@@ -152,7 +152,7 @@ where
         command_runner,
         sender,
         progress,
-        &format!("Checking if '{package_name}' is already installed"),
+        &format!("Checking whether {package_name} is already installed"),
         token,
     )
     .await
@@ -377,6 +377,7 @@ where
     // Execute install command with streaming output
     let install_output = match steps::execute_command_streaming(
         command_runner,
+        context.package_name,
         context.install_cmd,
         "install",
         context.config,
@@ -496,7 +497,7 @@ where
             command_runner,
             sender,
             progress,
-            "Verifying package installation",
+            &format!("Verifying the installation of {}", context.package_name),
             token,
         )
         .await?;

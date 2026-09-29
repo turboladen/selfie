@@ -915,6 +915,7 @@ mod tests {
             step: 1,
             total_steps: 5,
             percent_complete: 0.2,
+            kind: selfie::package::event::StepKind::Local,
         };
 
         // Progress events should be suppressed (return true = handled)

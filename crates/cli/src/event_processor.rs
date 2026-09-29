@@ -502,7 +502,8 @@ impl EventProcessor {
             | PackageEvent::DotfileListLoaded { .. }
             | PackageEvent::SyncRepoStatus { .. }
             | PackageEvent::SyncDriftSummary { .. }
-            | PackageEvent::SyncCommitCreated { .. } => {
+            | PackageEvent::SyncCommitCreated { .. }
+            | PackageEvent::StepEnded { .. } => {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }
@@ -727,6 +728,7 @@ mod tests {
                 step: 1,
                 total_steps: 2,
                 percent_complete: 0.5,
+                kind: selfie::package::event::StepKind::Local,
                 message: "Loading package file".to_string(),
             },
             PackageEvent::Completed {
@@ -803,6 +805,7 @@ mod tests {
                 step: 1,
                 total_steps: 3,
                 percent_complete: 1.0 / 3.0,
+                kind: selfie::package::event::StepKind::Local,
                 message: "Step 1".to_string(),
             },
             PackageEvent::Progress {
@@ -810,6 +813,7 @@ mod tests {
                 step: 2,
                 total_steps: 3,
                 percent_complete: 2.0 / 3.0,
+                kind: selfie::package::event::StepKind::Local,
                 message: "Step 2".to_string(),
             },
             PackageEvent::Completed {

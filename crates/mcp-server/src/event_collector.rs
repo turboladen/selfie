@@ -597,8 +597,11 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         // `Completed` is read by `collect_events` for the operation's result
         // rather than emitted as a data event, and the lifecycle and log variants
         // carry nothing a tool caller acts on.
+        // A step's end is lifecycle too: a failed step's cause arrives as its own
+        // warning or failure.
         PackageEvent::Started { .. }
         | PackageEvent::Progress { .. }
+        | PackageEvent::StepEnded { .. }
         | PackageEvent::Completed { .. }
         | PackageEvent::Canceled { .. }
         | PackageEvent::Trace { .. }

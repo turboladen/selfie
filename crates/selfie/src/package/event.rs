@@ -29,6 +29,53 @@ impl std::fmt::Display for StepCount {
     }
 }
 
+/// Whether a progress step waits on something outside selfie.
+///
+/// A consumer shows a waiting step until its [`PackageEvent::StepEnded`]; a
+/// local one is detail a consumer may hide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepKind {
+    /// Work selfie does itself, such as reading spec files.
+    Local,
+    /// A configured command, a provider command or a network call that selfie
+    /// has started and is waiting on. The step's message names what it waits
+    /// on. Waiting steps may overlap, so each carries its own id, and exactly
+    /// one [`PackageEvent::StepEnded`] with that id follows.
+    Waiting(StepId),
+}
+
+/// Identifies one waiting step, from its [`StepKind::Waiting`] progress event
+/// to its [`PackageEvent::StepEnded`]. Unique within the process, and a step
+/// started later has a greater id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StepId(u64);
+
+impl StepId {
+    /// A fixed id, for building events in tests.
+    #[cfg(any(test, feature = "with_mocks"))]
+    #[must_use]
+    pub const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// How a waiting step ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepEnding {
+    /// What was waited on finished and gave its answer, whatever that answer
+    /// was: a check command that reports "not installed" still succeeded.
+    Succeeded,
+    /// What was waited on failed, timed out or could not start.
+    Failed,
+    /// The run was cancelled while it waited.
+    Cancelled,
+}
+
 impl From<(usize, usize)> for StepCount {
     fn from((completed, total): (usize, usize)) -> Self {
         Self::new(completed, total)
@@ -134,6 +181,7 @@ impl EventSender {
         &self,
         step: usize,
         total_steps: usize,
+        kind: StepKind,
         message: impl fmt::Display,
     ) {
         let operation_info = self.touch_operation_info();
@@ -148,12 +196,52 @@ impl EventSender {
         );
 
         #[allow(clippy::cast_precision_loss)]
+        let percent_complete = if total_steps == 0 {
+            0.0
+        } else {
+            step as f32 / total_steps as f32
+        };
         self.send(PackageEvent::Progress {
             operation_info,
             step,
             total_steps,
-            percent_complete: step as f32 / total_steps as f32,
+            percent_complete,
+            kind,
             message: msg,
+        })
+        .await;
+    }
+
+    /// Send a waiting step that is not one of a numbered sequence: its `step`
+    /// and `total_steps` are both 0. The caller must end it with
+    /// [`send_step_ended`](Self::send_step_ended).
+    #[must_use = "a waiting step must be ended with `send_step_ended`"]
+    pub(crate) async fn send_waiting(&self, message: impl fmt::Display) -> StepId {
+        self.send_waiting_progress(0, 0, message).await
+    }
+
+    /// Send a numbered waiting step. The caller must end it with
+    /// [`send_step_ended`](Self::send_step_ended).
+    #[must_use = "a waiting step must be ended with `send_step_ended`"]
+    pub(crate) async fn send_waiting_progress(
+        &self,
+        step: usize,
+        total_steps: usize,
+        message: impl fmt::Display,
+    ) -> StepId {
+        let id = StepId::next();
+        self.send_progress(step, total_steps, StepKind::Waiting(id), message)
+            .await;
+        id
+    }
+
+    /// End the waiting step `step`.
+    pub(crate) async fn send_step_ended(&self, step: StepId, ending: StepEnding) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::StepEnded {
+            operation_info,
+            step,
+            ending,
         })
         .await;
     }
@@ -226,8 +314,8 @@ impl EventSender {
         }
     }
 
-    /// Send informational output to the console
-    pub(crate) async fn send_info(&self, output: ConsoleOutput) {
+    /// Send a line of the output of the command waiting step `step` runs.
+    pub(crate) async fn send_info(&self, step: StepId, output: ConsoleOutput) {
         let operation_info = self.touch_operation_info();
 
         tracing::info!(
@@ -239,6 +327,7 @@ impl EventSender {
 
         self.send(PackageEvent::Info {
             operation_info,
+            step,
             output,
         })
         .await;
@@ -2300,7 +2389,16 @@ pub enum PackageEvent {
         step: usize,
         total_steps: usize,
         percent_complete: f32,
+        /// Whether the step waits on something outside selfie.
+        kind: StepKind,
         message: String,
+    },
+
+    /// A waiting step ended.
+    StepEnded {
+        operation_info: OperationInfo,
+        step: StepId,
+        ending: StepEnding,
     },
 
     /// Operation completed
@@ -2330,6 +2428,8 @@ pub enum PackageEvent {
     /// Informational message with console output
     Info {
         operation_info: OperationInfo,
+        /// The waiting step whose command wrote it.
+        step: StepId,
         output: ConsoleOutput,
     },
 

@@ -17,7 +17,7 @@ use crate::{
     package::{
         event::{
             CheckResult, DependencyStatus, EnvironmentStatus, EnvironmentStatusData, EventSender,
-            OperationResult, OperationSuccess, PackageInfoData, ScopedDotfile,
+            OperationResult, OperationSuccess, PackageInfoData, ScopedDotfile, StepEnding,
         },
         git::GitStatusProvider,
         port::PackageRepository,
@@ -167,10 +167,39 @@ where
         return failure;
     }
 
-    // Step 2: Check installation status for the current environment
-    progress.next(sender, "Checking installation status").await;
+    // Step 2: Check installation status for the current environment. Waiting
+    // when a check command may run: the package's own, or one belonging to a
+    // dependency or recommend, each of which is looked up and checked.
+    let env_config = package_blob.package.environments().get(current_env);
+    let step = match env_config {
+        Some(env) if env.dependencies().is_empty() && env.recommends().is_empty() => {
+            match env.check() {
+                Some(_) => Some(
+                    progress
+                        .next_waiting(
+                            sender,
+                            format!("Running the check command for {package_name}"),
+                        )
+                        .await,
+                ),
+                None => None,
+            }
+        }
+        Some(_) => Some(
+            progress
+                .next_waiting(
+                    sender,
+                    format!("Running check commands for {package_name} and what it depends on"),
+                )
+                .await,
+        ),
+        None => None,
+    };
+    if step.is_none() {
+        progress.next(sender, "Checking installation status").await;
+    }
 
-    if let Some(env_config) = package_blob.package.environments().get(current_env) {
+    if let Some(env_config) = env_config {
         let package_dir = config.package_directory();
         let status = get_installation_status(
             package_name,
@@ -202,6 +231,17 @@ where
             max_concurrent,
         )
         .await;
+
+        // Ended before the status is sent, so a consumer closes the step
+        // before it shows the answer.
+        if let Some(step) = step {
+            let ending = if token.is_cancelled() {
+                StepEnding::Cancelled
+            } else {
+                StepEnding::Succeeded
+            };
+            sender.send_step_ended(step, ending).await;
+        }
 
         let environment_status = EnvironmentStatusData {
             environment_name: current_env.to_string(),

@@ -45,8 +45,8 @@ use tracing::instrument;
 
 use super::{
     event::{
-        EventSender, EventStream, OperationContext, OperationResult, PackageEvent,
-        metadata::OperationType,
+        EventSender, EventStream, OperationContext, OperationResult, PackageEvent, StepId,
+        StepKind, metadata::OperationType,
     },
     git::GitStatusProvider,
     port::PackageRepository,
@@ -103,13 +103,38 @@ impl ProgressTracker {
         }
     }
 
-    /// Advance one step and emit a progress event, with the step numbers appended
-    /// to `message` — "Installing package (2/5)".
+    /// Advance one step that selfie does itself, and emit its progress event,
+    /// with the step numbers appended to `message` — "Loading packages (1/2)".
     pub(crate) async fn next(&mut self, sender: &EventSender, message: impl std::fmt::Display) {
+        self.advance(sender, StepKind::Local, message).await;
+    }
+
+    /// Advance one step that waits on something outside selfie, which
+    /// `message` names, and emit its progress event.
+    ///
+    /// The caller must end the step with `EventSender::send_step_ended`.
+    #[must_use = "a waiting step must be ended with `send_step_ended`"]
+    pub(crate) async fn next_waiting(
+        &mut self,
+        sender: &EventSender,
+        message: impl std::fmt::Display,
+    ) -> StepId {
+        self.current_step += 1;
+        sender
+            .send_waiting_progress(self.current_step, self.total_steps, message)
+            .await
+    }
+
+    async fn advance(
+        &mut self,
+        sender: &EventSender,
+        kind: StepKind,
+        message: impl std::fmt::Display,
+    ) {
         self.current_step += 1;
         let enhanced_message = format!("{} ({}/{})", message, self.current_step, self.total_steps);
         sender
-            .send_progress(self.current_step, self.total_steps, enhanced_message)
+            .send_progress(self.current_step, self.total_steps, kind, enhanced_message)
             .await;
     }
 

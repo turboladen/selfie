@@ -20,7 +20,10 @@ use crate::{
         filesystem::{FileSystem, FileSystemError},
         target::TargetPath,
     },
-    package::{DotfileEntry, event::EventSender},
+    package::{
+        DotfileEntry,
+        event::{EventSender, StepEnding},
+    },
 };
 
 use super::classify::{SecretEntry, secret_target_link};
@@ -325,7 +328,14 @@ where
 
     /// Run the entry's commands and produce its content.
     async fn resolve(&self, target: &SecretEntry<'_>) -> Phase<ResolvedContent> {
-        match resolve_content(
+        let step = self
+            .sender
+            .send_waiting(format!(
+                "Running the commands that produce {}",
+                target.entry.target()
+            ))
+            .await;
+        let resolved = resolve_content(
             target.entry,
             self.base_dir,
             self.filesystem,
@@ -333,8 +343,14 @@ where
             self.config.command_timeout(),
             self.token,
         )
-        .await
-        {
+        .await;
+        let ending = match &resolved {
+            Ok(_) => StepEnding::Succeeded,
+            Err(_) if self.token.is_cancelled() => StepEnding::Cancelled,
+            Err(_) => StepEnding::Failed,
+        };
+        self.sender.send_step_ended(step, ending).await;
+        match resolved {
             Ok(resolved) => Ok(resolved),
             Err(e) => {
                 // Safe to surface: `ResolveError`'s Display names commands, var

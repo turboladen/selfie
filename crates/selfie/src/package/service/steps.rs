@@ -7,7 +7,9 @@ use crate::{
     config::SelfieConfig,
     package::{
         EnvironmentConfig, GetPackage, Package,
-        event::{ConsoleOutput, EventSender, OperationFailure, OperationResult, RefusedSpec},
+        event::{
+            ConsoleOutput, EventSender, OperationFailure, OperationResult, RefusedSpec, StepEnding,
+        },
         port::{PackageError, PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
@@ -148,9 +150,12 @@ pub async fn get_command<'a>(
 }
 
 /// Step to execute a command in the package directory, streaming its output
-/// for real-time feedback
+/// for real-time feedback. `package_name` names the package the command
+/// belongs to, in its step.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_command_streaming<CR>(
     command_runner: &CR,
+    package_name: &str,
     cmd: &str,
     command_type: &str,
     config: &SelfieConfig,
@@ -168,13 +173,13 @@ where
     check_command_safety(cmd, sender).await;
 
     let is_final_execution = progress.current_step() + 1 == progress.total_steps();
-    let step_message = if is_final_execution {
-        format!("Executing final `{command_type}` command: `{cmd}`")
-    } else {
-        format!("Executing package's `{command_type}` command: `{cmd}`")
-    };
 
-    progress.next(sender, step_message).await;
+    let step = progress
+        .next_waiting(
+            sender,
+            format!("Running the {command_type} command for {package_name}"),
+        )
+        .await;
 
     // Create a channel for streaming output
     let (tx, mut rx) = mpsc::channel::<OutputChunk>(1000);
@@ -187,10 +192,14 @@ where
         while let Some(chunk) = rx.recv().await {
             match chunk {
                 OutputChunk::Stdout(line) => {
-                    sender_clone.send_info(ConsoleOutput::Stdout(line)).await;
+                    sender_clone
+                        .send_info(step, ConsoleOutput::Stdout(line))
+                        .await;
                 }
                 OutputChunk::Stderr(line) => {
-                    sender_clone.send_info(ConsoleOutput::Stderr(line)).await;
+                    sender_clone
+                        .send_info(step, ConsoleOutput::Stderr(line))
+                        .await;
                 }
             }
         }
@@ -215,6 +224,12 @@ where
             .send_warning(format!("Output streaming task failed: {join_error}"))
             .await;
     }
+
+    // Ended before anything else is said about the command, so a consumer
+    // closes the step before it reports the result.
+    sender
+        .send_step_ended(step, ending_of(&result, StepEnding::Failed))
+        .await;
 
     match result {
         Ok(output) => {
@@ -241,6 +256,21 @@ where
             Ok(output)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// How a waiting step that ran a command ended, given what the command
+/// returned. `on_nonzero` is the ending for a non-zero exit: a failure for an
+/// install, and an answer for a check.
+pub(crate) fn ending_of(
+    result: &Result<CommandOutput, CommandError>,
+    on_nonzero: StepEnding,
+) -> StepEnding {
+    match result {
+        Ok(output) if output.is_success() => StepEnding::Succeeded,
+        Ok(_) => on_nonzero,
+        Err(CommandError::Cancelled { .. }) => StepEnding::Cancelled,
+        Err(_) => StepEnding::Failed,
     }
 }
 
@@ -458,6 +488,7 @@ rm -rf package package.tar.gz";
 
             execute_command_streaming(
                 &runner,
+                "bat",
                 cmd,
                 "install",
                 &config,

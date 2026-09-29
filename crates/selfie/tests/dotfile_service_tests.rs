@@ -4150,6 +4150,93 @@ mod secret_bearing {
         dirs.state_dir.join("deploy-state.yml")
     }
 
+    // A provider entry's command is something outside selfie that apply waits
+    // on, and the step names the target it produces. A dry run runs nothing.
+    #[tokio::test]
+    async fn apply_waits_on_a_provider_command_and_a_dry_run_does_not() {
+        use selfie::package::event::StepEnding;
+        use selfie::package::event::StepKind;
+
+        let waits = |events: &[PackageEvent]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    PackageEvent::Progress {
+                        kind: StepKind::Waiting(_),
+                        message,
+                        ..
+                    } => Some(message.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let dry = dirs.service_with_runner(FakeCommandRunner::new());
+        let events = collect_events(
+            dry.apply_all(ApplyOptions {
+                dry_run: true,
+                ..Default::default()
+            })
+            .await,
+        )
+        .await;
+        assert!(waits(&events).is_empty(), "{events:#?}");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(
+            waits(&events),
+            vec![format!(
+                "Running the commands that produce {}",
+                target.display()
+            )]
+        );
+        assert_eq!(endings(&events), vec![StepEnding::Succeeded], "{events:#?}");
+    }
+
+    // How each waiting step ended, in order.
+    fn endings(events: &[PackageEvent]) -> Vec<selfie::package::event::StepEnding> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::StepEnded { ending, .. } => Some(*ending),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A provider command that fails ends its step as failed, before the warning
+    // that reports it, so no consumer can show it as done.
+    #[tokio::test]
+    async fn a_failing_provider_command_ends_its_step_as_failed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().failing("op read x", b"no session");
+        let service = dirs.service_with_runner(runner);
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            endings(&events),
+            vec![selfie::package::event::StepEnding::Failed],
+            "{events:#?}"
+        );
+        let ended = events
+            .iter()
+            .position(|e| matches!(e, PackageEvent::StepEnded { .. }))
+            .unwrap();
+        let warned = events
+            .iter()
+            .position(|e| matches!(e, PackageEvent::Warning { .. }))
+            .unwrap();
+        assert!(ended < warned, "{events:#?}");
+    }
+
     #[tokio::test]
     async fn provider_content_is_deployed_to_an_absent_target() {
         let dirs = TestDirs::new();
