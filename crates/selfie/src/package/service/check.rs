@@ -2,7 +2,7 @@
 
 use super::steps;
 use crate::{
-    commands::runner::CommandRunner,
+    commands::runner::{CommandError, CommandRunner},
     config::SelfieConfig,
     package::{
         GetPackage,
@@ -56,8 +56,10 @@ where
         Err(result) => return *result,
     };
 
-    // Step 3: Execute the check command
-    let check_result = execute_check_command(
+    // Step 3: Execute the check command. A check that could not start is the
+    // directory's, the shell's or the cancellation's failure, not the check
+    // command's, so it is reported as such rather than as an invalid command.
+    let check_result = match execute_check_command(
         package_name,
         config.environment(),
         check_command.as_deref(),
@@ -68,7 +70,11 @@ where
         "Running package check command",
         token,
     )
-    .await;
+    .await
+    {
+        Ok(check_result) => check_result,
+        Err(err) => return OperationResult::Failure(err.into()),
+    };
 
     // Step 4: Send the check result event
     sender.send_check_result(check_result.clone()).await;
@@ -215,10 +221,17 @@ fn create_operation_result(
     }
 }
 
-/// Execute a check command in `package_dir` and return structured results
+/// Execute a check command in `package_dir`, advancing progress, and return
+/// structured results.
 ///
-/// This function can be reused by other services that need to run check commands
-/// without duplicating the package loading and environment validation logic.
+/// A failure that stops every command in `package_dir` is returned as the error
+/// instead of recorded as the check's result: the directory cannot be entered,
+/// the shell cannot start, or the operation was cancelled.
+///
+/// # Errors
+///
+/// The [`CommandError`] that kept the check from starting, when no later command
+/// in `package_dir` could start either.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_check_command<CR>(
     package_name: &str,
@@ -230,13 +243,13 @@ pub(super) async fn execute_check_command<CR>(
     progress: &mut ProgressTracker,
     step_description: &str,
     token: &CancellationToken,
-) -> CheckResultData
+) -> Result<CheckResultData, CommandError>
 where
     CR: CommandRunner,
 {
     progress.next(sender, step_description).await;
 
-    execute_check_command_quiet(
+    run_check(
         package_name,
         environment,
         check_command,
@@ -262,48 +275,81 @@ pub(super) async fn execute_check_command_quiet<CR>(
 where
     CR: CommandRunner,
 {
-    if let Some(cmd) = check_command {
-        match command_runner.execute(cmd, package_dir, token).await {
-            Ok(output) => {
-                // Any exit status is an answer, whatever produced it: the user's
-                // shell reports a check killed by a signal as an ordinary non-zero
-                // status, so a kill cannot be told from an exit.
-                if output.is_success() {
-                    CheckResultData {
-                        package_name: package_name.to_string(),
-                        environment: environment.to_string(),
-                        check_command: Some(cmd.to_string()),
-                        result: CheckResult::Success {
-                            stdout: output.stdout_str().to_string(),
-                            stderr: output.stderr_str().to_string(),
-                        },
-                    }
-                } else {
-                    CheckResultData {
-                        package_name: package_name.to_string(),
-                        environment: environment.to_string(),
-                        check_command: Some(cmd.to_string()),
-                        result: CheckResult::Failed {
-                            stdout: output.stdout_str().to_string(),
-                            stderr: output.stderr_str().to_string(),
-                            exit_code: Some(output.exit_code()),
-                        },
-                    }
-                }
-            }
-            Err(err) => CheckResultData {
-                package_name: package_name.to_string(),
-                environment: environment.to_string(),
-                check_command: Some(cmd.to_string()),
-                result: CheckResult::Error(err.to_string()),
-            },
-        }
-    } else {
-        CheckResultData {
+    run_check(
+        package_name,
+        environment,
+        check_command,
+        package_dir,
+        command_runner,
+        token,
+    )
+    .await
+    .unwrap_or_else(|err| could_not_run(package_name, environment, check_command, &err))
+}
+
+/// The result of a check that could not run, recording why.
+fn could_not_run(
+    package_name: &str,
+    environment: &str,
+    check_command: Option<&str>,
+    err: &CommandError,
+) -> CheckResultData {
+    CheckResultData {
+        package_name: package_name.to_string(),
+        environment: environment.to_string(),
+        check_command: check_command.map(str::to_string),
+        result: CheckResult::Error(err.to_string()),
+    }
+}
+
+/// Run a check, returning as an error only a failure that stops every command
+/// in `package_dir`, cancellation included, and recording any other as the
+/// check's result.
+async fn run_check<CR>(
+    package_name: &str,
+    environment: &str,
+    check_command: Option<&str>,
+    package_dir: &Path,
+    command_runner: &CR,
+    token: &CancellationToken,
+) -> Result<CheckResultData, CommandError>
+where
+    CR: CommandRunner,
+{
+    let Some(cmd) = check_command else {
+        return Ok(CheckResultData {
             package_name: package_name.to_string(),
             environment: environment.to_string(),
             check_command: None,
             result: CheckResult::NoCheckCommand,
-        }
-    }
+        });
+    };
+
+    // Any exit status is an answer, whatever produced it: the user's shell
+    // reports a check killed by a signal as an ordinary non-zero status, so a
+    // kill cannot be told from an exit.
+    let result = match command_runner.execute(cmd, package_dir, token).await {
+        Ok(output) if output.is_success() => CheckResult::Success {
+            stdout: output.stdout_str().to_string(),
+            stderr: output.stderr_str().to_string(),
+        },
+        Ok(output) => CheckResult::Failed {
+            stdout: output.stdout_str().to_string(),
+            stderr: output.stderr_str().to_string(),
+            exit_code: Some(output.exit_code()),
+        },
+        Err(
+            err @ (CommandError::WorkingDirectoryUnusable { .. }
+            | CommandError::SpawnFailed { .. }
+            | CommandError::Cancelled { .. }),
+        ) => return Err(err),
+        Err(err) => CheckResult::Error(err.to_string()),
+    };
+
+    Ok(CheckResultData {
+        package_name: package_name.to_string(),
+        environment: environment.to_string(),
+        check_command: Some(cmd.to_string()),
+        result,
+    })
 }

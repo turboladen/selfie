@@ -34,6 +34,16 @@ fn service<CR: CommandRunner + Clone + std::fmt::Debug + 'static>(
     package_dir: &Path,
     runner: CR,
 ) -> impl PackageService {
+    service_with_token(spec_dir, package_dir, runner, CancellationToken::new())
+}
+
+// `service`, cancelled through `token`.
+fn service_with_token<CR: CommandRunner + Clone + std::fmt::Debug + 'static>(
+    spec_dir: &Path,
+    package_dir: &Path,
+    runner: CR,
+    token: CancellationToken,
+) -> impl PackageService {
     let config = SelfieConfigBuilder::default()
         .environment("test")
         .package_directory(package_dir)
@@ -53,7 +63,7 @@ fn service<CR: CommandRunner + Clone + std::fmt::Debug + 'static>(
         runner,
         GixGitStatusProvider,
         config,
-        CancellationToken::new(),
+        token,
     )
 }
 
@@ -358,5 +368,337 @@ async fn install_with_a_shell_that_cannot_start_names_the_shell_not_the_command(
     assert!(
         !rendered.to_lowercase().contains("not found"),
         "the install command was never looked for: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn install_stops_at_a_check_that_cannot_enter_the_package_directory() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        &format!("    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n"),
+    );
+    let gone = temp.path().join("gone");
+    let unusable = selfie::commands::CommandError::WorkingDirectoryUnusable {
+        command: CHECK_CMD.to_string(),
+        working_directory: gone.clone(),
+        source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+    };
+    let runner = FakeCommandRunner::new()
+        .erroring(CHECK_CMD, unusable)
+        .succeeding(INSTALL_CMD, b"");
+
+    let events = collect_events(
+        service(temp.path(), temp.path(), runner.clone())
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    let OperationResult::Failure(failure) = completed(&events) else {
+        panic!("install must fail: {events:?}");
+    };
+    assert!(
+        failure.to_string().contains(&gone.display().to_string()),
+        "the failure must name the directory: {failure}"
+    );
+    let commands: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+    assert_eq!(
+        commands,
+        vec![CHECK_CMD.to_string()],
+        "nothing runs after the check"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Warning { .. })),
+        "no warning precedes the failure: {events:?}"
+    );
+}
+
+// A check that cannot enter the package directory is that directory's failure,
+// not an invalid check command.
+#[tokio::test]
+async fn check_names_a_package_directory_it_cannot_enter_not_the_command() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        &format!("    install: \"true\"\n    check: \"{CHECK_CMD}\"\n"),
+    );
+    let gone = temp.path().join("gone");
+    let unusable = selfie::commands::CommandError::WorkingDirectoryUnusable {
+        command: CHECK_CMD.to_string(),
+        working_directory: gone.clone(),
+        source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+    };
+    let runner = FakeCommandRunner::new().erroring(CHECK_CMD, unusable);
+
+    let events = collect_events(service(temp.path(), temp.path(), runner).check("pkg").await).await;
+
+    let OperationResult::Failure(failure) = completed(&events) else {
+        panic!("check must fail: {events:?}");
+    };
+    let rendered = failure.to_string();
+    assert!(
+        rendered.contains(&gone.display().to_string()),
+        "the failure must name the directory: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Invalid command"),
+        "the check command is not at fault: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn install_stops_at_a_pre_install_check_that_was_cancelled() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        &format!("    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n"),
+    );
+    let cancelled = selfie::commands::CommandError::Cancelled {
+        command: CHECK_CMD.to_string(),
+        working_directory: temp.path().to_path_buf(),
+    };
+    let runner = FakeCommandRunner::new()
+        .erroring(CHECK_CMD, cancelled)
+        .succeeding(INSTALL_CMD, b"");
+
+    let events = collect_events(
+        service(temp.path(), temp.path(), runner.clone())
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        matches!(completed(&events), OperationResult::Failure(_)),
+        "{events:?}"
+    );
+    let commands: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+    assert_eq!(
+        commands,
+        vec![CHECK_CMD.to_string()],
+        "nothing runs after the check"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Warning { .. })),
+        "no warning precedes the failure: {events:?}"
+    );
+}
+
+// An install whose own command moves its package directory away has nothing
+// left to verify in: the post-install check cannot start, and the install must
+// fail rather than report a success it never verified.
+#[tokio::test]
+async fn an_install_that_moves_its_own_package_directory_away_fails() {
+    let temp = TempDir::new().unwrap();
+    let package_dir = temp.path().join("pkgs");
+    std::fs::create_dir(&package_dir).unwrap();
+    let quote = |path: &Path| {
+        shlex::try_quote(path.to_str().unwrap())
+            .unwrap()
+            .into_owned()
+    };
+    let install = format!(
+        "mv {} {}",
+        quote(&package_dir),
+        quote(&temp.path().join("pkgs.gone"))
+    );
+    write_spec(
+        &package_dir,
+        &format!("    install: \"{install}\"\n    check: \"test -f ./installed\"\n"),
+    );
+
+    let events = collect_events(
+        service(&package_dir, &package_dir, real_runner())
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        temp.path().join("pkgs.gone").exists(),
+        "the install command never ran: {events:?}"
+    );
+    let OperationResult::Failure(failure) = completed(&events) else {
+        panic!("an install with nothing to verify in must fail: {events:?}");
+    };
+    assert!(
+        failure
+            .to_string()
+            .contains(&package_dir.display().to_string()),
+        "the failure must name the directory: {failure}"
+    );
+}
+
+#[tokio::test]
+async fn a_post_install_check_that_runs_and_fails_is_still_a_warning() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        &format!("    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n"),
+    );
+    let runner = FakeCommandRunner::new()
+        .failing(CHECK_CMD, b"")
+        .succeeding(INSTALL_CMD, b"");
+
+    let events = collect_events(
+        service(temp.path(), temp.path(), runner)
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        matches!(completed(&events), OperationResult::Success(_)),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::Warning { message, .. } if message.contains("verification failed")
+        )),
+        "the failed verification must be reported: {events:?}"
+    );
+}
+
+// A runner that answers as `FakeCommandRunner` does, and refuses every command
+// once `token` is cancelled, as the shell runner does.
+#[derive(Debug, Clone)]
+struct CancelAware {
+    inner: FakeCommandRunner,
+}
+
+impl CancelAware {
+    fn cancelled(command: &str, dir: &Path) -> selfie::commands::CommandError {
+        selfie::commands::CommandError::Cancelled {
+            command: command.to_string(),
+            working_directory: dir.to_path_buf(),
+        }
+    }
+}
+
+impl CommandRunner for CancelAware {
+    async fn is_command_available(&self, command: &str) -> bool {
+        self.inner.is_command_available(command).await
+    }
+
+    async fn execute(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        token: &CancellationToken,
+    ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
+        if token.is_cancelled() {
+            return Err(Self::cancelled(command, working_dir));
+        }
+        self.inner.execute(command, working_dir, token).await
+    }
+
+    async fn execute_in_dir(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
+        if token.is_cancelled() {
+            return Err(Self::cancelled(command, working_dir));
+        }
+        self.inner
+            .execute_in_dir(command, working_dir, timeout, token)
+            .await
+    }
+
+    async fn execute_streaming(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        timeout: Duration,
+        output_sender: tokio::sync::mpsc::Sender<selfie::commands::OutputChunk>,
+        token: &CancellationToken,
+    ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
+        if token.is_cancelled() {
+            return Err(Self::cancelled(command, working_dir));
+        }
+        self.inner
+            .execute_streaming(command, working_dir, timeout, output_sender, token)
+            .await
+    }
+
+    async fn execute_for_content(
+        &self,
+        command: &str,
+        working_dir: &Path,
+        timeout: Duration,
+        token: &CancellationToken,
+    ) -> Result<selfie::commands::ContentOutput, selfie::commands::CommandError> {
+        self.inner
+            .execute_for_content(command, working_dir, timeout, token)
+            .await
+    }
+}
+
+// A Ctrl+C landing while the install command runs cancels the post-install
+// check. The install ends as a cancellation: no warning about a check that never
+// ran, and nothing runs after it.
+#[tokio::test]
+async fn a_cancel_before_the_post_install_check_ends_the_install_cancelled() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        &format!("    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n"),
+    );
+    let token = CancellationToken::new();
+    let runner = CancelAware {
+        inner: FakeCommandRunner::new()
+            .failing(CHECK_CMD, b"")
+            .succeeding(INSTALL_CMD, b"")
+            .cancelling(INSTALL_CMD, &token),
+    };
+
+    let events = collect_events(
+        service_with_token(temp.path(), temp.path(), runner.clone(), token)
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Canceled { .. })),
+        "a cancelled install must say so: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Completed { .. })),
+        "a cancelled install must not also report a result: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Warning { .. })),
+        "no warning about a check that never ran: {events:?}"
+    );
+    let commands: Vec<String> = runner.inner.calls().into_iter().map(|(c, _)| c).collect();
+    assert_eq!(
+        commands,
+        vec![CHECK_CMD.to_string(), INSTALL_CMD.to_string()],
+        "nothing runs after the cancel"
+    );
+    // The runner refuses every command after the cancel, so the install stopping
+    // shows in its progress: it must end at the refused check, not carry on to
+    // its completion step.
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            PackageEvent::Progress { message, .. } if message.contains("installation completed")
+        )),
+        "the install carried on past the cancelled check: {events:?}"
     );
 }
