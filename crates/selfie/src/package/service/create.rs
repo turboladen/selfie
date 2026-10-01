@@ -18,8 +18,10 @@ use crate::{
     },
 };
 
+/// `identity` is [`creatable_identity`]'s answer for `package`.
 pub(super) async fn handle_create<PR>(
     package: Package,
+    identity: Result<String, String>,
     repo: &PR,
     config: &SelfieConfig,
     sender: &EventSender,
@@ -28,19 +30,12 @@ pub(super) async fn handle_create<PR>(
 where
     PR: PackageRepository,
 {
-    let package_name = package.name().to_string();
-
-    // The spec-name rule the loader applies to a file's stem, so create never
-    // writes a spec that every later command refuses to load. One check here
-    // serves every adapter. First, before any lookup: a name such as
-    // `../../x/y` would otherwise have the guards below report whether a file
-    // exists outside the package directory.
-    if !crate::package::is_valid_spec_name(&package_name) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Refusing to create '{package_name}': it is not a valid spec name. Rename it: {}.",
-            crate::package::SPEC_NAME_RULE
-        )));
-    }
+    // Every check that needs no repository, before any lookup or probe, so nothing
+    // outside the package directory is ever asked about or written.
+    let package_name = match identity {
+        Ok(identity) => identity,
+        Err(refusal) => return OperationResult::Failure(OperationFailure::Generic(refusal)),
+    };
 
     // Step 1: Check if package already exists
     progress
@@ -91,8 +86,8 @@ where
     // above, and so is a directory named like a spec, which the read refuses. What
     // reaches this is a path the file system matches and selfie's names do not: a
     // different Unicode normalization on a normalization-insensitive file system,
-    // another spec's file at an interactive file name, or something created after
-    // the lookup. Whatever it is, selfie must not write over it (selfie-6cg2).
+    // or something created after the lookup. Whatever it is, selfie must not write
+    // over it (selfie-6cg2).
     if repo.path_is_occupied(package.path()) {
         let path = package.path().to_path_buf();
         sender
@@ -173,6 +168,56 @@ where
     ))
 }
 
+/// The name selfie will resolve the created spec by, which is its file stem.
+///
+/// # Errors
+///
+/// The refusal to show, when `package.name()` breaks the spec-name rule, when the
+/// spec's path is not directly in the package directory, or when its file name is
+/// not one the loader reads as a spec.
+pub(super) fn creatable_identity(
+    package: &Package,
+    config: &SelfieConfig,
+) -> Result<String, String> {
+    // Three checks, in this order. The name first, so a name such as `../x` is
+    // refused as a name. Then the path, because `--interactive` asks for a file
+    // name separately and a stem alone drops every directory component: `../evil`
+    // has the valid stem `evil`. Then the file name, judged as the loader judges it
+    // (`spec_name_of`, then the rule on the stem as spelled), because the stem, not
+    // `name:`, is what every later command finds the spec by.
+    let name = package.name();
+    if !crate::package::is_valid_spec_name(name) {
+        return Err(format!(
+            "Refusing to create '{name}': it is not a valid spec name. Rename it: {}.",
+            crate::package::SPEC_NAME_RULE
+        ));
+    }
+
+    let path = package.path();
+    let directory = config.package_directory();
+    if path.parent() != Some(directory.as_path()) {
+        return Err(format!(
+            "Refusing to create '{name}': {} is not directly in the package directory {}, \
+             where every spec has to be.",
+            path.display(),
+            directory.display()
+        ));
+    }
+
+    let stem = crate::package::spec_name_of(path)
+        .and_then(|_| path.file_stem())
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| crate::package::is_valid_spec_name(stem));
+    match stem {
+        Some(stem) => Ok(stem.to_string()),
+        None => Err(format!(
+            "Refusing to create '{name}': selfie would not load {} as a spec. Its name before \
+             the .yml or .yaml extension has to follow the rule for a package name.",
+            path.display()
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +281,18 @@ mod tests {
         }
     }
 
+    // `handle_create` as the service calls it, with the identity worked out first.
+    async fn create(
+        package: Package,
+        repo: &MockPackageRepository,
+        config: &crate::config::SelfieConfig,
+        sender: &EventSender,
+        progress: &mut ProgressTracker,
+    ) -> OperationResult {
+        let identity = creatable_identity(&package, config);
+        handle_create(package, identity, repo, config, sender, progress).await
+    }
+
     // A repository where the name is free and the path is not taken, ready to
     // save once if `saves` is 1, or to refuse any save if it is 0.
     fn a_free_name(saves: usize) -> MockPackageRepository {
@@ -284,7 +341,7 @@ mod tests {
             .build();
 
         let repo = a_free_name(0);
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         let OperationResult::Failure(OperationFailure::InvalidSpec {
             package_name,
@@ -319,7 +376,7 @@ mod tests {
             .build();
 
         let repo = a_free_name(0);
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         let OperationResult::Failure(OperationFailure::InvalidSpec { issues, .. }) = result else {
             panic!("expected the create to be refused as invalid, got: {result:?}");
@@ -343,7 +400,7 @@ mod tests {
             .build();
 
         let repo = a_free_name(0);
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         let OperationResult::Failure(OperationFailure::InvalidSpec { issues, .. }) = result else {
             panic!("expected the create to be refused as invalid, got: {result:?}");
@@ -371,7 +428,7 @@ mod tests {
                 .build();
 
             let repo = a_free_name(1);
-            let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+            let result = create(package, &repo, &config, &sender, &mut progress).await;
 
             assert!(
                 matches!(result, OperationResult::Success(_)),
@@ -407,7 +464,7 @@ mod tests {
             .build();
 
         let repo = a_free_name(1);
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         assert!(
             matches!(result, OperationResult::Success(_)),
@@ -444,7 +501,7 @@ mod tests {
             .build();
 
         let repo = a_free_name(1);
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         assert!(
             matches!(result, OperationResult::Success(_)),
@@ -490,7 +547,7 @@ mod tests {
         // The assertion that matters: nothing is written.
         repo.expect_save_package().times(0);
 
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         // Which refusal it is matters as much as that it refused. Reporting
         // that the package already exists would be false here -- the name check
@@ -553,7 +610,7 @@ mod tests {
         // The assertion that matters: nothing is written.
         repo.expect_save_package().times(0);
 
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         assert!(
             matches!(result, OperationResult::Failure(_)),
@@ -582,7 +639,7 @@ mod tests {
         });
         repo.expect_save_package().times(1).returning(|_, _| Ok(()));
 
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         assert!(
             matches!(result, OperationResult::Success(_)),
@@ -598,30 +655,178 @@ mod tests {
     #[tokio::test]
     async fn create_refuses_a_name_the_loader_would_refuse() {
         let (temp, config, _) = fixture();
-        let (sender, _rx) = test_sender();
-        let mut progress = ProgressTracker::new(2);
-        let package = PackageBuilder::default()
-            .name("my tool")
-            .environment("test", |b| b.install("true"))
-            .path(temp.path().join("my tool.yml"))
-            .build();
+        // `../x` is the MCP shape: the adapter joins the name onto the package
+        // directory, so the path climbs out of it. A stem alone would be `x`.
+        for (name, path) in [
+            ("my tool", temp.path().join("my tool.yml")),
+            ("../x", temp.path().join("../x.yml")),
+        ] {
+            let (sender, _rx) = test_sender();
+            let mut progress = ProgressTracker::new(2);
+            let package = PackageBuilder::default()
+                .name(name)
+                .environment("test", |b| b.install("true"))
+                .path(&path)
+                .build();
 
-        // Nothing is asked of the repository at all: not written, and not
-        // looked up either, so a name cannot probe the file system.
+            // Nothing is asked of the repository at all: not written, and not
+            // looked up either, so a name cannot probe the file system.
+            let repo = untouched_repository();
+
+            let result = create(package, &repo, &config, &sender, &mut progress).await;
+
+            // The name rule's own refusal, not the path check behind it: that one
+            // would also refuse, and only the words tell them apart.
+            let message = generic_refusal(result);
+            assert!(message.contains(&format!("'{name}'")), "got: {message}");
+            assert!(message.contains("not a valid spec name"), "got: {message}");
+            assert!(message.contains("'@' and '+'"), "got: {message}");
+            assert!(!message.contains("package directory"), "got: {message}");
+        }
+    }
+
+    // A repository no test step may touch.
+    fn untouched_repository() -> MockPackageRepository {
         let mut repo = MockPackageRepository::new();
         repo.expect_get_package().times(0);
         repo.expect_path_is_occupied().times(0);
         repo.expect_save_package().times(0);
+        repo
+    }
 
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
-
+    // The message of a `Generic` refusal, or a panic naming what came back.
+    fn generic_refusal(result: OperationResult) -> String {
         match result {
-            OperationResult::Failure(OperationFailure::Generic(message)) => {
-                assert!(message.contains("'my tool'"), "got: {message}");
-                assert!(message.contains("'@' and '+'"), "got: {message}");
-            }
+            OperationResult::Failure(OperationFailure::Generic(message)) => message,
             other => panic!("expected the create to be refused, got: {other:?}"),
         }
+    }
+
+    // The interactive shape: a valid package name, and a file name that climbs out
+    // of the package directory. Its stem, `evil`, is a valid name, so only the path
+    // check stops it, before anything is looked up or written.
+    #[tokio::test]
+    async fn create_refuses_a_path_outside_the_package_directory() {
+        let (temp, config, _) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .environment("test", |b| b.install("true"))
+            .path(temp.path().join("../evil.yml"))
+            .build();
+
+        let repo = untouched_repository();
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
+
+        let message = generic_refusal(result);
+        assert!(
+            message.contains("is not directly in the package directory"),
+            "got: {message}"
+        );
+    }
+
+    // A file name the loader would not read as a spec is refused before any lookup,
+    // whatever the package name says.
+    #[tokio::test]
+    async fn create_refuses_a_file_name_the_loader_would_not_read() {
+        let (temp, config, _) = fixture();
+        for file_name in ["my file.yml", "myapp.txt", ".yml"] {
+            let (sender, _rx) = test_sender();
+            let mut progress = ProgressTracker::new(2);
+            let package = PackageBuilder::default()
+                .name("myapp")
+                .environment("test", |b| b.install("true"))
+                .path(temp.path().join(file_name))
+                .build();
+
+            let repo = untouched_repository();
+            let result = create(package, &repo, &config, &sender, &mut progress).await;
+
+            let message = generic_refusal(result);
+            assert!(
+                message.contains("selfie would not load"),
+                "{file_name}: got: {message}"
+            );
+        }
+    }
+
+    // Every later command finds a spec by its file name, so that is the name the
+    // create looks up: `bar.yml` for a package called `myapp` collides with an
+    // existing `bar`, and writing it would leave two files claiming `bar`.
+    #[tokio::test]
+    async fn create_looks_up_the_file_name_not_the_name_field() {
+        let (temp, config, _) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .environment("test", |b| b.install("true"))
+            .path(temp.path().join("bar.yml"))
+            .build();
+        let existing = PackageBuilder::default()
+            .name("bar")
+            .environment("test", |b| b.install("true"))
+            .path(temp.path().join("bar.yaml"))
+            .build();
+
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().returning(move |name| {
+            if name == "bar" {
+                Ok(crate::package::GetPackage::from_existing(
+                    existing.clone(),
+                    existing.path().clone(),
+                ))
+            } else {
+                Err(PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: PathBuf::from("/packages"),
+                    files_examined: 0,
+                    search_patterns: vec![],
+                }
+                .into())
+            }
+        });
+        repo.expect_path_is_occupied().returning(|_| false);
+        repo.expect_save_package().times(0);
+
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
+
+        assert!(
+            matches!(
+                result,
+                OperationResult::Failure(OperationFailure::Package(
+                    PackageError::PackageAlreadyExists { ref name, .. }
+                )) if name == "bar"
+            ),
+            "got: {result:?}"
+        );
+    }
+
+    // The result names the package the way selfie will find it again: by its file
+    // name, not by the `name:` field.
+    #[tokio::test]
+    async fn create_reports_the_name_selfie_resolves() {
+        let (temp, config, _) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .environment("test", |b| b.install("true"))
+            .path(temp.path().join("bar.yml"))
+            .build();
+
+        let repo = a_free_name(1);
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
+
+        assert!(
+            matches!(
+                result,
+                OperationResult::Success(OperationSuccess::PackageCreated { ref package_name, .. })
+                    if package_name == "bar"
+            ),
+            "got: {result:?}"
+        );
     }
 
     // The second control. A package directory that does not exist yet holds
@@ -643,7 +848,7 @@ mod tests {
         });
         repo.expect_save_package().times(1).returning(|_, _| Ok(()));
 
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         assert!(
             matches!(result, OperationResult::Success(_)),
@@ -674,7 +879,7 @@ mod tests {
         // never happens.
         repo.expect_save_package().times(0);
 
-        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+        let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         let OperationResult::Failure(failure) = result else {
             panic!("a file at the package directory must refuse, got: {result:?}");

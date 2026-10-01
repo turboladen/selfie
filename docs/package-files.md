@@ -61,6 +61,10 @@ file whose name breaks it, such as `my app.yml` or `.hidden.yml`, is not loaded:
 lists specs reports it as a spec that could not be loaded (the MCP server's `kind` is
 `invalid_name`), and it deploys and installs nothing until it is renamed. `selfie spec create` and
 the MCP server's `selfie_spec_create` refuse such a name rather than write the file.
+`selfie spec create --interactive` also asks for a file name, and that file name is what every later
+command finds the spec by, so the create judges it the same way: it refuses a file name the loader
+would not read or one outside the package directory, looks up the name the file name gives, and
+reports the created package under that name.
 
 Names are compared ignoring case, so `neovim` and `Neovim` are one package: a spec stored as
 `Neovim.yml` answers to either. The extension folds the same way, and does not distinguish one
@@ -295,10 +299,9 @@ the same question as whether the name is. Names are compared ignoring case and e
 existing `Neovim.yml` or `neovim.yaml` answers to `neovim` and the name check finds it. What that
 check cannot see is a path the file system matches and selfie's names do not: on macOS, a file or
 directory whose name spells the same letters in a different Unicode normalization, such as a
-decomposed `é`; the file name `selfie spec create --interactive` asks for, when another spec already
-has it; or something created after the name check. So selfie asks the file system about the path as
-well, and declines: the path is already taken by something selfie did not find under that name, and
-selfie will not write over it.
+decomposed `é`, or something created after the name check. So selfie asks the file system about the
+path as well, and declines: the path is already taken by something selfie did not find under that
+name, and selfie will not write over it.
 
 The rewriting commands also refuse a file selfie could not read back, even though no key is known to
 be wrong with it, and so does apply — a rewrite would delete whatever the file carries that selfie

@@ -72,17 +72,22 @@ pub(crate) async fn handle_create(
     let event_stream = service.create(package).await;
 
     // Process the event stream with custom handling for create-specific events
-    let mut created_file_path: Option<PathBuf> = None;
+    // The name and path the library created the spec under. The name is the file's,
+    // which the interactive prompts may have made different from the argument.
+    let mut created: Option<(String, PathBuf)> = None;
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
             PackageEvent::Completed {
-                result: OperationResult::Success(OperationSuccess::PackageCreated {
-                    file_path, ..
-                }),
+                result:
+                    OperationResult::Success(OperationSuccess::PackageCreated {
+                        package_name,
+                        file_path,
+                        ..
+                    }),
                 ..
             } => {
-                created_file_path = Some(file_path.clone());
+                created = Some((package_name.clone(), file_path.clone()));
                 false // Let default handler print success message
             }
             PackageEvent::ValidationResultCompleted {
@@ -106,7 +111,7 @@ pub(crate) async fn handle_create(
 
     // Ask if user wants to edit the file (only in interactive mode)
     if interactive {
-        if let Some(ref file_path) = created_file_path {
+        if let Some((ref created_name, ref file_path)) = created {
             let edit_now = display.prompt(
                 Confirm::with_theme(&SimpleTheme)
                     .with_prompt("Would you like to open the package file for editing now?")
@@ -117,7 +122,7 @@ pub(crate) async fn handle_create(
                 Ok(true) => {
                     let success_message = format!(
                         "Package '{}' created and saved at {}",
-                        package_name,
+                        created_name,
                         file_path.display()
                     );
                     common::open_editor(file_path, display, Some(success_message))
@@ -722,6 +727,48 @@ mod tests {
             }
             other => panic!("Expected PackageCreated, got: {other:?}"),
         }
+    }
+
+    // The interactive prompts can give a file name other than the package name. The
+    // run is named, like its result, by the file name: that is the name selfie
+    // finds the spec by afterwards.
+    #[tokio::test]
+    async fn a_create_run_is_named_by_the_file_it_writes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = test_common::create_test_service(&temp_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(temp_dir.path()));
+        let basic = create_basic_package("myapp", &config);
+        let package = selfie::package::Package::new(
+            basic.name().to_string(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            basic.environments().clone(),
+            temp_dir.path().join("bar.yml"),
+        );
+
+        let mut stream = service.create(package).await;
+        let mut completed = None;
+        while let Some(event) = stream.next().await {
+            if let PackageEvent::Completed {
+                operation_info,
+                result,
+            } = event
+            {
+                completed = Some((operation_info.package_name, result));
+            }
+        }
+
+        let Some((
+            run_name,
+            OperationResult::Success(OperationSuccess::PackageCreated { package_name, .. }),
+        )) = completed
+        else {
+            panic!("expected the create to succeed, got: {completed:?}");
+        };
+        assert_eq!(run_name, "bar");
+        assert_eq!(package_name, "bar");
     }
 
     #[tokio::test]
