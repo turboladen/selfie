@@ -18,15 +18,6 @@ pub enum NameLocation {
     Dotfiles,
 }
 
-impl fmt::Display for NameLocation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Packages => write!(f, "packages"),
-            Self::Dotfiles => write!(f, "dotfiles"),
-        }
-    }
-}
-
 /// Error returned when a name already exists in the shared namespace
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceConflict {
@@ -36,13 +27,21 @@ pub struct NamespaceConflict {
     pub found_in: NameLocation,
 }
 
+/// The sentence [`spec_name_taken`] gives for this name and location.
 impl fmt::Display for NamespaceConflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "name '{}' already exists in {}",
-            self.name, self.found_in
-        )
+        f.write_str(&spec_name_taken(&self.name, &self.found_in))
+    }
+}
+
+/// The fact that `name` is already taken in `found_in`, as one sentence. It
+/// carries no remedy: what to do about it depends on what the caller was
+/// trying to do.
+#[must_use]
+pub fn spec_name_taken(name: &str, found_in: &NameLocation) -> String {
+    match found_in {
+        NameLocation::Dotfiles => format!("A dotfile spec named '{name}' already exists."),
+        NameLocation::Packages => format!("'{name}' is already a package."),
     }
 }
 
@@ -384,15 +383,22 @@ mod tests {
         assert!(!rendered.contains("already exists"), "{rendered}");
     }
 
+    // A conflict reads as the fact for its location, with no remedy: that is
+    // the caller's to add.
     #[test]
-    fn test_display_formatting() {
-        let conflict = NamespaceConflict {
+    fn a_conflict_reads_as_the_taken_name_sentence() {
+        let package = NamespaceConflict {
             name: "starship".to_string(),
             found_in: NameLocation::Packages,
         };
+        assert_eq!(package.to_string(), "'starship' is already a package.");
+        let dotfile = NamespaceConflict {
+            name: "starship".to_string(),
+            found_in: NameLocation::Dotfiles,
+        };
         assert_eq!(
-            conflict.to_string(),
-            "name 'starship' already exists in packages"
+            dotfile.to_string(),
+            "A dotfile spec named 'starship' already exists."
         );
     }
 }

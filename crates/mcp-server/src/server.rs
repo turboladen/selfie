@@ -323,7 +323,7 @@ impl SelfieServer {
             &pkg_repo,
             Some(&dotfiles_repo),
         ) {
-            return namespace_refusal(e);
+            return namespace_refusal(e, NameCheck::SpecCreate);
         }
 
         let file_path = self
@@ -711,7 +711,7 @@ with all=true, when a key in any environment cannot be trusted. A result that co
         if let Err(e) =
             selfie::namespace::validate_unique_name(&params.name, &pkg_repo, Some(&dotfiles_repo))
         {
-            return namespace_refusal(e);
+            return namespace_refusal(e, NameCheck::DotfilesTrack);
         }
 
         let stream = self
@@ -851,6 +851,7 @@ impl ServerHandler for SelfieServer {
 /// sends an agent round a loop of names that all fail identically.
 fn namespace_refusal(
     error: selfie::namespace::NamespaceValidationError,
+    check: NameCheck,
 ) -> Result<CallToolResult, McpError> {
     use selfie::namespace::NamespaceValidationError as Invalid;
 
@@ -868,11 +869,37 @@ fn namespace_refusal(
                 serde_json::to_string_pretty(&payload).unwrap_or_default(),
             )]))
         }
-        Invalid::Conflict(_) | Invalid::LookupFailed(_) => Err(McpError::invalid_params(
+        // The fact, then what the calling tool can do about it.
+        Invalid::Conflict(conflict) => {
+            use selfie::namespace::NameLocation;
+
+            let remedy = match (check, &conflict.found_in) {
+                (NameCheck::SpecCreate, NameLocation::Packages) => {
+                    "Use selfie_spec_update to change it, or choose a different name."
+                }
+                (NameCheck::DotfilesTrack, NameLocation::Packages) => {
+                    "Use selfie_package_track_dotfile to track a file for it, or choose a \
+                     different name."
+                }
+                (_, NameLocation::Dotfiles) => "Remove it first or choose a different name.",
+            };
+            Err(McpError::invalid_params(
+                format!("{conflict} {remedy}"),
+                None,
+            ))
+        }
+        Invalid::LookupFailed(_) => Err(McpError::invalid_params(
             format!("Namespace conflict: {error}"),
             None,
         )),
     }
+}
+
+/// Which tool's name check refused, for the remedy it offers.
+#[derive(Clone, Copy)]
+enum NameCheck {
+    SpecCreate,
+    DotfilesTrack,
 }
 
 /// Returns the standalone dotfiles repository for `config`'s
@@ -897,6 +924,54 @@ fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A taken name reaches an assistant as the fact and the remedy for its tool.
+    #[test]
+    fn a_name_conflict_is_the_taken_name_sentence() {
+        let error = selfie::namespace::NamespaceValidationError::Conflict(
+            selfie::namespace::NamespaceConflict {
+                name: "rc".to_string(),
+                found_in: selfie::namespace::NameLocation::Dotfiles,
+            },
+        );
+
+        let Err(refusal) = namespace_refusal(error, NameCheck::DotfilesTrack) else {
+            panic!("a conflict is an error");
+        };
+
+        assert_eq!(
+            refusal.message,
+            "A dotfile spec named 'rc' already exists. Remove it first or choose a different name."
+        );
+    }
+
+    // A package's name gets the remedy for the tool that asked: an update for
+    // a create, the package's own track tool for a track.
+    #[test]
+    fn a_package_name_conflict_offers_the_calling_tools_remedy() {
+        let conflict = || {
+            selfie::namespace::NamespaceValidationError::Conflict(
+                selfie::namespace::NamespaceConflict {
+                    name: "bat".to_string(),
+                    found_in: selfie::namespace::NameLocation::Packages,
+                },
+            )
+        };
+
+        let Err(create) = namespace_refusal(conflict(), NameCheck::SpecCreate) else {
+            panic!("a conflict is an error");
+        };
+        let Err(track) = namespace_refusal(conflict(), NameCheck::DotfilesTrack) else {
+            panic!("a conflict is an error");
+        };
+
+        assert!(create.message.starts_with("'bat' is already a package."));
+        assert!(create.message.contains("selfie_spec_update"), "{create:?}");
+        assert!(
+            track.message.contains("selfie_package_track_dotfile"),
+            "{track:?}"
+        );
+    }
 
     #[test]
     fn apply_param_defaults_auto_accept_to_false() {

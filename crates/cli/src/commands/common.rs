@@ -183,6 +183,33 @@ pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) ->
     Some(1)
 }
 
+/// The message for a name the namespace check refused, for a command tracking a
+/// dotfile under that name.
+pub(crate) fn name_check_message(
+    name: &str,
+    error: &selfie::namespace::NamespaceValidationError,
+) -> String {
+    use selfie::namespace::NamespaceValidationError as Invalid;
+
+    match error {
+        // The fact, then what a track can do about it.
+        Invalid::Conflict(conflict) => match conflict.found_in {
+            selfie::namespace::NameLocation::Dotfiles => {
+                format!("{conflict} Remove it first or choose a different name.")
+            }
+            selfie::namespace::NameLocation::Packages => format!(
+                "{conflict} To track a file for that package, use 'selfie package track-dotfile \
+                 {name} <file>', or choose a different name."
+            ),
+        },
+        // A dotfiles directory that would not read says nothing about the name,
+        // and telling the user they cannot use it sends them off to pick another
+        // one, which fails in exactly the same way.
+        Invalid::DotfilesDirectoryUnreadable(_) => error.to_string(),
+        Invalid::LookupFailed(_) => format!("Cannot use name '{name}': {error}"),
+    }
+}
+
 /// Track a standalone dotfile via `DotfileServiceImpl::track_standalone`.
 ///
 /// Shared by `selfie dotfiles track` and `selfie track` (interactive).

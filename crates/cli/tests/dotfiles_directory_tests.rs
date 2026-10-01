@@ -226,9 +226,15 @@ fn spec_create_refuses_a_name_that_collides_with_a_standalone_dotfile() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    // The one sentence for a taken name, with no prefix of its own.
     assert!(
-        combined.contains("Name conflict"),
+        combined.contains("A dotfile spec named 'vim' already exists"),
         "the collision with the standalone dotfile must be reported, got:\n{combined}"
+    );
+    assert!(!combined.contains("Name conflict"), "{combined}");
+    assert!(
+        !combined.contains("already exists in dotfiles"),
+        "{combined}"
     );
     assert!(
         !spec_exists(&temp.path().join("packages"), "vim"),

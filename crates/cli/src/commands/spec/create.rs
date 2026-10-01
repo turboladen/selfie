@@ -160,10 +160,16 @@ fn get_valid_package_name(
                 return Err(Exit::Failed.code());
             }
             Err(NamespaceValidationError::Conflict(conflict)) => {
-                // Name exists somewhere — check if it's in packages/ (editable)
-                // or dotfiles/ (just a conflict, need a different name)
-                if let Ok(existing_package) = repo.get_package(&current_name) {
-                    display.print_info(format!("Package '{current_name}' already exists."));
+                // Only a package the check found, and this command can load, is
+                // offered for editing. Where the name was found is the check's
+                // answer; a failed load does not move it to the dotfiles directory.
+                let editable = match conflict.found_in {
+                    namespace::NameLocation::Packages => repo.get_package(&current_name).ok(),
+                    namespace::NameLocation::Dotfiles => None,
+                };
+                if let Some(existing_package) = editable {
+                    display
+                        .print_warning(format!("{conflict} Edit it, or choose a different name."));
 
                     let action = display.prompt(
                         Select::with_theme(&SimpleTheme)
@@ -188,11 +194,15 @@ fn get_valid_package_name(
                         _ => return Ok(PackageNameResult::Cancelled),
                     }
                 } else {
-                    // Conflict is in dotfiles/ — can't edit, need a different name
-                    display.print_warning(format!("Name conflict: {conflict}"));
-                    display.print_suggestion(
-                        "Choose a different name to avoid conflicting with the standalone dotfile.",
-                    );
+                    // Not a package this command can edit, so a different name is
+                    // the way out.
+                    let why = match conflict.found_in {
+                        namespace::NameLocation::Packages => {
+                            " It could not be loaded, so it cannot be edited here."
+                        }
+                        namespace::NameLocation::Dotfiles => "",
+                    };
+                    display.print_warning(format!("{conflict}{why} Choose a different name."));
                 }
 
                 // Prompt for a new name

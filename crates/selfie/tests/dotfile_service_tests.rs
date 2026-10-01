@@ -13696,6 +13696,34 @@ mod track_entry_points_agree {
         }
     }
 
+    // A file already at the path a new standalone track would write is refused,
+    // naming the path it checked.
+    #[tokio::test]
+    async fn a_spec_already_at_the_path_is_refused_by_name_and_path() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(&dirs.dotfiles_dir).unwrap();
+        let spec = dirs.dotfiles_dir.join("fresh.yml");
+        std::fs::write(&spec, "name: [unterminated\n").unwrap();
+        let target = dirs.target_dir.join("config");
+        std::fs::write(&target, "--theme=ansi").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("fresh", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains(&format!(
+                "Something is already at {}, where the spec for 'fresh' would be written",
+                spec.display()
+            )),
+            "{failure}"
+        );
+    }
+
     // The control: with a target both entry points accept, both succeed. Without
     // it every test above could pass on an implementation that refused
     // everything.
