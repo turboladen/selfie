@@ -290,7 +290,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command. Use selfie_config_get to check the current environment. When the dotfiles directory cannot be read the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path. The name may be free and nothing could check it, so retrying with another name fails the same way."
+        description = "Create a new package spec file. Requires name, environment, and install command. Use selfie_config_get to check the current environment. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way."
     )]
     async fn spec_create(
         &self,
@@ -693,7 +693,7 @@ with all=true, when a key in any environment cannot be trusted. A result that co
 
     #[tool(
         name = "selfie_dotfiles_track",
-        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. Fails, writing nothing, when no readable directory is at the dotfiles directory path — nothing there, something that is not a directory, a symlink whose destination is gone, or a directory whose entries cannot be read, since a directory selfie cannot read may already hold the name — or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy. A spec that cannot be saved also writes nothing: the copy is removed again, or, where that removal also fails, the failure names the file to delete. A deploy state that cannot be written at the end is the one partial outcome — the copy and the spec entry are in place and only the record is missing, and the failure names both files. Call selfie_apply_dotfiles to finish it; tracking again records nothing."
+        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. Fails, writing nothing, when no readable directory is at the dotfiles directory path — nothing there, something that is not a directory, a symlink whose destination is gone, or a directory whose entries cannot be read, since a directory selfie cannot read may already hold the name — or when the package directory cannot be read or something other than a directory is at its path (status 'refused' with package_directory), or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy. A spec that cannot be saved also writes nothing: the copy is removed again, or, where that removal also fails, the failure names the file to delete. A deploy state that cannot be written at the end is the one partial outcome — the copy and the spec entry are in place and only the record is missing, and the failure names both files. Call selfie_apply_dotfiles to finish it; tracking again records nothing."
     )]
     async fn selfie_dotfiles_track(
         &self,
@@ -842,34 +842,22 @@ impl ServerHandler for SelfieServer {
 
 /// The MCP answer to a refused name check.
 ///
-/// A conflict, and a package directory that would not answer, are about the name the
-/// caller sent: those are `invalid_params`, where retrying with another name is the
-/// right move. A dotfiles directory selfie could not read is not about the name at all,
-/// since the name may be free and nothing could check it, so it comes back as a
-/// refusal in the shape the apply and drift tools use, carrying `status` and `reason`
-/// fields an agent branches on instead of prose. Reporting it as invalid input is what
-/// sends an agent round a loop of names that all fail identically.
+/// A conflict is about the name the caller sent, so it is `invalid_params`: the
+/// fact, then what the calling tool can do about it. A package or dotfiles
+/// directory selfie could not read is not about the name at all, so it comes back
+/// as a refusal in the shape the apply and drift tools use: `status` and `reason`,
+/// plus `package_directory` or `dotfiles_directory` naming the directory.
+// Reporting an unreadable directory as invalid input is what sends an agent round a
+// loop of names that all fail identically.
 fn namespace_refusal(
     error: selfie::namespace::NamespaceValidationError,
     check: NameCheck,
 ) -> Result<CallToolResult, McpError> {
     use selfie::namespace::NamespaceValidationError as Invalid;
 
-    match &error {
-        Invalid::DotfilesDirectoryUnreadable(listing) => {
-            let payload = serde_json::json!({
-                "result": {
-                    "status": "refused",
-                    "reason": error.to_string(),
-                    "dotfiles_directory": listing.path().display().to_string(),
-                },
-                "data": [],
-            });
-            Ok(CallToolResult::error(vec![ContentBlock::text(
-                serde_json::to_string_pretty(&payload).unwrap_or_default(),
-            )]))
-        }
-        // The fact, then what the calling tool can do about it.
+    let (directory_key, listing) = match &error {
+        Invalid::PackageDirectoryUnreadable(listing) => ("package_directory", listing),
+        Invalid::DotfilesDirectoryUnreadable(listing) => ("dotfiles_directory", listing),
         Invalid::Conflict(conflict) => {
             use selfie::namespace::NameLocation;
 
@@ -883,16 +871,21 @@ fn namespace_refusal(
                 }
                 (_, NameLocation::Dotfiles) => "Remove it first or choose a different name.",
             };
-            Err(McpError::invalid_params(
+            return Err(McpError::invalid_params(
                 format!("{conflict} {remedy}"),
                 None,
-            ))
+            ));
         }
-        Invalid::LookupFailed(_) => Err(McpError::invalid_params(
-            format!("Namespace conflict: {error}"),
-            None,
-        )),
-    }
+    };
+    let mut result = serde_json::json!({
+        "status": "refused",
+        "reason": error.to_string(),
+    });
+    result[directory_key] = listing.path().display().to_string().into();
+    let payload = serde_json::json!({ "result": result, "data": [] });
+    Ok(CallToolResult::error(vec![ContentBlock::text(
+        serde_json::to_string_pretty(&payload).unwrap_or_default(),
+    )]))
 }
 
 /// Which tool's name check refused, for the remedy it offers.
@@ -1143,6 +1136,34 @@ mod tests {
         assert!(
             packages.join("brandnew.yml").is_file(),
             "the first package must be written: {json}"
+        );
+    }
+
+    // A file at the package directory's path says nothing about the name, so the
+    // tool refuses with the directory rather than calling the name invalid.
+    #[tokio::test]
+    async fn spec_create_refuses_when_the_package_directory_is_a_file() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::write(&packages, "not a directory").unwrap();
+        let server = server_over(&packages, None);
+
+        let json = create(&server, "brandnew").await;
+
+        assert_eq!(json["result"]["status"], "refused", "got {json}");
+        assert_eq!(
+            json["result"]["package_directory"],
+            packages.display().to_string(),
+            "got {json}"
+        );
+        let reason = json["result"]["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("is not a directory, it is a regular file"),
+            "got {json}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&packages).unwrap(),
+            "not a directory"
         );
     }
 

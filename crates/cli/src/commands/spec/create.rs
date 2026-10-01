@@ -148,14 +148,13 @@ fn get_valid_package_name(
     loop {
         // Check namespace conflict (packages + dotfiles directories)
         match namespace::validate_unique_name(&current_name, repo, Some(&dotfiles_repo)) {
-            Err(NamespaceValidationError::LookupFailed(msg)) => {
-                display.print_error(format!("Failed to check namespace: {msg}"));
-                return Err(Exit::Failed.code());
-            }
             // Not a retry with a different name: the directory is the problem, not
             // the name, so prompting again would ask the user to guess their way
             // past an unreadable directory.
-            Err(error @ NamespaceValidationError::DotfilesDirectoryUnreadable(_)) => {
+            Err(
+                error @ (NamespaceValidationError::PackageDirectoryUnreadable(_)
+                | NamespaceValidationError::DotfilesDirectoryUnreadable(_)),
+            ) => {
                 display.print_error(format!("Cannot create '{current_name}': {error}"));
                 return Err(Exit::Failed.code());
             }

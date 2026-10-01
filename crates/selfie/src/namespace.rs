@@ -52,8 +52,10 @@ impl std::error::Error for NamespaceConflict {}
 pub enum NamespaceValidationError {
     /// The name conflicts with an existing entry
     Conflict(NamespaceConflict),
-    /// Failed to look up names in the required package repository
-    LookupFailed(String),
+    /// The package directory could not be read, or something other than a
+    /// directory is at its path. The listing error names the directory and says
+    /// what is at it.
+    PackageDirectoryUnreadable(PackageListError),
     /// The dotfiles directory could not be read, so whether the name is already
     /// taken is unknown. The listing error names the directory and says what is at
     /// it.
@@ -64,11 +66,14 @@ impl fmt::Display for NamespaceValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Conflict(c) => write!(f, "{c}"),
-            Self::LookupFailed(msg) => write!(f, "namespace lookup failed: {msg}"),
             // `error` leads with the directory's own path, so no noun goes in front
             // of it: "the dotfiles directory /home/me/dots could not be listed" reads
             // as two subjects.
-            Self::DotfilesDirectoryUnreadable(error) => {
+            // Something that is not a directory holds no names, so the listing's own
+            // sentence is the whole answer. Only a path selfie could not look into
+            // leaves the name's status unknown.
+            Self::PackageDirectoryUnreadable(error) if error.is_absent() => write!(f, "{error}"),
+            Self::PackageDirectoryUnreadable(error) | Self::DotfilesDirectoryUnreadable(error) => {
                 write!(f, "cannot tell whether the name is already taken: {error}")
             }
         }
@@ -90,9 +95,9 @@ impl From<NamespaceConflict> for NamespaceValidationError {
 /// # Errors
 ///
 /// [`NamespaceValidationError::Conflict`] if the name is taken in either
-/// directory. [`NamespaceValidationError::LookupFailed`] if the package
-/// directory could not be read, or something other than a directory is at its
-/// path. [`NamespaceValidationError::DotfilesDirectoryUnreadable`] if the dotfiles
+/// directory. [`NamespaceValidationError::PackageDirectoryUnreadable`] if the
+/// package directory could not be read, or something other than a directory is at
+/// its path. [`NamespaceValidationError::DotfilesDirectoryUnreadable`] if the dotfiles
 /// directory's listing failed and its error does not report the directory absent,
 /// because a name in a directory selfie cannot read is a name it cannot report as
 /// free.
@@ -112,7 +117,7 @@ pub fn validate_unique_name(
     let files = match package_repo.find_package_files(name) {
         Ok(files) => files,
         Err(error) if error.may_be_created() => Vec::new(),
-        Err(error) => return Err(NamespaceValidationError::LookupFailed(error.to_string())),
+        Err(error) => return Err(NamespaceValidationError::PackageDirectoryUnreadable(error)),
     };
     if !files.is_empty() {
         return Err(NamespaceConflict {
@@ -299,9 +304,45 @@ mod tests {
             .returning(|_| Ok(vec![]));
 
         let result = validate_unique_name("foo", &package_repo, Some(&dotfiles_repo));
+        let Err(error @ NamespaceValidationError::PackageDirectoryUnreadable(_)) = result else {
+            panic!("expected the lookup to fail, got {result:?}");
+        };
+        // The directory is what failed, so the sentence names it and says what is
+        // there. A file holds no names, so the sentence does not claim the answer is
+        // unknown either.
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            "/packages is not a directory, it is a regular file"
+        );
+    }
+
+    // A package directory selfie could not list may hold the name, so the refusal
+    // says the answer is unknown and names the directory.
+    #[test]
+    fn a_package_directory_that_cannot_be_listed_leaves_the_name_unknown() {
+        let mut package_repo = MockPackageRepository::new();
+        package_repo.expect_find_package_files().returning(|_| {
+            Err(PackageListError::new(
+                "/packages".into(),
+                DirectoryState::Unlistable(Arc::new(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))),
+            ))
+        });
+        let mut dotfiles_repo = MockPackageRepository::new();
+        dotfiles_repo
+            .expect_find_package_files()
+            .returning(|_| Ok(vec![]));
+
+        let result = validate_unique_name("foo", &package_repo, Some(&dotfiles_repo));
+        let Err(error @ NamespaceValidationError::PackageDirectoryUnreadable(_)) = result else {
+            panic!("expected the lookup to fail, got {result:?}");
+        };
+        let message = error.to_string();
         assert!(
-            matches!(result, Err(NamespaceValidationError::LookupFailed(_))),
-            "got {result:?}"
+            message.starts_with("cannot tell whether the name is already taken: /packages"),
+            "{message}"
         );
     }
 

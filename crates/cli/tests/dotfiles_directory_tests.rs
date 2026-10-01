@@ -640,3 +640,44 @@ fn dotfiles_track_works_before_the_package_directory_exists() {
     );
     assert!(spec_exists(&dotfiles, "rc"), "stderr:\n{stderr}");
 }
+
+// A file at the package directory's path says nothing about the name the user
+// chose, so the refusal names the directory instead of telling them to pick another
+// name that would fail the same way.
+#[test]
+fn dotfiles_track_with_a_file_at_the_package_directory_names_the_directory() {
+    let temp = config_without_dotfiles_dir();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    let packages = temp.path().join("packages");
+    std::fs::remove_dir(&packages).unwrap();
+    std::fs::write(&packages, "not a directory").unwrap();
+
+    let tracked = temp.path().join(".tracked-rc");
+    std::fs::write(&tracked, "set -o vi\n").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["dotfiles", "track", "rc", tracked.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "{} is not a directory, it is a regular file",
+            packages.display()
+        )),
+        "the refusal must name the directory and what is there, stderr:\n{stderr}"
+    );
+    // A file holds no names, so the refusal does not claim the answer is unknown.
+    assert!(
+        !stderr.contains("cannot tell whether the name is already taken"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Cannot use name"),
+        "the name is not what failed, stderr:\n{stderr}"
+    );
+    assert!(!spec_exists(&dotfiles, "rc"), "stderr:\n{stderr}");
+}

@@ -202,11 +202,12 @@ pub(crate) fn name_check_message(
                  {name} <file>', or choose a different name."
             ),
         },
-        // A dotfiles directory that would not read says nothing about the name,
-        // and telling the user they cannot use it sends them off to pick another
+        // A package or dotfiles directory that would not read says nothing about the
+        // name, and telling the user they cannot use it sends them off to pick another
         // one, which fails in exactly the same way.
-        Invalid::DotfilesDirectoryUnreadable(_) => error.to_string(),
-        Invalid::LookupFailed(_) => format!("Cannot use name '{name}': {error}"),
+        Invalid::PackageDirectoryUnreadable(_) | Invalid::DotfilesDirectoryUnreadable(_) => {
+            error.to_string()
+        }
     }
 }
 
