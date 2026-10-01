@@ -432,6 +432,37 @@ fn spec_validate_exits_three_on_a_warning() {
     assert_eq!(code, Some(FOUND), "{output}");
 }
 
+// Commands run through the user's own shell, so one that does not parse as POSIX
+// sh is a warning, which is a finding (3), never an error (1): fish's `\'` inside
+// single quotes, and a trailing backslash.
+#[test]
+fn spec_validate_exits_three_for_a_command_that_is_not_posix_sh() {
+    for install in [r#"echo 'it\'s fish'"#, r"echo foo \"] {
+        let temp = sandbox();
+        write_spec(
+            &temp,
+            "tool",
+            &format!(
+                "name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: '{}'\n",
+                install.replace('\'', "''")
+            ),
+        );
+
+        let (code, output) = run(&temp, &["spec", "validate", "tool"]);
+        assert_eq!(code, Some(FOUND), "{install}: {output}");
+        // The reassurance is part of the message, so the table, which shows no
+        // suggestions, carries it too.
+        assert!(
+            output.contains("does not parse as POSIX sh"),
+            "{install}: {output}"
+        );
+        assert!(
+            output.contains("This is fine if your shell accepts it"),
+            "{install}: {output}"
+        );
+    }
+}
+
 // An unparsable dotfiles/ spec that a packages/ spec of the same name shadows is
 // reported as a warning, and a run that reports one is not clean.
 #[test]

@@ -1801,6 +1801,12 @@ Selfie validates package files according to these rules:
 ### Commands
 
 - Install and check commands should be valid shell scripts
+- Selfie runs a command through your login shell, which may be fish or zsh rather than POSIX sh, so
+  it never refuses a command for its syntax. A command that does not parse as POSIX sh, such as one
+  with a quote left open, a trailing backslash or an empty pipeline stage (`| |`), is reported as a
+  warning, which is fine if your shell accepts it. Quotes are read as a POSIX shell reads them, so
+  an escaped quote (`it\'s`), `'it'\''s'` and an apostrophe in a `#` comment draw no warning. A
+  command with a heredoc (`<<`) is not checked for quotes at all, because its body is raw text
 - Multi-line commands should consider including `set -e` for proper error handling (stops execution
   on first failure)
 - Commands should handle errors appropriately and provide meaningful error messages

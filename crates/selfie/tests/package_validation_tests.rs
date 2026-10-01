@@ -36,8 +36,9 @@ environments:
     let package = repo.get_package("test-package").unwrap();
     let validation = package.package().validate("test-env");
 
-    // Should find at least one error with command syntax
-    assert!(validation.issues().has_errors());
+    // A command that does not parse as POSIX sh is a warning, not an error: it
+    // may run in the user's own shell.
+    assert!(!validation.issues().has_errors());
 
     let command_errors = validation
         .issues()
@@ -49,8 +50,12 @@ environments:
         .collect::<Vec<_>>();
 
     assert!(!command_errors.is_empty());
-    assert_eq!(command_errors[0].level(), ValidationLevel::Error);
-    assert!(command_errors[0].message().contains("quote"));
+    assert_eq!(command_errors[0].level(), ValidationLevel::Warning);
+    assert!(
+        command_errors[0]
+            .message()
+            .contains("does not parse as POSIX sh")
+    );
 }
 
 #[test]

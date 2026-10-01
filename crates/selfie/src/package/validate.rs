@@ -167,6 +167,18 @@ fn unknown_dotfile_issue(entry_key: UnknownEntryKey) -> ValidationIssue {
     )
 }
 
+/// The warning for a command that does not parse as POSIX sh, saying why.
+fn not_posix_sh(field_name: &str, why: &str) -> ValidationIssue {
+    ValidationIssue::warning(
+        ValidationErrorCategory::CommandSyntax,
+        field_name,
+        &format!(
+            "The command does not parse as POSIX sh: {why}. This is fine if your shell accepts it"
+        ),
+        None,
+    )
+}
+
 /// Format a `Location` as a human-readable string, returning `None` for unknown locations.
 fn location_string(loc: &Location) -> Option<String> {
     if *loc == Location::UNKNOWN {
@@ -529,43 +541,26 @@ impl Package {
     fn validate_single_command(command: &str, field_name: &str) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
 
-        // Check for unmatched quotes
-        let mut in_single_quotes = false;
-        let mut in_double_quotes = false;
-
-        for c in command.chars() {
-            match c {
-                '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
-                '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
-                _ => {}
-            }
-        }
-
-        if in_single_quotes {
-            issues.push(ValidationIssue::error(
-                ValidationErrorCategory::CommandSyntax,
+        // Commands run through the user's login shell, which may be fish or zsh, so a
+        // command that does not parse as POSIX sh is a warning, never an error: an
+        // error would make `spec create` refuse a command that runs.
+        //
+        // `shlex` reads quotes the way a POSIX shell does: a backslash escapes a
+        // quote, `'\''` closes and reopens, and a `#` comment ends the words. It
+        // fails only on a quote left open or a backslash with nothing after it. It
+        // does not know heredocs, whose body is raw text, so an apostrophe there
+        // reads as an open quote: a command with a heredoc operator is not checked.
+        if !command.contains("<<") && shlex::split(command).is_none() {
+            issues.push(not_posix_sh(
                 field_name,
-                "Unmatched single quote in command",
-                Some("Add a closing single quote (') to the command."),
+                "a quote is left open, or it ends in a backslash",
             ));
         }
 
-        if in_double_quotes {
-            issues.push(ValidationIssue::error(
-                ValidationErrorCategory::CommandSyntax,
-                field_name,
-                "Unmatched double quote in command",
-                Some("Add a closing double quote (\") to the command."),
-            ));
-        }
-
-        // Check for invalid pipe usage
         if command.contains("| |") {
-            issues.push(ValidationIssue::error(
-                ValidationErrorCategory::CommandSyntax,
+            issues.push(not_posix_sh(
                 field_name,
-                "Invalid pipe usage in command",
-                Some("Remove duplicate pipe symbols."),
+                "it has an empty pipeline stage, `| |`",
             ));
         }
 
@@ -2024,30 +2019,88 @@ dotfiles:
         assert!(issues[0].message.contains("required"));
     }
 
+    // The command-syntax issues a single install command draws, as (level, message).
+    fn syntax_issues(install: &str) -> Vec<(ValidationLevel, String)> {
+        PackageBuilder::default()
+            .name("test-package")
+            .environment("test-env", |b| b.install(install))
+            .build()
+            .validate_command_syntax()
+            .into_iter()
+            .filter(|issue| issue.message.contains("POSIX sh"))
+            .map(|issue| (issue.level(), issue.message))
+            .collect()
+    }
+
+    // Valid POSIX shell that a character-counting check misreads: an escaped quote,
+    // the close-and-reopen idiom, and an apostrophe inside a comment. None draws a
+    // syntax issue at all.
+    #[test]
+    fn quoting_a_shell_accepts_is_not_reported() {
+        for command in [
+            r"echo it\'s",
+            r#"printf "%s" "a\"b""#,
+            r"echo 'it'\''s'",
+            "brew install foo # don't upgrade",
+        ] {
+            assert!(
+                syntax_issues(command).is_empty(),
+                "{command}: {:?}",
+                syntax_issues(command)
+            );
+        }
+    }
+
+    // A heredoc's body is raw text, so an apostrophe in it is not a quote and draws
+    // no warning. The same apostrophe outside any heredoc still does.
+    #[test]
+    fn a_heredoc_body_is_not_read_as_quotes() {
+        let heredoc = "cat <<'EOF' > ~/.motd\nit's a heredoc\nEOF";
+        assert!(
+            syntax_issues(heredoc).is_empty(),
+            "{:?}",
+            syntax_issues(heredoc)
+        );
+
+        let issues = syntax_issues("echo it's not a heredoc");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].0, ValidationLevel::Warning, "{issues:?}");
+    }
+
+    // Commands that do not parse as POSIX sh but may run in the user's own shell:
+    // fish's `\'` inside single quotes, a trailing backslash, a quote left open, and
+    // an empty pipeline stage. Each is a warning that says so, never an error, so
+    // nothing that runs is refused.
+    #[test]
+    fn a_command_that_is_not_posix_sh_is_a_warning() {
+        for (command, why) in [
+            (r"echo 'it\'s fish'", "a quote is left open"),
+            (r"echo foo \", "ends in a backslash"),
+            ("echo 'unmatched", "a quote is left open"),
+            ("echo test | | grep test", "empty pipeline stage"),
+        ] {
+            let issues = syntax_issues(command);
+            assert_eq!(issues.len(), 1, "{command}: {issues:?}");
+            assert_eq!(issues[0].0, ValidationLevel::Warning, "{command}");
+            assert!(
+                issues[0]
+                    .1
+                    .starts_with("The command does not parse as POSIX sh: "),
+                "{command}: {issues:?}"
+            );
+            assert!(issues[0].1.contains(why), "{command}: {issues:?}");
+            assert!(
+                issues[0]
+                    .1
+                    .ends_with(". This is fine if your shell accepts it"),
+                "{command}: {issues:?}"
+            );
+            assert!(!issues[0].1.contains("nvalid"), "{command}: {issues:?}");
+        }
+    }
+
     #[test]
     fn test_validate_command_syntax() {
-        // Test unmatched quote
-        let package = PackageBuilder::default()
-            .name("test-package")
-            .environment("test-env", |b| b.install("echo 'unmatched"))
-            .build();
-
-        let issues = package.validate_command_syntax();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].level(), ValidationLevel::Error);
-        assert!(issues[0].message.contains("Unmatched single quote"));
-
-        // Test invalid pipe
-        let package = PackageBuilder::default()
-            .name("test-package")
-            .environment("test-env", |b| b.install("echo test | | grep test"))
-            .build();
-
-        let issues = package.validate_command_syntax();
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].level(), ValidationLevel::Error);
-        assert!(issues[0].message.contains("Invalid pipe usage"));
-
         // Test backticks (warning)
         let package = PackageBuilder::default()
             .name("test-package")
