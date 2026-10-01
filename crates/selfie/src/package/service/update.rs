@@ -118,7 +118,11 @@ where
 
     // Handle remove_environment
     if let Some(ref remove_env) = fields.remove_environment
-        && package.environments.value.remove(remove_env).is_none()
+        && package
+            .environments
+            .value
+            .shift_remove(remove_env)
+            .is_none()
     {
         return OperationResult::Failure(
             format!("Environment '{remove_env}' not found in package '{package_name}'").into(),
@@ -402,6 +406,54 @@ mod tests {
         .await;
 
         assert!(matches!(result, OperationResult::Success(_)));
+    }
+
+    // Removing an environment leaves the rest in the order the file gave them. Three
+    // environments, removing the first: a removal that moved the last one into the
+    // gap would write `mid` before `alpha`.
+    #[tokio::test]
+    async fn removing_an_environment_keeps_the_rest_in_order() {
+        let mut mock_repo = MockPackageRepository::new();
+        let config = test_config();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("zeta", |b| b.install("echo z"))
+            .environment("alpha", |b| b.install("echo a"))
+            .environment("mid", |b| b.install("echo m"))
+            .path("/test/packages/test-pkg.yml")
+            .build();
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/test-pkg.yml"));
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+
+        let saved = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = std::sync::Arc::clone(&saved);
+        mock_repo.expect_save_package().returning(move |pkg, _| {
+            *sink.lock().unwrap() = pkg.environments().keys().cloned().collect();
+            Ok(())
+        });
+
+        let fields = PackageUpdateFields {
+            remove_environment: Some("zeta".to_string()),
+            ..Default::default()
+        };
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &mock_repo,
+            &config,
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
+        assert_eq!(*saved.lock().unwrap(), ["alpha", "mid"]);
     }
 
     #[tokio::test]

@@ -296,7 +296,7 @@ impl SelfieServer {
         &self,
         Parameters(params): Parameters<CreateParam>,
     ) -> Result<CallToolResult, McpError> {
-        let mut environments = std::collections::HashMap::new();
+        let mut environments = selfie::package::Environments::new();
         environments.insert(
             params.environment,
             EnvironmentConfig::new(

@@ -302,11 +302,15 @@ would refuse to write can still be opened to fix it. Only a package that does no
 written before the editor opens.
 
 The rewriting commands named above write the file back from selfie's own model of it, and that model
-holds no comments, no key order and no anchors. A rewrite that succeeds therefore drops every
-comment, replaces every anchor reference with the value it expanded to, and reorders the keys. A
-top-level key beginning with `_`, which selfie allows as an anchor definition, is dropped the same
-way unless its name shadows a real field, in which case the rewrite is refused. `selfie spec create`
-writes only a file that does not exist yet, so nothing is lost there.
+holds no comments and no anchors, and keeps the order of only one thing, the environments. A rewrite
+that succeeds therefore drops every comment and replaces every anchor reference with the value it
+expanded to. It writes the top-level keys, and the keys inside each environment and each dotfile
+entry, in selfie's own order. The environments stay in the order the file gives them, except that
+environments brought in through a merge key (`<<:`) are written after the ones the mapping spells
+out, where they then stay. A top-level key beginning with `_`, which selfie allows as an anchor
+definition, is dropped the same way unless its name shadows a real field, in which case the rewrite
+is refused. `selfie spec create` writes only a file that does not exist yet, so nothing is lost
+there.
 
 Keys beginning with `_` are treated as YAML anchor definitions and allowed, unless the rest of the
 name matches a real field — `_check:` cannot be told apart from a misspelling of `check:` and is

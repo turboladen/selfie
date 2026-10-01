@@ -130,10 +130,9 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
 mod tests {
     use super::*;
     use selfie::package::{
-        GetPackage, Package,
+        Environments, GetPackage, Package,
         port::{MockPackageRepository, PackageError},
     };
-    use std::collections::HashMap;
     use std::{fs, path::PathBuf};
     use tempfile::TempDir;
     use test_common::test_config_with_dir;
@@ -274,7 +273,7 @@ mod tests {
             None,
             Vec::new(),
             None,
-            HashMap::new(),
+            Environments::new(),
             PathBuf::from("/test/packages/edit-test.yml"),
         );
         let get_package =

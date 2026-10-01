@@ -9,6 +9,7 @@ dunce.workspace = true
 etcetera.workspace = true
 futures.workspace = true
 gix.workspace = true
+indexmap.workspace = true
 mockall = { workspace = true, optional = true }
 # "user" is for `Uid::effective`, which `privilege::RealPrivilege` needs. `std`
 # has no `geteuid`, and `libc`'s is `unsafe` -- this keeps the crate free of

@@ -2,12 +2,12 @@ use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
 use selfie::{
     namespace::{self, NamespaceValidationError},
     package::{
-        EnvironmentConfig, SpecService,
+        EnvironmentConfig, Environments, SpecService,
         event::{OperationResult, OperationSuccess, PackageEvent},
         port::PackageRepository,
     },
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 use tracing::info;
 
 use crate::{
@@ -234,7 +234,7 @@ fn get_valid_package_name(
 }
 
 fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::package::Package {
-    let mut environments = HashMap::new();
+    let mut environments = Environments::new();
 
     // Use the environment from config (which may be overridden by --environment)
     let env_name = config.environment();
@@ -340,8 +340,8 @@ fn prompt_environments(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<HashMap<String, EnvironmentConfig>, i32> {
-    let mut environments = HashMap::new();
+) -> Result<Environments, i32> {
+    let mut environments = Environments::new();
 
     loop {
         display.print_info("Adding environment configuration...");
@@ -364,7 +364,7 @@ fn prompt_environments(
 }
 
 fn prompt_environment_name(
-    existing_environments: &HashMap<String, EnvironmentConfig>,
+    existing_environments: &Environments,
     config: &CliConfig,
     display: &DisplayManager,
 ) -> Result<String, i32> {

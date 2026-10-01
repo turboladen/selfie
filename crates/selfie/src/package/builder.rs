@@ -1,6 +1,6 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
-use super::{DotfileEntry, EnvironmentConfig, Package, SpecOrigin};
+use super::{DotfileEntry, EnvironmentConfig, Environments, Package, SpecOrigin};
 
 #[derive(Default)]
 pub struct PackageBuilder {
@@ -9,7 +9,7 @@ pub struct PackageBuilder {
     description: Option<String>,
     dotfiles: Vec<DotfileEntry>,
     post_install_note: Option<String>,
-    environments: HashMap<String, EnvironmentConfig>,
+    environments: Environments,
     path: PathBuf,
     origin: SpecOrigin,
 }

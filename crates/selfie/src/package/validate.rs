@@ -483,8 +483,8 @@ impl Package {
     }
     /// Basic command syntax validation that doesn't require external dependencies
     pub(crate) fn validate_command_syntax(&self) -> Vec<ValidationIssue> {
-        // Sorted for the same reason the other walks are: every environment is
-        // checked, and hash order would vary the report between runs.
+        // Sorted as the other walks are: every environment is checked, and the
+        // report lists them in name order whatever order the file gives.
         self.validate_command_syntax_for(
             self.environments_sorted().into_iter().map(|(name, _)| name),
         )
@@ -1054,9 +1054,7 @@ mod tests {
 
     #[test]
     fn a_misspelled_key_in_an_environment_dotfile_is_reported_with_its_environment() {
-        // A single environment on purpose: `environments` is a HashMap, so two
-        // would make the issue order nondeterministic. Assert on content, never
-        // on order, and do not add a second environment here.
+        // One environment, so exactly one issue is expected.
         let issues = unknown_dotfile_fields(
             "name: creds\nenvironments:\n  test:\n    install: echo i\n    dotfiles:\n      \
              - source: e.tpl\n        target: ~/.e\n        vasr: 1\n",
@@ -2524,9 +2522,9 @@ environments:
         );
     }
 
-    // Every walk over `environments()` reports in name order. A `HashMap`
-    // iterated directly does not: hash order is randomized per process, so the
-    // same file lists its problems differently between two runs.
+    // Every walk over `environments()` reports in name order, not in the order the
+    // file gives: the fixture lists `charlie` before `alpha`, so a walk that
+    // followed the file would report them the other way round.
     #[test]
     fn environment_diagnostics_are_reported_in_name_order() {
         let package = package_from_yaml(
