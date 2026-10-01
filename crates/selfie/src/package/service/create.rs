@@ -87,18 +87,18 @@ where
 
     // The name said nothing was there; ask the file system about the path.
     //
-    // Names fold, so a differently-capitalized spec is already caught above.
-    // What the name check cannot see is a path held by something that is not a
-    // spec at all -- a directory, or a `neovim.yml` selfie will not treat as a
-    // package. Writing there would replace it and report success naming a path
-    // that is not what is on disk (selfie-6cg2).
+    // Names fold case and extension, so `Neovim.yml` or `neovim.yaml` is caught
+    // above, and so is a directory named like a spec, which the read refuses. What
+    // reaches this is a path the file system matches and selfie's names do not: a
+    // different Unicode normalization on a normalization-insensitive file system,
+    // another spec's file at an interactive file name, or something created after
+    // the lookup. Whatever it is, selfie must not write over it (selfie-6cg2).
     if repo.path_is_occupied(package.path()) {
         let path = package.path().to_path_buf();
         sender
             .send_warning(format!(
-                "Refusing to create '{package_name}': {} is already taken. On this file system \
-                 that path may resolve to a file stored under a different capitalization, and \
-                 creating would replace it.",
+                "Refusing to create '{package_name}': {} is already taken by something selfie \
+                 did not find under that name; selfie will not write over it.",
                 path.display()
             ))
             .await;
@@ -472,7 +472,7 @@ mod tests {
     #[tokio::test]
     async fn create_refuses_when_the_path_is_already_taken() {
         let (_temp, config, package) = fixture();
-        let (sender, _rx) = test_sender();
+        let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
         let mut repo = MockPackageRepository::new();
@@ -506,6 +506,34 @@ mod tests {
             ),
             "got: {result:?}"
         );
+
+        // The words say what the guard catches. Capitalization never reaches it: the
+        // name lookup folds case and would have found the file.
+        let mut warnings = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let PackageEvent::Warning { message, .. } = event {
+                warnings.push(message);
+            }
+        }
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        // The warning and the error the adapters print both say the same thing, and
+        // neither calls what is there a file or says it would be replaced: it may be a
+        // directory, which a write refuses rather than replaces.
+        let OperationResult::Failure(failure) = result else {
+            unreachable!("matched as a failure above");
+        };
+        for said in [warnings[0].clone(), failure.to_string()] {
+            assert!(
+                said.contains(
+                    "is already taken by something selfie did not find under that name; selfie \
+                     will not write over it"
+                ),
+                "got: {said}"
+            );
+            for wrong in ["capitalization", "replace", "file"] {
+                assert!(!said.contains(wrong), "{wrong}: {said}");
+            }
+        }
     }
 
     // A file that is present but will not parse is not an absent package.

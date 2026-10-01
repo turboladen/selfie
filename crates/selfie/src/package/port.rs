@@ -542,8 +542,8 @@ pub enum PackageError {
 
     /// The write path for a new package is occupied, though the name is free
     #[error(
-        "Cannot create `{name}`: {} already exists, though no package answers to that name. \
-         Creating would replace that file.",
+        "Cannot create `{name}`: {} is already taken by something selfie did not find under \
+         that name; selfie will not write over it.",
         file_path.display()
     )]
     PackagePathOccupied { name: String, file_path: PathBuf },

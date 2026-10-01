@@ -291,11 +291,14 @@ refused to open, two files claiming the same name — would be overwritten, and 
 cannot see it because the package being written was built in memory rather than read from disk.
 
 `selfie spec create` and `selfie spec edit` also refuse when the path is already taken, which is not
-the same question as whether the name is. Names are compared ignoring case, so an existing
-`Neovim.yml` does answer to `neovim` and the name check finds it. What that check cannot see is a
-path held by something no name resolves to — a directory, or a file selfie will not load as a spec —
-so selfie asks the file system about the path as well, and declines rather than replace whatever is
-there.
+the same question as whether the name is. Names are compared ignoring case and extension, so an
+existing `Neovim.yml` or `neovim.yaml` answers to `neovim` and the name check finds it. What that
+check cannot see is a path the file system matches and selfie's names do not: on macOS, a file or
+directory whose name spells the same letters in a different Unicode normalization, such as a
+decomposed `é`; the file name `selfie spec create --interactive` asks for, when another spec already
+has it; or something created after the name check. So selfie asks the file system about the path as
+well, and declines: the path is already taken by something selfie did not find under that name, and
+selfie will not write over it.
 
 The rewriting commands also refuse a file selfie could not read back, even though no key is known to
 be wrong with it, and so does apply — a rewrite would delete whatever the file carries that selfie
