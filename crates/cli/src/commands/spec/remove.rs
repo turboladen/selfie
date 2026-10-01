@@ -163,7 +163,7 @@ pub(crate) async fn handle_remove(
                         for dep in &dependent_packages {
                             display.print_warning(format!("  - {}", dep.name()));
                         }
-                        display.print_info(
+                        display.print_suggestion(
                             "You may need to update these packages to remove the dependency.",
                         );
                     }

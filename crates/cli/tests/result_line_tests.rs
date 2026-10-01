@@ -1,23 +1,12 @@
 pub mod common;
 
 use std::fs;
-use std::process::Command as StdCommand;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{SELFIE_ENV, package_repo_with_remote, sandboxed_command, setup_default_test_config};
 
 // Every run prints its result: a command that finishes prints at least one line
 // on stdout saying so, even when there is nothing else to show. Each row of the
 // output contract's command table is run once at default verbosity.
-
-fn git(dir: &std::path::Path, args: &[&str]) {
-    let status = StdCommand::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .status()
-        .unwrap();
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
-}
 
 // Two packages with inert commands, one with a dotfile, in a git repository
 // with a bare remote, and a file in the sandbox home to track.
@@ -49,26 +38,7 @@ fn sandbox() -> tempfile::TempDir {
     fs::write(root.join(".tracked-rc"), "rc\n").unwrap();
     fs::create_dir_all(root.join("dotfiles")).unwrap();
 
-    git(&packages, &["init", "-q", "-b", "main"]);
-    git(&packages, &["config", "user.email", "t@t.example"]);
-    git(&packages, &["config", "user.name", "t"]);
-    git(&packages, &["config", "commit.gpgsign", "false"]);
-    git(&packages, &["add", "-A"]);
-    git(&packages, &["commit", "-q", "-m", "init"]);
-    let remote = root.join("remote.git");
-    let status = StdCommand::new("git")
-        .args(["clone", "-q", "--bare"])
-        .arg(&packages)
-        .arg(&remote)
-        .status()
-        .unwrap();
-    assert!(status.success());
-    git(
-        &packages,
-        &["remote", "add", "origin", remote.to_str().unwrap()],
-    );
-    git(&packages, &["fetch", "-q", "origin"]);
-    git(&packages, &["branch", "-q", "-u", "origin/main"]);
+    package_repo_with_remote(&temp_dir);
 
     temp_dir
 }

@@ -13,8 +13,6 @@ use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use selfie::package::event::{BaseKind, StepEnding, StepId};
 
-use crate::source_paths::Channel;
-
 /// Shorten a path for display by replacing the home directory with `~`.
 ///
 /// Only a path inside the home directory is shortened; anything else comes back
@@ -215,10 +213,10 @@ impl From<bool> for Verbosity {
     }
 }
 
-/// The stream a line was printed to (test capture).
-#[cfg(test)]
+/// The stream a line is printed on. A source line's stream gets its own
+/// headings, so a reader of either stream alone can resolve every path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stream {
+pub(crate) enum Channel {
     Stdout,
     Stderr,
 }
@@ -270,7 +268,7 @@ pub struct DisplayManager {
     // assert what a run would have shown. Output goes straight to the terminal,
     // which a test in this process cannot read back.
     #[cfg(test)]
-    printed: Arc<Mutex<Vec<(Stream, String)>>>,
+    printed: Arc<Mutex<Vec<(Channel, String)>>>,
 }
 
 impl DisplayManager {
@@ -327,7 +325,7 @@ impl DisplayManager {
     }
 
     #[cfg(test)]
-    fn record(&self, stream: Stream, line: &str) {
+    fn record(&self, stream: Channel, line: &str) {
         if let Ok(mut printed) = self.printed.lock() {
             printed.push((stream, line.to_string()));
         }
@@ -341,17 +339,17 @@ impl DisplayManager {
 
     #[cfg(test)]
     fn record_stdout(&self, line: &str) {
-        self.record(Stream::Stdout, line);
+        self.record(Channel::Stdout, line);
     }
 
     #[cfg(test)]
     fn record_stderr(&self, line: &str) {
-        self.record(Stream::Stderr, line);
+        self.record(Channel::Stderr, line);
     }
 
     // Every line the printing methods printed, with its stream, in order.
     #[cfg(test)]
-    pub(crate) fn printed(&self) -> Vec<(Stream, String)> {
+    pub(crate) fn printed(&self) -> Vec<(Channel, String)> {
         self.printed
             .lock()
             .map(|printed| printed.clone())
@@ -726,13 +724,13 @@ impl DisplayManager {
         }
     }
 
-    /// Print a suggestion message (stdout)
+    /// Print a suggestion (stderr): advice about the run, never the answer.
     pub(crate) fn print_suggestion(&self, message: impl Display) {
         let message = message.to_string();
-        self.record_stdout(&message);
+        self.record_stderr(&message);
         if self.use_colors {
             self.mp.suspend(|| {
-                println!(
+                eprintln!(
                     "{} {}: {}",
                     style("✨").bold(),
                     style("Suggestion").yellow().bold(),
@@ -740,19 +738,32 @@ impl DisplayManager {
                 )
             });
         } else {
-            self.mp.suspend(|| println!("✨ Suggestion: {message}"));
+            self.mp.suspend(|| eprintln!("✨ Suggestion: {message}"));
         }
     }
 
     /// Print a section header (stdout)
     pub(crate) fn print_section_header(&self, title: impl Display) {
+        self.print_section_header_to(Channel::Stdout, title);
+    }
+
+    /// Print a section header on `channel`.
+    pub(crate) fn print_section_header_to(&self, channel: Channel, title: impl Display) {
         let title = title.to_string();
-        self.record_stdout(&title);
-        if self.use_colors {
-            self.mp
-                .suspend(|| println!("── {} ──", style(&title).bold()));
+        let rendered = if self.use_colors {
+            format!("── {} ──", style(&title).bold())
         } else {
-            self.mp.suspend(|| println!("── {title} ──"));
+            format!("── {title} ──")
+        };
+        match channel {
+            Channel::Stdout => {
+                self.record_stdout(&title);
+                self.mp.suspend(|| println!("{rendered}"));
+            }
+            Channel::Stderr => {
+                self.record_stderr(&title);
+                self.mp.suspend(|| eprintln!("{rendered}"));
+            }
         }
     }
 
@@ -837,6 +848,22 @@ impl DisplayManager {
         let message = message.to_string();
         self.record_stdout(&message);
         self.mp.suspend(|| println!("{message}"));
+    }
+
+    /// Print a plain line to stderr, as written: the stderr twin of
+    /// [`println`](Self::println), for the lines a diagnostic lists.
+    pub(crate) fn print_note(&self, message: impl Display) {
+        let message = message.to_string();
+        self.record_stderr(&message);
+        self.mp.suspend(|| eprintln!("{message}"));
+    }
+
+    /// Print a plain line on `channel`.
+    pub(crate) fn line_to(&self, channel: Channel, message: impl Display) {
+        match channel {
+            Channel::Stdout => self.println(message),
+            Channel::Stderr => self.print_note(message),
+        }
     }
 
     /// Print a styled key-value pair (stdout, for config display, etc.)
@@ -1254,7 +1281,7 @@ mod tests {
         assert_eq!(
             dm.printed(),
             vec![(
-                Stream::Stderr,
+                Channel::Stderr,
                 "Running the install command for ripgrep...".to_string()
             )]
         );
@@ -1271,7 +1298,7 @@ mod tests {
         assert_eq!(
             dm.printed().last(),
             Some(&(
-                Stream::Stderr,
+                Channel::Stderr,
                 "  Running the install command for ripgrep │ Downloading ripgrep".to_string()
             ))
         );
@@ -1287,7 +1314,7 @@ mod tests {
         assert_eq!(
             dm.printed(),
             vec![(
-                Stream::Stderr,
+                Channel::Stderr,
                 "✓ Running the install command for ripgrep (0s)".to_string()
             )]
         );
@@ -1328,7 +1355,7 @@ mod tests {
         assert_eq!(
             dm.printed(),
             vec![(
-                Stream::Stderr,
+                Channel::Stderr,
                 "✓ Running the commands that produce ~/.creds (0s)".to_string()
             )]
         );
@@ -1372,7 +1399,7 @@ mod tests {
         assert_eq!(
             dm.printed(),
             vec![(
-                Stream::Stderr,
+                Channel::Stderr,
                 "✓ Running the audit command for bat (0s)".to_string()
             )]
         );
@@ -1391,7 +1418,7 @@ mod tests {
         assert_eq!(
             dm.printed().last(),
             Some(&(
-                Stream::Stderr,
+                Channel::Stderr,
                 "  Running the install command for a │ from a".to_string()
             ))
         );
@@ -1520,7 +1547,7 @@ mod tests {
         verbose.print_status("Loading specs...");
         assert_eq!(
             verbose.printed(),
-            vec![(Stream::Stderr, "Loading specs...".to_string())]
+            vec![(Channel::Stderr, "Loading specs...".to_string())]
         );
     }
 }

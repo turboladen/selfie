@@ -3,6 +3,7 @@ use selfie::package::{
     service::SpecService,
 };
 
+use crate::display_manager::Channel;
 use crate::{
     commands::validation_display::{ValidationGroup, ValidationRow, display_validation_groups},
     config::CliConfig,
@@ -137,5 +138,5 @@ fn display_validation_issues_table(
         rows,
     }];
 
-    display_validation_groups(&groups, config.use_colors(), display);
+    display_validation_groups(&groups, config.use_colors(), display, Channel::Stdout);
 }

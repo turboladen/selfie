@@ -42,7 +42,7 @@ pub(crate) async fn handle_create(
     let package_name = match get_valid_package_name(package_name, &repo, config, display) {
         Ok(PackageNameResult::CreateNew(name)) => name,
         Ok(PackageNameResult::EditExisting(path)) => {
-            display.print_info(format!(
+            display.print_run_note(format!(
                 "Opening existing package for editing at {}",
                 path.display()
             ));

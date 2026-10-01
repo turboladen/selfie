@@ -4,7 +4,7 @@ use std::path::Path;
 
 use selfie::package::event::{BaseKind, DotfileSource};
 
-use crate::display_manager::{DisplayManager, shorten_path};
+use crate::display_manager::{Channel, DisplayManager, shorten_path};
 
 /// The line naming a base directory, for relative source paths printed below
 /// it: "Packages: ~/…" or "Dotfiles: ~/…".
@@ -30,14 +30,6 @@ pub(crate) fn relative_text(source: &DotfileSource) -> String {
         // earlier line, a bare spelling would read as relative to it.
         DotfileSource::Recorded(spelling) => format!("{spelling} (as recorded, directory unknown)"),
     }
-}
-
-/// The stream a line that names a source is printed on. Each stream gets its
-/// own headings, so a reader of either one alone can resolve every path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Channel {
-    Stdout,
-    Stderr,
 }
 
 /// `source` as its line shows it, printing its base directory's line first on
@@ -156,7 +148,7 @@ mod tests {
     // headed on its own.
     #[test]
     fn each_stream_gets_its_own_heading() {
-        use crate::display_manager::Stream;
+        use crate::display_manager::Channel;
 
         let display = DisplayManager::new(false);
         let source = file(BaseKind::PackageDirectory, "/r/p", "a");
@@ -164,7 +156,7 @@ mod tests {
         out(&display, &source);
         label(&display, Channel::Stderr, &source);
 
-        let headings: Vec<(Stream, String)> = display
+        let headings: Vec<(Channel, String)> = display
             .printed()
             .into_iter()
             .filter(|(_, line)| line.starts_with("Packages:"))
@@ -172,8 +164,8 @@ mod tests {
         assert_eq!(
             headings,
             vec![
-                (Stream::Stdout, "Packages: /r/p".to_string()),
-                (Stream::Stderr, "Packages: /r/p".to_string()),
+                (Channel::Stdout, "Packages: /r/p".to_string()),
+                (Channel::Stderr, "Packages: /r/p".to_string()),
             ]
         );
     }

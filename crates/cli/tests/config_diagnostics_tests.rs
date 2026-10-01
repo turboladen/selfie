@@ -218,9 +218,8 @@ fn a_stale_key_is_reported_before_the_command_runs() {
     );
 }
 
-// Diagnostics belong on stderr, all of it. `print_suggestion` writes to stdout,
-// so splitting a notice across the two put `✨ Suggestion: …` into the file on
-// every `selfie package list > packages.txt` until the key was removed.
+// Diagnostics belong on stderr, all of it: a notice in redirected output would
+// land in the file on every `selfie package list > packages.txt`.
 #[test]
 fn a_diagnostic_never_lands_in_redirected_output() {
     let temp = config_with("configs_directory: /somewhere/else\n");

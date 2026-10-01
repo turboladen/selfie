@@ -1,22 +1,8 @@
 pub mod common;
 
 use std::fs;
-use std::process::Command as StdCommand;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
-
-// A local `git` invocation against the sandbox's package directory. Config is
-// set per-repo rather than globally, so the test commits without touching the
-// developer's own git identity or signing key.
-fn git(dir: &std::path::Path, args: &[&str]) {
-    let status = StdCommand::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .status()
-        .unwrap();
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
-}
+use common::{SELFIE_ENV, git, sandboxed_command, setup_default_test_config};
 
 fn sandbox_with_one_unparsable_spec_in_a_git_repo() -> tempfile::TempDir {
     let temp_dir = setup_default_test_config();

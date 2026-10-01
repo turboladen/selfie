@@ -18,9 +18,8 @@ fn sandbox_without_a_package_directory() -> tempfile::TempDir {
     temp_dir
 }
 
-// Both streams, because the two halves land on different ones: the condition is
-// an error and goes to stderr, the remedy is a suggestion and goes to stdout.
-// `spec list` has the same split.
+// Both streams, so a test reads the condition and its remedy together however
+// they are split.
 fn output_of(temp_dir: &tempfile::TempDir, args: &[&str]) -> String {
     let output = sandboxed_command(temp_dir)
         .args(args)

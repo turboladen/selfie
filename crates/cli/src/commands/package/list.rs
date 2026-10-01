@@ -3,11 +3,7 @@ use std::borrow::Cow;
 use console::style;
 use selfie::package::{event, service::PackageService};
 
-use crate::{
-    config::CliConfig,
-    display_manager::{DisplayManager, INDENT},
-    status_style,
-};
+use crate::{config::CliConfig, display_manager::DisplayManager, status_style};
 
 use crate::commands::common;
 
@@ -299,21 +295,20 @@ fn display_environment_stats(
 
     display.println(format!("{table}"));
 
-    if config.use_colors() {
-        display.print_suggestion(format!(
-            "{} to see packages for a different environment",
-            console::style("--environment <env>").yellow()
-        ));
-        display.println(format!(
-            "{INDENT}or: {} to see all packages regardless of environment",
-            console::style("--all").yellow()
-        ));
+    // Advice about the run, so on stderr, as one suggestion: a second line on
+    // its own would read as an unrelated note.
+    let (environment, all) = if config.use_colors() {
+        (
+            console::style("--environment <env>").yellow().to_string(),
+            console::style("--all").yellow().to_string(),
+        )
     } else {
-        display.print_suggestion("--environment <env> to see packages for a different environment");
-        display.println(format!(
-            "{INDENT}or: --all to see all packages regardless of environment"
-        ));
-    }
+        ("--environment <env>".to_string(), "--all".to_string())
+    };
+    display.print_suggestion(format!(
+        "{environment} to see packages for a different environment, or {all} to see all \
+         packages regardless of environment"
+    ));
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@
 use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 
-use crate::display_manager::DisplayManager;
+use crate::display_manager::{Channel, DisplayManager};
 
 /// A single validation issue row, used as a common representation for both
 /// event-driven validation results and sync push validation failures.
@@ -25,11 +25,13 @@ pub(crate) struct ValidationGroup<'a> {
     pub rows: Vec<ValidationRow<'a>>,
 }
 
-/// Display one or more validation groups as formatted tables.
+/// Display one or more validation groups as formatted tables, on `channel`:
+/// stdout when the issues are the answer, stderr when they explain a failure.
 pub(crate) fn display_validation_groups(
     groups: &[ValidationGroup<'_>],
     use_colors: bool,
     display: &DisplayManager,
+    channel: Channel,
 ) {
     let total_errors: usize = groups
         .iter()
@@ -71,8 +73,8 @@ pub(crate) fn display_validation_groups(
         (0, 0, n) if n > 0 => format!("Validation Notices ({n})"),
         _ => format!("Validation Issues ({})", counted.join(", ")),
     };
-    display.println("");
-    display.print_section_header(header);
+    display.line_to(channel, "");
+    display.print_section_header_to(channel, header);
 
     for group in groups {
         if group.rows.is_empty() {
@@ -88,12 +90,19 @@ pub(crate) fn display_validation_groups(
             ("ℹ", style("ℹ").blue())
         };
         if use_colors {
-            display.println(format!("  {} {}", marked, style(group.label).bold()));
+            display.line_to(
+                channel,
+                format!("  {} {}", marked, style(group.label).bold()),
+            );
         } else {
-            display.println(format!("  {marker} {}", group.label));
+            display.line_to(channel, format!("  {marker} {}", group.label));
         }
 
         let mut table = create_validation_table();
+        // Sized to the terminal of the stream it prints on.
+        if channel == Channel::Stderr {
+            table.use_stderr();
+        }
         table.set_header(vec!["Level", "Category", "Field", "Message", "Location"]);
 
         for row in &group.rows {
@@ -130,7 +139,7 @@ pub(crate) fn display_validation_groups(
             ]);
         }
 
-        display.println(format!("{table}"));
+        display.line_to(channel, format!("{table}"));
     }
 }
 
@@ -140,4 +149,40 @@ fn create_validation_table() -> Table {
         .load_style(presets::UTF8_FULL_CONDENSED.with_rounded_corners())
         .set_content_arrangement(ContentArrangement::Dynamic);
     table
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display_manager::Channel;
+
+    fn groups() -> Vec<ValidationGroup<'static>> {
+        vec![ValidationGroup {
+            label: "noenv",
+            rows: vec![ValidationRow {
+                level: "ERROR",
+                category: "RequiredField",
+                field: "environments",
+                message: "At least one environment must be defined",
+                location: None,
+            }],
+        }]
+    }
+
+    // Every line of the tables goes to the channel asked for: stdout where the
+    // issues are the answer, stderr where they explain a failure.
+    #[test]
+    fn every_line_goes_to_the_channel_asked_for() {
+        for (channel, stream) in [
+            (Channel::Stdout, Channel::Stdout),
+            (Channel::Stderr, Channel::Stderr),
+        ] {
+            let display = DisplayManager::new(false);
+            display_validation_groups(&groups(), false, &display, channel);
+
+            let printed = display.printed();
+            assert!(printed.len() > 2, "{printed:?}");
+            assert!(printed.iter().all(|(s, _)| *s == stream), "{printed:?}");
+        }
+    }
 }

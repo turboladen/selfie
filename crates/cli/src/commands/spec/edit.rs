@@ -47,7 +47,7 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
 
     // Try to get existing package, or create a new one
     let package_blob = if let Some(pkg) = existing_package {
-        display.print_info(format!(
+        display.print_run_note(format!(
             "Opening existing package '{package_name}' for editing"
         ));
         pkg

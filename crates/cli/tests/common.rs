@@ -165,3 +165,86 @@ pub fn setup_test_config_with_state_directory() -> TempDir {
     fs::write(config, text).unwrap();
     temp
 }
+
+/// What a finished `selfie` run printed, and how it exited.
+pub struct RunOutput {
+    /// The exit code, or `None` when a signal ended the run.
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run `selfie` with `args` in `temp_dir`'s sandbox (see [`sandboxed_command`])
+/// and capture what it printed.
+///
+/// # Panics
+///
+/// Panics if the binary cannot be run.
+#[must_use]
+pub fn run_sandboxed(temp_dir: &TempDir, args: &[&str]) -> RunOutput {
+    let output = sandboxed_std_command(temp_dir).args(args).output().unwrap();
+    RunOutput {
+        code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Run `git` with `args` in `dir`, as a fixed identity with commit signing off,
+/// so a commit does not depend on the developer's git configuration.
+///
+/// # Panics
+///
+/// Panics if git cannot be run or exits non-zero.
+pub fn git(dir: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.email=t@t.example",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?} failed in {dir:?}");
+}
+
+/// Make `temp_dir`'s package directory a git repository holding what is there
+/// now as one commit, with a bare clone beside it as its upstream `origin`. The
+/// repository's own config carries a fixed identity with signing off, so a
+/// commit selfie makes there does not depend on the developer's either.
+///
+/// # Panics
+///
+/// Panics if any git command fails.
+pub fn package_repo_with_remote(temp_dir: &TempDir) {
+    let packages = temp_dir.path().join("packages");
+    let remote = temp_dir.path().join("remote.git");
+    git(&packages, &["init", "-q", "-b", "main"]);
+    git(&packages, &["config", "user.email", "t@t.example"]);
+    git(&packages, &["config", "user.name", "t"]);
+    git(&packages, &["config", "commit.gpgsign", "false"]);
+    git(&packages, &["add", "-A"]);
+    git(&packages, &["commit", "-q", "-m", "init"]);
+    git(
+        temp_dir.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            packages.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+    git(
+        &packages,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&packages, &["fetch", "-q", "origin"]);
+    git(&packages, &["branch", "-q", "-u", "origin/main"]);
+}

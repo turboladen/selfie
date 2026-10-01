@@ -489,9 +489,11 @@ fn test_package_list_environment_mismatch_shows_stats() {
         .stdout(predicate::str::contains("ubuntu"))
         .stdout(predicate::str::contains("windows"))
         .stdout(predicate::str::contains("debian"))
-        .stdout(predicate::str::contains("Suggestion"))
-        .stdout(predicate::str::contains("--environment <env>"))
-        .stdout(predicate::str::contains("--all"));
+        // The advice is about the run, not the answer, so it is on stderr.
+        .stderr(predicate::str::contains("Suggestion"))
+        .stderr(predicate::str::contains("--environment <env>"))
+        .stderr(predicate::str::contains("--all"))
+        .stdout(predicate::str::contains("Suggestion").not());
 }
 
 // The row's first column is the file's own name, so a reason that named the file
