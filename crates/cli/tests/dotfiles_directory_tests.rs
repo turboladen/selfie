@@ -612,3 +612,31 @@ fn spec_create_names_an_unreadable_dotfiles_directory_once() {
         "a noun in front of the path reads as two subjects, got:\n{combined}"
     );
 }
+
+// A standalone dotfile goes into the dotfiles directory, so a package directory
+// that does not exist yet holds no names and must not stop the track.
+#[test]
+fn dotfiles_track_works_before_the_package_directory_exists() {
+    // The unset default puts the dotfiles directory beside the package directory.
+    let temp = config_without_dotfiles_dir();
+    let dotfiles = temp.path().join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    std::fs::remove_dir(temp.path().join("packages")).unwrap();
+
+    let tracked = temp.path().join(".tracked-rc");
+    std::fs::write(&tracked, "set -o vi\n").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["dotfiles", "track", "rc", "~/.tracked-rc"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert!(
+        stdout.contains("Now tracking '~/.tracked-rc' in spec 'rc'"),
+        "the track must report its answer, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(spec_exists(&dotfiles, "rc"), "stderr:\n{stderr}");
+}

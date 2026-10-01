@@ -273,6 +273,11 @@ A command that shows every environment refuses a file with an unrecognized key i
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
 
+A package directory that does not exist yet holds no names, so it does not stop
+`selfie spec create`, `selfie dotfiles track` or the MCP tools that check a new name: the first spec
+saved there creates it. Something other than a directory at that path, such as a regular file or a
+symlink to nothing, is refused, because the directory cannot be created through it.
+
 Creating a package refuses too when a file is already at that path and selfie cannot read it. Only a
 name with no file behind it is a create; anything else — a file that will not parse, one selfie
 refused to open, two files claiming the same name — would be overwritten, and the guards above

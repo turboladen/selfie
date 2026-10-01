@@ -29,6 +29,32 @@ fn spec_create_writes_a_package_that_does_not_exist() {
     );
 }
 
+// The first package on a fresh machine: the configured package directory is not
+// there yet. It holds no names, and the save creates it.
+#[test]
+fn spec_create_writes_the_first_package_before_the_package_directory_exists() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::remove_dir(&packages).unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["spec", "create", "brandnew"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(
+        stdout.contains("Package 'brandnew' created at"),
+        "the create must report its answer, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        packages.join("brandnew.yml").is_file(),
+        "the first package must be written, stderr:\n{stderr}"
+    );
+}
+
 // The name typed on the command line reaches the library's spec-name rule, so
 // the CLI cannot write a spec every later command refuses to load. The
 // interactive prompts build their package the same way and hand it to the same

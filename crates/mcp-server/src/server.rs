@@ -1130,6 +1130,22 @@ mod tests {
         );
     }
 
+    // The first package on a fresh machine: the package directory is not there
+    // yet, holds no names, and the save creates it.
+    #[tokio::test]
+    async fn spec_create_writes_the_first_package_before_the_package_directory_exists() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let server = server_over(&packages, None);
+
+        let json = create(&server, "brandnew").await;
+
+        assert!(
+            packages.join("brandnew.yml").is_file(),
+            "the first package must be written: {json}"
+        );
+    }
+
     // The JSON a tool returned.
     fn tool_json(result: &CallToolResult) -> serde_json::Value {
         let text = &result.content[0]
