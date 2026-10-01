@@ -5,10 +5,16 @@
 use crate::{
     config::SelfieConfig,
     package::{
-        Package,
-        event::{EventSender, OperationFailure, OperationResult, OperationSuccess},
+        Package, SpecOrigin,
+        event::{
+            EventSender, OperationFailure, OperationResult, OperationSuccess, Outcome,
+            ValidationResultData, ValidationStatus,
+        },
         port::{PackageRepoError, PackageRepository},
-        service::ProgressTracker,
+        service::{
+            ProgressTracker,
+            validate::{all_issues, issue_payload},
+        },
     },
 };
 
@@ -109,6 +115,39 @@ where
         );
     }
 
+    // Create always writes into the package directory, so the spec is judged as a
+    // package spec whatever the caller built it as: a standalone dotfile spec may
+    // declare no environments, and a package spec may not.
+    let mut package = package;
+    package.set_origin(SpecOrigin::PackageDirectory);
+
+    // The rule `spec validate` applies, so create never writes a spec that every
+    // later command reports as broken or apply refuses.
+    let issues = all_issues(&package, repo, config.environment());
+    // Scored as `spec validate` scores it; only a clean spec with nothing at all to
+    // say sends no result.
+    let status = match issues.outcome() {
+        Outcome::Failed => {
+            return OperationResult::Failure(OperationFailure::InvalidSpec {
+                package_name,
+                issues: issue_payload(&issues),
+            });
+        }
+        Outcome::Found => Some(ValidationStatus::HasWarnings),
+        Outcome::Clean if issues.all_issues().is_empty() => None,
+        Outcome::Clean => Some(ValidationStatus::Valid),
+    };
+    if let Some(status) = status {
+        sender
+            .send_validation_result(ValidationResultData {
+                package_name: package_name.clone(),
+                environment: config.environment().to_string(),
+                status,
+                issues: issue_payload(&issues),
+            })
+            .await;
+    }
+
     // Step 2: Save the package
     progress.next(sender, "Saving package file").await;
 
@@ -141,7 +180,10 @@ mod tests {
         config::SelfieConfigBuilder,
         package::{
             PackageBuilder,
-            event::{OperationContext, OperationFailure, PackageEvent, metadata::OperationType},
+            event::{
+                OperationContext, OperationFailure, PackageEvent, ValidationLevel,
+                metadata::OperationType,
+            },
             port::{
                 MockPackageRepository, PackageError, PackageListError, PackageParseError,
                 PackageRepoError,
@@ -192,6 +234,236 @@ mod tests {
                 crate::package::port::PackageParseKind::Yaml { source },
             ),
         }
+    }
+
+    // A repository where the name is free and the path is not taken, ready to
+    // save once if `saves` is 1, or to refuse any save if it is 0.
+    fn a_free_name(saves: usize) -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().returning(|name| {
+            Err(PackageError::PackageNotFound {
+                name: name.to_string(),
+                packages_path: PathBuf::from("/packages"),
+                files_examined: 0,
+                search_patterns: vec![],
+            }
+            .into())
+        });
+        repo.expect_path_is_occupied().returning(|_| false);
+        repo.expect_save_package()
+            .times(saves)
+            .returning(|_, _| Ok(()));
+        repo
+    }
+
+    // Every validation result the run sent.
+    fn validation_results(rx: &mut mpsc::Receiver<PackageEvent>) -> Vec<ValidationResultData> {
+        let mut results = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let PackageEvent::ValidationResultCompleted {
+                validation_result, ..
+            } = event
+            {
+                results.push(validation_result);
+            }
+        }
+        results
+    }
+
+    // A spec `spec validate` would report an error for is refused before anything is
+    // written, and the failure carries the issue rather than a sentence about it.
+    #[tokio::test]
+    async fn create_refuses_a_spec_that_would_not_validate() {
+        let (temp, config, _) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .environment("test", |b| b.install(""))
+            .path(temp.path().join("myapp.yml"))
+            .build();
+
+        let repo = a_free_name(0);
+        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+        let OperationResult::Failure(OperationFailure::InvalidSpec {
+            package_name,
+            issues,
+        }) = result
+        else {
+            panic!("expected the create to be refused as invalid, got: {result:?}");
+        };
+        assert_eq!(package_name, "myapp");
+        assert!(
+            issues
+                .iter()
+                .any(|issue| matches!(issue.level, ValidationLevel::Error)
+                    && issue.field == "environments.test.install"
+                    && issue.message.contains("Install command is required")),
+            "got: {issues:?}"
+        );
+    }
+
+    // A spec the caller built as a standalone dotfile spec is still written into the
+    // package directory, so it is held to the package rule: no environments is an
+    // error there, and nothing is written.
+    #[tokio::test]
+    async fn create_judges_a_spec_by_where_it_is_written() {
+        let (temp, config, _) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .origin(SpecOrigin::DotfilesDirectory)
+            .path(temp.path().join("myapp.yml"))
+            .build();
+
+        let repo = a_free_name(0);
+        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+        let OperationResult::Failure(OperationFailure::InvalidSpec { issues, .. }) = result else {
+            panic!("expected the create to be refused as invalid, got: {result:?}");
+        };
+        assert!(
+            issues.iter().any(|issue| issue.field == "environments"
+                && matches!(issue.level, ValidationLevel::Error)),
+            "got: {issues:?}"
+        );
+    }
+
+    // A package spec with no environment at all, which apply refuses to deploy.
+    #[tokio::test]
+    async fn create_refuses_a_spec_with_no_environments() {
+        let (temp, config, _) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .path(temp.path().join("myapp.yml"))
+            .build();
+
+        let repo = a_free_name(0);
+        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+        let OperationResult::Failure(OperationFailure::InvalidSpec { issues, .. }) = result else {
+            panic!("expected the create to be refused as invalid, got: {result:?}");
+        };
+        assert!(
+            issues.iter().any(|issue| issue.field == "environments"
+                && matches!(issue.level, ValidationLevel::Error)),
+            "got: {issues:?}"
+        );
+    }
+
+    // Selfie runs commands through the user's own shell, so a command that does not
+    // parse as POSIX sh, such as fish's `\'` inside single quotes or a trailing
+    // backslash, is written and reported as a warning, never refused.
+    #[tokio::test]
+    async fn create_writes_a_command_that_is_not_posix_sh() {
+        let (temp, config, _) = fixture();
+        for command in [r"echo 'it\'s fish'", r"echo foo \"] {
+            let (sender, mut rx) = test_sender();
+            let mut progress = ProgressTracker::new(2);
+            let package = PackageBuilder::default()
+                .name("myapp")
+                .environment("test", |b| b.install(command))
+                .path(temp.path().join("myapp.yml"))
+                .build();
+
+            let repo = a_free_name(1);
+            let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+            assert!(
+                matches!(result, OperationResult::Success(_)),
+                "{command}: got: {result:?}"
+            );
+            let results = validation_results(&mut rx);
+            assert!(
+                results
+                    .iter()
+                    .any(|result| result.issues.iter().any(|issue| matches!(
+                        issue.level,
+                        ValidationLevel::Warning
+                    ) && issue
+                        .message
+                        .contains("does not parse as POSIX sh"))),
+                "{command}: got: {results:?}"
+            );
+        }
+    }
+
+    // Warnings do not stop a create, and they are not swallowed either: the run
+    // sends them as a validation result and still writes the spec.
+    #[tokio::test]
+    async fn create_writes_a_spec_with_warnings_and_reports_them() {
+        let (temp, config, _) = fixture();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        // The configured environment is `test`; this spec configures only `other`.
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .environment("other", |b| b.install("true"))
+            .path(temp.path().join("myapp.yml"))
+            .build();
+
+        let repo = a_free_name(1);
+        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "got: {result:?}"
+        );
+        let results = validation_results(&mut rx);
+        assert_eq!(results.len(), 1, "got: {results:?}");
+        assert!(
+            results[0]
+                .issues
+                .iter()
+                .any(|issue| matches!(issue.level, ValidationLevel::Warning)
+                    && issue
+                        .message
+                        .contains("Current environment 'test' is not configured")),
+            "got: {results:?}"
+        );
+    }
+
+    // A notice is reported too, with no warning beside it: it is what a reader of
+    // a package that runs commands needs to see.
+    #[tokio::test]
+    async fn create_reports_a_notice_with_no_warning() {
+        let (temp, config, _) = fixture();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let entry: crate::package::DotfileEntry =
+            crate::yaml::parse("command: echo key\ntarget: ~/.key\n").expect("fixture must parse");
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .environment("test", |b| b.install("true"))
+            .dotfiles(vec![entry])
+            .path(temp.path().join("myapp.yml"))
+            .build();
+
+        let repo = a_free_name(1);
+        let result = handle_create(package, &repo, &config, &sender, &mut progress).await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "got: {result:?}"
+        );
+        let results = validation_results(&mut rx);
+        assert_eq!(results.len(), 1, "got: {results:?}");
+        assert!(
+            results[0]
+                .issues
+                .iter()
+                .any(|issue| matches!(issue.level, ValidationLevel::Info)
+                    && issue.message.contains("executes 1 command(s)")),
+            "got: {results:?}"
+        );
+        assert!(
+            matches!(results[0].status, ValidationStatus::Valid),
+            "a notice is not a warning, got: {results:?}"
+        );
     }
 
     // A path can be held by something no name resolves to -- a directory, or a
@@ -266,7 +538,7 @@ mod tests {
     #[tokio::test]
     async fn create_still_writes_when_no_file_is_there() {
         let (_temp, config, package) = fixture();
-        let (sender, _rx) = test_sender();
+        let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
         let mut repo = MockPackageRepository::new();
@@ -288,6 +560,9 @@ mod tests {
             matches!(result, OperationResult::Success(_)),
             "a package with no file must still be created, got: {result:?}"
         );
+        // A clean spec has nothing to report, so no validation result is sent.
+        let results = validation_results(&mut rx);
+        assert!(results.is_empty(), "got: {results:?}");
     }
 
     // Every adapter creates through here, so this one check keeps both the CLI

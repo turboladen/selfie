@@ -1106,6 +1106,16 @@ pub enum OperationFailure {
         package_name: String,
         reason: String,
     },
+    /// A spec that would not pass `spec validate`, so nothing was written.
+    ///
+    /// `issues` lists every issue the validation found, errors first, then
+    /// warnings and notices, in the shape a validation result carries.
+    // Typed so an adapter can render each issue in its own channel, and an MCP
+    // client gets the fields rather than a sentence to parse.
+    InvalidSpec {
+        package_name: String,
+        issues: Vec<ValidationIssueData>,
+    },
     /// A command named a package it could not find.
     // Typed rather than folded into `Generic` so an adapter can tell a typo from
     // a spec that failed to load without parsing the sentence.
@@ -1218,6 +1228,21 @@ impl std::fmt::Display for OperationFailure {
                 package_name,
                 reason,
             } => write!(f, "Cannot use package `{package_name}`: {reason}"),
+            OperationFailure::InvalidSpec {
+                package_name,
+                issues,
+            } => {
+                let errors = issues
+                    .iter()
+                    .filter(|issue| matches!(issue.level, ValidationLevel::Error))
+                    .count();
+                write!(
+                    f,
+                    "Refusing to create '{package_name}': it would not pass spec validate ({errors} \
+                     {}), so nothing was written",
+                    crate::pluralize(errors, "error", "errors")
+                )
+            }
             OperationFailure::NoSuchPackage { name, reason } => match reason {
                 NoSuchPackageReason::NotFound => write!(f, "No package named '{name}' was found"),
                 NoSuchPackageReason::MaybeInUnlistableDirectory => write!(

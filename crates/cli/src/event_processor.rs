@@ -394,6 +394,13 @@ impl EventProcessor {
                             self.display.print_error(err.to_string());
                             self.display.print_command_stderr(stderr.as_str());
                         }
+                        OperationFailure::InvalidSpec { ref issues, .. } => {
+                            self.display.print_error(err.to_string());
+                            crate::commands::validation_display::print_issues(
+                                &self.display,
+                                issues,
+                            );
+                        }
                         _ => {
                             self.display.print_error(err.to_string());
                         }
@@ -1076,6 +1083,59 @@ mod tests {
         };
         let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
         assert_eq!(printed, vec![(Channel::Stderr, "broken".to_string())]);
+    }
+
+    // A spec refused as invalid is an error, not an answer: the summary and every
+    // issue go to stderr, and nothing goes to stdout.
+    #[tokio::test]
+    async fn invalid_spec_prints_each_issue_on_stderr() {
+        use crate::display_manager::Channel;
+        use selfie::package::event::{OperationFailure, ValidationIssueData, ValidationLevel};
+
+        let issue = |level, field: &str| ValidationIssueData {
+            category: "CommandSyntax".to_string(),
+            field: field.to_string(),
+            message: "Unmatched double quote in command".to_string(),
+            level,
+            suggestion: Some("Add a closing double quote.".to_string()),
+            location: None,
+        };
+        let failed = PackageEvent::Completed {
+            operation_info: make_operation_info("tool"),
+            result: OperationResult::Failure(OperationFailure::InvalidSpec {
+                package_name: "tool".to_string(),
+                issues: vec![
+                    issue(ValidationLevel::Error, "environments.work.install"),
+                    issue(ValidationLevel::Warning, "environments.work.check"),
+                ],
+            }),
+        };
+
+        let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
+
+        assert_eq!(
+            printed,
+            vec![
+                (
+                    Channel::Stderr,
+                    "Refusing to create 'tool': it would not pass spec validate (1 error), so \
+                     nothing was written"
+                        .to_string()
+                ),
+                (
+                    Channel::Stderr,
+                    "ERROR environments.work.install: Unmatched double quote in command. Add a \
+                     closing double quote."
+                        .to_string()
+                ),
+                (
+                    Channel::Stderr,
+                    "WARN environments.work.check: Unmatched double quote in command. Add a \
+                     closing double quote."
+                        .to_string()
+                ),
+            ]
+        );
     }
 
     fn make_operation_info(package_name: &str) -> selfie::package::event::OperationInfo {

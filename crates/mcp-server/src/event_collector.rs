@@ -14,6 +14,11 @@ pub struct EventCollectorResult {
 /// The result payload for a failed operation.
 fn failure_json(failure: &OperationFailure) -> Value {
     let mut payload = serde_json::json!({ "status": "failure", "error": format!("{failure}") });
+    // Each issue as a validation result carries it, so an assistant fixes the field
+    // without parsing the sentence in `error`.
+    if let OperationFailure::InvalidSpec { issues, .. } = failure {
+        payload["issues"] = issues.iter().map(issue_json).collect::<Vec<_>>().into();
+    }
     // A field, so an assistant can tell a typo from a spec that failed to load
     // without matching the sentence in `error`.
     if let OperationFailure::NoSuchPackage { reason, .. } = failure {
@@ -378,11 +383,7 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
-            let issues: Vec<Value> = validation_result
-                .issues
-                .iter()
-                .map(|i| serde_json::json!({ "level": validation_level_label(&i.level), "category": &i.category, "field": &i.field, "message": &i.message, "suggestion": &i.suggestion, "location": &i.location }))
-                .collect();
+            let issues: Vec<Value> = validation_result.issues.iter().map(issue_json).collect();
             Some(
                 serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "status": format!("{}", validation_result.status), "issues": issues }),
             )
@@ -675,6 +676,19 @@ fn git_status_label(status: Option<&selfie::package::git::GitFileStatus>) -> Val
         Some(GitFileStatus::NotInRepo) => Value::String("not_in_repo".to_string()),
         None => Value::Null,
     }
+}
+
+/// One validation issue as JSON, for a validation result and for a spec refused
+/// as invalid alike.
+fn issue_json(issue: &selfie::package::event::ValidationIssueData) -> Value {
+    serde_json::json!({
+        "level": validation_level_label(&issue.level),
+        "category": &issue.category,
+        "field": &issue.field,
+        "message": &issue.message,
+        "suggestion": &issue.suggestion,
+        "location": &issue.location,
+    })
 }
 
 /// Label a validation issue's severity for an assistant reading the JSON.

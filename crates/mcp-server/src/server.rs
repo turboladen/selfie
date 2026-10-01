@@ -290,7 +290,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command. Use selfie_config_get to check the current environment. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way."
+        description = "Create a new package spec file. Requires name, environment, and install command. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate would before it is written: with errors nothing is written, the call fails, and the result carries every issue under issues; warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way."
     )]
     async fn spec_create(
         &self,
@@ -1164,6 +1164,96 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&packages).unwrap(),
             "not a directory"
+        );
+    }
+
+    // A spec `spec validate` would report an error for is not written, and the
+    // failure carries each issue as fields.
+    #[tokio::test]
+    async fn spec_create_refuses_a_spec_that_would_not_validate() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let server = server_over(&packages, None);
+        let params: CreateParam = serde_json::from_value(serde_json::json!({
+            "package": "broken",
+            "install": "",
+            "environment": "test",
+        }))
+        .unwrap();
+
+        let json = tool_json(&server.spec_create(Parameters(params)).await.unwrap());
+
+        assert!(!packages.join("broken.yml").exists(), "got {json}");
+        let issues = json["result"]["issues"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue["field"] == "environments.test.install"
+                    && issue["level"] == "error"),
+            "got {json}"
+        );
+    }
+
+    // A command that does not parse as POSIX sh may run in the user's own shell, so
+    // it is written and reported as a warning, never refused.
+    #[tokio::test]
+    async fn spec_create_writes_a_command_that_is_not_posix_sh() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let server = server_over(&packages, None);
+        let params: CreateParam = serde_json::from_value(serde_json::json!({
+            "package": "fishy",
+            "install": r"echo 'it\'s fish'",
+            "environment": "test",
+        }))
+        .unwrap();
+
+        let json = tool_json(&server.spec_create(Parameters(params)).await.unwrap());
+
+        assert_eq!(json["result"]["status"], "success", "got {json}");
+        assert!(packages.join("fishy.yml").is_file(), "got {json}");
+        assert!(
+            json.to_string().contains("does not parse as POSIX sh"),
+            "got {json}"
+        );
+    }
+
+    // A warning does not stop the create: the spec is written and the warning is
+    // reported with it.
+    #[tokio::test]
+    async fn spec_create_reports_a_warning_and_still_writes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let server = server_over(&packages, None);
+        // The server's environment is `test`; this spec configures only `other`.
+        let params: CreateParam = serde_json::from_value(serde_json::json!({
+            "package": "elsewhere",
+            "install": "true",
+            "environment": "other",
+        }))
+        .unwrap();
+
+        let json = tool_json(&server.spec_create(Parameters(params)).await.unwrap());
+
+        assert!(packages.join("elsewhere.yml").is_file(), "got {json}");
+        let data = json["data"].as_array().cloned().unwrap_or_default();
+        assert!(
+            data.iter().any(|entry| entry["type"] == "validation_result"
+                && entry["issues"]
+                    .as_array()
+                    .is_some_and(
+                        |issues| issues.iter().any(|issue| issue["level"] == "warning"
+                            && issue["message"]
+                                .as_str()
+                                .is_some_and(|m| m.contains("Current environment 'test'")))
+                    )),
+            "got {json}"
         );
     }
 

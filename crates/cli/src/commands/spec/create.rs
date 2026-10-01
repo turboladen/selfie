@@ -85,6 +85,17 @@ pub(crate) async fn handle_create(
                 created_file_path = Some(file_path.clone());
                 false // Let default handler print success message
             }
+            PackageEvent::ValidationResultCompleted {
+                validation_result, ..
+            } => {
+                // The spec is still written, and the answer on stdout is that it was
+                // created, so the issues go to stderr.
+                crate::commands::validation_display::print_issues(
+                    display,
+                    &validation_result.issues,
+                );
+                true
+            }
             _ => false, // Default handling for everything else
         })
         .await;

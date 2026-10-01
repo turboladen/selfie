@@ -273,6 +273,13 @@ A command that shows every environment refuses a file with an unrecognized key i
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
 
+`selfie spec create` and the MCP server's `selfie_spec_create` check a new spec as
+`selfie spec validate` would before writing it. A spec with an error, such as an empty install
+command or no environment at all, is not written: the run exits 1 and lists every issue on stderr
+(the MCP result carries them under `issues`). A spec with only warnings, such as one that configures
+an environment other than the current one, or a command that does not parse as POSIX sh, is written,
+and the warnings are listed on stderr; the run still exits 0.
+
 A package directory that does not exist yet holds no names, so it does not stop
 `selfie spec create`, `selfie dotfiles track` or the MCP tools that check a new name: the first spec
 saved there creates it. Something other than a directory at that path, such as a regular file or a

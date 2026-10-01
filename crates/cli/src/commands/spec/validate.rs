@@ -5,7 +5,9 @@ use selfie::package::{
 
 use crate::display_manager::Channel;
 use crate::{
-    commands::validation_display::{ValidationGroup, ValidationRow, display_validation_groups},
+    commands::validation_display::{
+        ValidationGroup, ValidationRow, display_validation_groups, level_label,
+    },
     config::CliConfig,
     display_manager::DisplayManager,
     event_processor::EventProcessor,
@@ -117,20 +119,13 @@ fn display_validation_issues_table(
     let rows: Vec<ValidationRow<'_>> = validation_result
         .issues
         .iter()
-        .map(|issue| {
-            let level = match issue.level {
-                selfie::package::event::ValidationLevel::Error => "ERROR",
-                selfie::package::event::ValidationLevel::Warning => "WARN",
-                selfie::package::event::ValidationLevel::Info => "INFO",
-            };
-            ValidationRow {
-                level,
-                category: &issue.category,
-                field: &issue.field,
-                message: &issue.message,
-                location: issue.location.as_deref(),
-                suggestion: issue.suggestion.as_deref(),
-            }
+        .map(|issue| ValidationRow {
+            level: level_label(&issue.level),
+            category: &issue.category,
+            field: &issue.field,
+            message: &issue.message,
+            location: issue.location.as_deref(),
+            suggestion: issue.suggestion.as_deref(),
         })
         .collect();
 
