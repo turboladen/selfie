@@ -27,7 +27,7 @@ pub(crate) async fn handle_info(
     tracing::debug!("Getting package definition for: {package_name}");
 
     // Status message:
-    display.print_progress(format!("Getting info for {package_name}..."));
+    display.print_status(format!("Getting info for {package_name}..."));
 
     // Call the service's spec_info method to get an event stream
     let event_stream = service.spec_info(package_name).await;
@@ -53,9 +53,6 @@ pub(crate) async fn handle_info(
                 } => {
                     let table = create_environment_table(environment_status, config);
                     display.println(format!("\n{table}"));
-                    true // Handled
-                }
-                PackageEvent::Progress { .. } => {
                     true // Handled
                 }
                 PackageEvent::Completed {

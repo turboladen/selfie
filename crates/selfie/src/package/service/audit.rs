@@ -6,7 +6,10 @@ use crate::{
     config::SelfieConfig,
     package::{
         GetPackage,
-        event::{AuditResult, AuditResultData, EventSender, OperationResult, OperationSuccess},
+        event::{
+            AuditResult, AuditResultData, EventSender, OperationResult, OperationSuccess,
+            StepEnding,
+        },
         port::PackageRepository,
         service::ProgressTracker,
     },
@@ -327,9 +330,9 @@ async fn execute_audit_command<CR>(
 where
     CR: CommandRunner,
 {
-    progress.next(sender, "Running audit command").await;
-
+    // Waiting only when a command will actually run.
     let Some(cmd) = audit_command else {
+        progress.next(sender, "No audit command").await;
         return AuditResultData {
             package_name: package_name.to_string(),
             environment: environment.to_string(),
@@ -338,7 +341,19 @@ where
         };
     };
 
-    match command_runner.execute(cmd, package_dir, token).await {
+    let step = progress
+        .next_waiting(
+            sender,
+            format!("Running the audit command for {package_name}"),
+        )
+        .await;
+
+    let result = command_runner.execute(cmd, package_dir, token).await;
+    // A non-zero exit is an audit error, so the step failed.
+    sender
+        .send_step_ended(step, steps::ending_of(&result, StepEnding::Failed))
+        .await;
+    match result {
         Ok(output) => {
             if output.is_success() {
                 let stdout = output.stdout_str().to_string();

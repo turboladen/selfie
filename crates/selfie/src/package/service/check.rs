@@ -8,7 +8,7 @@ use crate::{
         GetPackage,
         event::{
             CheckResult, CheckResultData, CheckVerdict, CommandFailure, EventSender,
-            OperationFailure, OperationResult, OperationSuccess,
+            OperationFailure, OperationResult, OperationSuccess, StepEnding,
         },
         port::{PackageError, PackageRepository},
         service::ProgressTracker,
@@ -67,7 +67,7 @@ where
         command_runner,
         sender,
         progress,
-        "Running package check command",
+        &format!("Running the check command for {package_name}"),
         token,
     )
     .await
@@ -247,9 +247,15 @@ pub(super) async fn execute_check_command<CR>(
 where
     CR: CommandRunner,
 {
-    progress.next(sender, step_description).await;
+    // Waiting only when a command will actually run.
+    let step = if check_command.is_some() {
+        Some(progress.next_waiting(sender, step_description).await)
+    } else {
+        progress.next(sender, step_description).await;
+        None
+    };
 
-    run_check(
+    let result = run_check(
         package_name,
         environment,
         check_command,
@@ -257,7 +263,26 @@ where
         command_runner,
         token,
     )
-    .await
+    .await;
+    if let Some(step) = step {
+        let ending = match &result {
+            Ok(data) => check_ending(&data.result, token),
+            Err(CommandError::Cancelled { .. }) => StepEnding::Cancelled,
+            Err(_) => StepEnding::Failed,
+        };
+        sender.send_step_ended(step, ending).await;
+    }
+    result
+}
+
+/// How a waiting step that ran a check command ended. Any exit status is the
+/// check's answer; only a command that could not give one failed.
+pub(super) fn check_ending(result: &CheckResult, token: &CancellationToken) -> StepEnding {
+    match result {
+        CheckResult::Error(_) if token.is_cancelled() => StepEnding::Cancelled,
+        CheckResult::Error(_) | CheckResult::CommandNotFound => StepEnding::Failed,
+        _ => StepEnding::Succeeded,
+    }
 }
 
 /// Execute a check command in `package_dir` without updating progress

@@ -3,6 +3,7 @@
 //! selfie never deletes or changes an orphaned file. It reports one that is
 //! still there, and a run that writes drops the record of one that is gone.
 
+use crate::config::SelfieConfig;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -226,12 +227,17 @@ impl Findings {
 pub(super) async fn check<F: FileSystem>(
     filesystem: &F,
     catalog: Catalog<'_>,
-    environment: &str,
+    config: &SelfieConfig,
     state: &DeployState,
     owner: Option<&str>,
     sender: &EventSender,
 ) -> Findings {
-    let survey = &Survey::of(filesystem, catalog.packages, environment, catalog.shortfall);
+    let survey = &Survey::of(
+        filesystem,
+        catalog.packages,
+        config.environment(),
+        catalog.shortfall,
+    );
     let unproduced = survey.unproduced(state, owner);
 
     if let Some(shortfall) = &survey.shortfall {
@@ -278,7 +284,7 @@ pub(super) async fn check<F: FileSystem>(
         });
         if !still_deployed {
             sender
-                .send_dotfile_orphaned(entry.source(), target, entry.package())
+                .send_dotfile_orphaned(&entry.event_source(config), target, entry.package())
                 .await;
             findings.reported += 1;
         }

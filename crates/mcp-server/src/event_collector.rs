@@ -1,8 +1,8 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, CheckResult, EventStream, NoSuchPackageReason, OperationFailure, OperationResult,
-    Outcome, PackageEvent,
+    AuditResult, BaseKind, CheckResult, DotfileSource, EventStream, NoSuchPackageReason,
+    OperationFailure, OperationResult, Outcome, PackageEvent,
 };
 use serde_json::Value;
 
@@ -35,6 +35,41 @@ fn failure_json(failure: &OperationFailure) -> Value {
         });
     }
     payload
+}
+
+/// `row` with the fields naming where a dotfile's content comes from:
+/// - `source`: the file's full path with any var names, or the command; null for
+///   a source recorded before records named their base;
+/// - `base`: "packages" or "dotfiles", the directory the file was read from, or
+///   null;
+/// - `relative_path`: the file relative to `base`, or null;
+/// - `vars`: a template's var names, empty otherwise;
+/// - `recorded_source`: for an old record, the source as its spec spelled it.
+fn with_source(mut row: Value, source: &DotfileSource) -> Value {
+    let map = row.as_object_mut().expect("constructed as an object");
+    let (base, relative_path, vars) = match source {
+        DotfileSource::File { base, path, vars } => (
+            base.as_ref().map(|base| match base.kind {
+                BaseKind::PackageDirectory => "packages",
+                BaseKind::DotfilesDirectory => "dotfiles",
+            }),
+            base.as_ref().map(|_| path.display().to_string()),
+            vars.clone(),
+        ),
+        DotfileSource::Command(_) | DotfileSource::Recorded(_) => (None, None, Vec::new()),
+    };
+    let full = match source {
+        DotfileSource::Recorded(_) => Value::Null,
+        _ => source.to_string().into(),
+    };
+    map.insert("source".into(), full);
+    map.insert("base".into(), base.into());
+    map.insert("relative_path".into(), relative_path.into());
+    map.insert("vars".into(), vars.into());
+    if let DotfileSource::Recorded(spelling) = source {
+        map.insert("recorded_source".into(), spelling.clone().into());
+    }
+    row
 }
 
 /// The `outcome` field's value.
@@ -136,6 +171,16 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     )) = &final_result
     {
         result_data["unjudged_count"] = (*unjudged_count).into();
+    }
+    // The step count is a field because no message carries one. A failure has
+    // no count to give.
+    if let Some(OperationResult::Success(s)) = &final_result
+        && let Some(steps) = s.steps_completed()
+    {
+        result_data["steps"] = serde_json::json!({
+            "completed": steps.completed,
+            "total": steps.total,
+        });
     }
 
     EventCollectorResult {
@@ -456,46 +501,54 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             "type": "warning",
             "message": message,
         })),
-        PackageEvent::DotfileDeploying { source, target, .. } => Some(serde_json::json!({
-            "type": "dotfile_deploying",
-            "source": source,
-            "target": target,
-        })),
+        PackageEvent::DotfileDeploying { source, target, .. } => Some(with_source(
+            serde_json::json!({
+                "type": "dotfile_deploying",
+                "target": target,
+            }),
+            source,
+        )),
         PackageEvent::DotfileDeployed {
             source,
             target,
             backup,
             ..
-        } => Some(serde_json::json!({
-            "type": "dotfile_deployed",
-            "source": source,
-            "target": target,
-            // Null when nothing was kept, so an assistant can tell "no copy" from
-            // a field this server forgot to send.
-            "backup": backup,
-        })),
+        } => Some(with_source(
+            serde_json::json!({
+                "type": "dotfile_deployed",
+                "target": target,
+                // Null when nothing was kept, so an assistant can tell "no copy" from
+                // a field this server forgot to send.
+                "backup": backup,
+            }),
+            source,
+        )),
         PackageEvent::DotfileSkipped {
             source,
             target,
             reason,
             ..
-        } => Some(serde_json::json!({
-            "type": "dotfile_skipped",
-            "source": source,
-            "target": target,
-            "reason": reason,
-        })),
+        } => Some(with_source(
+            serde_json::json!({
+                "type": "dotfile_skipped",
+                "target": target,
+                "reason": reason,
+            }),
+            source,
+        )),
         PackageEvent::DotfileConflict {
             source,
             target,
             diff,
             ..
-        } => Some(serde_json::json!({
-            "type": "dotfile_conflict",
-            "source": source,
-            "target": target,
-            "diff": diff,
-        })),
+        } => Some(with_source(
+            serde_json::json!({
+                "type": "dotfile_conflict",
+                "target": target,
+                "diff": diff,
+            }),
+            source,
+        )),
         // `drift_type` stays the bare classification an assistant can match on.
         PackageEvent::DotfileDriftDetected {
             target, drift_type, ..
@@ -509,14 +562,16 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
             target,
             package,
             ..
-        } => Some(serde_json::json!({
-            "type": "dotfile_orphaned",
-            "source": source,
-            "target": target,
-            // Null when the record does not say, so an assistant can tell that
-            // from a field this server forgot to send.
-            "package": package,
-        })),
+        } => Some(with_source(
+            serde_json::json!({
+                "type": "dotfile_orphaned",
+                "target": target,
+                // Null when the record does not say, so an assistant can tell that
+                // from a field this server forgot to send.
+                "package": package,
+            }),
+            source,
+        )),
         PackageEvent::PostInstallNote {
             package_name, note, ..
         } => Some(serde_json::json!({
@@ -597,8 +652,11 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         // `Completed` is read by `collect_events` for the operation's result
         // rather than emitted as a data event, and the lifecycle and log variants
         // carry nothing a tool caller acts on.
+        // A step's end is lifecycle too: a failed step's cause arrives as its own
+        // warning or failure.
         PackageEvent::Started { .. }
         | PackageEvent::Progress { .. }
+        | PackageEvent::StepEnded { .. }
         | PackageEvent::Completed { .. }
         | PackageEvent::Canceled { .. }
         | PackageEvent::Trace { .. }
@@ -686,6 +744,56 @@ mod tests {
     use std::time::Instant;
     use uuid::Uuid;
 
+    // A file under the package directory `/home/u/packages`.
+    fn package_file(path: &str) -> DotfileSource {
+        DotfileSource::File {
+            base: Some(selfie::package::event::SourceBase {
+                kind: BaseKind::PackageDirectory,
+                directory: "/home/u/packages".into(),
+            }),
+            path: path.into(),
+            vars: Vec::new(),
+        }
+    }
+
+    // A dotfile row gives the source in full, so an assistant needs no config to
+    // find the file, and the base it is relative to, so it can show it as the
+    // CLI does.
+    #[tokio::test]
+    async fn a_dotfile_row_names_its_source_in_full_and_by_base() {
+        let events = vec![PackageEvent::DotfileSkipped {
+            operation_info: test_op_info(),
+            source: package_file("bat/config"),
+            target: "/home/u/.config/bat/config".to_string(),
+            reason: "dry run".to_string(),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+        let row = &result.data["data"][0];
+
+        assert_eq!(row["source"], "/home/u/packages/bat/config");
+        assert_eq!(row["base"], "packages");
+        assert_eq!(row["relative_path"], "bat/config");
+    }
+
+    // A record that names no base gives its spelling, never a path it cannot know
+    // is full.
+    #[tokio::test]
+    async fn an_old_record_gives_its_spelling_and_no_full_path() {
+        let events = vec![PackageEvent::DotfileOrphaned {
+            operation_info: test_op_info(),
+            source: DotfileSource::Recorded("vim/vimrc".to_string()),
+            target: "/home/u/.vimrc".to_string(),
+            package: Some("vim".to_string()),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+        let row = &result.data["data"][0];
+
+        assert!(row["source"].is_null(), "{row}");
+        assert_eq!(row["recorded_source"], "vim/vimrc");
+    }
+
     fn test_op_info() -> OperationInfo {
         OperationInfo {
             id: Uuid::new_v4(),
@@ -697,6 +805,54 @@ mod tests {
         }
     }
 
+    // The step count is a field of the result and no part of its message. Two
+    // different numbers, so a swap of completed and total shows.
+    #[tokio::test]
+    async fn a_success_reports_its_steps_as_fields() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count: 1,
+                skipped_count: 0,
+                conflict_count: 0,
+                refused_count: 0,
+                orphan_count: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(2, 3),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(
+            result.data["result"]["steps"],
+            serde_json::json!({ "completed": 2, "total": 3 })
+        );
+        let message = result.data["result"]["message"].as_str().unwrap();
+        assert!(!message.contains("steps"), "{message}");
+    }
+
+    // A result with no step count has no `steps` field, rather than a made-up one.
+    #[tokio::test]
+    async fn a_generic_success_has_no_steps_field() {
+        use selfie::package::event::OperationSuccess;
+
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(
+            result.data["result"].get("steps").is_none(),
+            "{}",
+            result.data
+        );
+    }
+
     // An assistant that reports a deploy has to be able to tell the user how to
     // get their old file back, and has to be able to say "nothing was kept" when
     // that is the truth rather than when the field went missing. Hence a
@@ -705,7 +861,7 @@ mod tests {
     async fn a_deployment_carries_the_copy_it_kept_or_null() {
         let deployed = |backup: Option<&str>| PackageEvent::DotfileDeployed {
             operation_info: test_op_info(),
-            source: "myapp/config.toml".to_string(),
+            source: package_file("myapp/config.toml"),
             target: "/home/u/.config/app.toml".to_string(),
             backup: backup.map(str::to_string),
         };
@@ -845,7 +1001,7 @@ mod tests {
         let events = vec![
             PackageEvent::DotfileOrphaned {
                 operation_info: test_op_info(),
-                source: "git/config".to_string(),
+                source: package_file("git/config"),
                 target: "/home/u/.gitconfig".to_string(),
                 package: Some("git".to_string()),
             },
@@ -870,7 +1026,8 @@ mod tests {
         assert_eq!(result.data["result"]["orphan_count"], 1);
         let row = &result.data["data"][0];
         assert_eq!(row["type"], "dotfile_orphaned");
-        assert_eq!(row["source"], "git/config");
+        assert_eq!(row["source"], "/home/u/packages/git/config");
+        assert_eq!(row["relative_path"], "git/config");
         assert_eq!(row["target"], "/home/u/.gitconfig");
         assert_eq!(row["package"], "git");
     }

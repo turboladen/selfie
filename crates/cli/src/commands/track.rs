@@ -119,7 +119,7 @@ pub(crate) async fn handle_track(
         return 1;
     }
 
-    let choice = prompt_track_choice(&package_names, file);
+    let choice = prompt_track_choice(&package_names, file, display);
 
     match choice {
         TrackChoice::ExistingPackage(ref name) => {
@@ -211,38 +211,48 @@ fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) 
 }
 
 /// Present the interactive selection prompt and return the user's choice.
-fn prompt_track_choice(package_names: &[String], file: &str) -> TrackChoice {
+fn prompt_track_choice(
+    package_names: &[String],
+    file: &str,
+    display: &DisplayManager,
+) -> TrackChoice {
     // Build the selection list: existing packages + sentinel options
     let mut items: Vec<String> = package_names.to_vec();
     items.push(NEW_STANDALONE.to_string());
     items.push(TYPE_A_NAME.to_string());
 
-    let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
-        .with_prompt("Where should this file be tracked?")
-        .items(&items)
-        .default(0)
-        .interact_opt();
+    let selection = display.prompt(
+        FuzzySelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Where should this file be tracked?")
+            .items(&items)
+            .default(0),
+    );
 
     let choice = match selection {
         Ok(Some(idx)) => idx,
         Ok(None) | Err(_) => return TrackChoice::Cancelled,
     };
 
-    resolve_choice(&items, choice, file)
+    resolve_choice(&items, choice, file, display)
 }
 
 /// Pure function: given the selection list and the chosen index, determine action.
-fn resolve_choice(items: &[String], choice: usize, file: &str) -> TrackChoice {
+fn resolve_choice(
+    items: &[String],
+    choice: usize,
+    file: &str,
+    display: &DisplayManager,
+) -> TrackChoice {
     let selected = &items[choice];
 
     if selected == TYPE_A_NAME {
-        match prompt_for_name() {
+        match prompt_for_name(display) {
             Some(name) => TrackChoice::NewStandalone(name),
             None => TrackChoice::Cancelled,
         }
     } else if selected == NEW_STANDALONE {
         let suggested = suggest_name(file);
-        match prompt_for_name_with_default(&suggested) {
+        match prompt_for_name_with_default(&suggested, display) {
             Some(name) => TrackChoice::NewStandalone(name),
             None => TrackChoice::Cancelled,
         }
@@ -252,20 +262,24 @@ fn resolve_choice(items: &[String], choice: usize, file: &str) -> TrackChoice {
 }
 
 /// Prompt the user to type a dotfile name (no default).
-fn prompt_for_name() -> Option<String> {
-    Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Name for the new dotfile spec")
-        .interact_text()
+fn prompt_for_name(display: &DisplayManager) -> Option<String> {
+    display
+        .prompt(crate::display_manager::TextLine(
+            Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Name for the new dotfile spec"),
+        ))
         .ok()
         .filter(|s: &String| !s.trim().is_empty())
 }
 
 /// Prompt for a name, pre-filling with a suggested default.
-fn prompt_for_name_with_default(default: &str) -> Option<String> {
-    Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Name for the new dotfile spec")
-        .default(default.to_string())
-        .interact_text()
+fn prompt_for_name_with_default(default: &str, display: &DisplayManager) -> Option<String> {
+    display
+        .prompt(crate::display_manager::TextLine(
+            Input::with_theme(&ColorfulTheme::default())
+                .with_prompt("Name for the new dotfile spec")
+                .default(default.to_string()),
+        ))
         .ok()
         .filter(|s: &String| !s.trim().is_empty())
 }
@@ -671,7 +685,12 @@ mod tests {
             NEW_STANDALONE.to_string(),
             TYPE_A_NAME.to_string(),
         ];
-        let result = resolve_choice(&items, 0, "~/.config/test.toml");
+        let result = resolve_choice(
+            &items,
+            0,
+            "~/.config/test.toml",
+            &DisplayManager::new(false),
+        );
         assert_eq!(
             result,
             TrackChoice::ExistingPackage("alacritty".to_string())

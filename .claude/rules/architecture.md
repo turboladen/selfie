@@ -29,7 +29,9 @@ decide how to display information about that event to the user in the current UI
   emits events via `EventSender`; the CLI consumes them via `EventProcessor` with custom handlers;
   the MCP server consumes them via `event_collector::collect_events`, which converts a stream into
   an `EventCollectorResult` for structured JSON.
-- **Progress:** `ProgressTracker` provides step-based progress (e.g., "Installing package (2/5)").
+- **Progress:** `ProgressTracker` emits `Progress` events, each marked `Local` or `Waiting`
+  (`StepKind`); the step numbers are the event's `step` and `total_steps` fields, never part of its
+  message.
 - **Service orchestration:** `PackageServiceImpl::execute_operation_with_deps()` is the standard
   pattern — creates channel, spawns async task, returns stream.
 

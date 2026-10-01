@@ -70,8 +70,9 @@ fn apply_names_the_orphan_and_exits_zero() {
     );
 }
 
-// Drift's summary is a warning, not a success, when it found an orphan, and an
-// orphan is a finding drift was asked to look for.
+// Drift's summary is marked as a finding, not a success, when it found an
+// orphan, and an orphan is a finding drift was asked to look for. Both are
+// drift's answer, so both are on stdout.
 #[test]
 fn drift_warns_in_its_summary_and_exits_three() {
     let temp = moved_target();
@@ -81,13 +82,87 @@ fn drift_warns_in_its_summary_and_exits_three() {
 
     let (code, stdout, stderr) = run(&temp, &["dotfiles", "drift"]);
     assert_eq!(code, Some(3), "{stdout}{stderr}");
-    assert!(stderr.contains("Orphaned"), "{stderr}");
     assert!(
-        stderr.contains("1 orphaned") && !stdout.contains("1 orphaned"),
-        "the summary must be the warning, not the success line:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        stdout.contains("Orphaned") && !stderr.contains("Orphaned"),
+        "{stdout}{stderr}"
+    );
+    let summary = stdout
+        .lines()
+        .find(|line| line.contains("1 orphaned"))
+        .unwrap_or_else(|| panic!("the summary counts the orphan:\n{stdout}"));
+    assert!(
+        summary.starts_with('⚠') && !stderr.contains("1 orphaned"),
+        "the summary must be marked as a finding, on stdout:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("0 drifted"),
-        "nothing but the orphan may make the summary a warning:\n{stderr}"
+        summary.contains("0 drifted"),
+        "nothing but the orphan may make the summary a finding:\n{summary}"
+    );
+}
+
+// An orphan's source is shown relative to the directory its record names, under
+// that directory's heading.
+#[test]
+fn drift_shows_an_orphan_relative_to_its_directory() {
+    let temp = moved_target();
+
+    let (code, stdout, stderr) = run(&temp, &["dotfiles", "drift"]);
+    assert_eq!(code, Some(3), "{stdout}{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    let heading = lines
+        .iter()
+        .position(|line| line.contains("Packages: "))
+        .unwrap_or_else(|| panic!("the base directory is named:\n{stdout}"));
+    let orphan = lines
+        .iter()
+        .position(|line| line.contains("deployed from myapp/rc by package 'myapp'"))
+        .unwrap_or_else(|| panic!("the orphan's source is relative:\n{stdout}"));
+    assert!(heading < orphan, "{stdout}");
+}
+
+// A record that names no base keeps its spelling, with no heading claiming a
+// directory for it.
+#[test]
+fn an_orphan_whose_record_names_no_base_shows_its_spelling() {
+    let temp = moved_target();
+    let state = temp.path().join("state/deploy-state.yml");
+    let old = temp.path().join(".old");
+    // A record without the `base` field.
+    std::fs::write(
+        &state,
+        format!(
+            "deployed:\n  {}:\n    source: myapp/rc\n    checksum: abc\n    \
+             deployed_at: \"2026-09-01T00:00:00+00:00\"\n    package: myapp\n",
+            old.display()
+        ),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run(&temp, &["dotfiles", "drift"]);
+    assert_eq!(code, Some(3), "{stdout}{stderr}");
+    assert!(
+        stdout
+            .contains("deployed from myapp/rc (as recorded, directory unknown) by package 'myapp'"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("Packages: "), "{stdout}");
+}
+
+// Apply warns about an orphan on stderr, so its heading is on stderr too: a
+// reader of that stream alone can resolve the path.
+#[test]
+fn apply_heads_an_orphan_on_its_own_stream() {
+    let temp = moved_target();
+
+    let (code, stdout, stderr) = run(&temp, &["apply", "-y"]);
+    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let heading = lines.iter().position(|l| l.contains("Packages: "));
+    let orphan = lines
+        .iter()
+        .position(|l| l.contains("deployed from myapp/rc by package 'myapp'"));
+    assert!(
+        matches!((heading, orphan), (Some(h), Some(o)) if h < o),
+        "stderr:\n{stderr}"
     );
 }

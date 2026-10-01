@@ -319,15 +319,21 @@ directory holds one copy per target _ever_ deployed here.
 
 #### `cli.verbose`
 
-Print the extra per-step detail that `--verbose` prints. Lives under `cli:`, not at the top level.
+Do everything `--verbose` does, on every run. Lives under `cli:`, not at the top level.
 
 ```yaml
 cli:
   verbose: true
 ```
 
-It does **not** turn on the `DEBUG` log lines: the tracing level is chosen from the `--verbose` flag
-alone, before the configuration file is read, so those come only from passing the flag.
+stdout carries a command's answer at any verbosity. What verbose adds all goes to stderr: each
+command's operation header, such as `Spec info package 'bat'`, every step, a configured command's
+own output, and `DEBUG` log lines. At default verbosity a step that waits on something outside
+selfie (a configured command, a provider command, or the network) still shows: as a spinner on a
+terminal, which shows the command's latest output line and ends as `✓` with its elapsed time when it
+succeeds or `✗` when it fails, and otherwise as one status line. Steps that run at once, such as the
+audits of `package audit --all`, each get their own spinner. When a configured command fails, its
+last output lines are shown at every verbosity.
 
 #### `cli.use_colors`
 
@@ -457,9 +463,7 @@ error — the flags do not paper over a file you are in the middle of editing.
 **The `cli:` booleans only move one way.** `--verbose` turns verbose on and `--no-color` turns
 colors off; neither has an opposite. `verbose: true` or `use_colors: false` under `cli:` therefore
 cannot be overridden from the command line — edit the file. Written at the top level instead of
-under `cli:` they are ignored entirely, and selfie reports them. `--verbose` is also the wider of
-the two: it selects the `DEBUG` tracing level as well, which `cli: verbose: true` does not, because
-the tracing level is chosen from the flag before the file is read.
+under `cli:` they are ignored entirely, and selfie reports them.
 
 **`SELFIE_CONFIG_DIR` and the path flags do not compete.** The variable chooses _which file_ is
 read; the flags override _fields_ in whatever file that was. Setting both is normal, and the flag

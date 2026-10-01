@@ -4150,6 +4150,93 @@ mod secret_bearing {
         dirs.state_dir.join("deploy-state.yml")
     }
 
+    // A provider entry's command is something outside selfie that apply waits
+    // on, and the step names the target it produces. A dry run runs nothing.
+    #[tokio::test]
+    async fn apply_waits_on_a_provider_command_and_a_dry_run_does_not() {
+        use selfie::package::event::StepEnding;
+        use selfie::package::event::StepKind;
+
+        let waits = |events: &[PackageEvent]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    PackageEvent::Progress {
+                        kind: StepKind::Waiting(_),
+                        message,
+                        ..
+                    } => Some(message.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let dry = dirs.service_with_runner(FakeCommandRunner::new());
+        let events = collect_events(
+            dry.apply_all(ApplyOptions {
+                dry_run: true,
+                ..Default::default()
+            })
+            .await,
+        )
+        .await;
+        assert!(waits(&events).is_empty(), "{events:#?}");
+
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner(runner);
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        assert_eq!(
+            waits(&events),
+            vec![format!(
+                "Running the commands that produce {}",
+                target.display()
+            )]
+        );
+        assert_eq!(endings(&events), vec![StepEnding::Succeeded], "{events:#?}");
+    }
+
+    // How each waiting step ended, in order.
+    fn endings(events: &[PackageEvent]) -> Vec<selfie::package::event::StepEnding> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::StepEnded { ending, .. } => Some(*ending),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A provider command that fails ends its step as failed, before the warning
+    // that reports it, so no consumer can show it as done.
+    #[tokio::test]
+    async fn a_failing_provider_command_ends_its_step_as_failed() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+
+        let runner = FakeCommandRunner::new().failing("op read x", b"no session");
+        let service = dirs.service_with_runner(runner);
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            endings(&events),
+            vec![selfie::package::event::StepEnding::Failed],
+            "{events:#?}"
+        );
+        let ended = events
+            .iter()
+            .position(|e| matches!(e, PackageEvent::StepEnded { .. }))
+            .unwrap();
+        let warned = events
+            .iter()
+            .position(|e| matches!(e, PackageEvent::Warning { .. }))
+            .unwrap();
+        assert!(ended < warned, "{events:#?}");
+    }
+
     #[tokio::test]
     async fn provider_content_is_deployed_to_an_absent_target() {
         let dirs = TestDirs::new();
@@ -5700,10 +5787,10 @@ mod secret_bearing {
 
         let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
 
-        let conflict = events
+        let (source, conflict) = events
             .iter()
             .find_map(|e| match e {
-                PackageEvent::DotfileConflict { diff, .. } => Some(diff),
+                PackageEvent::DotfileConflict { source, diff, .. } => Some((source, diff)),
                 _ => None,
             })
             .expect("expected a conflict event");
@@ -5711,9 +5798,11 @@ mod secret_bearing {
         assert!(conflict.contains("lines"), "got: {conflict}");
         assert!(conflict.contains("content hidden"), "got: {conflict}");
         test_common::assert_secret_free(conflict, SECRET, "the conflict diff");
-        assert!(
-            conflict.contains("op read x"),
-            "the command is a reference, not a credential, and should be shown: {conflict}"
+        // The command is a reference, not a credential, so the event names it, as
+        // its source.
+        assert_eq!(
+            *source,
+            selfie::package::event::DotfileSource::Command("op read x".to_string())
         );
     }
 
@@ -16172,6 +16261,43 @@ mod recorded_package {
             .expect("the target is recorded");
         assert_eq!(entry.package(), Some("starship"));
     }
+
+    // Track knows which directory holds the spec it wrote beside the copy, so its
+    // record names it, as apply's would.
+    #[tokio::test]
+    async fn track_records_the_directory_its_copy_is_in() {
+        use selfie::package::event::BaseKind;
+
+        let dirs = TestDirs::new();
+        let standalone = dirs.target_dir.join("starship.toml");
+        std::fs::write(&standalone, "format = \"$all\"").unwrap();
+        collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", standalone.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let packaged = dirs.target_dir.join("batconfig");
+        std::fs::write(&packaged, "--theme=ansi").unwrap();
+        create_package_with_dotfiles(&dirs.package_dir, "bat", &[]);
+        collect_events(
+            dirs.service_with_dotfiles()
+                .track_for_package("bat", packaged.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let state = state_in(&dirs);
+        let base = |target: &std::path::Path| {
+            state
+                .get(&target.display().to_string())
+                .expect("the target is recorded")
+                .base()
+        };
+        assert_eq!(base(&standalone), Some(BaseKind::DotfilesDirectory));
+        assert_eq!(base(&packaged), Some(BaseKind::PackageDirectory));
+    }
 }
 
 // Deploy-state records whose target no entry deploys to any more. selfie reports
@@ -16187,7 +16313,7 @@ mod orphans {
             .iter()
             .filter_map(|event| match event {
                 PackageEvent::DotfileOrphaned { source, target, .. } => {
-                    Some((source.clone(), target.clone()))
+                    Some((source.to_string(), target.clone()))
                 }
                 _ => None,
             })
@@ -16252,7 +16378,7 @@ mod orphans {
         } else {
             DeployState::empty()
         };
-        state.record_deployment(target, source, "seeded", package);
+        state.record_deployment(target, source, "seeded", package, None);
         std::fs::write(&path, serde_saphyr::to_string(&state).unwrap()).unwrap();
     }
 
@@ -16769,7 +16895,7 @@ mod orphans {
         let mut state = state_in(&dirs);
         for key in [target(&dirs, "a"), target(&dirs, "shared")] {
             let entry = state.get(&key).unwrap().clone();
-            state.record_deployment(&key, entry.source(), entry.checksum(), None);
+            state.record_deployment(&key, entry.source(), entry.checksum(), None, None);
         }
         std::fs::write(
             dirs.state_dir.join("deploy-state.yml"),
@@ -16797,6 +16923,102 @@ mod orphans {
         );
     }
 
+    // A record that names no base, in sync with its source, gains one from the
+    // next apply that writes, and keeps its package: which package deployed a
+    // shared target is not the apply's to guess.
+    #[tokio::test]
+    async fn an_apply_places_an_in_sync_record_and_keeps_its_package() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a", "shared"]);
+        package(&dirs, "beta", &["shared"]);
+        for name in ["alpha", "beta"] {
+            std::fs::write(dirs.package_dir.join(name).join("shared"), "same").unwrap();
+        }
+        run_apply_all(&dirs).await;
+        // Each record keeps its package, so the orphan check has nothing to
+        // attribute and its own save cannot carry the placement.
+        let mut state = state_in(&dirs);
+        let shared_package = state
+            .get(&target(&dirs, "shared"))
+            .unwrap()
+            .package()
+            .map(str::to_string);
+        for key in [target(&dirs, "a"), target(&dirs, "shared")] {
+            let entry = state.get(&key).unwrap().clone();
+            state.record_deployment(&key, "as spelled", entry.checksum(), entry.package(), None);
+        }
+        std::fs::write(
+            dirs.state_dir.join("deploy-state.yml"),
+            serde_saphyr::to_string(&state).unwrap(),
+        )
+        .unwrap();
+
+        run_dry_run(&dirs).await;
+        assert_eq!(
+            state_in(&dirs).get(&target(&dirs, "a")).unwrap().base(),
+            None
+        );
+
+        run_apply_all(&dirs).await;
+        let state = state_in(&dirs);
+        let a = state.get(&target(&dirs, "a")).unwrap();
+        assert_eq!(
+            a.base(),
+            Some(selfie::package::event::BaseKind::PackageDirectory)
+        );
+        assert_eq!(a.source(), "alpha/a");
+        let shared = state.get(&target(&dirs, "shared")).unwrap();
+        assert!(shared.base().is_some());
+        assert_eq!(
+            shared.package().map(str::to_string),
+            shared_package,
+            "placing a record leaves its package alone"
+        );
+    }
+
+    // Placing a record is housekeeping: a state that cannot be written costs the
+    // location and nothing else, so a run where everything is in sync still
+    // succeeds, with a warning.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_placement_that_cannot_be_saved_only_warns() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        run_apply_all(&dirs).await;
+        let mut state = state_in(&dirs);
+        let key = target(&dirs, "a");
+        let entry = state.get(&key).unwrap().clone();
+        state.record_deployment(&key, "alpha/a", entry.checksum(), Some("alpha"), None);
+        std::fs::write(
+            dirs.state_dir.join("deploy-state.yml"),
+            serde_saphyr::to_string(&state).unwrap(),
+        )
+        .unwrap();
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP a_placement_that_cannot_be_saved_only_warns: mode bits ignored");
+            return;
+        };
+
+        let events = run_apply_all(&dirs).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(success))
+                    if success.outcome() == selfie::package::event::Outcome::Clean
+            ),
+            "{events:#?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::Warning { message, .. } if message.contains("Could not tidy")
+            )),
+            "{events:#?}"
+        );
+        assert_eq!(state_in(&dirs).get(&key).unwrap().base(), None);
+    }
+
     // A named apply attributes only its own package's records.
     #[tokio::test]
     async fn a_named_apply_attributes_only_its_own_records() {
@@ -16807,7 +17029,7 @@ mod orphans {
         let mut state = state_in(&dirs);
         for key in [target(&dirs, "a"), target(&dirs, "b")] {
             let entry = state.get(&key).unwrap().clone();
-            state.record_deployment(&key, entry.source(), entry.checksum(), None);
+            state.record_deployment(&key, entry.source(), entry.checksum(), None, None);
         }
         std::fs::write(
             dirs.state_dir.join("deploy-state.yml"),
@@ -17102,5 +17324,159 @@ mod orphans {
             "{events:?}"
         );
         assert!(recorded(&dirs, &target(&dirs, "gone")));
+    }
+}
+
+// How apply's events name a dotfile's source: with the base directory it was
+// read from, so no consumer has to guess which directory a relative path means.
+mod event_sources {
+    use super::*;
+    use selfie::package::event::{BaseKind, DotfileSource};
+
+    fn skipped_sources(events: &[PackageEvent]) -> Vec<DotfileSource> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::DotfileSkipped { source, .. } => Some(source.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn dry_run(dirs: &TestDirs) -> Vec<PackageEvent> {
+        let service = dirs.service_with_runner(FakeCommandRunner::new());
+        collect_events(
+            service
+                .apply_all(ApplyOptions {
+                    dry_run: true,
+                    ..Default::default()
+                })
+                .await,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_package_file_and_a_standalone_file_name_their_own_base() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("bat")).unwrap();
+        std::fs::write(dirs.package_dir.join("bat/config"), "cfg\n").unwrap();
+        std::fs::write(
+            dirs.package_dir.join("bat.yml"),
+            format!(
+                "name: bat\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: bat/config\n    target: \"{}\"\n",
+                dirs.target_dir.join("bat").display()
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&dirs.dotfiles_dir).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("zshrc"), "z\n").unwrap();
+        std::fs::write(
+            dirs.dotfiles_dir.join("zsh.yml"),
+            format!(
+                "name: zsh\ndotfiles:\n  - source: zshrc\n    target: \"{}\"\n",
+                dirs.target_dir.join("zshrc").display()
+            ),
+        )
+        .unwrap();
+
+        let sources = skipped_sources(&dry_run(&dirs).await);
+
+        let bases: Vec<(Option<BaseKind>, String)> = sources
+            .iter()
+            .map(|source| match source {
+                DotfileSource::File { base, path, .. } => (
+                    base.as_ref().map(|base| base.kind),
+                    path.display().to_string(),
+                ),
+                other => panic!("expected a file, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            bases,
+            vec![
+                (Some(BaseKind::PackageDirectory), "bat/config".to_string()),
+                (Some(BaseKind::DotfilesDirectory), "zshrc".to_string()),
+            ]
+        );
+    }
+
+    // A template carries its var names beside the path, not inside it.
+    #[tokio::test]
+    async fn a_template_names_its_vars_apart_from_its_path() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("git")).unwrap();
+        std::fs::write(dirs.package_dir.join("git/config.tmpl"), "x\n").unwrap();
+        std::fs::write(
+            dirs.package_dir.join("git.yml"),
+            format!(
+                "name: git\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: git/config.tmpl\n    target: \"{}\"\n    vars:\n      email: \"echo e\"\n",
+                dirs.target_dir.join("gitconfig").display()
+            ),
+        )
+        .unwrap();
+
+        let sources = skipped_sources(&dry_run(&dirs).await);
+
+        assert_eq!(sources.len(), 1, "{sources:?}");
+        let DotfileSource::File { base, path, vars } = &sources[0] else {
+            panic!("expected a file, got {:?}", sources[0]);
+        };
+        assert_eq!(
+            base.as_ref().map(|b| b.kind),
+            Some(BaseKind::PackageDirectory)
+        );
+        assert_eq!(path, &std::path::PathBuf::from("git/config.tmpl"));
+        assert_eq!(vars, &vec!["email".to_string()]);
+    }
+
+    // One directory configured as both is read once, as the package directory,
+    // and its sources say so.
+    #[tokio::test]
+    async fn one_directory_for_both_reports_the_package_directory() {
+        let mut dirs = TestDirs::new();
+        dirs.dotfiles_dir = dirs.package_dir.clone();
+        std::fs::create_dir_all(dirs.package_dir.join("bat")).unwrap();
+        std::fs::write(dirs.package_dir.join("bat/config"), "cfg\n").unwrap();
+        std::fs::write(
+            dirs.package_dir.join("bat.yml"),
+            format!(
+                "name: bat\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: bat/config\n    target: \"{}\"\n",
+                dirs.target_dir.join("bat").display()
+            ),
+        )
+        .unwrap();
+
+        let sources = skipped_sources(&dry_run(&dirs).await);
+
+        let kinds: Vec<Option<BaseKind>> = sources
+            .iter()
+            .map(|source| match source {
+                DotfileSource::File { base, .. } => base.as_ref().map(|b| b.kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec![Some(BaseKind::PackageDirectory)]);
+    }
+
+    // A command's source is the command, with no base.
+    #[tokio::test]
+    async fn a_provider_names_its_command() {
+        let dirs = TestDirs::new();
+        secret_bearing::provider_package(
+            &dirs.package_dir,
+            dirs.target_dir.join("creds").to_str().unwrap(),
+            "op read x",
+        );
+
+        let sources = skipped_sources(&dry_run(&dirs).await);
+
+        assert_eq!(
+            sources,
+            vec![DotfileSource::Command("op read x".to_string())]
+        );
     }
 }

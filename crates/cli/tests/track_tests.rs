@@ -251,8 +251,9 @@ fn already_tracking_says_nothing_about_a_plain_target() {
 // The sudo refusal is decided by `SUDO_UID` against the effective uid, not by
 // holding privilege, so a test can set the variable and drive the real binary.
 // Both track commands must stop before the service starts: the gate is in the
-// library and refuses either way, but a run that prints "Started" first has
-// announced work it is about to decline.
+// library and refuses either way, but a run that prints its operation header
+// first has announced work it is about to decline. The header shows only under
+// `--verbose`, so the commands run with it, or its absence would prove nothing.
 #[test]
 fn track_commands_refuse_under_sudo_before_the_service_starts() {
     let temp = setup_default_test_config();
@@ -278,8 +279,8 @@ fn track_commands_refuse_under_sudo_before_the_service_starts() {
     }
 
     for args in [
-        vec!["dotfiles", "track", "thing", "~/thing.toml"],
-        vec!["package", "track-dotfile", "bat", "~/thing.toml"],
+        vec!["-v", "dotfiles", "track", "thing", "~/thing.toml"],
+        vec!["-v", "package", "track-dotfile", "bat", "~/thing.toml"],
     ] {
         let output = sandboxed_command(&temp)
             .env("HOME", &home)
@@ -307,7 +308,8 @@ fn track_commands_refuse_under_sudo_before_the_service_starts() {
             "{args:?} failed for some other reason, got:\n{both}"
         );
         assert!(
-            !both.contains("Started"),
+            // The header reads "<Operation> package '<name>' in environment '<env>'".
+            !both.contains(" in environment '"),
             "{args:?} announced work it then declined, got:\n{both}"
         );
     }

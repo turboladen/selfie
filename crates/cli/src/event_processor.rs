@@ -7,11 +7,15 @@
 
 use futures::StreamExt;
 use selfie::package::{
-    event::{ConsoleOutput, EventStream, OperationResult, Outcome, PackageEvent},
+    event::{
+        ConsoleOutput, EventStream, OperationInfo, OperationResult, OperationType, Outcome,
+        PackageEvent, StepKind,
+    },
     port::{PackageError, PackageParseKind},
 };
 
 use crate::display_manager::{DisplayManager, ErrorDetail};
+use crate::source_paths::{self, Channel};
 
 /// How a command's run ended, as the process reports it.
 ///
@@ -109,13 +113,18 @@ impl EventProcessor {
         while let Some(event) = stream.next().await {
             // Scored before the custom handler, which may claim either event: the
             // exit code is the library's verdict, whoever renders it.
+            // A step still open when the operation ends is cleared without a
+            // result line, before anything renders the ending: only its own end
+            // event says how it went.
             let cancelled = match &event {
                 PackageEvent::Completed { result, .. } => {
                     ending = Some(Exit::from(result.outcome()));
+                    self.display.clear_waiting();
                     false
                 }
                 PackageEvent::Canceled { .. } => {
                     ending = Some(Exit::Cancelled);
+                    self.display.clear_waiting();
                     true
                 }
                 _ => false,
@@ -148,32 +157,46 @@ impl EventProcessor {
 
     /// Render one event the default way.
     fn handle_event(&self, event: PackageEvent) {
+        // A line that names a source prints with its heading as one block, so a
+        // conflict prompt printing on the service's thread cannot land between
+        // them.
+        let _block = matches!(
+            event,
+            PackageEvent::DotfileDeploying { .. }
+                | PackageEvent::DotfileDeployed { .. }
+                | PackageEvent::DotfileSkipped { .. }
+                | PackageEvent::DotfileConflict { .. }
+                | PackageEvent::DotfileOrphaned { .. }
+        )
+        .then(|| self.display.hold_block());
         match event {
+            // The header and every local step are commentary on a run, shown only
+            // under `--verbose`. A step waiting on something outside selfie shows
+            // at every verbosity. No command changes this for itself.
             PackageEvent::Started { operation_info } => {
-                // Handle list operations differently since they don't have a specific package name
-                let message = if operation_info.package_name.is_empty() {
-                    format!(
-                        "{} in environment '{}'",
-                        operation_info.operation_type.to_string().to_title_case(),
-                        operation_info.environment
-                    )
-                } else {
-                    format!(
-                        "{} package '{}' in environment '{}'",
-                        operation_info.operation_type.to_string().to_title_case(),
-                        operation_info.package_name,
-                        operation_info.environment
-                    )
+                if self.display.is_verbose() {
+                    self.display.print_run_note(started_line(&operation_info));
+                }
+            }
+
+            PackageEvent::Progress { kind, message, .. } => match kind {
+                StepKind::Waiting(step) => self.display.start_waiting(step, message),
+                StepKind::Local => self.display.print_status(message),
+            },
+
+            PackageEvent::StepEnded { step, ending, .. } => {
+                self.display.end_waiting(step, ending);
+            }
+
+            // A configured command's own output is not the answer: stderr, and at
+            // default verbosity only as the waiting spinner's latest line.
+            PackageEvent::Info { step, output, .. } => {
+                let text = match &output {
+                    ConsoleOutput::Stdout(text) | ConsoleOutput::Stderr(text) => text,
                 };
-                self.display.print_info(message);
-            }
-
-            PackageEvent::Progress { message, .. } => {
-                self.display.print_progress(message);
-            }
-
-            PackageEvent::Info { output, .. } => {
-                handle_console_output(output);
+                for line in text.lines() {
+                    self.display.command_output(step, line);
+                }
             }
 
             PackageEvent::Trace { message, .. } => {
@@ -206,10 +229,13 @@ impl EventProcessor {
                 // The level follows the library's verdict, so a run that refused
                 // part of its work reads as an error and one that found drift as
                 // a warning. The exit code was scored in `process_events`.
-                OperationResult::Success(success) => match success.outcome() {
-                    Outcome::Clean => self.display.print_success(success.to_string()),
-                    Outcome::Found => self.display.print_warning(success.to_string()),
-                    Outcome::Failed => {
+                // The summary is the answer, so it goes to stdout at every outcome,
+                // marked by it. A run that failed on a success, as a refusal does,
+                // also joins the error summary. An `OperationFailure` is an error,
+                // not an answer, and stays on stderr below.
+                OperationResult::Success(success) => {
+                    let outcome = success.outcome();
+                    if outcome == Outcome::Failed {
                         self.display.collect_error(ErrorDetail {
                             package_name: operation_info.package_name,
                             operation: operation_info.operation_type.to_string(),
@@ -218,9 +244,9 @@ impl EventProcessor {
                             stderr: None,
                             message: success.to_string(),
                         });
-                        self.display.print_error(success.to_string());
                     }
-                },
+                    self.display.print_result(outcome, success.to_string());
+                }
                 OperationResult::Failure(err) => {
                     use selfie::package::event::{CommandFailure, OperationFailure};
 
@@ -356,6 +382,17 @@ impl EventProcessor {
                                 }
                             }
                         }
+                        // The command's own stderr, bounded, at every verbosity: its
+                        // output is hidden while it runs, and the tail its step showed
+                        // may be stdout alone. Lines the tail already showed are left
+                        // out.
+                        OperationFailure::CommandError(CommandFailure::ExecutionFailed {
+                            ref stderr,
+                            ..
+                        }) => {
+                            self.display.print_error(err.to_string());
+                            self.display.print_command_stderr(stderr.as_str());
+                        }
                         _ => {
                             self.display.print_error(err.to_string());
                         }
@@ -368,9 +405,11 @@ impl EventProcessor {
                     .print_warning(format!("Operation canceled: {reason}"));
             }
 
+            // The recommended package's install command is its own waiting step,
+            // which names it; this announcement is detail.
             PackageEvent::RecommendStarted { recommend_name, .. } => {
                 self.display
-                    .print_info(format!("  Installing recommended: {recommend_name}..."));
+                    .print_status(format!("Installing recommended: {recommend_name}"));
             }
 
             PackageEvent::RecommendSucceeded { recommend_name, .. } => {
@@ -387,7 +426,7 @@ impl EventProcessor {
             }
 
             PackageEvent::DotfileDeploying { source, target, .. } => {
-                let short_source = crate::display_manager::shorten_path(&source);
+                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display
                     .print_info(format!("  Deploying {short_source} → {short_target}"));
@@ -399,7 +438,7 @@ impl EventProcessor {
                 backup,
                 ..
             } => {
-                let short_source = crate::display_manager::shorten_path(&source);
+                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display
                     .print_success(format!("  {short_source} → {short_target}"));
@@ -418,7 +457,7 @@ impl EventProcessor {
                 reason,
                 ..
             } => {
-                let short_source = crate::display_manager::shorten_path(&source);
+                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display.print_info(format!(
                     "  ⊘ {short_source} → {short_target} skipped: {reason}"
@@ -431,40 +470,57 @@ impl EventProcessor {
                 diff,
                 ..
             } => {
-                let short_source = crate::display_manager::shorten_path(&source);
+                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 self.display.println("");
                 self.display
                     .print_warning(format!("  Conflict: {short_target}"));
                 self.display
-                    .print_progress(format!("{short_source} → {short_target}"));
+                    .println(format!("  {short_source} → {short_target}"));
                 self.display.print_diff(&diff);
             }
 
             PackageEvent::DotfileDriftDetected {
                 target, drift_type, ..
             } => {
+                // Drift is what `dotfiles drift` was asked to find: its answer.
                 let short_target = crate::display_manager::shorten_path(&target);
-                self.display
-                    .print_warning(format!("  Drift in {short_target}: {drift_type}"));
+                self.display.print_result(
+                    Outcome::Found,
+                    format!("  Drift in {short_target}: {drift_type}"),
+                );
             }
 
             // A warning: the file is one the user may still want, and nothing
             // will manage it again unless they act.
             PackageEvent::DotfileOrphaned {
+                operation_info,
                 source,
                 target,
                 package,
-                ..
             } => {
+                // An orphan is part of what `dotfiles drift` is asked to find, so
+                // there it is the answer. Elsewhere it is a warning about the run.
+                let answer = matches!(operation_info.operation_type, OperationType::DotfileDrift);
+                let channel = if answer {
+                    Channel::Stdout
+                } else {
+                    Channel::Stderr
+                };
+                let source = source_paths::label(&self.display, channel, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 let by = package
                     .map(|package| format!(" by package '{package}'"))
                     .unwrap_or_default();
-                self.display.print_warning(format!(
+                let line = format!(
                     "  Orphaned {short_target}: deployed from {source}{by}, and no entry deploys \
                      to it now. selfie leaves it in place; check whether you still need it"
-                ));
+                );
+                if answer {
+                    self.display.print_result(Outcome::Found, line);
+                } else {
+                    self.display.print_warning(line);
+                }
             }
 
             PackageEvent::PostInstallNote { note, .. } => {
@@ -510,15 +566,21 @@ impl EventProcessor {
     }
 }
 
-/// Handle console output appropriately
-fn handle_console_output(output: ConsoleOutput) {
-    match output {
-        ConsoleOutput::Stdout(msg) => {
-            println!("{msg}");
-        }
-        ConsoleOutput::Stderr(msg) => {
-            eprintln!("{msg}");
-        }
+/// The header line for an operation: what it is, on which package, in which
+/// environment.
+pub(crate) fn started_line(operation_info: &OperationInfo) -> String {
+    let operation = operation_info.operation_type.to_string().to_title_case();
+    // An operation over every package has no package name to give.
+    if operation_info.package_name.is_empty() {
+        format!(
+            "{operation} in environment '{}'",
+            operation_info.environment
+        )
+    } else {
+        format!(
+            "{operation} package '{}' in environment '{}'",
+            operation_info.package_name, operation_info.environment
+        )
     }
 }
 
@@ -545,6 +607,7 @@ impl ToTitleCase for str {
 mod tests {
     use super::*;
     use futures::stream;
+    use selfie::package::event::{StepEnding, StepId};
 
     #[test]
     fn test_to_title_case() {
@@ -695,6 +758,325 @@ mod tests {
         assert!(!handler_called);
     }
 
+    fn step(kind: StepKind, message: &str) -> PackageEvent {
+        PackageEvent::Progress {
+            operation_info: make_operation_info("bat"),
+            step: 1,
+            total_steps: 2,
+            percent_complete: 0.5,
+            kind,
+            message: message.to_string(),
+        }
+    }
+
+    // What the shared handler printed for `events` on `display`. A stream with no
+    // completion also gets "ended without reporting a result", which is left out
+    // here: these streams are cut short on purpose.
+    async fn printed_for(
+        display: DisplayManager,
+        events: Vec<PackageEvent>,
+    ) -> Vec<(crate::display_manager::Stream, String)> {
+        let processor = EventProcessor::new(display.clone());
+        processor
+            .process_events(Box::pin(stream::iter(events)), |_event| false)
+            .await;
+        display
+            .printed()
+            .into_iter()
+            .filter(|(_, line)| line != "The operation ended without reporting a result")
+            .collect()
+    }
+
+    fn verbose() -> DisplayManager {
+        DisplayManager::new(false).with_verbosity(crate::display_manager::Verbosity::Verbose)
+    }
+
+    #[tokio::test]
+    async fn a_waiting_step_prints_at_normal_verbosity_on_stderr() {
+        use crate::display_manager::Stream;
+
+        let printed = printed_for(
+            DisplayManager::new(false),
+            vec![step(
+                StepKind::Waiting(StepId::from_raw(1)),
+                "Running the check command for bat",
+            )],
+        )
+        .await;
+        assert_eq!(
+            printed,
+            vec![(
+                Stream::Stderr,
+                "Running the check command for bat...".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_step_is_hidden_unless_verbose() {
+        use crate::display_manager::Stream;
+
+        let normal = printed_for(
+            DisplayManager::new(false),
+            vec![step(StepKind::Local, "Loading packages")],
+        )
+        .await;
+        assert!(normal.is_empty(), "{normal:?}");
+
+        let shown = printed_for(verbose(), vec![step(StepKind::Local, "Loading packages")]).await;
+        assert_eq!(
+            shown,
+            vec![(Stream::Stderr, "Loading packages".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_header_prints_only_when_verbose_on_stderr() {
+        use crate::display_manager::Stream;
+
+        let started = || PackageEvent::Started {
+            operation_info: make_operation_info("bat"),
+        };
+        let normal = printed_for(DisplayManager::new(false), vec![started()]).await;
+        assert!(normal.is_empty(), "{normal:?}");
+
+        let shown = printed_for(verbose(), vec![started()]).await;
+        assert_eq!(
+            shown,
+            vec![(
+                Stream::Stderr,
+                "Package check package 'bat' in environment 'test'".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn the_header_names_the_package_only_when_there_is_one() {
+        assert_eq!(
+            started_line(&make_operation_info("")),
+            "Package check in environment 'test'"
+        );
+    }
+
+    // A command's own output is hidden at default verbosity without a terminal,
+    // and never printed on stdout.
+    #[tokio::test]
+    async fn command_output_is_hidden_at_normal_verbosity() {
+        let info = PackageEvent::Info {
+            operation_info: make_operation_info("bat"),
+            step: StepId::from_raw(1),
+            output: ConsoleOutput::Stdout("==> Pouring bat".to_string()),
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![info]).await;
+        assert!(printed.is_empty(), "{printed:?}");
+    }
+
+    // A failed command's bounded stderr prints with its error, at every
+    // verbosity: while it ran, its output was hidden.
+    #[tokio::test]
+    async fn a_failed_command_shows_its_stderr_at_normal_verbosity() {
+        use crate::display_manager::Stream;
+        use selfie::package::event::{CommandFailure, OperationFailure};
+
+        let failed = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::ExecutionFailed {
+                    command: "brew install bat".to_string(),
+                    exit_code: Some(1),
+                    stderr: selfie::commands::BoundedText::bound(b"Error: no bottle"),
+                },
+            )),
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
+        assert!(
+            printed.contains(&(Stream::Stderr, "Error: no bottle".to_string())),
+            "{printed:?}"
+        );
+    }
+
+    fn checked() -> PackageEvent {
+        use selfie::package::event::{CheckVerdict, OperationSuccess};
+
+        PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Success(OperationSuccess::PackageChecked {
+                package_name: "bat".to_string(),
+                environment: "test".to_string(),
+                verdict: CheckVerdict::Installed,
+                steps_completed: (1, 1).into(),
+            }),
+        }
+    }
+
+    fn ended(id: u64, ending: StepEnding) -> PackageEvent {
+        PackageEvent::StepEnded {
+            operation_info: make_operation_info("bat"),
+            step: StepId::from_raw(id),
+            ending,
+        }
+    }
+
+    // A step that ended collapses to its line when its end arrives, so the line
+    // comes before the completion.
+    #[tokio::test]
+    async fn an_ended_step_collapses_before_the_completion_prints() {
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        let events = vec![
+            step(
+                StepKind::Waiting(StepId::from_raw(1)),
+                "Running the check command for bat",
+            ),
+            ended(1, StepEnding::Succeeded),
+            checked(),
+        ];
+        let printed = printed_for(display.clone(), events).await;
+
+        let lines: Vec<&str> = printed.iter().map(|(_, line)| line.as_str()).collect();
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.starts_with("✓ Running the check command for bat (")),
+            "{lines:?}"
+        );
+        assert!(display.waiting_messages().is_empty());
+    }
+
+    // The completion says nothing about a step still open: it is cleared
+    // without a line, since only the step's own end says how it went.
+    #[tokio::test]
+    async fn a_step_open_at_the_completion_is_cleared_without_a_line() {
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        let events = vec![
+            step(
+                StepKind::Waiting(StepId::from_raw(1)),
+                "Running the check command for bat",
+            ),
+            checked(),
+        ];
+        let printed = printed_for(display.clone(), events).await;
+
+        assert!(
+            !printed.iter().any(|(_, l)| l.contains("Running the check")),
+            "{printed:?}"
+        );
+        assert!(display.waiting_messages().is_empty());
+    }
+
+    // A line naming a source waits for a block the conflict prompt holds, so it
+    // cannot print between the prompt's heading and its line.
+    #[tokio::test]
+    async fn a_source_line_waits_for_the_prompts_block() {
+        use selfie::package::event::{BaseKind, DotfileSource, SourceBase};
+
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display.clone());
+        let skipped = PackageEvent::DotfileSkipped {
+            operation_info: make_operation_info("bat"),
+            source: DotfileSource::File {
+                base: Some(SourceBase {
+                    kind: BaseKind::PackageDirectory,
+                    directory: "/r/p".into(),
+                }),
+                path: "bat/config".into(),
+                vars: Vec::new(),
+            },
+            target: "/h/.config/bat/config".to_string(),
+            reason: "dry run".to_string(),
+        };
+
+        let held = display.hold_block();
+        let printer = std::thread::spawn(move || processor.handle_event(skipped));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(display.printed().is_empty(), "{:?}", display.printed());
+        drop(held);
+        printer.join().unwrap();
+
+        assert_eq!(display.printed().len(), 2, "{:?}", display.printed());
+    }
+
+    // A provider command that fails is never shown as done, even though apply
+    // itself completes.
+    #[tokio::test]
+    async fn a_failed_provider_step_never_shows_done() {
+        use selfie::package::event::OperationSuccess;
+
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        let events = vec![
+            step(
+                StepKind::Waiting(StepId::from_raw(1)),
+                "Running the commands that produce ~/.creds",
+            ),
+            ended(1, StepEnding::Failed),
+            PackageEvent::Warning {
+                operation_info: make_operation_info("bat"),
+                message: "Failed to resolve '~/.creds': no session".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: make_operation_info("bat"),
+                result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                    deployed_count: 0,
+                    skipped_count: 0,
+                    conflict_count: 0,
+                    refused_count: 1,
+                    orphan_count: 0,
+                    environment: "test".to_string(),
+                    steps_completed: (1, 1).into(),
+                }),
+            },
+        ];
+        let printed = printed_for(display, events).await;
+
+        let lines: Vec<&str> = printed.iter().map(|(_, line)| line.as_str()).collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("✗ Running the commands")),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.starts_with('✓')), "{lines:?}");
+    }
+
+    // A summary is the answer at every outcome, so it goes to stdout; an error
+    // is not, and stays on stderr.
+    #[tokio::test]
+    async fn a_found_summary_goes_to_stdout_and_a_failure_to_stderr() {
+        use crate::display_manager::Stream;
+        use selfie::package::event::{CheckVerdict, OperationFailure, OperationSuccess};
+
+        let found = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Success(OperationSuccess::PackageChecked {
+                package_name: "bat".to_string(),
+                environment: "test".to_string(),
+                verdict: CheckVerdict::NotInstalled {
+                    command: "false".to_string(),
+                    exit_code: Some(1),
+                    stderr: selfie::commands::BoundedText::bound(b""),
+                },
+                steps_completed: (1, 1).into(),
+            }),
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![found]).await;
+        assert!(
+            printed
+                .iter()
+                .any(|(stream, line)| *stream == Stream::Stdout && line.contains("'bat'")),
+            "{printed:?}"
+        );
+        assert!(
+            printed.iter().all(|(stream, _)| *stream == Stream::Stdout),
+            "{printed:?}"
+        );
+
+        let failed = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::Generic("broken".to_string())),
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
+        assert_eq!(printed, vec![(Stream::Stderr, "broken".to_string())]);
+    }
+
     fn make_operation_info(package_name: &str) -> selfie::package::event::OperationInfo {
         use selfie::package::event::OperationContext;
         use selfie::package::event::OperationType;
@@ -727,6 +1109,7 @@ mod tests {
                 step: 1,
                 total_steps: 2,
                 percent_complete: 0.5,
+                kind: selfie::package::event::StepKind::Local,
                 message: "Loading package file".to_string(),
             },
             PackageEvent::Completed {
@@ -803,6 +1186,7 @@ mod tests {
                 step: 1,
                 total_steps: 3,
                 percent_complete: 1.0 / 3.0,
+                kind: selfie::package::event::StepKind::Local,
                 message: "Step 1".to_string(),
             },
             PackageEvent::Progress {
@@ -810,6 +1194,7 @@ mod tests {
                 step: 2,
                 total_steps: 3,
                 percent_complete: 2.0 / 3.0,
+                kind: selfie::package::event::StepKind::Local,
                 message: "Step 2".to_string(),
             },
             PackageEvent::Completed {

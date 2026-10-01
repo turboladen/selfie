@@ -110,10 +110,11 @@ pub(crate) async fn handle_remove(
     };
 
     if !skip_confirm {
-        let confirm_removal = Confirm::with_theme(&SimpleTheme)
-            .with_prompt(prompt)
-            .default(default_answer)
-            .interact();
+        let confirm_removal = display.prompt(
+            Confirm::with_theme(&SimpleTheme)
+                .with_prompt(prompt)
+                .default(default_answer),
+        );
 
         match confirm_removal {
             Ok(true) => {}
@@ -147,7 +148,6 @@ pub(crate) async fn handle_remove(
             PackageEvent::SpecSkipped { error, .. } => {
                 already_reported.contains(error.package_path())
             }
-            PackageEvent::Progress { .. } => true,
             PackageEvent::Completed { result, .. } => {
                 if let OperationResult::Success(_) = result {
                     display.print_success(format!(

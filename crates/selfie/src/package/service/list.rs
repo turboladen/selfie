@@ -14,7 +14,7 @@ use crate::{
     package::{
         event::{
             EventSender, OperationResult, OperationSuccess, PackageListData, PackageListItem,
-            RefusedSpec,
+            RefusedSpec, StepEnding,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -99,8 +99,32 @@ where
         .collect();
     sender.send_package_list_ready(ready_items).await;
 
-    // Step 2: Check package status in parallel
-    progress.next(sender, "Checking package status").await;
+    // Step 2: Check package status in parallel. Waiting when some package's
+    // check command will run.
+    let with_checks = packages_to_process
+        .iter()
+        .filter(|package| {
+            package
+                .environments()
+                .get(config.environment())
+                .is_some_and(|env| env.check().is_some())
+        })
+        .count();
+    let step = if with_checks > 0 {
+        let step = progress
+            .next_waiting(
+                sender,
+                format!(
+                    "Checking {with_checks} {}",
+                    crate::pluralize(with_checks, "package", "packages")
+                ),
+            )
+            .await;
+        Some(step)
+    } else {
+        progress.next(sender, "Checking package status").await;
+        None
+    };
 
     // Limit concurrent subprocess spawns to avoid exhausting file descriptors.
     let semaphore = Arc::new(Semaphore::new(config.max_concurrency().get()));
@@ -204,6 +228,17 @@ where
                     .await;
             }
         }
+    }
+
+    // Every check has answered, each in its own item; one that errored is that
+    // item's answer, not a failure of the step.
+    if let Some(step) = step {
+        let ending = if token.is_cancelled() {
+            StepEnding::Cancelled
+        } else {
+            StepEnding::Succeeded
+        };
+        sender.send_step_ended(step, ending).await;
     }
 
     // Sort by original index to maintain alphabetical order for final summary

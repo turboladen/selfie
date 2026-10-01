@@ -489,11 +489,14 @@ install: |
 **Your commands' output is shown to whoever is running selfie. Write them as if everything they
 print will be read.**
 
-- **`install` output is streamed live**, line by line, as the command runs — both stdout and stderr,
-  whether the command succeeds or fails. When selfie is driven through its MCP server rather than
-  the terminal, those same lines are included in the structured response the AI assistant receives.
+- **`install` output is shown as the command runs**, on stderr, both its stdout and its stderr. On a
+  terminal the latest line appears beside the spinner; with `--verbose` every line is printed. When
+  the command fails, its last output is printed with the error whatever the verbosity. When selfie
+  is driven through its MCP server rather than the terminal, every line is included in the
+  structured response the AI assistant receives.
 - **`check` output is displayed** when you run `selfie package check`, so that a check reporting
-  "not installed" can tell you why.
+  "not installed" can tell you why: a passing check's output on stdout with its result, a failing
+  check's error output on stderr. `--verbose` adds the full result card.
 
 This is deliberate: watching an install run and reading a check's explanation are the point. But it
 means **a command that prints a credential prints it to the terminal and to any connected MCP

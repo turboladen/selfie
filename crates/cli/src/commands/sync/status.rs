@@ -102,6 +102,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
         }
 
         PackageEvent::SyncDriftSummary {
+            operation_info,
             drifted_targets,
             total_deployed,
             refused_count,
@@ -124,20 +125,31 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                     "{refused_count} refusal(s) left dotfiles unchecked -- see the warnings above"
                 ));
             }
+            // The drift line is part of this command's answer, so it is on
+            // stdout, marked by what it found.
             if drifted_targets.is_empty() {
                 let (line, clean) =
                     no_drift_line(*total_deployed, *drift_outcome, *warned, *unverified);
-                if clean {
-                    display.print_success(line);
+                let outcome = if clean {
+                    Outcome::Clean
                 } else {
-                    display.print_warning(line);
-                }
+                    Outcome::Found
+                };
+                // Drift depends on the environment, so the line names it.
+                display.print_result(
+                    outcome,
+                    format!("{line} in environment '{}'", operation_info.environment),
+                );
             } else {
                 let count = drifted_targets.len();
-                display.print_warning(format!(
-                    "Dotfile drift: {count} drifted out of {}",
-                    deployed_phrase(*total_deployed, *unverified)
-                ));
+                display.print_result(
+                    Outcome::Found,
+                    format!(
+                        "Dotfile drift in environment '{}': {count} drifted out of {}",
+                        operation_info.environment,
+                        deployed_phrase(*total_deployed, *unverified)
+                    ),
+                );
                 // Show drifted file paths (shortened)
                 for target in drifted_targets {
                     let short = shorten_path(target);
@@ -173,9 +185,6 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             result: OperationResult::Success(OperationSuccess::Generic(_)),
             ..
         } => true,
-
-        // Suppress started/progress for status (it's a fast operation)
-        PackageEvent::Started { .. } | PackageEvent::Progress { .. } => true,
 
         _ => false,
     }
@@ -385,13 +394,14 @@ mod tests {
         assert!(handle_status_event(&event, &display, false));
     }
 
+    // The header is the shared handler's, shown only under `--verbose`.
     #[test]
-    fn suppresses_started_and_progress() {
+    fn leaves_started_to_the_shared_handler() {
         let display = DisplayManager::new(false);
         let started = PackageEvent::Started {
             operation_info: make_operation_info(),
         };
-        assert!(handle_status_event(&started, &display, false));
+        assert!(!handle_status_event(&started, &display, false));
     }
 
     #[test]

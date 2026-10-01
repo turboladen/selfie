@@ -174,18 +174,17 @@ fn confirm_commits(
     let mut confirmed = Vec::new();
     for (i, commit) in pending.into_iter().enumerate() {
         let num = i + 1;
-        let edited_message: String =
-            match dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
+        let edited_message: String = match display.prompt(crate::display_manager::TextLine(
+            dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
                 .with_prompt(format!("Commit message ({num}/{total})"))
-                .with_initial_text(&commit.message)
-                .interact_text()
-            {
-                Ok(msg) => msg,
-                Err(_) => {
-                    display.print_warning("Cancelled");
-                    return None;
-                }
-            };
+                .with_initial_text(&commit.message),
+        )) {
+            Ok(msg) => msg,
+            Err(_) => {
+                display.print_warning("Cancelled");
+                return None;
+            }
+        };
 
         confirmed.push(ConfirmedCommit {
             files: commit.files,
@@ -250,9 +249,6 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager, use_colors:
             display.print_info("Nothing to push");
             true
         }
-
-        // Suppress started/progress — we show our own commit-by-commit output
-        PackageEvent::Started { .. } | PackageEvent::Progress { .. } => true,
 
         _ => false,
     }
@@ -325,13 +321,14 @@ mod tests {
         assert!(handle_push_event(&event, &display, false));
     }
 
+    // The header is the shared handler's, shown only under `--verbose`.
     #[test]
-    fn suppresses_started_and_progress() {
+    fn leaves_started_to_the_shared_handler() {
         let display = DisplayManager::new(false);
         let started = PackageEvent::Started {
             operation_info: make_operation_info(),
         };
-        assert!(handle_push_event(&started, &display, false));
+        assert!(!handle_push_event(&started, &display, false));
     }
 
     // --- show_pending_commits tests ---

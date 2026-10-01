@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::package::event::EventStream;
+use crate::package::event::{DotfileSource, EventStream};
 
 /// The user's chosen resolution for a dotfile conflict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +33,11 @@ pub enum ConflictDetail<'a> {
     ///
     /// Empty when the two sides decode to the same text, which two different
     /// binary files can.
-    Diff { source: &'a str, diff: &'a str },
+    Diff {
+        /// Where the content comes from.
+        source: &'a DotfileSource,
+        diff: &'a str,
+    },
     /// The two candidate contents, plus a non-revealing structural summary.
     ///
     /// Borrowed rather than owned. This does not stop a resolver copying the
@@ -42,6 +46,9 @@ pub enum ConflictDetail<'a> {
     /// `'static` boundary the blocking resolver call requires, so the only copy
     /// that exists is one an adapter took deliberately.
     Secret {
+        /// Where the content comes from: the command, or the template and its
+        /// var names.
+        source: &'a DotfileSource,
         /// The structural summary, which reveals neither value.
         summary: &'a str,
         /// The resolved content an Accept would write.

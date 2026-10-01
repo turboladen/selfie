@@ -111,6 +111,17 @@ pub(crate) fn report_config_notices(notices: &[ConfigNotice], display: &DisplayM
     }
 }
 
+/// Print every notice as part of `config validate`'s answer (stdout), where the
+/// notices are what the command was asked to find.
+pub(crate) fn print_config_notices(notices: &[ConfigNotice], display: &DisplayManager) {
+    for notice in notices {
+        display.print_result(
+            selfie::package::event::Outcome::Found,
+            format!("{} {}", notice.message, notice.suggestion),
+        );
+    }
+}
+
 /// The `cli:` section, parsed from the text the library already read.
 ///
 /// Returns the defaults and a notice when the section is present but is not a

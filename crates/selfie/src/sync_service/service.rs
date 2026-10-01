@@ -18,7 +18,8 @@ use crate::{
     },
     package::event::{
         EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
-        OperationSuccess, Outcome, PackageEvent, StepCount, metadata::OperationType,
+        OperationSuccess, Outcome, PackageEvent, StepCount, StepEnding, StepKind,
+        metadata::OperationType,
     },
     privilege::{Privilege, SudoPolicy, WriteScope},
 };
@@ -400,7 +401,12 @@ where
                 let ConfirmedCommit { files, message } = commit;
 
                 sender
-                    .send_progress(i + 1, total_steps, format!("Committing: {message}"))
+                    .send_progress(
+                        i + 1,
+                        total_steps,
+                        StepKind::Local,
+                        format!("Committing: {message}"),
+                    )
                     .await;
 
                 // Stage files — move `files` directly to avoid cloning Vec<PathBuf>
@@ -461,17 +467,22 @@ where
             .unwrap_or(commits_created);
 
             // Push all commits
-            sender
-                .send_progress(total_steps, total_steps, "Pushing to remote")
+            let step = sender
+                .send_waiting_progress(
+                    total_steps,
+                    total_steps,
+                    format!("Pushing to {}", remote_label(&repo_info)),
+                )
                 .await;
 
-            if let Err(e) = blocking_git("push", {
+            let pushed = blocking_git("push", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.push(&root)
             })
-            .await
-            {
+            .await;
+            sender.send_step_ended(step, git_ending(&pushed)).await;
+            if let Err(e) = pushed {
                 sender
                     .send_completed(OperationResult::Failure(OperationFailure::Generic(
                         format!("Push failed: {e}. Your commits are preserved locally — run 'selfie sync pull' first, then try again."),
@@ -567,14 +578,17 @@ where
             }
 
             // Step 3: Fetch
-            sender.send_progress(1, 3, "Fetching from remote").await;
-            if let Err(e) = blocking_git("fetch", {
+            let step = sender
+                .send_waiting_progress(1, 3, format!("Fetching from {}", remote_label(&repo_info)))
+                .await;
+            let fetched = blocking_git("fetch", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.fetch(&root)
             })
-            .await
-            {
+            .await;
+            sender.send_step_ended(step, git_ending(&fetched)).await;
+            if let Err(e) = fetched {
                 sender
                     .send_completed(OperationResult::Failure(OperationFailure::Generic(
                         format!("Fetch failed: {e}"),
@@ -584,7 +598,10 @@ where
             }
 
             // Step 4: Fast-forward merge
-            sender.send_progress(2, 3, "Merging remote changes").await;
+            // A local `git merge --ff-only`: nothing outside selfie is waited on.
+            sender
+                .send_progress(2, 3, StepKind::Local, "Merging remote changes")
+                .await;
             match blocking_git("fast_forward", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
@@ -1288,6 +1305,23 @@ fn extract_package_name_from_message(message: &str) -> String {
         return message[start + 1..end].to_string();
     }
     message.to_string()
+}
+
+// How a waiting step that ran a git network call ended. Sync is not
+// cancellable, so a step either finished or failed.
+fn git_ending<T, E>(result: &Result<T, E>) -> StepEnding {
+    match result {
+        Ok(_) => StepEnding::Succeeded,
+        Err(_) => StepEnding::Failed,
+    }
+}
+
+// The remote a fetch or push talks to, named for its waiting step.
+fn remote_label(repo_info: &crate::git::sync_provider::RepoInfo) -> String {
+    match &repo_info.remote_name {
+        Some(name) => format!("remote '{name}'"),
+        None => "the remote".to_string(),
+    }
 }
 
 // ─── Drift summary collection ────────────────────────────────────────────────
@@ -3178,6 +3212,72 @@ mod credential_egress_tests {
             rendered.contains("could not read Password"),
             "git's diagnosis must survive redaction, got: {rendered}"
         );
+    }
+
+    // Each progress step's kind, "waiting" or "local", with its message.
+    fn steps(events: &[PackageEvent]) -> Vec<(&'static str, String)> {
+        use crate::package::event::StepKind;
+
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::Progress { kind, message, .. } => {
+                    let kind = match kind {
+                        StepKind::Waiting(_) => "waiting",
+                        StepKind::Local => "local",
+                    };
+                    Some((kind, message.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // How each waiting step ended, in order.
+    fn endings(events: &[PackageEvent]) -> Vec<StepEnding> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::StepEnded { ending, .. } => Some(*ending),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // A fetch talks to the remote and waits on it; the fast-forward that follows
+    // is a local git merge.
+    #[tokio::test]
+    async fn a_pull_waits_on_the_fetch_and_not_the_merge() {
+        // The push fixture fails only a push, so a pull reaches both steps.
+        let events: Vec<PackageEvent> = service(FailAt::Push).pull().await.collect().await;
+
+        assert_eq!(
+            steps(&events),
+            vec![
+                ("waiting", "Fetching from remote 'origin'".to_string()),
+                ("local", "Merging remote changes".to_string()),
+            ],
+            "{events:?}"
+        );
+        assert_eq!(endings(&events), vec![StepEnding::Succeeded], "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_push_waits_on_the_push_and_names_the_remote() {
+        // The push step is sent before the push is tried, so a failing push
+        // still shows it, and ends it as failed.
+        let events: Vec<PackageEvent> = service(FailAt::Push)
+            .execute_push(vec![])
+            .await
+            .collect()
+            .await;
+
+        assert_eq!(
+            steps(&events).last(),
+            Some(&("waiting", "Pushing to remote 'origin'".to_string())),
+            "{events:?}"
+        );
+        assert_eq!(endings(&events), vec![StepEnding::Failed], "{events:?}");
     }
 
     // Committing is disabled, so a push that would create commits is refused before

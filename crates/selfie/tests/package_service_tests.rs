@@ -15,7 +15,7 @@
 use futures::StreamExt;
 use tempfile::TempDir;
 use test_common::{
-    assert_failed_operation, assert_successful_operation, collect_events,
+    assert_failed_answer, assert_failed_operation, assert_successful_operation, collect_events,
     create_circular_dependency, create_dependency_chain, create_service_install_test_package_file,
     create_service_install_test_package_file_with_note, create_service_invalid_package_file,
     create_service_test_package_file, create_service_test_package_file_with_deps,
@@ -1535,7 +1535,7 @@ mod validate_all_covers_standalone_specs {
 
         let events = collect_events(dirs.service().validate_all().await).await;
 
-        assert_failed_operation(&events);
+        assert_failed_answer(&events);
         assert_eq!(
             results(&events),
             [(
@@ -1587,7 +1587,7 @@ mod validate_all_covers_standalone_specs {
 
         let events = collect_events(dirs.service().validate_all().await).await;
 
-        assert_failed_operation(&events);
+        assert_failed_answer(&events);
         assert!(results(&events).is_empty(), "{:?}", results(&events));
         assert!(
             events.iter().any(|event| matches!(
@@ -1613,7 +1613,7 @@ mod validate_all_covers_standalone_specs {
 
         let events = collect_events(dirs.service().validate_all().await).await;
 
-        assert_failed_operation(&events);
+        assert_failed_answer(&events);
         assert_eq!(
             results(&events),
             [(
@@ -1641,7 +1641,7 @@ mod validate_all_covers_standalone_specs {
             return;
         }
 
-        assert_failed_operation(&events);
+        assert_failed_answer(&events);
         assert!(
             events.iter().any(|event| matches!(
                 event,
@@ -1752,4 +1752,34 @@ mod validate_all_covers_standalone_specs {
             [("gemrc".to_string(), status_name(&ValidationStatus::Valid))]
         );
     }
+}
+
+// A failed install command's warning names the command that failed, since the
+// warning carries nothing else to locate it by.
+#[tokio::test]
+async fn a_failed_command_warning_names_the_command() {
+    let temp_dir = TempDir::new().unwrap();
+    std::fs::write(
+        temp_dir.path().join("broken.yaml"),
+        "name: broken\nenvironments:\n  test:\n    install: \"exit 3\"\n    check: \"false\"\n",
+    )
+    .unwrap();
+    let service = create_service_test_service(&temp_dir);
+
+    let events = collect_events(service.install("broken", InstallOptions::default()).await).await;
+
+    let warnings: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            PackageEvent::Warning { message, .. } if message.contains("failed with exit code") => {
+                Some(message)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        warnings,
+        vec!["The `install` command failed with exit code 3"],
+        "{events:#?}"
+    );
 }

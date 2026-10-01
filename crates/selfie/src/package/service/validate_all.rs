@@ -129,31 +129,18 @@ where
         sender.send_validation_result(validation_result).await;
     }
 
-    let total_errors = error_count + unparsable + uncollected;
-
-    if total_errors > 0 {
-        OperationResult::Failure(
-            format!(
-                "Validation failed: {} package(s) with errors, {} with warnings, {} unparsable, {} ambiguous or unlistable (completed {}/{} steps)",
-                error_count,
-                warning_count,
-                unparsable,
-                uncollected,
-                progress.current_step(),
-                progress.total_steps()
-            )
-            .into(),
-        )
-    } else {
-        OperationResult::Success(OperationSuccess::specs_validated(
-            valid_packages.len(),
-            0,
-            warning_count,
-            collection_warnings,
-            environment.to_string(),
-            (progress.current_step(), progress.total_steps()).into(),
-        ))
-    }
+    // A run with errors is still a validation that answered: its counts are the
+    // answer, and its outcome, Failed, is what makes the run fail.
+    OperationResult::Success(OperationSuccess::specs_validated(
+        valid_packages.len(),
+        error_count,
+        unparsable,
+        uncollected,
+        warning_count,
+        collection_warnings,
+        environment.to_string(),
+        (progress.current_step(), progress.total_steps()).into(),
+    ))
 }
 
 /// Whether `--all` validates `package` in `environment`.

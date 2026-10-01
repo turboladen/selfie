@@ -55,13 +55,15 @@ package_directory: "/test/packages"
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
-    // Validate's own row, not the refusal every other command gives.
+    // Validate's own row, not the refusal every other command gives. The rows
+    // and the verdict are this command's answer, so they are on stdout.
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("Validation failed."))
-        .stderr(predicates::str::contains(
+        .stdout(predicates::str::contains("Validation failed."))
+        .stdout(predicates::str::contains(
             "The `environment` setting is missing",
-        ));
+        ))
+        .stderr(predicates::str::contains("Validation failed.").not());
 }
 
 // A flag does not fill the gap for this command, which reports the file. Nor
@@ -76,8 +78,8 @@ fn a_missing_environment_is_reported_as_a_row() {
     cmd.args(["--environment", "flag-env", "config", "validate"]);
 
     cmd.assert()
-        .stderr(predicates::str::contains("Validation failed."))
-        .stderr(predicates::str::contains(
+        .stdout(predicates::str::contains("Validation failed."))
+        .stdout(predicates::str::contains(
             "The `environment` setting is missing",
         ))
         .stderr(predicates::str::contains("does not set every required setting").not());
@@ -97,7 +99,7 @@ package_directory: "relative/path"
 
     cmd.assert()
         .failure()
-        .stderr(predicates::str::contains("relative and cannot be resolved"));
+        .stdout(predicates::str::contains("relative and cannot be resolved"));
 }
 
 // Every command that reads the package directory fails without it, so
@@ -119,8 +121,8 @@ fn test_validate_config_with_nonexistent_directory_shows_error() {
     // An error is a failure, which exits 1.
     cmd.assert()
         .code(1)
-        .stderr(predicates::str::contains("Validation failed."))
-        .stderr(predicates::str::contains("does not exist"));
+        .stdout(predicates::str::contains("Validation failed."))
+        .stdout(predicates::str::contains("does not exist"));
 }
 
 // A flag must not change what this command reports, including the two `cli:`

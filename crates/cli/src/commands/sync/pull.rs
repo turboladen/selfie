@@ -75,9 +75,6 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
             true
         }
 
-        // Suppress started — but show progress (fetch/merge steps)
-        PackageEvent::Started { .. } => true,
-
         _ => false,
     }
 }
@@ -140,13 +137,14 @@ mod tests {
         assert!(handle_pull_event(&event, &display, false));
     }
 
+    // The header is the shared handler's, shown only under `--verbose`.
     #[test]
-    fn suppresses_started() {
+    fn leaves_started_to_the_shared_handler() {
         let display = DisplayManager::new(false);
         let started = PackageEvent::Started {
             operation_info: make_operation_info(),
         };
-        assert!(handle_pull_event(&started, &display, false));
+        assert!(!handle_pull_event(&started, &display, false));
     }
 
     #[test]

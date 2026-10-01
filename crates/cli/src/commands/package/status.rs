@@ -16,8 +16,6 @@ pub(crate) async fn handle_status(
 ) -> i32 {
     tracing::debug!("Getting runtime status for: {package_name}");
 
-    display.print_progress(format!("Checking status of {package_name}..."));
-
     let event_stream = service.status(package_name).await;
 
     let processor = EventProcessor::new(display.clone());
@@ -30,7 +28,6 @@ pub(crate) async fn handle_status(
                 display.println(format!("\n{table}"));
                 true
             }
-            PackageEvent::Progress { .. } => true,
             PackageEvent::Completed {
                 result: OperationResult::Success(_),
                 ..

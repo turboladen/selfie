@@ -85,7 +85,6 @@ pub(crate) async fn handle_create(
                 created_file_path = Some(file_path.clone());
                 false // Let default handler print success message
             }
-            PackageEvent::Progress { .. } if !config.verbose() => true, // Suppress in non-verbose
             _ => false, // Default handling for everything else
         })
         .await;
@@ -97,10 +96,11 @@ pub(crate) async fn handle_create(
     // Ask if user wants to edit the file (only in interactive mode)
     if interactive {
         if let Some(ref file_path) = created_file_path {
-            let edit_now = Confirm::with_theme(&SimpleTheme)
-                .with_prompt("Would you like to open the package file for editing now?")
-                .default(true)
-                .interact();
+            let edit_now = display.prompt(
+                Confirm::with_theme(&SimpleTheme)
+                    .with_prompt("Would you like to open the package file for editing now?")
+                    .default(true),
+            );
 
             match edit_now {
                 Ok(true) => {
@@ -165,15 +165,16 @@ fn get_valid_package_name(
                 if let Ok(existing_package) = repo.get_package(&current_name) {
                     display.print_info(format!("Package '{current_name}' already exists."));
 
-                    let action = Select::with_theme(&SimpleTheme)
-                        .with_prompt("What would you like to do?")
-                        .items([
-                            "Edit the existing package",
-                            "Create a new package with a different name",
-                            "Cancel",
-                        ])
-                        .default(0)
-                        .interact();
+                    let action = display.prompt(
+                        Select::with_theme(&SimpleTheme)
+                            .with_prompt("What would you like to do?")
+                            .items([
+                                "Edit the existing package",
+                                "Create a new package with a different name",
+                                "Cancel",
+                            ])
+                            .default(0),
+                    );
 
                     match action {
                         Ok(0) => {
@@ -203,12 +204,10 @@ fn get_valid_package_name(
                     return Err(Exit::Failed.code());
                 }
 
-                let new_name: String = if let Ok(name) = Input::with_theme(&SimpleTheme)
-                    .with_prompt(format!(
+                let new_name: String = if let Ok(name) =
+                    display.prompt(Input::with_theme(&SimpleTheme).with_prompt(format!(
                         "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
-                    ))
-                    .interact()
-                {
+                    ))) {
                     name
                 } else {
                     display.print_error("Failed to read package name.");
@@ -278,10 +277,12 @@ fn create_package_interactive(
 }
 
 fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
-    Input::with_theme(&SimpleTheme)
-        .with_prompt("Package name")
-        .default(default_name.to_string())
-        .interact()
+    display
+        .prompt(
+            Input::with_theme(&SimpleTheme)
+                .with_prompt("Package name")
+                .default(default_name.to_string()),
+        )
         .map_err(|_| {
             display.print_error("Failed to read package name.");
             Exit::Failed.code()
@@ -289,10 +290,12 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
 }
 
 fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i32> {
-    let homepage: String = Input::with_theme(&SimpleTheme)
-        .with_prompt("Homepage URL (optional)")
-        .allow_empty(true)
-        .interact()
+    let homepage: String = display
+        .prompt(
+            Input::with_theme(&SimpleTheme)
+                .with_prompt("Homepage URL (optional)")
+                .allow_empty(true),
+        )
         .map_err(|_| {
             display.print_error("Failed to read homepage.");
             Exit::Failed.code()
@@ -306,10 +309,12 @@ fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i
 }
 
 fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>, i32> {
-    let description: String = Input::with_theme(&SimpleTheme)
-        .with_prompt("Description (optional)")
-        .allow_empty(true)
-        .interact()
+    let description: String = display
+        .prompt(
+            Input::with_theme(&SimpleTheme)
+                .with_prompt("Description (optional)")
+                .allow_empty(true),
+        )
         .map_err(|_| {
             display.print_error("Failed to read description.");
             Exit::Failed.code()
@@ -360,10 +365,12 @@ fn prompt_environment_name(
         "production".to_string()
     };
 
-    Input::with_theme(&SimpleTheme)
-        .with_prompt("Environment name")
-        .default(default_env)
-        .interact()
+    display
+        .prompt(
+            Input::with_theme(&SimpleTheme)
+                .with_prompt("Environment name")
+                .default(default_env),
+        )
         .map_err(|_| {
             display.print_error("Failed to read environment name.");
             Exit::Failed.code()
@@ -372,9 +379,8 @@ fn prompt_environment_name(
 
 fn prompt_install_command(display: &DisplayManager) -> Result<String, i32> {
     loop {
-        let cmd: String = Input::with_theme(&SimpleTheme)
-            .with_prompt("Install command (required)")
-            .interact()
+        let cmd: String = display
+            .prompt(Input::with_theme(&SimpleTheme).with_prompt("Install command (required)"))
             .map_err(|_| {
                 display.print_error("Failed to read install command.");
                 Exit::Failed.code()
@@ -393,11 +399,13 @@ fn prompt_check_command(
     display: &DisplayManager,
 ) -> Result<Option<String>, i32> {
     let default_check = format!("command -v {package_name}");
-    let check_cmd: String = Input::with_theme(&SimpleTheme)
-        .with_prompt("Check command (optional)")
-        .default(default_check)
-        .allow_empty(true)
-        .interact()
+    let check_cmd: String = display
+        .prompt(
+            Input::with_theme(&SimpleTheme)
+                .with_prompt("Check command (optional)")
+                .default(default_check)
+                .allow_empty(true),
+        )
         .map_err(|_| {
             display.print_error("Failed to read check command.");
             Exit::Failed.code()
@@ -456,10 +464,12 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         return Ok(Vec::new());
     }
 
-    let selected = MultiSelect::with_theme(&SimpleTheme)
-        .with_prompt("Dependencies (select with space, confirm with enter)")
-        .items(&available_packages)
-        .interact()
+    let selected = display
+        .prompt(
+            MultiSelect::with_theme(&SimpleTheme)
+                .with_prompt("Dependencies (select with space, confirm with enter)")
+                .items(&available_packages),
+        )
         .map_err(|_| {
             display.print_error("Failed to read dependencies.");
             Exit::Failed.code()
@@ -472,10 +482,12 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
 }
 
 fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, i32> {
-    Confirm::with_theme(&SimpleTheme)
-        .with_prompt("Add another environment?")
-        .default(false)
-        .interact()
+    display
+        .prompt(
+            Confirm::with_theme(&SimpleTheme)
+                .with_prompt("Add another environment?")
+                .default(false),
+        )
         .map_err(|_| {
             display.print_error("Failed to read user input.");
             Exit::Failed.code()
@@ -483,10 +495,12 @@ fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, i32>
 }
 
 fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
-    Input::with_theme(&SimpleTheme)
-        .with_prompt("File name (without .yml extension)")
-        .default(default_name.to_string())
-        .interact()
+    display
+        .prompt(
+            Input::with_theme(&SimpleTheme)
+                .with_prompt("File name (without .yml extension)")
+                .default(default_name.to_string()),
+        )
         .map_err(|_| {
             display.print_error("Failed to read file name.");
             Exit::Failed.code()

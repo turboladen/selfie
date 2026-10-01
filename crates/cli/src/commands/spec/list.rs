@@ -18,7 +18,7 @@ pub(crate) async fn handle_list(
 ) -> i32 {
     tracing::debug!("Running spec list command (show_all={show_all})");
 
-    display.print_progress("Loading specs...");
+    display.print_status("Loading specs...");
 
     let event_stream = service.list(show_all).await;
 
@@ -43,9 +43,6 @@ pub(super) fn handle_spec_list_event(
         }
         PackageEvent::SpecListItemCompleted { .. } => {
             true // Consumed — we display everything in the summary
-        }
-        PackageEvent::Progress { .. } => {
-            true // Suppress progress for this fast operation
         }
         _ => false,
     }

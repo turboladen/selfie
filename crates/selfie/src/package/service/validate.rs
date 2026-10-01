@@ -156,6 +156,7 @@ where
                 package_name.to_string(),
                 config.environment().to_string(),
                 ValidationStatus::Valid,
+                0,
                 None,
                 (progress.current_step(), progress.total_steps()).into(),
             ))
@@ -166,22 +167,22 @@ where
                 package_name.to_string(),
                 config.environment().to_string(),
                 ValidationStatus::HasWarnings,
+                0,
                 Some(warning_count),
                 (progress.current_step(), progress.total_steps()).into(),
             ))
         }
+        // A spec with errors is still a validation that answered: its outcome,
+        // Failed, is what makes the run fail.
         ValidationStatus::HasErrors => {
-            let error_count = issues.errors().len();
-            let warning_count = issues.warnings().len();
-            let error_msg = format!(
-                "Package '{}' validation failed with {} error(s) and {} warning(s) (completed {}/{} steps)",
-                package_name,
-                error_count,
-                warning_count,
-                progress.current_step(),
-                progress.total_steps()
-            );
-            OperationResult::Failure(error_msg.into())
+            OperationResult::Success(OperationSuccess::package_validated(
+                package_name.to_string(),
+                config.environment().to_string(),
+                ValidationStatus::HasErrors,
+                issues.errors().len(),
+                Some(issues.warnings().len()),
+                (progress.current_step(), progress.total_steps()).into(),
+            ))
         }
     }
 }
