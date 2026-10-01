@@ -496,7 +496,7 @@ fn test_package_list_environment_mismatch_shows_stats() {
         .stdout(predicate::str::contains("Suggestion").not());
 }
 
-// The row's first column is the file's own name, so a reason that named the file
+// The row's Package column is the file's own name, so a reason that named the file
 // again would print it twice across one line. The reason has no path in it, and
 // this is where that shows.
 #[test]
@@ -643,5 +643,108 @@ mod a_spec_selfie_will_not_read {
         let text = combined(&output);
         assert_eq!(output.status.code(), Some(1), "{text}");
         assert!(text.contains("_environments"), "{text}");
+    }
+}
+
+// The listing is a table: a package's status and, under `--all`, its
+// environments are cells of their own, and an unreadable or refused spec is a
+// row whose Status says why.
+mod table {
+    use super::*;
+
+    fn listing(args: &[&str]) -> String {
+        let temp_dir = setup_default_test_config();
+        let packages = temp_dir.path().join("packages");
+        fs::write(
+            packages.join("bat.yaml"),
+            "name: bat\nenvironments:\n  test-env:\n    install: \"true\"\n    check: \"true\"\n  other-env:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        fs::write(packages.join("broken.yaml"), "name: [unterminated\n").unwrap();
+        fs::write(packages.join("noenv.yaml"), "name: noenv\n").unwrap();
+        let output = sandboxed_command(&temp_dir).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        // Paths printed in a row are relative to the package directory.
+        assert!(
+            !stdout
+                .lines()
+                .any(|l| l.contains("┆") && l.contains(temp_dir.path().to_str().unwrap())),
+            "{stdout}"
+        );
+        stdout
+    }
+
+    fn row<'a>(stdout: &'a str, name: &str) -> Vec<&'a str> {
+        let line = stdout
+            .lines()
+            .find(|l| l.contains(&format!(" {name} ")) && l.contains('┆'))
+            .unwrap_or_else(|| panic!("no row for {name}:\n{stdout}"));
+        line.trim_matches(|c| c == '│' || c == ' ')
+            .split('┆')
+            .map(str::trim)
+            .collect()
+    }
+
+    #[test]
+    fn all_puts_status_and_environments_in_their_own_cells() {
+        let stdout = listing(&["package", "list", "--all"]);
+
+        let bat = row(&stdout, "bat");
+        assert_eq!(bat[1], "bat", "{bat:?}");
+        assert_eq!(bat[2], "Installed", "{bat:?}");
+        assert!(
+            bat[3].contains("*test-env") && bat[3].contains("other-env"),
+            "{bat:?}"
+        );
+        assert!(!stdout.contains("Installed ("), "{stdout}");
+    }
+
+    // Control: without `--all` there is no Environments column.
+    #[test]
+    fn without_all_there_is_no_environments_column() {
+        let stdout = listing(&["package", "list"]);
+
+        assert!(!stdout.contains("Environments"), "{stdout}");
+        assert_eq!(row(&stdout, "bat").len(), 3, "{stdout}");
+    }
+
+    #[test]
+    fn an_unreadable_or_refused_spec_is_a_row_saying_why() {
+        let all = listing(&["package", "list", "--all"]);
+        let broken = row(&all, "broken");
+        assert!(broken[2].starts_with("unparsable: "), "{broken:?}");
+        assert_eq!(broken[3], "-", "{broken:?}");
+
+        // A spec with no environment is refused for this one.
+        let stdout = listing(&["package", "list"]);
+        let noenv = row(&stdout, "noenv");
+        assert!(
+            noenv[2].starts_with("refused (noenv.yaml): ")
+                && noenv[2].contains("At least one environment"),
+            "{noenv:?}"
+        );
+    }
+
+    // The directory a refused row's path is relative to is named before the
+    // table, so output cut short still says where the file is.
+    #[test]
+    fn the_package_directory_is_named_before_the_table() {
+        let stdout = listing(&["package", "list"]);
+
+        let directory = stdout
+            .lines()
+            .position(|l| l.starts_with("Packages: "))
+            .unwrap_or_else(|| panic!("{stdout}"));
+        let first_row = stdout.lines().position(|l| l.contains('┆')).unwrap();
+        assert!(directory < first_row, "{stdout}");
+    }
+
+    // The counts are the summary line's, printed once.
+    #[test]
+    fn the_counts_are_printed_once() {
+        let stdout = listing(&["package", "list"]);
+
+        assert_eq!(stdout.matches("refused package(s)").count(), 1, "{stdout}");
     }
 }

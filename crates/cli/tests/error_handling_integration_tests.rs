@@ -179,7 +179,9 @@ name: "incomplete-package"
     // The listing says so rather than leaving it out, and still succeeds.
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("incomplete-package  refused"))
+        .stdout(predicate::str::contains(
+            "incomplete-package ┆ refused (incomplete-package.yaml)",
+        ))
         .stdout(predicate::str::contains(
             "At least one environment must be defined",
         ));
