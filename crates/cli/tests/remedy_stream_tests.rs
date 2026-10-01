@@ -187,3 +187,79 @@ fn sync_push_explains_a_validation_failure_on_stderr() {
         assert!(out.stderr.contains(needle), "{needle}\n{}", out.stderr);
     }
 }
+
+// A validation issue's suggestion is a column of the issues table, shown where
+// some issue has one: on stdout for `spec validate`, whose table is its answer.
+#[test]
+fn spec_validate_shows_a_suggestion_in_its_table() {
+    let temp_dir = setup_default_test_config();
+    write_spec(
+        &temp_dir,
+        "other",
+        "name: other\nenvironments:\n  else:\n    install: \"true\"\n",
+    );
+
+    let out = run_sandboxed(&temp_dir, &["--no-color", "spec", "validate", "other"]);
+
+    assert_eq!(out.code, Some(3), "{}", out.stderr);
+    let header = out
+        .stdout
+        .lines()
+        .find(|l| l.contains("Level"))
+        .unwrap_or_else(|| panic!("no table:\n{}", out.stdout));
+    assert!(header.contains("Suggestion"), "{}", out.stdout);
+    assert!(
+        out.stdout
+            .contains("Add an environment section for 'test-env'"),
+        "{}",
+        out.stdout
+    );
+}
+
+// Control: a table with no suggestion has no Suggestion column.
+#[test]
+fn spec_validate_without_a_suggestion_has_no_column() {
+    let temp_dir = setup_default_test_config();
+    write_spec(
+        &temp_dir,
+        "typo",
+        &format!(
+            "name: typo\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    audt: \"true\"\n"
+        ),
+    );
+
+    let out = run_sandboxed(&temp_dir, &["--no-color", "spec", "validate", "typo"]);
+
+    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert!(out.stdout.contains("audt"), "{}", out.stdout);
+    assert!(!out.stdout.contains("Suggestion"), "{}", out.stdout);
+}
+
+// A push refused for a failing spec shows each issue's suggestion too, in the
+// table it prints on stderr.
+#[test]
+fn sync_push_shows_a_suggestion_in_its_table() {
+    let temp_dir = setup_default_test_config();
+    write_spec(
+        &temp_dir,
+        "bat",
+        &format!("name: bat\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    );
+    package_repo_with_remote(&temp_dir);
+    write_spec(
+        &temp_dir,
+        "other",
+        "name: other\nenvironments:\n  else:\n    install: \"true\"\n    audt: \"true\"\n",
+    );
+
+    let out = run_sandboxed(&temp_dir, &["--no-color", "sync", "push"]);
+
+    assert_eq!(out.code, Some(1), "{}{}", out.stdout, out.stderr);
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr
+            .contains("Add an environment section for 'test-env'"),
+        "{}",
+        out.stderr
+    );
+}

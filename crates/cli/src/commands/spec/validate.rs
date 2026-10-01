@@ -129,6 +129,7 @@ fn display_validation_issues_table(
                 field: &issue.field,
                 message: &issue.message,
                 location: issue.location.as_deref(),
+                suggestion: issue.suggestion.as_deref(),
             }
         })
         .collect();

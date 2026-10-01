@@ -16,6 +16,8 @@ pub(crate) struct ValidationRow<'a> {
     pub field: &'a str,
     pub message: &'a str,
     pub location: Option<&'a str>,
+    /// How to fix it, when the issue says.
+    pub suggestion: Option<&'a str>,
 }
 
 /// A group of validation issues for a single file or package.
@@ -103,7 +105,14 @@ pub(crate) fn display_validation_groups(
         if channel == Channel::Stderr {
             table.use_stderr();
         }
-        table.set_header(vec!["Level", "Category", "Field", "Message", "Location"]);
+        // A Suggestion column only where some issue has one, so a table without
+        // any keeps its width.
+        let suggested = group.rows.iter().any(|r| r.suggestion.is_some());
+        let mut header = vec!["Level", "Category", "Field", "Message", "Location"];
+        if suggested {
+            header.push("Suggestion");
+        }
+        table.set_header(header);
 
         for row in &group.rows {
             let level = if use_colors {
@@ -130,13 +139,17 @@ pub(crate) fn display_validation_groups(
 
             let location = row.location.unwrap_or("-");
 
-            table.add_row(vec![
+            let mut cells = vec![
                 level,
                 category,
                 field,
                 row.message.to_string(),
                 location.to_string(),
-            ]);
+            ];
+            if suggested {
+                cells.push(row.suggestion.unwrap_or("-").to_string());
+            }
+            table.add_row(cells);
         }
 
         display.line_to(channel, format!("{table}"));
@@ -165,6 +178,7 @@ mod tests {
                 field: "environments",
                 message: "At least one environment must be defined",
                 location: None,
+                suggestion: None,
             }],
         }]
     }

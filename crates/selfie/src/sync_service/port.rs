@@ -59,6 +59,8 @@ pub struct PackageValidationIssue {
     /// Source location from parse errors (e.g., `"line 17 column 1"`), or `None`
     /// for logical validation errors that don't map to a specific location.
     pub location: Option<String>,
+    /// How to fix it, when the issue says.
+    pub suggestion: Option<String>,
 }
 
 /// Options controlling how `sync push` behaves.
