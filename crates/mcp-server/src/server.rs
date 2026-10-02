@@ -1138,10 +1138,12 @@ mod tests {
     #[test]
     fn a_name_conflict_is_the_taken_name_sentence() {
         let error = selfie::namespace::NamespaceValidationError::Conflict(
-            selfie::namespace::NamespaceConflict {
-                name: "rc".to_string(),
-                found_in: selfie::namespace::NameLocation::Dotfiles,
-            },
+            selfie::namespace::NamespaceConflict::new(
+                "rc",
+                selfie::namespace::NameLocation::Dotfiles,
+                vec!["/d/rc.yml".into()],
+            )
+            .expect("one claimant"),
         );
 
         let Err(refusal) = namespace_refusal(error, NameCheck::DotfilesTrack) else {
@@ -1150,7 +1152,8 @@ mod tests {
 
         assert_eq!(
             refusal.message,
-            "A dotfile spec named 'rc' already exists. Remove it first or choose a different name."
+            "A dotfile spec named 'rc' already exists (/d/rc.yml). Remove it first or choose a \
+             different name."
         );
     }
 
@@ -1160,10 +1163,12 @@ mod tests {
     fn a_package_name_conflict_offers_the_calling_tools_remedy() {
         let conflict = || {
             selfie::namespace::NamespaceValidationError::Conflict(
-                selfie::namespace::NamespaceConflict {
-                    name: "bat".to_string(),
-                    found_in: selfie::namespace::NameLocation::Packages,
-                },
+                selfie::namespace::NamespaceConflict::new(
+                    "bat",
+                    selfie::namespace::NameLocation::Packages,
+                    vec!["/p/bat.yml".into()],
+                )
+                .expect("one claimant"),
             )
         };
 
@@ -1174,7 +1179,11 @@ mod tests {
             panic!("a conflict is an error");
         };
 
-        assert!(create.message.starts_with("'bat' is already a package."));
+        assert!(
+            create
+                .message
+                .starts_with("'bat' is already a package (/p/bat.yml).")
+        );
         assert!(create.message.contains("selfie_spec_update"), "{create:?}");
         assert!(
             track.message.contains("selfie_package_track_dotfile"),
