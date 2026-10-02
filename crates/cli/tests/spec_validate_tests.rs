@@ -133,3 +133,37 @@ fn a_listing_does_not_show_a_window() {
         "a listing must not quote the file, got: {stdout}"
     );
 }
+
+// The category column words a category for a person, never the enum's name.
+#[test]
+fn an_issue_category_reads_as_words() {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("packages");
+    fs::create_dir_all(&packages_dir).unwrap();
+    fs::write(
+        packages_dir.join("blank.yml"),
+        format!(
+            "name: blank\nenvironments:\n  {}:\n    install: \"\"\n",
+            common::SELFIE_ENV
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["spec", "validate", "blank"])
+        .output()
+        .unwrap();
+
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        both.lines()
+            .filter(|line| line.contains("required field"))
+            .count(),
+        1,
+        "{both}"
+    );
+}

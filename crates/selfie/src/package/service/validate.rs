@@ -8,7 +8,7 @@ use crate::{
         Package,
         event::{
             EventSender, OperationResult, OperationSuccess, Outcome, ValidationIssueData,
-            ValidationLevel, ValidationResultData, ValidationStatus,
+            ValidationResultData, ValidationStatus,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -51,26 +51,23 @@ where
 
 /// Convert issues into the event payload, errors first, then warnings, then
 /// informational notices.
-///
-/// Shared with `validate_all`: one conversion, so a newly added level cannot be
-/// wired into one command and forgotten in the other.
 pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueData> {
-    let level_of = |issue: &ValidationIssue| match issue.level() {
-        crate::validation::ValidationLevel::Error => ValidationLevel::Error,
-        crate::validation::ValidationLevel::Warning => ValidationLevel::Warning,
-        crate::validation::ValidationLevel::Info => ValidationLevel::Info,
-    };
-
-    issues
-        .errors()
+    // Ranked by an exhaustive match, so a level added later fails the build here
+    // rather than dropping out of every command's payload. The sort is stable,
+    // so issues of one level keep their order.
+    let mut ordered: Vec<_> = issues.all_issues().iter().collect();
+    ordered.sort_by_key(|issue| match issue.level() {
+        crate::validation::ValidationLevel::Error => 0,
+        crate::validation::ValidationLevel::Warning => 1,
+        crate::validation::ValidationLevel::Info => 2,
+    });
+    ordered
         .into_iter()
-        .chain(issues.warnings())
-        .chain(issues.infos())
         .map(|issue| ValidationIssueData {
-            category: format!("{:?}", issue.category()),
+            category: issue.category(),
             field: issue.field().to_string(),
             message: issue.message().to_string(),
-            level: level_of(issue),
+            level: issue.level(),
             suggestion: issue.suggestion().map(std::string::ToString::to_string),
             location: issue.location(),
         })
@@ -184,5 +181,35 @@ where
                 (progress.current_step(), progress.total_steps()).into(),
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::validation::{ValidationErrorCategory, ValidationIssue};
+
+    // The payload lists errors, then warnings, then notices, and keeps the order
+    // issues of one level arrived in.
+    #[test]
+    fn issues_go_out_by_level_keeping_their_order() {
+        type Make = fn(ValidationErrorCategory, &str, &str, Option<&str>) -> ValidationIssue;
+        let issue =
+            |make: Make, field| make(ValidationErrorCategory::InvalidValue, field, "m", None);
+        let issues: ValidationIssues = vec![
+            issue(ValidationIssue::info, "i1"),
+            issue(ValidationIssue::warning, "w1"),
+            issue(ValidationIssue::error, "e1"),
+            issue(ValidationIssue::warning, "w2"),
+            issue(ValidationIssue::error, "e2"),
+        ]
+        .into();
+
+        let fields: Vec<String> = issue_payload(&issues)
+            .into_iter()
+            .map(|issue| issue.field)
+            .collect();
+
+        assert_eq!(fields, ["e1", "e2", "w1", "w2", "i1"]);
     }
 }
