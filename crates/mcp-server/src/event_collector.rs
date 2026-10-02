@@ -480,7 +480,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         } => {
             let issues: Vec<Value> = validation_result.issues.iter().map(issue_json).collect();
             Some(
-                serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "status": format!("{}", validation_result.status), "issues": issues }),
+                serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "outcome": outcome_label(validation_result.outcome), "issues": issues }),
             )
         }
         PackageEvent::RemovalDependencyInfo {
@@ -1362,7 +1362,7 @@ mod tests {
             validation_result: selfie::package::event::ValidationResultData {
                 package_name: "bat".to_string(),
                 environment: "test".to_string(),
-                status: selfie::package::event::ValidationStatus::HasErrors,
+                outcome: Outcome::Failed,
                 issues: vec![
                     issue(Some(selfie::yaml::SourceLocation::new(5, 15))),
                     issue(None),
@@ -1430,6 +1430,33 @@ mod tests {
                 }],
             })]
         );
+    }
+
+    // Each spec's row carries its own verdict, so a run over several keeps a
+    // per-spec answer beside the run's aggregate.
+    #[tokio::test]
+    async fn a_validation_row_carries_its_own_outcome() {
+        let row = |name: &str, outcome| PackageEvent::ValidationResultCompleted {
+            operation_info: test_op_info(),
+            validation_result: selfie::package::event::ValidationResultData {
+                package_name: name.to_string(),
+                environment: "test".to_string(),
+                outcome,
+                issues: Vec::new(),
+            },
+        };
+        let events = vec![
+            row("a", Outcome::Clean),
+            row("b", Outcome::Found),
+            row("c", Outcome::Failed),
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = result.data["data"].as_array().expect("data is an array");
+        let outcomes: Vec<&Value> = rows.iter().map(|r| &r["outcome"]).collect();
+        assert_eq!(outcomes, ["clean", "found", "failed"]);
+        assert!(rows.iter().all(|r| r.get("status").is_none()), "{rows:?}");
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

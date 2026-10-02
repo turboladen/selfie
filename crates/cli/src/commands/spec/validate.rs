@@ -1,5 +1,5 @@
 use selfie::package::{
-    event::{PackageEvent, ValidationResultData, ValidationStatus},
+    event::{Outcome, PackageEvent, ValidationResultData},
     service::SpecService,
 };
 
@@ -74,8 +74,8 @@ fn display_validation_result(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    match validation_result.status {
-        ValidationStatus::Valid => {
+    match validation_result.outcome {
+        Outcome::Clean => {
             // Show success card for valid packages
             display_validation_success_card(validation_result, config, display);
 
@@ -85,7 +85,7 @@ fn display_validation_result(
             // package that has nothing else wrong, which is most of them.
             display_validation_issues_table(validation_result, config, display);
         }
-        ValidationStatus::HasWarnings | ValidationStatus::HasErrors => {
+        Outcome::Found | Outcome::Failed => {
             // Show table for packages with issues
             display_validation_issues_table(validation_result, config, display);
         }
