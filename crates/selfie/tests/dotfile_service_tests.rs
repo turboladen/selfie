@@ -1386,7 +1386,7 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
         if path.path() == self.state_file
             && self
                 .allowed
-                .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+                .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
                 .is_err()
         {
             return Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
