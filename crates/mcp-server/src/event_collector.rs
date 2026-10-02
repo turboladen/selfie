@@ -922,24 +922,55 @@ fn check_status_label(result: &CheckResult) -> &'static str {
     }
 }
 
+/// Each dependency's status: `status`, and for an unknown one a `kind` label
+/// to branch on, `reason` to display, and, for a spec that could not be used,
+/// `failure` with the parse failure's fields. Each is null where it does not
+/// apply.
 fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -> Vec<Value> {
+    use selfie::package::event::{EnvironmentStatus, UnknownStatus};
+
     statuses
         .iter()
         .map(|dep| {
-            let (status, reason) = match &dep.status {
-                selfie::package::event::EnvironmentStatus::Installed => ("installed", None),
-                selfie::package::event::EnvironmentStatus::NotInstalled => ("not installed", None),
-                selfie::package::event::EnvironmentStatus::Unknown(reason) => {
-                    ("unknown", Some(reason.as_str()))
-                }
-            };
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "name": &dep.name,
-                "status": status,
-                "reason": reason,
-            })
+                "kind": null,
+                "reason": null,
+                "failure": null,
+            });
+            row["status"] = Value::from(match &dep.status {
+                EnvironmentStatus::Installed => "installed",
+                EnvironmentStatus::NotInstalled => "not installed",
+                EnvironmentStatus::Unknown(_) => "unknown",
+            });
+            if let EnvironmentStatus::Unknown(unknown) = &dep.status {
+                row["kind"] = Value::from(unknown_status_label(unknown));
+                row["reason"] = Value::from(unknown.to_string());
+                if let UnknownStatus::Unloadable(error) = unknown
+                    && let Some(failure) = error.parse_failure()
+                {
+                    row["failure"] = parse_failure_json(failure);
+                }
+            }
+            row
         })
         .collect()
+}
+
+/// Label why a dependency's status is unknown.
+fn unknown_status_label(unknown: &selfie::package::event::UnknownStatus) -> &'static str {
+    // A rename is a change to the MCP contract, so a test pins every label.
+    use selfie::package::event::UnknownStatus;
+
+    match unknown {
+        UnknownStatus::NotFound(_) => "not_found",
+        UnknownStatus::Unloadable(_) => "unloadable",
+        UnknownStatus::Refused { .. } => "refused",
+        UnknownStatus::NotInEnvironment => "not_in_environment",
+        UnknownStatus::NoCheckCommand => "no_check_command",
+        UnknownStatus::CheckError(_) => "check_error",
+        UnknownStatus::TimedOut(_) => "timed_out",
+    }
 }
 
 fn audit_details(result: &AuditResult) -> Value {
@@ -1506,6 +1537,113 @@ mod tests {
         let outcomes: Vec<&Value> = rows.iter().map(|r| &r["outcome"]).collect();
         assert_eq!(outcomes, ["clean", "found", "failed"]);
         assert!(rows.iter().all(|r| r.get("status").is_none()), "{rows:?}");
+    }
+
+    // An unknown dependency says why as a label, with the sentence beside it.
+    #[test]
+    fn an_unknown_dependency_says_why_as_a_label() {
+        use selfie::package::event::{DependencyStatus, EnvironmentStatus, UnknownStatus};
+
+        let rows = dep_statuses_to_json(&[
+            DependencyStatus {
+                name: "a".to_string(),
+                status: EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment),
+            },
+            DependencyStatus {
+                name: "b".to_string(),
+                status: EnvironmentStatus::Installed,
+            },
+        ]);
+
+        assert_eq!(rows[0]["status"], "unknown");
+        assert_eq!(rows[0]["kind"], "not_in_environment");
+        assert_eq!(rows[0]["reason"], "not in current environment");
+        assert_eq!(rows[0]["failure"], Value::Null);
+        assert!(rows[0].get("detail").is_none(), "{rows:?}");
+        assert_eq!(rows[1]["status"], "installed");
+        assert_eq!(rows[1]["kind"], Value::Null);
+        assert_eq!(rows[1]["reason"], Value::Null);
+    }
+
+    // The label set is the MCP contract, so each label is pinned.
+    #[test]
+    fn every_unknown_status_has_its_label() {
+        use selfie::commands::runner::TimedOut;
+        use selfie::package::event::{RefusalKind, UnknownStatus};
+        use selfie::package::port::{PackageError, PackageRepoError};
+
+        let error = || {
+            PackageRepoError::from(PackageError::PackageNotFound {
+                name: "dep".to_string(),
+                packages_path: "/packages".into(),
+                files_examined: 0,
+                search_patterns: Vec::new(),
+            })
+        };
+        let cases = [
+            (UnknownStatus::NotFound(error()), "not_found"),
+            (UnknownStatus::Unloadable(error()), "unloadable"),
+            (
+                UnknownStatus::Refused {
+                    kind: RefusalKind::NoEnvironments,
+                    reason: "r".to_string(),
+                },
+                "refused",
+            ),
+            (UnknownStatus::NotInEnvironment, "not_in_environment"),
+            (UnknownStatus::NoCheckCommand, "no_check_command"),
+            (UnknownStatus::CheckError("e".to_string()), "check_error"),
+            (
+                UnknownStatus::TimedOut(TimedOut::new("c", std::time::Duration::from_secs(1))),
+                "timed_out",
+            ),
+        ];
+        for (unknown, label) in cases {
+            assert_eq!(unknown_status_label(&unknown), label, "{unknown:?}");
+        }
+    }
+
+    // An unloadable dependency carries its parse failure as the fields a skipped
+    // spec carries.
+    #[test]
+    fn an_unloadable_dependency_carries_its_parse_failure() {
+        use selfie::package::event::{DependencyStatus, EnvironmentStatus, UnknownStatus};
+        use selfie::package::port::{
+            PackageError, PackageParseError, PackageParseKind, PackageRepoError,
+        };
+
+        let source =
+            selfie::yaml::parse::<selfie::package::Package>("name: dep\nenvironments: {oops\n")
+                .expect_err("the fixture must not parse");
+        let error = PackageRepoError::from(PackageError::ParseError {
+            name: "dep".to_string(),
+            packages_path: "/packages".into(),
+            failed_file: "/packages/dep.yml".into(),
+            source: PackageParseError::new("/packages/dep.yml", PackageParseKind::Yaml { source }),
+        });
+        let rows = dep_statuses_to_json(&[DependencyStatus {
+            name: "dep".to_string(),
+            status: EnvironmentStatus::Unknown(UnknownStatus::Unloadable(error)),
+        }]);
+
+        assert_eq!(rows[0]["kind"], "unloadable");
+        assert_eq!(rows[0]["failure"]["kind"], "yaml");
+        assert_eq!(rows[0]["failure"]["line"], 2);
+    }
+
+    #[test]
+    fn a_dependency_check_that_timed_out_says_so_as_a_label() {
+        use selfie::commands::runner::TimedOut;
+        use selfie::package::event::{DependencyStatus, EnvironmentStatus, UnknownStatus};
+
+        let timed_out = TimedOut::new("check-dep", std::time::Duration::from_secs(2));
+        let rows = dep_statuses_to_json(&[DependencyStatus {
+            name: "dep".to_string(),
+            status: EnvironmentStatus::Unknown(UnknownStatus::TimedOut(timed_out.clone())),
+        }]);
+
+        assert_eq!(rows[0]["kind"], "timed_out");
+        assert_eq!(rows[0]["reason"], timed_out.to_string());
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

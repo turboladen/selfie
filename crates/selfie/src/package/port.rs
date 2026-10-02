@@ -307,6 +307,21 @@ impl PackageRepoError {
             _ => false,
         }
     }
+
+    /// Why the spec file could not be used, when this error is about one that
+    /// selfie found and could not parse, read, or accept by its name.
+    #[must_use]
+    pub fn parse_failure(&self) -> Option<&PackageParseError> {
+        match self {
+            Self::PackageError(e) => match &**e {
+                PackageError::ParseError { source, .. }
+                | PackageError::UnreadableFile { source, .. }
+                | PackageError::UnusableName { source, .. } => Some(source),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
 }
 
 impl From<PackageError> for PackageRepoError {

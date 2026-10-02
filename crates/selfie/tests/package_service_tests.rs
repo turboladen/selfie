@@ -922,10 +922,15 @@ mod a_spec_selfie_cannot_read {
             .expect("the root's status must be sent");
         assert_eq!(statuses.len(), 1);
         match &statuses[0].status {
-            selfie::package::event::EnvironmentStatus::Unknown(reason) => assert!(
-                reason.starts_with("is refused: ") && reason.contains("_environments"),
-                "the status must say it is refused and name the key, got: {reason}"
-            ),
+            selfie::package::event::EnvironmentStatus::Unknown(
+                unknown @ selfie::package::event::UnknownStatus::Refused { .. },
+            ) => {
+                let reason = unknown.to_string();
+                assert!(
+                    reason.starts_with("is refused: ") && reason.contains("_environments"),
+                    "the status must say it is refused and name the key, got: {reason}"
+                );
+            }
             other => panic!("the dependency must be unknown, got: {other:?}"),
         }
     }
@@ -2589,4 +2594,108 @@ mod timeouts {
             TimedOut::new("install-app", Duration::from_secs(2))
         );
     }
+
+    // A dependency whose check times out is unknown because it timed out, and
+    // carries the timeout itself.
+    #[tokio::test]
+    async fn a_dependency_check_that_times_out_is_unknown_as_a_timeout() {
+        use selfie::package::event::{EnvironmentStatus, UnknownStatus};
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("app.yml"),
+            "name: app\nenvironments:\n  test:\n    install: \"install-app\"\n    \
+             dependencies: [dep]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("dep.yml"),
+            "name: dep\nenvironments:\n  test:\n    install: \"install-dep\"\n    check: \
+             \"check-dep\"\n",
+        )
+        .unwrap();
+        let service = create_service_test_service_with_runner(&dir, timing_out("check-dep"));
+
+        let events = collect_events(service.status("app").await).await;
+
+        let statuses = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::EnvironmentStatusChecked {
+                    environment_status, ..
+                } => Some(&environment_status.dependency_statuses),
+                _ => None,
+            })
+            .expect("the package's status must be sent");
+        assert!(
+            matches!(
+                &statuses[..],
+                [dep] if matches!(
+                    &dep.status,
+                    EnvironmentStatus::Unknown(UnknownStatus::TimedOut(timed_out))
+                        if *timed_out == TimedOut::new("check-dep", Duration::from_secs(2))
+                )
+            ),
+            "{statuses:?}"
+        );
+    }
+}
+
+// A dependency whose spec does not parse is reported as unloadable, carrying
+// the parse failure with its location, apart from a dependency no spec
+// answers to.
+#[tokio::test]
+async fn status_reports_an_unparsable_dependency_with_its_failure() {
+    use selfie::package::event::{EnvironmentStatus, UnknownStatus};
+
+    let temp_dir = TempDir::new().unwrap();
+    let _ = create_service_test_package_file_with_deps(&temp_dir, "root", &["broken", "absent"]);
+    std::fs::write(
+        temp_dir.path().join("broken.yaml"),
+        "name: broken\nenvironments: {oops\n",
+    )
+    .unwrap();
+    let service = create_service_test_service(&temp_dir);
+
+    let events = collect_events(service.status("root").await).await;
+
+    let statuses = events
+        .iter()
+        .find_map(|event| match event {
+            PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } => Some(&environment_status.dependency_statuses),
+            _ => None,
+        })
+        .expect("the root's status must be sent");
+    let status_of = |name: &str| {
+        &statuses
+            .iter()
+            .find(|dep| dep.name == name)
+            .unwrap_or_else(|| panic!("no status for {name}: {statuses:?}"))
+            .status
+    };
+    match status_of("broken") {
+        EnvironmentStatus::Unknown(UnknownStatus::Unloadable(error)) => {
+            let failure = error
+                .parse_failure()
+                .unwrap_or_else(|| panic!("the parse failure must travel: {error:?}"));
+            assert!(
+                matches!(
+                    failure.kind(),
+                    selfie::package::port::PackageParseKind::Yaml { source }
+                        if source.location().is_some()
+                ),
+                "{failure:?}"
+            );
+        }
+        other => panic!("an unparsable dependency is unloadable, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            status_of("absent"),
+            EnvironmentStatus::Unknown(UnknownStatus::NotFound(_))
+        ),
+        "{statuses:?}"
+    );
 }

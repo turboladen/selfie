@@ -3002,7 +3002,47 @@ pub struct EnvironmentStatusData {
 pub enum EnvironmentStatus {
     Installed,
     NotInstalled,
-    Unknown(String),
+    /// selfie could not tell, for the reason given.
+    Unknown(UnknownStatus),
+}
+
+/// Why selfie could not tell whether a package is installed.
+///
+/// [`Display`](fmt::Display) words the reason for a person.
+#[derive(Debug, Clone)]
+pub enum UnknownStatus {
+    /// No spec answers to the name.
+    NotFound(crate::package::port::PackageRepoError),
+    /// A spec answers to the name and could not be loaded. Carries the
+    /// failure, which names the file and, for one that does not parse, where.
+    Unloadable(crate::package::port::PackageRepoError),
+    /// The spec loaded and selfie refuses it whole.
+    Refused {
+        kind: RefusalKind,
+        /// The objection as a clause.
+        reason: String,
+    },
+    /// The spec declares nothing for the current environment.
+    NotInEnvironment,
+    /// The spec declares no check command for the current environment.
+    NoCheckCommand,
+    /// The check command could not give an answer.
+    CheckError(String),
+    /// The check command ran past `command_timeout` and was stopped.
+    TimedOut(TimedOut),
+}
+
+impl fmt::Display for UnknownStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(error) | Self::Unloadable(error) => write!(f, "{error}"),
+            Self::Refused { reason, .. } => write!(f, "is refused: {reason}"),
+            Self::NotInEnvironment => f.write_str("not in current environment"),
+            Self::NoCheckCommand => f.write_str("no check command"),
+            Self::CheckError(error) => f.write_str(error),
+            Self::TimedOut(timed_out) => write!(f, "{timed_out}"),
+        }
+    }
 }
 
 /// Installation status of a dependency package

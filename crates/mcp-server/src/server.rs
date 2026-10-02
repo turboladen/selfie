@@ -604,7 +604,7 @@ with all=true, when a key in any environment cannot be trusted. A result that co
 
     #[tool(
         name = "selfie_package_status",
-        description = "Check runtime installation status for a specific package in the current environment. Fails, naming the reason, when selfie will not read the package's spec. A dependency whose spec selfie will not read has an unknown status carrying that reason."
+        description = "Check runtime installation status for a specific package in the current environment. Fails, naming the reason, when selfie will not read the package's spec. A dependency selfie cannot judge has status \"unknown\", a `kind` label (\"not_found\", \"unloadable\", \"refused\", \"not_in_environment\", \"no_check_command\", \"check_error\" or \"timed_out\") and a `reason`; branch on `kind`; `reason` is prose. An unloadable one whose spec could not be parsed or read also carries `failure`, with the `kind`, `reason` and `line`/`column` a skipped spec carries. Each is null for a dependency with a known status."
     )]
     async fn package_status(
         &self,

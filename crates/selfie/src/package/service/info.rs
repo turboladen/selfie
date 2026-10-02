@@ -18,6 +18,7 @@ use crate::{
         event::{
             CheckResult, DependencyStatus, EnvironmentStatus, EnvironmentStatusData, EventSender,
             OperationResult, OperationSuccess, PackageInfoData, ScopedDotfile, StepEnding,
+            UnknownStatus,
         },
         git::GitStatusProvider,
         port::PackageRepository,
@@ -317,20 +318,28 @@ fn look_up_dependency<PR: PackageRepository>(
 ) -> DependencyLookup {
     let dep_package = match repo.get_package(dep_name) {
         Ok(pkg) => pkg,
-        Err(err) => return DependencyLookup::Known(EnvironmentStatus::Unknown(format!("{err}"))),
+        Err(err) => {
+            let status = if err.means_no_such_package() {
+                UnknownStatus::NotFound(err)
+            } else {
+                UnknownStatus::Unloadable(err)
+            };
+            return DependencyLookup::Known(EnvironmentStatus::Unknown(status));
+        }
     };
 
     // The refusal is asked before the lookup below, which a shadowing key makes
     // miss or find a decoy.
     if let Some(reason) = dep_package.package.spec_refusal(current_env) {
-        return DependencyLookup::Known(EnvironmentStatus::Unknown(format!(
-            "is refused: {reason}"
-        )));
+        return DependencyLookup::Known(EnvironmentStatus::Unknown(UnknownStatus::Refused {
+            kind: reason.kind(),
+            reason: reason.to_string(),
+        }));
     }
 
     let Some(env_config) = dep_package.package.environments().get(current_env) else {
         return DependencyLookup::Known(EnvironmentStatus::Unknown(
-            "not in current environment".to_string(),
+            UnknownStatus::NotInEnvironment,
         ));
     };
 
@@ -386,9 +395,9 @@ async fn check_dependency_statuses<CR: CommandRunner>(
             status: match lookup {
                 DependencyLookup::Known(status) => status,
                 // One status per check, taken in the same order the checks ran.
-                DependencyLookup::Check(_) => checked
-                    .next()
-                    .unwrap_or_else(|| EnvironmentStatus::Unknown("not checked".to_string())),
+                DependencyLookup::Check(_) => checked.next().unwrap_or_else(|| {
+                    EnvironmentStatus::Unknown(UnknownStatus::CheckError("not checked".to_string()))
+                }),
             },
             name,
         })
@@ -399,9 +408,11 @@ fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
     match result {
         CheckResult::Success { .. } => EnvironmentStatus::Installed,
         CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
-        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown("no check command".to_string()),
-        CheckResult::Error(e) => EnvironmentStatus::Unknown(e),
-        CheckResult::TimedOut(timed_out) => EnvironmentStatus::Unknown(timed_out.to_string()),
+        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand),
+        CheckResult::Error(e) => EnvironmentStatus::Unknown(UnknownStatus::CheckError(e)),
+        CheckResult::TimedOut(timed_out) => {
+            EnvironmentStatus::Unknown(UnknownStatus::TimedOut(timed_out))
+        }
     }
 }
 
@@ -791,7 +802,7 @@ mod tests {
                 );
                 assert!(matches!(
                     &environment_status.dependency_statuses[0].status,
-                    EnvironmentStatus::Unknown(reason) if reason.contains("not found")
+                    EnvironmentStatus::Unknown(UnknownStatus::NotFound(_))
                 ));
                 found = true;
             }
@@ -884,7 +895,7 @@ mod tests {
                 assert_eq!(environment_status.dependency_statuses.len(), 1);
                 assert!(matches!(
                     &environment_status.dependency_statuses[0].status,
-                    EnvironmentStatus::Unknown(reason) if reason.contains("not in current environment")
+                    EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment)
                 ));
                 found = true;
             }
