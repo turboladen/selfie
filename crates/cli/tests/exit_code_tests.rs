@@ -12,6 +12,7 @@ use common::{
 
 const CLEAN: i32 = 0;
 const FAILED: i32 = 1;
+const USAGE: i32 = 2;
 const FOUND: i32 = 3;
 
 fn write_spec(temp: &tempfile::TempDir, name: &str, yaml: &str) {
@@ -588,10 +589,11 @@ fn spec_create_exits_clean_when_it_writes_the_spec() {
     assert!(temp.path().join("packages/tool.yml").exists(), "{output}");
 }
 
-// Without a terminal the "already exists" menu cannot be answered, so the create
-// declines. It wrote nothing, which a script must not read as success.
+// Without a terminal the "already exists" menu cannot be asked: a usage error,
+// naming what to run instead. It wrote nothing, which a script must not read as
+// success.
 #[test]
-fn spec_create_exits_one_when_it_declines() {
+fn spec_create_exits_two_when_it_cannot_ask_about_a_taken_name() {
     let temp = sandbox();
     write_spec(
         &temp,
@@ -600,6 +602,7 @@ fn spec_create_exits_one_when_it_declines() {
     );
 
     let (code, output) = run(&temp, &["spec", "create", "tool"]);
-    assert_eq!(code, Some(FAILED), "{output}");
+    assert_eq!(code, Some(USAGE), "{output}");
     assert!(output.contains("'tool' is already a package"), "{output}");
+    assert!(output.contains("selfie spec edit tool"), "{output}");
 }

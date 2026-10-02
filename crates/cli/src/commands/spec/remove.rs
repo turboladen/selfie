@@ -122,9 +122,14 @@ pub(crate) async fn handle_remove(
                 display.print_info("Package removal cancelled.");
                 return 0;
             }
-            Err(_) => {
-                display.print_error("Failed to read user input.");
-                return 1;
+            Err(failure) => {
+                return display
+                    .refuse_prompt(
+                        &failure,
+                        "Confirming the removal",
+                        format!("Pass --yes to remove '{package_name}' without asking.").as_str(),
+                    )
+                    .code();
             }
         }
     }
@@ -188,6 +193,45 @@ mod tests {
     use crate::config::CliConfig;
 
     use crate::commands::common;
+
+    // A spec in a fresh package directory, a config naming that directory, and a
+    // service over it.
+    fn one_spec() -> (
+        tempfile::TempDir,
+        PathBuf,
+        CliConfig,
+        impl selfie::package::service::SpecService,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir(&packages).unwrap();
+        let spec = packages.join("tool.yml");
+        std::fs::write(
+            &spec,
+            format!(
+                "name: tool\nenvironments:\n  {}:\n    install: \"true\"\n",
+                test_common::TEST_ENV
+            ),
+        )
+        .unwrap();
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&packages));
+        let service = test_common::create_test_service_with_config(test_config_with_dir(&packages));
+        (temp, spec, config, service)
+    }
+
+    // Ctrl+C at the confirmation ends the run canceled, and removes nothing.
+    #[tokio::test]
+    async fn ctrl_c_at_the_confirmation_is_canceled_and_keeps_the_spec() {
+        use crate::display_manager::{DisplayManager, ctrl_c};
+
+        let (_temp, spec, config, service) = one_spec();
+        let display = DisplayManager::new(false).answering(vec![ctrl_c()]);
+
+        let code = super::handle_remove(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(code, 130);
+        assert!(spec.exists());
+    }
 
     #[test]
     fn test_dependency_check_integration() {

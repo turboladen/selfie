@@ -5,6 +5,7 @@ use crate::config::CliConfig;
 use tracing::info;
 
 use crate::display_manager::DisplayManager;
+use crate::formatters::name_argument;
 
 use crate::commands::common;
 
@@ -68,25 +69,8 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
 
         display.print_info(format!("Package '{package_name}' does not exist."));
 
-        // Prompt user for confirmation before creating
-        let confirm = display.prompt(
-            Confirm::with_theme(&SimpleTheme)
-                .with_prompt(format!("Create new package '{package_name}'?"))
-                .default(false),
-        );
-
-        match confirm {
-            Ok(true) => {
-                // User confirmed, proceed with creation
-            }
-            Ok(false) => {
-                display.print_info("Package creation cancelled.");
-                return 0;
-            }
-            Err(_) => {
-                display.print_error("Failed to read user input.");
-                return 1;
-            }
+        if let Err(code) = confirm_new_package(package_name, display) {
+            return code;
         }
 
         display.print_info(format!("Creating new package '{package_name}'"));
@@ -131,6 +115,38 @@ fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> String {
     )
 }
 
+/// Ask whether to create `package_name`.
+///
+/// # Errors
+///
+/// The exit code when the user did not confirm.
+fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(), i32> {
+    let confirm = display.prompt(
+        Confirm::with_theme(&SimpleTheme)
+            .with_prompt(format!("Create new package '{package_name}'?"))
+            .default(false),
+    );
+
+    match confirm {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            display.print_info("Package creation cancelled.");
+            Err(0)
+        }
+        Err(failure) => Err(display
+            .refuse_prompt(
+                &failure,
+                "Confirming a new package",
+                format!(
+                    "Create it with `selfie spec create {}`, then edit it.",
+                    name_argument(package_name)
+                )
+                .as_str(),
+            )
+            .code()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +176,14 @@ mod tests {
             assert!(!refusal.contains(wrong), "{wrong}: {refusal}");
         }
     }
+    // Ctrl+C at the confirmation ends the run canceled.
+    #[test]
+    fn ctrl_c_at_the_create_confirmation_is_canceled() {
+        let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
+
+        assert_eq!(confirm_new_package("fresh", &display), Err(130));
+    }
+
     #[test]
     fn test_handle_edit_nonexistent_package() {
         // Test behavior when package doesn't exist and no EDITOR is available

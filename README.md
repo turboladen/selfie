@@ -209,9 +209,14 @@ rather than on output text.
 | ----- | ----------------------------------------------------------------------------------------------- |
 | `0`   | Clean: the command did what it was asked and found nothing to report.                           |
 | `1`   | Failed: an error, **a refusal**, a declined `spec create`, or a run that ends without a result. |
-| `2`   | Usage: the command line could not be parsed.                                                    |
+| `2`   | Usage: the command line could not be parsed, or a command had to ask and had no terminal.       |
 | `3`   | Found: the command did what it was asked, and **found what it was asked to look for**.          |
 | `130` | Cancelled (Ctrl+C). This is the usual `128 + SIGINT` value.                                     |
+
+A command that has to ask a question and has no terminal to ask on, as in a script, a pipe or a CI
+job, does not wait for an answer: it exits `2` and names on stderr the flag or command that does the
+same thing without asking. The one exception is `apply`'s conflict prompt, which without a terminal
+skips the conflict and reports it. Ctrl+C at a prompt exits `130`.
 
 A failure outranks a finding: a command that refused part of its work exits `1` even if it also
 found something, since its answer has a hole in it. A code is never renumbered or reused. A new one

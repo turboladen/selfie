@@ -15,7 +15,7 @@ use crate::{
         validation_display::{ValidationGroup, ValidationRow, display_validation_groups},
     },
     config::CliConfig,
-    display_manager::DisplayManager,
+    display_manager::{DisplayManager, PromptFailure},
     event_processor::EventProcessor,
 };
 
@@ -110,12 +110,32 @@ pub(crate) async fn handle_push(
         return execute_push(&service, vec![], display, use_colors).await;
     }
 
+    // Refused before the preview, which is printed only to be confirmed: a run
+    // that cannot ask would leave the list on stdout as if it were an answer.
+    if !args.yes && !display.can_prompt() {
+        return display
+            .refuse_prompt(
+                &PromptFailure::NoTerminal,
+                "Editing the commit messages",
+                "Pass --yes to commit with the generated messages.",
+            )
+            .code();
+    }
+
     // Phase 1.5: Preview and confirm commit messages
     show_pending_commits(&pending_commits, display, use_colors);
 
     let confirmed_commits = match confirm_commits(pending_commits, args.yes, display) {
-        Some(commits) => commits,
-        None => return 130, // User cancelled
+        Ok(commits) => commits,
+        Err(failure) => {
+            return display
+                .refuse_prompt(
+                    &failure,
+                    "Editing the commit messages",
+                    "Pass --yes to commit with the messages shown above.",
+                )
+                .code();
+        }
     };
 
     // Phase 2: Execute commits and push
@@ -154,46 +174,40 @@ fn show_pending_commits(
 
 /// Prompt the user to confirm or edit each commit message.
 ///
-/// Returns `None` if the user cancelled (e.g., Ctrl-C).
+/// # Errors
+///
+/// [`PromptFailure`] when a prompt got no answer.
 fn confirm_commits(
     pending: Vec<selfie::sync_service::PendingCommit>,
     auto_accept: bool,
     display: &DisplayManager,
-) -> Option<Vec<ConfirmedCommit>> {
+) -> Result<Vec<ConfirmedCommit>, PromptFailure> {
     if auto_accept {
-        return Some(
-            pending
-                .into_iter()
-                .map(|c| ConfirmedCommit {
-                    files: c.files,
-                    message: c.message,
-                })
-                .collect(),
-        );
+        return Ok(pending
+            .into_iter()
+            .map(|c| ConfirmedCommit {
+                files: c.files,
+                message: c.message,
+            })
+            .collect());
     }
 
     let total = pending.len();
     let mut confirmed = Vec::new();
     for (i, commit) in pending.into_iter().enumerate() {
         let num = i + 1;
-        let edited_message: String = match display.prompt(crate::display_manager::TextLine(
+        let edited_message: String = display.prompt(crate::display_manager::TextLine(
             dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
                 .with_prompt(format!("Commit message ({num}/{total})"))
                 .with_initial_text(&commit.message),
-        )) {
-            Ok(msg) => msg,
-            Err(_) => {
-                display.print_warning("Cancelled");
-                return None;
-            }
-        };
+        ))?;
 
         confirmed.push(ConfirmedCommit {
             files: commit.files,
             message: edited_message,
         });
     }
-    Some(confirmed)
+    Ok(confirmed)
 }
 
 /// Execute the push via the service and process the resulting event stream.
@@ -406,6 +420,21 @@ mod tests {
         assert_eq!(confirmed[0].files, vec![PathBuf::from("starship.yml")]);
         assert_eq!(confirmed[1].message, "feat(fnm): add spec");
         assert_eq!(confirmed[1].files, vec![PathBuf::from("fnm.yml")]);
+    }
+
+    // Ctrl+C at a commit message ends the push canceled, with nothing committed.
+    #[test]
+    fn ctrl_c_at_a_commit_message_is_canceled() {
+        let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
+        let pending = vec![selfie::sync_service::PendingCommit {
+            name: "fd".to_string(),
+            files: vec![PathBuf::from("fd.yml")],
+            message: "feat(fd): add spec".to_string(),
+        }];
+
+        let failure = confirm_commits(pending, false, &display).unwrap_err();
+
+        assert_eq!(failure.exit(), crate::event_processor::Exit::Cancelled);
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::{
     cli::ApplyArgs,
     commands::common::create_dotfile_service,
     config::CliConfig,
-    display_manager::{Channel, DisplayManager, shorten_path},
+    display_manager::{Channel, DisplayManager, PromptFailure, shorten_path},
     event_processor::EventProcessor,
     source_paths::{force_heading, relative_text},
 };
@@ -72,6 +72,8 @@ struct InteractiveConflictResolver {
     // The targets whose conflict this has shown, so the conflict event the
     // library sends after a declined prompt is not shown a second time.
     shown: Arc<Mutex<HashSet<String>>>,
+    // The run's token, canceled when the user presses Ctrl+C at a prompt.
+    token: CancellationToken,
 }
 
 /// Which conflict is being asked about, and so what accepting costs.
@@ -115,14 +117,29 @@ impl InteractiveConflictResolver {
             items.push("Reveal the two values, then choose");
         }
 
-        self.display
-            .prompt(
+        self.answered(
+            self.display.prompt(
                 dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
                     .with_prompt("How should this conflict be resolved?")
                     .items(&items)
                     .default(0),
-            )
-            .ok()
+            ),
+        )
+    }
+
+    /// The answer a prompt got, or `None` when it got none. Ctrl+C cancels the
+    /// run as well.
+    fn answered<T>(&self, answer: Result<T, PromptFailure>) -> Option<T> {
+        match answer {
+            Ok(answer) => Some(answer),
+            // Canceled here rather than left to the SIGINT console raises, so
+            // the run ends canceled whoever delivers the signal.
+            Err(PromptFailure::Interrupted) => {
+                self.token.cancel();
+                None
+            }
+            Err(PromptFailure::NoTerminal | PromptFailure::Unreadable(_)) => None,
+        }
     }
 
     /// Show the difference between the two values, after an explicit confirmation.
@@ -141,11 +158,12 @@ impl InteractiveConflictResolver {
         );
 
         let confirmed = self
-            .display
-            .prompt(
-                dialoguer::Confirm::new()
-                    .with_prompt("Show values?")
-                    .default(false),
+            .answered(
+                self.display.prompt(
+                    dialoguer::Confirm::new()
+                        .with_prompt("Show values?")
+                        .default(false),
+                ),
             )
             .unwrap_or(false);
 
@@ -224,6 +242,9 @@ impl ConflictResolver for InteractiveConflictResolver {
                     Some(1) => ConflictResolution::Accept,
                     Some(2) => {
                         self.reveal(incoming, current, target);
+                        if self.token.is_cancelled() {
+                            return ConflictResolution::Skip;
+                        }
                         // Ask again, without offering reveal a second time.
                         match self.prompt(Prompt::Secret { reveal: false }) {
                             Some(1) => ConflictResolution::Accept,
@@ -274,6 +295,7 @@ pub(crate) async fn handle_apply(
         conflict_resolver: Some(Arc::new(InteractiveConflictResolver {
             display: display.clone(),
             shown: Arc::clone(&shown),
+            token: cancellation_token.clone(),
         })),
     };
 
@@ -369,6 +391,7 @@ mod tests {
         let resolver = InteractiveConflictResolver {
             display: display.clone(),
             shown: Arc::default(),
+            token: CancellationToken::new(),
         };
         let source = DotfileSource::File {
             base: Some(SourceBase {
@@ -405,6 +428,7 @@ mod tests {
         let resolver = InteractiveConflictResolver {
             display: display.clone(),
             shown: Arc::default(),
+            token: CancellationToken::new(),
         };
         let source = DotfileSource::File {
             base: Some(SourceBase {
@@ -423,6 +447,93 @@ mod tests {
         printer.join().unwrap();
 
         assert_eq!(display.printed().len(), 2, "{:?}", display.printed());
+    }
+
+    fn source() -> DotfileSource {
+        DotfileSource::File {
+            base: None,
+            path: "creds.tpl".into(),
+            vars: Vec::new(),
+        }
+    }
+
+    // A resolver over `display`, with a token of its own to read back.
+    fn resolver(display: &DisplayManager) -> (InteractiveConflictResolver, CancellationToken) {
+        let token = CancellationToken::new();
+        let resolver = InteractiveConflictResolver {
+            display: display.clone(),
+            shown: Arc::default(),
+            token: token.clone(),
+        };
+        (resolver, token)
+    }
+
+    fn resolve_secret(resolver: &InteractiveConflictResolver) -> ConflictResolution {
+        let source = source();
+        resolver.resolve(
+            "~/.creds",
+            ConflictDetail::Secret {
+                source: &source,
+                summary: "1 field differs",
+                incoming: b"new",
+                current: b"old",
+            },
+        )
+    }
+
+    // Ctrl+C at the conflict prompt cancels the run and leaves the target.
+    #[test]
+    fn ctrl_c_at_the_conflict_prompt_cancels_the_run() {
+        use crate::display_manager::ctrl_c;
+
+        let display = DisplayManager::new(false).answering(vec![ctrl_c()]);
+        let (resolver, token) = resolver(&display);
+        let source = source();
+
+        let resolution = resolver.resolve(
+            "~/.creds",
+            ConflictDetail::Diff {
+                source: &source,
+                diff: "",
+            },
+        );
+
+        assert!(matches!(resolution, ConflictResolution::Skip));
+        assert!(token.is_cancelled());
+    }
+
+    // Ctrl+C at "Show values?" cancels the run; it is not a "No".
+    #[test]
+    fn ctrl_c_at_the_reveal_confirmation_cancels_the_run() {
+        use crate::display_manager::{answer, ctrl_c};
+
+        let display = DisplayManager::new(false)
+            .drawing_as_a_terminal()
+            .answering(vec![answer(2_usize), ctrl_c()]);
+        let (resolver, token) = resolver(&display);
+
+        assert!(matches!(
+            resolve_secret(&resolver),
+            ConflictResolution::Skip
+        ));
+        assert!(token.is_cancelled());
+    }
+
+    // Ctrl+C at the conflict prompt asked again after a reveal cancels the run.
+    #[test]
+    fn ctrl_c_at_the_prompt_after_a_reveal_cancels_the_run() {
+        use crate::display_manager::{answer, ctrl_c};
+
+        let display = DisplayManager::new(false)
+            .drawing_as_a_terminal()
+            .answering(vec![answer(2_usize), answer(false), ctrl_c()]);
+        let (resolver, token) = resolver(&display);
+
+        assert!(matches!(
+            resolve_secret(&resolver),
+            ConflictResolution::Skip
+        ));
+        assert!(token.is_cancelled());
     }
 
     const SECRET: &str = "s3cr3t-rotated-token";

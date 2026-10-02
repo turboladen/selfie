@@ -365,10 +365,8 @@ fn track_without_a_terminal_on_stderr_refuses_rather_than_prompting_forever() {
         .unwrap();
 
     let status = status.expect("the command must end rather than prompt with no terminal");
-    assert!(
-        !status.success(),
-        "nothing was tracked, so exiting 0 would mislead a script"
-    );
+    // 2, a usage error: the question needs a terminal, and nothing was tracked.
+    assert_eq!(status.code(), Some(2), "{stderr}");
     assert!(
         stderr.contains("needs a terminal"),
         "the refusal must say what is missing, got:\n{stderr}"
@@ -424,10 +422,8 @@ fn track_without_a_terminal_refuses_rather_than_prompting_forever() {
         .unwrap();
 
     let status = status.expect("the command must end rather than prompt with no terminal");
-    assert!(
-        !status.success(),
-        "nothing was tracked, so exiting 0 would tell a script the file is handled"
-    );
+    // 2, a usage error: the question needs a terminal, and nothing was tracked.
+    assert_eq!(status.code(), Some(2), "{stderr}");
     assert!(
         stderr.contains("needs a terminal"),
         "the refusal must say what is missing, got:\n{stderr}"
@@ -514,7 +510,7 @@ fn track_before_the_package_directory_exists_gets_to_choosing_a_destination() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
     assert!(
         stderr.contains("Choosing where to track a file needs a terminal"),
         "stderr:\n{stderr}"

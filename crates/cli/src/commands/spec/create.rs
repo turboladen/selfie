@@ -10,9 +10,11 @@ use selfie::{
 use std::path::PathBuf;
 use tracing::info;
 
+use crate::formatters::name_argument;
+
 use crate::{
     config::CliConfig,
-    display_manager::DisplayManager,
+    display_manager::{DisplayManager, PromptFailure},
     event_processor::{EventProcessor, Exit},
 };
 
@@ -34,6 +36,11 @@ pub(crate) async fn handle_create(
     interactive: bool,
 ) -> i32 {
     info!("Creating package: {}", package_name);
+
+    // Refused before the name check, so a run that cannot ask prints only why.
+    if interactive && !display.can_prompt() {
+        return refuse_interactive(display, &PromptFailure::NoTerminal);
+    }
 
     // Create repository for name validation (UI flow decisions)
     let repo = common::create_package_repository(config);
@@ -133,10 +140,13 @@ pub(crate) async fn handle_create(
                     );
                     Exit::Clean.code()
                 }
-                Err(_) => {
-                    display.print_error("Failed to read user input.");
-                    Exit::Failed.code()
-                }
+                Err(failure) => display
+                    .refuse_prompt(
+                        &failure,
+                        "Asking whether to open the editor",
+                        format!("Open {} with 'selfie spec edit'.", file_path.display()).as_str(),
+                    )
+                    .code(),
             }
         } else {
             Exit::Clean.code()
@@ -145,6 +155,18 @@ pub(crate) async fn handle_create(
         display.print_info("Package created. Use 'selfie spec edit' to customize it.");
         Exit::Clean.code()
     }
+}
+
+/// Report a prompt of `spec create --interactive` that got no answer, and return
+/// the exit code.
+fn refuse_interactive(display: &DisplayManager, failure: &PromptFailure) -> i32 {
+    display
+        .refuse_prompt(
+            failure,
+            "spec create --interactive",
+            "Leave off --interactive to write a template, then edit it with 'selfie spec edit'.",
+        )
+        .code()
 }
 
 fn get_valid_package_name(
@@ -206,7 +228,21 @@ fn get_valid_package_name(
                         Ok(1) => {
                             // Fall through to prompt for new name below
                         }
-                        _ => return Ok(PackageNameResult::Cancelled),
+                        Ok(_) => return Ok(PackageNameResult::Cancelled),
+                        Err(failure) => {
+                            return Err(display
+                                .refuse_prompt(
+                                    &failure,
+                                    "Choosing what to do about an existing package",
+                                    format!(
+                                        "Edit it with `selfie spec edit {}`, or run `selfie spec \
+                                         create` with a different name.",
+                                        name_argument(&current_name)
+                                    )
+                                    .as_str(),
+                                )
+                                .code());
+                        }
                     }
                 } else {
                     // Not a package this command can edit, so a different name is
@@ -229,15 +265,21 @@ fn get_valid_package_name(
                     return Err(Exit::Failed.code());
                 }
 
-                let new_name: String = if let Ok(name) =
-                    display.prompt(Input::with_theme(&SimpleTheme).with_prompt(format!(
+                let new_name: String =
+                    match display.prompt(Input::with_theme(&SimpleTheme).with_prompt(format!(
                         "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
                     ))) {
-                    name
-                } else {
-                    display.print_error("Failed to read package name.");
-                    return Err(Exit::Failed.code());
-                };
+                        Ok(name) => name,
+                        Err(failure) => {
+                            return Err(display
+                                .refuse_prompt(
+                                    &failure,
+                                    "Choosing a different name",
+                                    "Run 'selfie spec create' again with a different name.",
+                                )
+                                .code());
+                        }
+                    };
                 current_name = new_name;
                 continue;
             }
@@ -308,10 +350,7 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
                 .with_prompt("Package name")
                 .default(default_name.to_string()),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read package name.");
-            Exit::Failed.code()
-        })
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i32> {
@@ -321,10 +360,7 @@ fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i
                 .with_prompt("Homepage URL (optional)")
                 .allow_empty(true),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read homepage.");
-            Exit::Failed.code()
-        })?;
+        .map_err(|failure| refuse_interactive(display, &failure))?;
 
     Ok(if homepage.trim().is_empty() {
         None
@@ -340,10 +376,7 @@ fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>
                 .with_prompt("Description (optional)")
                 .allow_empty(true),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read description.");
-            Exit::Failed.code()
-        })?;
+        .map_err(|failure| refuse_interactive(display, &failure))?;
 
     Ok(if description.trim().is_empty() {
         None
@@ -396,20 +429,14 @@ fn prompt_environment_name(
                 .with_prompt("Environment name")
                 .default(default_env),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read environment name.");
-            Exit::Failed.code()
-        })
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 fn prompt_install_command(display: &DisplayManager) -> Result<String, i32> {
     loop {
         let cmd: String = display
             .prompt(Input::with_theme(&SimpleTheme).with_prompt("Install command (required)"))
-            .map_err(|_| {
-                display.print_error("Failed to read install command.");
-                Exit::Failed.code()
-            })?;
+            .map_err(|failure| refuse_interactive(display, &failure))?;
 
         if !cmd.trim().is_empty() {
             break Ok(cmd);
@@ -431,10 +458,7 @@ fn prompt_check_command(
                 .default(default_check)
                 .allow_empty(true),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read check command.");
-            Exit::Failed.code()
-        })?;
+        .map_err(|failure| refuse_interactive(display, &failure))?;
 
     Ok(if check_cmd.trim().is_empty() {
         None
@@ -495,10 +519,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
                 .with_prompt("Dependencies (select with space, confirm with enter)")
                 .items(&available_packages),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read dependencies.");
-            Exit::Failed.code()
-        })?;
+        .map_err(|failure| refuse_interactive(display, &failure))?;
 
     Ok(selected
         .into_iter()
@@ -513,10 +534,7 @@ fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, i32>
                 .with_prompt("Add another environment?")
                 .default(false),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read user input.");
-            Exit::Failed.code()
-        })
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
@@ -526,10 +544,7 @@ fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<Stri
                 .with_prompt("File name (without .yml extension)")
                 .default(default_name.to_string()),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read file name.");
-            Exit::Failed.code()
-        })
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 #[cfg(test)]
@@ -543,6 +558,54 @@ mod tests {
     use selfie::package::port::MockPackageRepository;
     use std::path::PathBuf;
     use test_common::{test_config_with_dir, test_config_with_dir_and_env};
+
+    // A fresh package directory holding `existing` specs, a config naming it,
+    // and a service over it.
+    fn packages_holding(
+        existing: &[&str],
+    ) -> (tempfile::TempDir, PathBuf, CliConfig, impl SpecService) {
+        let temp = tempfile::tempdir().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir(&packages).unwrap();
+        for name in existing {
+            std::fs::write(
+                packages.join(format!("{name}.yml")),
+                format!(
+                    "name: {name}\nenvironments:\n  {}:\n    install: \"true\"\n",
+                    test_common::TEST_ENV
+                ),
+            )
+            .unwrap();
+        }
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&packages));
+        let service = test_common::create_test_service_with_config(test_config_with_dir(&packages));
+        (temp, packages, config, service)
+    }
+
+    // Ctrl+C at the "already exists" menu ends the run canceled.
+    #[tokio::test]
+    async fn ctrl_c_at_the_taken_name_menu_is_canceled() {
+        let (_temp, packages, config, service) = packages_holding(&["tool"]);
+        let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
+
+        let code = handle_create(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(code, 130);
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 1);
+    }
+
+    // Ctrl+C at the first interactive prompt ends the run canceled, writing
+    // nothing.
+    #[tokio::test]
+    async fn ctrl_c_at_an_interactive_prompt_is_canceled() {
+        let (_temp, packages, config, service) = packages_holding(&[]);
+        let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
+
+        let code = handle_create(&service, "fresh", &config, &display, true).await;
+
+        assert_eq!(code, 130);
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
+    }
 
     // Helper: collect the final `OperationResult` from an event stream.
     async fn collect_result(

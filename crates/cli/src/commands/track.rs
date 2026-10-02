@@ -5,7 +5,7 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
-use std::{collections::HashSet, io::IsTerminal as _};
+use std::collections::HashSet;
 
 use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
@@ -23,7 +23,7 @@ use tracing::info;
 use crate::{
     commands::common::{self, create_dotfiles_repository, create_package_repository},
     config::CliConfig,
-    display_manager::DisplayManager,
+    display_manager::{DisplayManager, PromptFailure},
 };
 
 /// Sentinel item appended after real package names in the select list.
@@ -97,29 +97,20 @@ pub(crate) async fn handle_track(
         }
     }
 
-    // Refused rather than attempted: `FuzzySelect` reads keys in a loop of its own,
-    // and with no terminal that loop never ends, re-rendering the menu until it
-    // floods the output and pins a core. `interact_opt` returns no `Err` to handle.
-    //
-    // **stderr**, not stdin. `FuzzySelect::interact_opt` prompts on `Term::stderr`,
-    // and console's `read_key` answers `Key::Unknown` at once when that terminal is
-    // not attended, while console reads input from `/dev/tty` when stdin is not one.
-    // So `selfie track x 2>log` from a terminal spins with a tty on stdin, and
-    // `selfie track x </dev/null` from a terminal would have worked. A guard on
-    // stdin gets both backwards.
-    if !std::io::stderr().is_terminal() {
-        display.print_error(
-            "Choosing where to track a file needs a terminal. Name the destination instead: \
-             `selfie package track-dotfile <package> <file>` to add it to an existing package, or \
-             `selfie dotfiles track <name> <file>` to make it a standalone dotfile."
-                .to_string(),
-        );
-        // Non-zero, and not treated as a cancellation: nothing was tracked, and
-        // exiting 0 would tell a script the file is handled.
-        return 1;
-    }
-
-    let choice = prompt_track_choice(&package_names, file, display);
+    let choice = match prompt_track_choice(&package_names, file, display) {
+        Ok(choice) => choice,
+        Err(failure) => {
+            return display
+                .refuse_prompt(
+                    &failure,
+                    "Choosing where to track a file",
+                    "Name the destination instead: `selfie package track-dotfile <package> <file>` \
+                     to add it to an existing package, or `selfie dotfiles track <name> <file>` to \
+                     make it a standalone dotfile.",
+                )
+                .code();
+        }
+    };
 
     match choice {
         TrackChoice::ExistingPackage(ref name) => {
@@ -198,11 +189,15 @@ fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) 
 }
 
 /// Present the interactive selection prompt and return the user's choice.
+///
+/// # Errors
+///
+/// [`PromptFailure`] when either prompt got no answer.
 fn prompt_track_choice(
     package_names: &[String],
     file: &str,
     display: &DisplayManager,
-) -> TrackChoice {
+) -> Result<TrackChoice, PromptFailure> {
     // Build the selection list: existing packages + sentinel options
     let mut items: Vec<String> = package_names.to_vec();
     items.push(NEW_STANDALONE.to_string());
@@ -215,60 +210,58 @@ fn prompt_track_choice(
             .default(0),
     );
 
-    let choice = match selection {
-        Ok(Some(idx)) => idx,
-        Ok(None) | Err(_) => return TrackChoice::Cancelled,
+    let Some(choice) = selection? else {
+        return Ok(TrackChoice::Cancelled);
     };
 
     resolve_choice(&items, choice, file, display)
 }
 
-/// Pure function: given the selection list and the chosen index, determine action.
+/// Given the selection list and the chosen index, determine the action, asking
+/// for a name when the choice needs one.
+///
+/// # Errors
+///
+/// [`PromptFailure`] when the name prompt got no answer.
 fn resolve_choice(
     items: &[String],
     choice: usize,
     file: &str,
     display: &DisplayManager,
-) -> TrackChoice {
+) -> Result<TrackChoice, PromptFailure> {
     let selected = &items[choice];
 
-    if selected == TYPE_A_NAME {
-        match prompt_for_name(display) {
-            Some(name) => TrackChoice::NewStandalone(name),
-            None => TrackChoice::Cancelled,
-        }
+    let default = if selected == TYPE_A_NAME {
+        None
     } else if selected == NEW_STANDALONE {
-        let suggested = suggest_name(file);
-        match prompt_for_name_with_default(&suggested, display) {
-            Some(name) => TrackChoice::NewStandalone(name),
-            None => TrackChoice::Cancelled,
-        }
+        Some(suggest_name(file))
     } else {
-        TrackChoice::ExistingPackage(selected.clone())
+        return Ok(TrackChoice::ExistingPackage(selected.clone()));
+    };
+
+    Ok(match prompt_for_name(default, display)? {
+        Some(name) => TrackChoice::NewStandalone(name),
+        None => TrackChoice::Cancelled,
+    })
+}
+
+/// Prompt for a name for the new dotfile spec, pre-filled with `default` when
+/// there is one. `None` for an empty answer.
+///
+/// # Errors
+///
+/// [`PromptFailure`] when the prompt got no answer.
+fn prompt_for_name(
+    default: Option<String>,
+    display: &DisplayManager,
+) -> Result<Option<String>, PromptFailure> {
+    let theme = ColorfulTheme::default();
+    let mut input = Input::with_theme(&theme).with_prompt("Name for the new dotfile spec");
+    if let Some(default) = default {
+        input = input.default(default);
     }
-}
-
-/// Prompt the user to type a dotfile name (no default).
-fn prompt_for_name(display: &DisplayManager) -> Option<String> {
-    display
-        .prompt(crate::display_manager::TextLine(
-            Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("Name for the new dotfile spec"),
-        ))
-        .ok()
-        .filter(|s: &String| !s.trim().is_empty())
-}
-
-/// Prompt for a name, pre-filling with a suggested default.
-fn prompt_for_name_with_default(default: &str, display: &DisplayManager) -> Option<String> {
-    display
-        .prompt(crate::display_manager::TextLine(
-            Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("Name for the new dotfile spec")
-                .default(default.to_string()),
-        ))
-        .ok()
-        .filter(|s: &String| !s.trim().is_empty())
+    let name: String = display.prompt(crate::display_manager::TextLine(input))?;
+    Ok(Some(name).filter(|name| !name.trim().is_empty()))
 }
 
 /// Derive a suggested spec name from the file path.
@@ -706,6 +699,29 @@ mod tests {
         );
     }
 
+    // Ctrl+C at the destination picker ends the run canceled.
+    #[test]
+    fn ctrl_c_at_the_destination_picker_is_canceled() {
+        let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
+
+        let failure = prompt_track_choice(&["bat".to_string()], "~/.batrc", &display).unwrap_err();
+
+        assert_eq!(failure.exit(), crate::event_processor::Exit::Cancelled);
+    }
+
+    // Ctrl+C at the name prompt ends the run canceled, not declined.
+    #[test]
+    fn ctrl_c_at_the_name_prompt_is_canceled() {
+        use crate::display_manager::{answer, ctrl_c};
+
+        // Index 1 is the "new standalone dotfile" entry after the one package.
+        let display = DisplayManager::new(false).answering(vec![answer(Some(1_usize)), ctrl_c()]);
+
+        let failure = prompt_track_choice(&["bat".to_string()], "~/.batrc", &display).unwrap_err();
+
+        assert_eq!(failure.exit(), crate::event_processor::Exit::Cancelled);
+    }
+
     #[test]
     fn resolve_choice_selects_existing_package() {
         let items = vec![
@@ -721,7 +737,7 @@ mod tests {
             &DisplayManager::new(false),
         );
         assert_eq!(
-            result,
+            result.unwrap(),
             TrackChoice::ExistingPackage("alacritty".to_string())
         );
     }
