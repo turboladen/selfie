@@ -6,10 +6,8 @@ use crate::{
     commands::runner::{CommandError, CommandOutput, CommandRunner},
     config::SelfieConfig,
     package::{
-        EnvironmentConfig, GetPackage, Package,
-        event::{
-            ConsoleOutput, EventSender, OperationFailure, OperationResult, RefusedSpec, StepEnding,
-        },
+        EnvironmentConfig, GetPackage,
+        event::{ConsoleOutput, EventSender, OperationFailure, OperationResult, StepEnding},
         port::{PackageError, PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
@@ -62,38 +60,6 @@ pub(super) fn refuse_unreadable_spec(
         package_name: package_name.to_string(),
         reason: refusal.to_string(),
     }))
-}
-
-/// The environments a listing shows, which decide when it refuses a spec.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum Shown<'a> {
-    /// The current environment only: a spec is refused when apply would refuse
-    /// it here.
-    Current(&'a str),
-    /// Every environment: a spec is refused when a key in any of them, or at its
-    /// top level, cannot be trusted.
-    Every,
-}
-
-/// Split `packages` into the specs readable in the environments `shown` covers
-/// and the ones refused there, each with its refusal.
-pub(super) fn separate_refused<'a>(
-    packages: impl IntoIterator<Item = &'a Package>,
-    shown: Shown<'_>,
-) -> (Vec<&'a Package>, Vec<(&'a Package, RefusedSpec)>) {
-    let mut readable = Vec::new();
-    let mut refused = Vec::new();
-    for package in packages {
-        let refusal = match shown {
-            Shown::Current(environment) => package.spec_refusal(environment),
-            Shown::Every => package.listing_refusal(),
-        };
-        match refusal {
-            Some(reason) => refused.push((package, RefusedSpec::new(package, reason))),
-            None => readable.push(package),
-        }
-    }
-    (readable, refused)
 }
 
 /// Shared step: build an `EnvironmentNotFound` error when the current

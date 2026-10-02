@@ -1,7 +1,7 @@
 mod builder;
 pub mod event;
 pub mod port;
-mod refusal;
+pub(crate) mod refusal;
 pub mod repository;
 pub mod service;
 pub mod validate;

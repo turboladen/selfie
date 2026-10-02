@@ -456,6 +456,55 @@ impl EventSender {
         .await;
     }
 
+    /// Report packages refused whole: one event for each distinct kind and
+    /// reason, in the order each pair first appears, naming every package
+    /// refused for it.
+    pub(crate) async fn send_packages_refused(
+        &self,
+        refusals: impl IntoIterator<Item = PackageRefusal>,
+    ) {
+        for (kind, reason, packages) in group_refusals(refusals) {
+            self.send_refused_group(kind, reason, packages).await;
+        }
+    }
+
+    /// Report `packages`, all refused whole as `kind` for `reason`, as one
+    /// event.
+    pub(crate) async fn send_refused_group(
+        &self,
+        kind: RefusalKind,
+        reason: String,
+        packages: Vec<RefusedPackage>,
+    ) {
+        let operation_info = self.touch_operation_info();
+        let names: Vec<&str> = packages.iter().map(|p| p.name.as_str()).collect();
+        tracing::warn!(
+            operation_type = operation_info.operation_type.to_string(),
+            environment = &operation_info.environment,
+            kind = ?kind,
+            packages = ?names,
+            reason = &reason,
+            "packages refused",
+        );
+        self.send(PackageEvent::PackagesRefused {
+            operation_info,
+            kind,
+            reason,
+            packages,
+        })
+        .await;
+    }
+
+    /// Report the recommended packages a cancel left untried.
+    pub(crate) async fn send_recommends_untried(&self, names: Vec<String>) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::RecommendsUntried {
+            operation_info,
+            names,
+        })
+        .await;
+    }
+
     /// Send a cancellation event
     pub(crate) async fn send_canceled(&self, reason: impl fmt::Display) {
         let operation_info = self.touch_operation_info();
@@ -2672,6 +2721,30 @@ pub enum PackageEvent {
         error: crate::package::port::PackageParseError,
     },
 
+    /// Packages selfie refused whole, all for one reason.
+    ///
+    /// Sent once per distinct reason, before any package is acted on, so a
+    /// consumer can say the reason once and name every package it refused.
+    PackagesRefused {
+        operation_info: OperationInfo,
+        /// What selfie objected to, for a consumer that branches on it.
+        kind: RefusalKind,
+        /// The objection as a clause, which a consumer puts after the package
+        /// names and a colon.
+        reason: String,
+        /// Every package refused for this reason, in the order they were met.
+        packages: Vec<RefusedPackage>,
+    },
+
+    /// Recommended packages a cancel kept from being tried, in the order the
+    /// package lists them: not started, or stopped before installing the next
+    /// of their packages. One whose own command was interrupted is reported
+    /// failed instead.
+    RecommendsUntried {
+        operation_info: OperationInfo,
+        names: Vec<String>,
+    },
+
     /// A recommended (soft) dependency failed to install (non-fatal)
     RecommendFailed {
         operation_info: OperationInfo,
@@ -2946,28 +3019,95 @@ pub struct DotfileListData {
 }
 
 /// A package the listing could not trust, and why.
-///
-/// The reason is rendered rather than typed, matching
-/// [`OperationFailure::UnreadableSpec`]. A consumer that needs to branch on the
-/// kind of refusal is the trigger to make `SpecRefusal` public; none does yet.
 #[derive(Debug, Clone)]
 pub struct RefusedSpec {
     /// The package's declared name.
     pub package_name: String,
     /// The file it was read from.
-    pub path: String,
-    /// What selfie objected to.
+    pub path: std::path::PathBuf,
+    /// What selfie objected to, for a consumer that branches on it.
+    pub kind: RefusalKind,
+    /// What selfie objected to, as a clause for display.
     pub reason: String,
 }
 
 impl RefusedSpec {
-    pub(crate) fn new(package: &crate::package::Package, reason: impl std::fmt::Display) -> Self {
+    pub(crate) fn new(
+        package: &crate::package::Package,
+        refusal: &crate::package::SpecRefusal,
+    ) -> Self {
         Self {
             package_name: package.name().to_string(),
-            path: package.path().display().to_string(),
-            reason: reason.to_string(),
+            path: package.path().to_path_buf(),
+            kind: refusal.kind(),
+            reason: refusal.to_string(),
         }
     }
+}
+
+/// Why selfie refused a whole package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalKind {
+    /// The file carries top-level keys a package does not accept.
+    UnknownTopLevelKeys,
+    /// An environment mapping carries keys an environment does not accept.
+    UnknownEnvironmentKeys,
+    /// The file's top-level keys could not be read back, so an unrecognized one
+    /// cannot be ruled out.
+    UncheckedTopLevel,
+    /// The spec declares no environment.
+    NoEnvironments,
+    /// Several spec files in one directory claim the package's name, so none of
+    /// them is used.
+    AmbiguousName,
+}
+
+/// A package a [`PackageEvent::PackagesRefused`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedPackage {
+    /// The package's name.
+    pub name: String,
+    /// The spec file it was read from, or every file claiming the name for
+    /// [`RefusalKind::AmbiguousName`].
+    pub paths: Vec<std::path::PathBuf>,
+}
+
+/// Carries one package refused whole, before refusals are grouped by reason.
+pub(crate) struct PackageRefusal {
+    pub(crate) kind: RefusalKind,
+    pub(crate) reason: String,
+    pub(crate) package: RefusedPackage,
+}
+
+impl From<&RefusedSpec> for PackageRefusal {
+    fn from(spec: &RefusedSpec) -> Self {
+        Self {
+            kind: spec.kind,
+            reason: spec.reason.clone(),
+            package: RefusedPackage {
+                name: spec.package_name.clone(),
+                paths: vec![spec.path.clone()],
+            },
+        }
+    }
+}
+
+/// `refusals` grouped by kind and reason, in the order each pair first appears,
+/// with each group's packages in the order they came.
+fn group_refusals(
+    refusals: impl IntoIterator<Item = PackageRefusal>,
+) -> Vec<(RefusalKind, String, Vec<RefusedPackage>)> {
+    let mut groups: Vec<(RefusalKind, String, Vec<RefusedPackage>)> = Vec::new();
+    for refusal in refusals {
+        match groups
+            .iter_mut()
+            .find(|(kind, reason, _)| *kind == refusal.kind && *reason == refusal.reason)
+        {
+            Some((_, _, packages)) => packages.push(refusal.package),
+            None => groups.push((refusal.kind, refusal.reason, vec![refusal.package])),
+        }
+    }
+    groups
 }
 
 /// Structured data for check results
@@ -3821,5 +3961,75 @@ mod tests {
     fn every_failure_is_failed() {
         let failure = OperationResult::Failure(OperationFailure::Generic("no".to_string()));
         assert_eq!(failure.outcome(), Outcome::Failed);
+    }
+
+    fn refusal(kind: RefusalKind, reason: &str, name: &str) -> PackageRefusal {
+        PackageRefusal {
+            kind,
+            reason: reason.to_string(),
+            package: RefusedPackage {
+                name: name.to_string(),
+                paths: vec![std::path::PathBuf::from(format!("/p/{name}.yml"))],
+            },
+        }
+    }
+
+    fn names(packages: &[RefusedPackage]) -> Vec<&str> {
+        packages.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    // Packages refused for one reason form one group, whatever lies between
+    // them, and groups come in the order each reason first appears. The reason
+    // shared by three packages comes second, so a grouping that put the larger
+    // group first would fail.
+    #[test]
+    fn refusals_group_by_reason_in_first_seen_order() {
+        let groups = group_refusals([
+            refusal(
+                RefusalKind::UnknownTopLevelKeys,
+                "unknown field `audt`",
+                "a",
+            ),
+            refusal(
+                RefusalKind::UnknownTopLevelKeys,
+                "unknown field `version`",
+                "b",
+            ),
+            refusal(
+                RefusalKind::UnknownTopLevelKeys,
+                "unknown field `version`",
+                "c",
+            ),
+            refusal(
+                RefusalKind::UnknownTopLevelKeys,
+                "unknown field `audt`",
+                "d",
+            ),
+            refusal(
+                RefusalKind::UnknownTopLevelKeys,
+                "unknown field `version`",
+                "e",
+            ),
+        ]);
+
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(groups[0].1, "unknown field `audt`");
+        assert_eq!(names(&groups[0].2), ["a", "d"]);
+        assert_eq!(groups[1].1, "unknown field `version`");
+        assert_eq!(names(&groups[1].2), ["b", "c", "e"]);
+    }
+
+    // One sentence under two kinds is two groups, so a consumer branching on the
+    // kind never sees a package filed under another's.
+    #[test]
+    fn one_reason_under_two_kinds_is_two_groups() {
+        let groups = group_refusals([
+            refusal(RefusalKind::UnknownTopLevelKeys, "same words", "a"),
+            refusal(RefusalKind::NoEnvironments, "same words", "b"),
+        ]);
+
+        assert_eq!(groups.len(), 2, "{groups:?}");
+        assert_eq!(groups[0].0, RefusalKind::UnknownTopLevelKeys);
+        assert_eq!(groups[1].0, RefusalKind::NoEnvironments);
     }
 }

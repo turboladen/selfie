@@ -130,13 +130,22 @@ fn counting_resolver(asked: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> 
     }
 }
 
-// Every warning a run emitted.
+// Every warning a run emitted, plus one line per package it refused whole,
+// reading "refused package '<name>': <reason>" from the event's own fields.
+// Every test reading warnings goes through here, so an assertion that a
+// sentence is absent also covers a refusal that travels as its own event.
 fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
     events
         .iter()
-        .filter_map(|event| match event {
-            PackageEvent::Warning { message, .. } => Some(message.clone()),
-            _ => None,
+        .flat_map(|event| match event {
+            PackageEvent::Warning { message, .. } => vec![message.clone()],
+            PackageEvent::PackagesRefused {
+                reason, packages, ..
+            } => packages
+                .iter()
+                .map(|package| format!("refused package '{}': {reason}", package.name))
+                .collect(),
+            _ => Vec::new(),
         })
         .collect()
 }
@@ -3228,7 +3237,7 @@ mod a_spec_declaring_no_environment {
         assert!(
             warning_messages(&events)
                 .iter()
-                .any(|w| w.contains("Skipping package 'gemrc'")
+                .any(|w| w.contains("refused package 'gemrc'")
                     && w.contains("environments' section")),
             "the refusal must name the package and what to add: {:?}",
             warning_messages(&events)
@@ -7242,16 +7251,6 @@ mod symlinked_targets {
             .is_symlink()
     }
 
-    fn warnings(events: &[PackageEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     // `(deployed, skipped, conflict, refused)` — every bucket, because the
     // point of each is that it is not one of the others. A refusal is not a
     // conflict, and since selfie-c28 it is not a skip either.
@@ -7363,7 +7362,7 @@ mod symlinked_targets {
             "the link's destination must not be written through"
         );
         assert!(is_symlink(&target), "the link itself must be left in place");
-        let warnings = warnings(&events);
+        let warnings = warning_messages(&events);
         assert!(
             warnings
                 .iter()
@@ -7473,7 +7472,7 @@ mod symlinked_targets {
         };
         let events = collect_events(dirs.service().apply_all(options).await).await;
 
-        let warnings = warnings(&events);
+        let warnings = warning_messages(&events);
         assert!(
             warnings.iter().any(|w| w.contains("is a symlink")),
             "a dry run must say the entry would be refused: {warnings:?}"
@@ -7720,7 +7719,7 @@ mod symlinked_targets {
             "the writer let the content through to the link's destination"
         );
         assert!(is_symlink(&target));
-        let warnings = warnings(&events);
+        let warnings = warning_messages(&events);
         assert!(
             warnings.iter().any(|w| w.contains("is a symlink")),
             "the writer's own refusal must still be reported: {warnings:?}"
@@ -7887,16 +7886,6 @@ mod symlink_consistency {
         std::fs::write(path, content).unwrap();
     }
 
-    fn warnings(events: &[PackageEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     fn drift_types(events: &[PackageEvent]) -> Vec<String> {
         events
             .iter()
@@ -7908,7 +7897,7 @@ mod symlink_consistency {
     }
 
     fn symlink_warnings(events: &[PackageEvent]) -> Vec<String> {
-        warnings(events)
+        warning_messages(events)
             .into_iter()
             .filter(|w| w.contains("is a symlink"))
             .collect()
@@ -7987,7 +7976,7 @@ mod symlink_consistency {
             symlink_warnings(&events).len(),
             1,
             "{:?}",
-            warnings(&events)
+            warning_messages(&events)
         );
         assert_eq!(
             drift_summary(&events),
@@ -8050,7 +8039,7 @@ mod symlink_consistency {
 
             let events = collect_events(dirs.service().check_drift().await).await;
 
-            let warnings = warnings(&events);
+            let warnings = warning_messages(&events);
             assert!(
                 warnings.iter().any(|w| w.contains("source path escapes")),
                 "linked: {linked}: {warnings:?}"
@@ -8263,10 +8252,10 @@ mod symlink_consistency {
                 collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
             assert!(
-                warnings(&events).is_empty(),
+                warning_messages(&events).is_empty(),
                 "the guard is lexical; if it started refusing this, update \
                  `is_within`'s documentation too: {:?}",
-                warnings(&events)
+                warning_messages(&events)
             );
             assert_eq!(
                 std::fs::read_to_string(&target).unwrap(),
@@ -8304,7 +8293,11 @@ mod symlink_consistency {
             let events =
                 collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
 
-            assert!(warnings(&events).is_empty(), "{:?}", warnings(&events));
+            assert!(
+                warning_messages(&events).is_empty(),
+                "{:?}",
+                warning_messages(&events)
+            );
             assert_eq!(
                 std::fs::read_to_string(&target).unwrap(),
                 "OUTSIDE VIA A LINKED DIRECTORY"
@@ -8573,16 +8566,6 @@ mod deploy_state_diagnostics {
 
     const CORRUPT: &[u8] = b"{{{{not valid yaml!!! garbage $$$";
 
-    fn warnings(events: &[PackageEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     // Everything a run said about the state file: the warnings, and the
     // failure a refusing command ends with.
     fn state_reports(events: &[PackageEvent]) -> Vec<String> {
@@ -8590,7 +8573,7 @@ mod deploy_state_diagnostics {
             Some(OperationResult::Failure(failure)) => Some(failure.to_string()),
             _ => None,
         };
-        warnings(events)
+        warning_messages(events)
             .into_iter()
             .chain(failure)
             .filter(|report| report.contains("deploy-state.yml"))
@@ -8672,7 +8655,7 @@ mod deploy_state_diagnostics {
             named.len(),
             1,
             "expected one report naming the state file, got {:?}",
-            warnings(&events)
+            warning_messages(&events)
         );
         assert!(
             named[0].contains("Cannot parse")
@@ -8801,7 +8784,7 @@ mod deploy_state_diagnostics {
 
         // The ones that match the egress: every warning and the failure, as the
         // fields the adapters read.
-        for report in reports.iter().chain(warnings(&events).iter()) {
+        for report in reports.iter().chain(warning_messages(&events).iter()) {
             assert!(
                 !report.contains(MARKER),
                 "a report carried the state file's contents: {report}"
@@ -8940,7 +8923,7 @@ mod deploy_state_diagnostics {
             named.len(),
             1,
             "expected one report: {:?}",
-            warnings(&events)
+            warning_messages(&events)
         );
         assert!(
             named[0].contains("named pipe (fifo)"),
@@ -9333,16 +9316,6 @@ environments:
         );
     }
 
-    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     // selfie-ty9n, the same hazard one level down.
     //
     // `_dotfiles:` inside the environment being applied leaves that environment's
@@ -9541,7 +9514,7 @@ dotfiles:
         let warnings = warning_messages(&events);
         assert!(
             warnings.iter().any(
-                |w| w.contains("Skipping package 'myapp'") && w.contains("cannot be ruled out")
+                |w| w.contains("refused package 'myapp'") && w.contains("cannot be ruled out")
             ),
             "the refusal must name the package and what could not be ruled out: {warnings:?}"
         );
@@ -9629,7 +9602,7 @@ environments:
         let warnings = warning_messages(&events);
         assert!(
             warnings.iter().any(
-                |w| w.contains("Skipping package 'myapp'") && w.contains("cannot be ruled out")
+                |w| w.contains("refused package 'myapp'") && w.contains("cannot be ruled out")
             ),
             "the refusal must name the package and what could not be ruled out: {warnings:?}"
         );
@@ -9728,7 +9701,7 @@ environments:
         assert!(
             warnings
                 .iter()
-                .any(|w| w.contains("Skipping package 'myapp'")
+                .any(|w| w.contains("refused package 'myapp'")
                     && w.contains("unknown field 'configs'")),
             "the refusal must name the package and the key: {warnings:?}"
         );
@@ -9871,16 +9844,6 @@ mod irregular_targets {
 
     fn make_fifo(path: &Path) {
         nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
-    }
-
-    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
     }
 
     // One package, one entry, whose target is `target`.
@@ -10444,16 +10407,6 @@ mod irregular_sources {
         nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
     }
 
-    fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     // One package, one entry, whose **source** is a fifo in the repository.
     fn package_with_fifo_source(dirs: &TestDirs, target: &Path) {
         std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
@@ -10876,11 +10829,11 @@ mod apply_and_drift_agree {
 
         let from_apply: Vec<String> = warning_messages(&applied)
             .into_iter()
-            .filter(|m| m.contains("Skipping package"))
+            .filter(|m| m.contains("refused package"))
             .collect();
         let from_drift: Vec<String> = warning_messages(&drifted)
             .into_iter()
-            .filter(|m| m.contains("Skipping package"))
+            .filter(|m| m.contains("refused package"))
             .collect();
 
         assert_eq!(
@@ -14427,22 +14380,23 @@ mod stop_on_error_governs_every_failure {
         );
     }
 
-    // Packages are applied in sorted path order, so `aaa` is refused before `zzz`
-    // is reached.
+    // A refused package stops the run before anything deploys, wherever it
+    // sorts. `zzz` sorts after a package that deploys, so a run that reached
+    // `aaa` first would write its target before refusing `zzz`.
     #[tokio::test]
-    async fn a_package_refused_whole_stops_the_run_naming_the_package() {
+    async fn a_package_refused_whole_stops_the_run_before_anything_deploys() {
         let dirs = TestDirs::new().stopping_on_error(true);
-        write_package_yaml(
-            &dirs.package_dir,
-            "aaa",
-            "name: aaa\nenvironments:\n  test:\n    install: \"echo i\"\nconfigs: []\n",
-        );
-        std::fs::write(dirs.package_dir.join("zzz.toml"), "ZZZ").unwrap();
-        let later = dirs.target_dir.join("zzz.toml");
+        std::fs::write(dirs.package_dir.join("aaa.toml"), "AAA").unwrap();
+        let earlier = dirs.target_dir.join("aaa.toml");
         create_package_with_dotfiles(
             &dirs.package_dir,
+            "aaa",
+            &[("aaa.toml", earlier.to_str().unwrap())],
+        );
+        write_package_yaml(
+            &dirs.package_dir,
             "zzz",
-            &[("zzz.toml", later.to_str().unwrap())],
+            "name: zzz\nenvironments:\n  test:\n    install: \"echo i\"\nconfigs: []\n",
         );
 
         let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
@@ -14450,9 +14404,19 @@ mod stop_on_error_governs_every_failure {
         let message = failure_message(&events);
         assert_eq!(
             message,
-            "Stopped after refusing package 'aaa' (stop_on_error is enabled)"
+            "Stopped before applying anything: package 'zzz' is refused (stop_on_error is enabled)"
         );
-        assert!(!later.exists(), "the run must stop before the next package");
+        assert!(
+            !earlier.exists(),
+            "a package listed ahead of the refused one must not deploy"
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, PackageEvent::PackagesRefused { packages, .. }
+                    if packages.iter().any(|p| p.name == "zzz"))
+            ),
+            "the refusal is still reported: {events:#?}"
+        );
     }
 
     #[tokio::test]
@@ -15069,7 +15033,7 @@ mod folded_names_are_refused {
         assert!(
             warning_messages(&events)
                 .iter()
-                .any(|w| w.starts_with("Skipping package 'bat'")
+                .any(|w| w.starts_with("refused package 'bat'")
                     && w.contains("bat.yaml, bat.yml")
                     && w.contains("Rename or remove all but one")),
             "the warning must be install's, naming both files: {events:?}"
@@ -15122,7 +15086,7 @@ mod folded_names_are_refused {
         assert!(
             warning_messages(&events)
                 .iter()
-                .any(|w| w.starts_with("Skipping package 'bat'")),
+                .any(|w| w.starts_with("refused package 'bat'")),
             "{events:?}"
         );
         // Two refusals: the ambiguity, and the file that failed to parse, which
@@ -15217,7 +15181,7 @@ mod folded_names_are_refused {
         assert!(
             !warning_messages(&events)
                 .iter()
-                .any(|w| w.starts_with("Skipping package 'bat'")),
+                .any(|w| w.starts_with("refused package 'bat'")),
             "{events:?}"
         );
         assert!(
@@ -15646,7 +15610,7 @@ async fn a_shadowing_top_level_or_environment_key_gets_its_level_s_advice() {
     let find = |package: &str| {
         warnings
             .iter()
-            .find(|w| w.starts_with(&format!("Skipping package '{package}'")))
+            .find(|w| w.starts_with(&format!("refused package '{package}'")))
             .unwrap_or_else(|| panic!("{warnings:?}"))
     };
     assert!(find("top").ends_with("only a name matching a top-level field is refused"));
@@ -17506,5 +17470,122 @@ mod event_sources {
             sources,
             vec![DotfileSource::Command("op read x".to_string())]
         );
+    }
+}
+
+// Packages refused whole for one reason arrive as one event naming every one,
+// before any package is acted on.
+mod refusals_grouped_by_reason {
+    use super::*;
+    use selfie::package::event::RefusalKind;
+
+    // Three packages carry `version:`, one between them in sort order carries
+    // `audt:`, and one deploys.
+    fn fixture(dirs: &TestDirs) -> PathBuf {
+        for (file, key) in [
+            ("a.yml", "version"),
+            ("b.yml", "audt"),
+            ("c.yml", "version"),
+            ("d.yml", "version"),
+        ] {
+            let name = file.trim_end_matches(".yml");
+            std::fs::write(
+                dirs.package_dir.join(file),
+                format!(
+                    "name: {name}\n{key}: 1\nenvironments:\n  test:\n    install: \"echo i\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(dirs.package_dir.join("e.toml"), "E").unwrap();
+        let target = dirs.target_dir.join("e.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "e",
+            &[("e.toml", target.to_str().unwrap())],
+        );
+        target
+    }
+
+    // Returns each event's kind, reason and package names, in the order they
+    // came.
+    fn refused(events: &[PackageEvent]) -> Vec<(RefusalKind, String, Vec<String>)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::PackagesRefused {
+                    kind,
+                    reason,
+                    packages,
+                    ..
+                } => Some((
+                    *kind,
+                    reason.clone(),
+                    packages.iter().map(|p| p.name.clone()).collect(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_grouped(events: &[PackageEvent]) {
+        let refused = refused(events);
+        assert_eq!(refused.len(), 2, "{refused:#?}");
+        assert_eq!(refused[0].0, RefusalKind::UnknownTopLevelKeys);
+        assert!(refused[0].1.contains("version"), "{refused:#?}");
+        assert_eq!(refused[0].2, ["a", "c", "d"]);
+        assert!(refused[1].1.contains("audt"), "{refused:#?}");
+        assert_eq!(refused[1].2, ["b"]);
+        assert!(
+            warning_messages(events)
+                .iter()
+                .filter(|w| w.contains("version"))
+                .count()
+                == 3,
+            "each package is still reported: {events:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_reports_each_reason_once() {
+        let dirs = TestDirs::new();
+        let target = fixture(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_grouped(&events);
+        assert!(target.exists(), "the readable package still deploys");
+        // Every refusal is reported before anything is deployed.
+        let last_refusal = events
+            .iter()
+            .rposition(|e| matches!(e, PackageEvent::PackagesRefused { .. }))
+            .unwrap();
+        let first_deploy = events
+            .iter()
+            .position(|e| matches!(e, PackageEvent::DotfileDeploying { .. }))
+            .unwrap();
+        assert!(last_refusal < first_deploy, "{events:#?}");
+        match get_operation_result(&events) {
+            Some(OperationResult::Success(OperationSuccess::DotfilesApplied {
+                refused_count,
+                deployed_count,
+                ..
+            })) => {
+                assert_eq!(*refused_count, 4);
+                assert_eq!(*deployed_count, 1);
+            }
+            other => panic!("expected an apply result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drift_reports_each_reason_once() {
+        let dirs = TestDirs::new();
+        fixture(&dirs);
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_grouped(&events);
+        assert_eq!(drift_summary(&events).2, 4, "{events:#?}");
     }
 }

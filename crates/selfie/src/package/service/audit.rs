@@ -119,19 +119,13 @@ where
     // refuses the same file, so this run has to say it left it out.
     //
     // Counted as a refusal, as an unparsable file is above.
-    let (readable, refused) = super::steps::separate_refused(
+    let (readable, refused) = crate::package::refusal::refuse_up_front(
         packages.valid_packages(),
-        super::steps::Shown::Current(config.environment()),
-    );
-    for (_, spec) in refused {
-        sender
-            .send_warning(format!(
-                "Skipping package '{}': {}",
-                spec.package_name, spec.reason
-            ))
-            .await;
-        refused_count += 1;
-    }
+        config.environment(),
+        sender,
+    )
+    .await;
+    refused_count += refused.len();
     let package_names: Vec<String> = readable
         .into_iter()
         .filter(|package| package.environments().contains_key(config.environment()))
@@ -1269,6 +1263,13 @@ mod tests {
             match event {
                 crate::package::event::PackageEvent::Warning { message, .. } => {
                     warnings.push(message);
+                }
+                crate::package::event::PackageEvent::PackagesRefused {
+                    reason, packages, ..
+                } => {
+                    for package in packages {
+                        warnings.push(format!("{}: {reason}", package.name));
+                    }
                 }
                 crate::package::event::PackageEvent::AuditResultCompleted { .. } => {
                     audit_results += 1;

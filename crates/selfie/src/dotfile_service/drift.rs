@@ -15,7 +15,10 @@ use crate::{
         state::{DeployState, DriftType},
     },
     fs::filesystem::FileSystem,
-    package::event::{EventSender, OperationResult, OperationSuccess, StepCount},
+    package::{
+        event::{EventSender, OperationResult, OperationSuccess, StepCount},
+        refusal::refuse_up_front,
+    },
 };
 
 use super::classify::{
@@ -83,28 +86,18 @@ where
 
     // Asked once, so every package compares targets against the same home.
     let home = ResolvedHome::of(filesystem);
-    let packages = catalog.packages;
+    // The same question apply asks, so the two commands cannot answer
+    // differently about one file. Drift reporting a package clean while apply
+    // refuses it is worse than either answer alone: it sends a reader to run the
+    // command that will not run. A package refused whole has no entry examined
+    // at all, so its reason is reported against the package.
+    let (packages, refused) = refuse_up_front(catalog.packages, config.environment(), sender).await;
+    tally.refused += refused.len();
 
     for package in packages {
         // Between packages, for a run whose entries are few or absent.
         if token.is_cancelled() {
             return None;
-        }
-
-        // The same question apply asks, in the same place, so the two commands
-        // cannot answer differently about one file. Drift reporting a package
-        // clean while apply refuses it is worse than either answer alone: it
-        // sends a reader to run the command that will not run.
-        //
-        // The entries are not examined at all. A package refused whole is
-        // refused before there is an entry to attach a reason to, which is the
-        // same reason apply asks here rather than per entry.
-        if let Some(refusal) = package.spec_refusal(config.environment()) {
-            sender
-                .send_warning(format!("Skipping package '{}': {refusal}", package.name()))
-                .await;
-            tally.refused += 1;
-            continue;
         }
 
         // Source paths resolve relative to the YAML file's parent directory

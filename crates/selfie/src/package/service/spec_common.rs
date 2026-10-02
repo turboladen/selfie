@@ -76,11 +76,12 @@ where
     // alone, since its description comes from the file selfie refused.
     let matches = |package: &Package| (opts.filter)(package.name(), package.description());
     let shown = if opts.show_all {
-        super::steps::Shown::Every
+        crate::package::refusal::Shown::Every
     } else {
-        super::steps::Shown::Current(config.environment())
+        crate::package::refusal::Shown::Current(config.environment())
     };
-    let (sorted_packages, refused) = super::steps::separate_refused(sorted_packages, shown);
+    let (sorted_packages, refused) =
+        crate::package::refusal::separate_refused(sorted_packages, shown);
     let refused: Vec<RefusedSpec> = refused
         .into_iter()
         .filter(|(package, _)| {

@@ -548,6 +548,8 @@ where
 /// Recommends are one-level deep only — we do NOT follow recommends of recommends.
 /// Each recommend's hard dependencies ARE resolved and installed.
 /// Failures are emitted as `RecommendFailed` events but never propagate to the parent result.
+/// When a cancel leaves recommends untried, one `RecommendsUntried` event names
+/// them all.
 ///
 /// `recommends` must be the root package's list for `config.environment()`, as
 /// `DependencyGraph::root_recommends` holds it.
@@ -578,11 +580,11 @@ async fn install_recommends<PR, CR>(
     // borrowed references that can't move into 'static tokio tasks.
     let max_concurrent = config.max_concurrency().get();
 
+    // Once canceled, every recommend not yet started returns at once without
+    // trying, in this chunk and every later one. All of them are named, so a
+    // canceled install never reads as one that tried every recommend.
+    let mut untried: Vec<String> = Vec::new();
     for chunk in recommends.chunks(max_concurrent) {
-        if token.is_cancelled() {
-            break;
-        }
-
         let futures: Vec<_> = chunk
             .iter()
             .map(|name| {
@@ -590,13 +592,27 @@ async fn install_recommends<PR, CR>(
             })
             .collect();
 
-        futures::future::join_all(futures).await;
+        let started = futures::future::join_all(futures).await;
+        untried.extend(
+            chunk
+                .iter()
+                .zip(started)
+                .filter(|(_, started)| !started)
+                .map(|(name, _)| name.clone()),
+        );
+    }
+
+    if !untried.is_empty() {
+        sender.send_recommends_untried(untried).await;
     }
 }
 
-/// Install a single recommend within a bulk operation.
+/// Install a single recommend within a bulk operation, and say whether it was
+/// tried: `false` when a cancel came before it started, or before it installed
+/// the next of its packages.
 ///
-/// Emits started/succeeded/failed events. Failures are reported but never
+/// A tried recommend emits started, then succeeded or failed; one the cancel
+/// stopped part way emits only started. Failures are reported but never
 /// propagate — recommends are soft dependencies.
 async fn install_recommend_in_bulk<PR, CR>(
     recommend_name: &str,
@@ -605,12 +621,13 @@ async fn install_recommend_in_bulk<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     token: &CancellationToken,
-) where
+) -> bool
+where
     PR: PackageRepository + Sync,
     CR: CommandRunner,
 {
     if token.is_cancelled() {
-        return;
+        return false;
     }
 
     sender.send_recommend_started(recommend_name).await;
@@ -632,15 +649,29 @@ async fn install_recommend_in_bulk<PR, CR>(
         Ok(()) => {
             sender.send_recommend_succeeded(recommend_name).await;
         }
-        Err(error) => {
+        // Stopped between its packages, so nothing of it failed: it is named
+        // with the untried ones.
+        Err(RecommendError::Interrupted) => return false,
+        // Everything else is a failure, decided by what happened and never by
+        // the token: a command that failed, one the cancel interrupted, and one
+        // the cancel stopped just before it spawned, which the runner reports
+        // the same way as an interrupted one.
+        Err(RecommendError::Failed(error)) => {
             sender.send_recommend_failed(recommend_name, &error).await;
         }
     }
+    true
+}
+
+/// Why a recommend was not installed.
+enum RecommendError {
+    /// A cancel came before it installed the next of its packages.
+    Interrupted,
+    /// Resolving or installing one of its packages failed.
+    Failed(String),
 }
 
 /// Try to install a single recommended package (with its hard dependencies).
-///
-/// Returns `Ok(())` on success, or `Err(message)` describing the failure.
 async fn install_single_recommend<PR, CR>(
     recommend_name: &str,
     repo: &PR,
@@ -649,7 +680,7 @@ async fn install_single_recommend<PR, CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
-) -> Result<(), String>
+) -> Result<(), RecommendError>
 where
     PR: PackageRepository + Sync,
     CR: CommandRunner,
@@ -657,12 +688,12 @@ where
     // Resolve hard dependencies for this recommend
     let dep_graph = deps::resolve_dependencies(recommend_name, repo, config.environment(), sender)
         .await
-        .map_err(|f| f.to_string())?;
+        .map_err(|f| RecommendError::Failed(f.to_string()))?;
 
     // Install each package in dependency order
     for pkg_name in &dep_graph.install_order {
         if token.is_cancelled() {
-            return Err("cancelled".to_string());
+            return Err(RecommendError::Interrupted);
         }
 
         let result = install_single_package(
@@ -677,7 +708,7 @@ where
         .await;
 
         if let OperationResult::Failure(failure) = result {
-            return Err(failure.to_string());
+            return Err(RecommendError::Failed(failure.to_string()));
         }
     }
 

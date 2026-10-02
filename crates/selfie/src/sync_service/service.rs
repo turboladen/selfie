@@ -190,14 +190,22 @@ where
             let drift_stream = dotfile_service.check_drift().await;
             let summary = collect_drift_summary(drift_stream).await;
 
-            // What drift warned about and the specs it skipped limit what its
-            // summary covers, so they are sent ahead of it, in the order drift
-            // reported them: a skipped spec comes before the warning it explains.
+            // What drift warned about, the packages it refused and the specs it
+            // skipped limit what its summary covers, so they are sent ahead of it,
+            // in the order drift reported them: a skipped spec comes before the
+            // warning it explains.
             for relayed in summary.relayed {
                 match relayed {
                     RelayedDriftEvent::Warning(message) => sender.send_warning(message).await,
                     RelayedDriftEvent::SkippedSpec(error) => {
                         sender.send_spec_skipped(error).await;
+                    }
+                    RelayedDriftEvent::PackagesRefused {
+                        kind,
+                        reason,
+                        packages,
+                    } => {
+                        sender.send_refused_group(kind, reason, packages).await;
                     }
                 }
             }
@@ -1337,6 +1345,11 @@ fn remote_label(repo_info: &crate::git::sync_provider::RepoInfo) -> String {
 enum RelayedDriftEvent {
     Warning(String),
     SkippedSpec(crate::package::port::PackageParseError),
+    PackagesRefused {
+        kind: crate::package::event::RefusalKind,
+        reason: String,
+        packages: Vec<crate::package::event::RefusedPackage>,
+    },
 }
 
 /// What `sync status` takes from a drift check.
@@ -1362,7 +1375,8 @@ struct DriftSummary {
     /// Distinct from `error`: a cancelled check did not fail, it did not finish, and
     /// its counts describe only what it reached.
     cancelled: Option<String>,
-    /// Warnings and skipped specs, in the order drift reported them.
+    /// Warnings, refused packages and skipped specs, in the order drift
+    /// reported them.
     relayed: Vec<RelayedDriftEvent>,
 }
 
@@ -1392,6 +1406,21 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
             }
             PackageEvent::SpecSkipped { error, .. } => {
                 summary.relayed.push(RelayedDriftEvent::SkippedSpec(error));
+            }
+            // Each refused package counts as one warning: `warned` counts what the
+            // check could not complete, and every refused package is one such gap.
+            PackageEvent::PackagesRefused {
+                kind,
+                reason,
+                packages,
+                ..
+            } => {
+                summary.warned += packages.len();
+                summary.relayed.push(RelayedDriftEvent::PackagesRefused {
+                    kind,
+                    reason,
+                    packages,
+                });
             }
             PackageEvent::Completed {
                 result:
@@ -2172,6 +2201,50 @@ mod tests {
                 &summary.relayed[2],
                 RelayedDriftEvent::Warning(message) if message == "second warning"
             ),
+            "{summary:?}"
+        );
+    }
+
+    // Packages refused whole are relayed in their place among the warnings, and
+    // each package counts as one warning.
+    #[tokio::test]
+    async fn collect_drift_summary_relays_grouped_refusals_in_order() {
+        use crate::package::event::{RefusalKind, RefusedPackage};
+
+        let package = |name: &str| RefusedPackage {
+            name: name.to_string(),
+            paths: vec![PathBuf::from(format!("/packages/{name}.yml"))],
+        };
+        let events = vec![
+            PackageEvent::Warning {
+                operation_info: test_operation_info(),
+                message: "first warning".to_string(),
+            },
+            PackageEvent::PackagesRefused {
+                operation_info: test_operation_info(),
+                kind: RefusalKind::UnknownTopLevelKeys,
+                reason: "unknown field `version`".to_string(),
+                packages: vec![package("a"), package("b"), package("c")],
+            },
+            PackageEvent::Warning {
+                operation_info: test_operation_info(),
+                message: "second warning".to_string(),
+            },
+        ];
+
+        let summary = collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(summary.warned, 5, "{summary:?}");
+        assert_eq!(summary.relayed.len(), 3, "{summary:?}");
+        assert!(
+            matches!(
+                &summary.relayed[1],
+                RelayedDriftEvent::PackagesRefused { packages, .. } if packages.len() == 3
+            ),
+            "{summary:?}"
+        );
+        assert!(
+            matches!(&summary.relayed[2], RelayedDriftEvent::Warning(m) if m == "second warning"),
             "{summary:?}"
         );
     }
