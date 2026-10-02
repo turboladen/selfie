@@ -441,6 +441,13 @@ impl EventProcessor {
                     .print_warning(format!("  ⚠ {recommend_name} failed: {error}"));
             }
 
+            PackageEvent::RecommendsUntried { names, .. } => {
+                self.display.print_warning(format!(
+                    "Canceled before installing recommended packages: {}",
+                    names.join(", ")
+                ));
+            }
+
             PackageEvent::DotfileDeploying { source, target, .. } => {
                 let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
@@ -948,6 +955,30 @@ mod tests {
                 "{each:?}"
             );
         }
+    }
+
+    // The recommends a cancel left untried are named together, on stderr.
+    #[tokio::test]
+    async fn untried_recommends_are_named_on_stderr() {
+        use crate::display_manager::Channel;
+
+        let printed = printed_for(
+            DisplayManager::new(false),
+            vec![PackageEvent::RecommendsUntried {
+                operation_info: make_operation_info("root"),
+                names: vec!["r2".to_string(), "r3".to_string()],
+            }],
+        )
+        .await;
+
+        assert_eq!(printed.len(), 1, "{printed:?}");
+        assert_eq!(printed[0].0, Channel::Stderr);
+        assert!(
+            printed[0]
+                .1
+                .contains("Canceled before installing recommended packages: r2, r3"),
+            "{printed:?}"
+        );
     }
 
     #[test]

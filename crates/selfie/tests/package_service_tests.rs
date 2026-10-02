@@ -1829,3 +1829,267 @@ async fn an_audit_of_every_package_groups_the_packages_it_refuses() {
         other => panic!("expected an audit result, got {other:?}"),
     }
 }
+
+// A cancel during the recommends names every recommend it left untried: the
+// ones in a chunk it never reached, and the ones in its own chunk that had not
+// started. Four recommends two at a time; the cancel lands in `r1`, so `r2`
+// returns from inside the first chunk without starting, and `r3` and `r4` are
+// in a chunk never reached. `r1` started, so it is not named.
+#[tokio::test]
+async fn a_cancel_during_the_recommends_names_the_ones_left_untried() {
+    use selfie::{
+        config::SelfieConfigBuilder,
+        fs::RealFileSystem,
+        package::{
+            SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
+            service::PackageServiceImpl,
+        },
+    };
+    use test_common::FakeCommandRunner;
+    use tokio_util::sync::CancellationToken;
+
+    let temp_dir = TempDir::new().unwrap();
+    let package_dir = temp_dir.path().to_path_buf();
+    std::fs::write(
+        package_dir.join("root.yml"),
+        "name: root\nenvironments:\n  test:\n    check: \"check-root\"\n    install: \
+         \"install-root\"\n    recommends:\n      - r1\n      - r2\n      - r3\n      - r4\n",
+    )
+    .unwrap();
+    for name in ["r1", "r2", "r3", "r4"] {
+        std::fs::write(
+            package_dir.join(format!("{name}.yml")),
+            format!(
+                "name: {name}\nenvironments:\n  test:\n    check: \"check-{name}\"\n    \
+                 install: \"install-{name}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let token = CancellationToken::new();
+    let runner = FakeCommandRunner::new()
+        .succeeding("check-root", b"")
+        .succeeding("check-r1", b"")
+        .cancelling("check-r1", &token);
+    let config = SelfieConfigBuilder::default()
+        .environment("test")
+        .package_directory(&package_dir)
+        .max_concurrency_unchecked(2)
+        .build();
+    let service = PackageServiceImpl::new(
+        YamlPackageRepository::new(
+            RealFileSystem,
+            package_dir.clone(),
+            SpecOrigin::PackageDirectory,
+        ),
+        YamlPackageRepository::new(
+            RealFileSystem,
+            config.dotfiles_directory(),
+            SpecOrigin::DotfilesDirectory,
+        ),
+        runner.clone(),
+        GixGitStatusProvider,
+        config,
+        token,
+    );
+
+    let events = collect_events(service.install("root", InstallOptions::default()).await).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::RecommendStarted { recommend_name, .. } if recommend_name == "r1"
+        )),
+        "control: the first recommend started, so the cancel landed inside the chunk: {events:#?}"
+    );
+    let untried: Vec<&Vec<String>> = events
+        .iter()
+        .filter_map(|e| match e {
+            PackageEvent::RecommendsUntried { names, .. } => Some(names),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        untried,
+        [&vec!["r2".to_string(), "r3".to_string(), "r4".to_string()]],
+        "{events:#?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Canceled { .. })),
+        "{events:#?}"
+    );
+}
+
+// A recommend the cancel stops part way, here between its dependency and
+// itself, is named with the untried ones and not reported as failed.
+#[tokio::test]
+async fn a_recommend_the_cancel_stops_part_way_is_named_untried() {
+    use selfie::{
+        fs::RealFileSystem,
+        package::{
+            SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
+            service::PackageServiceImpl,
+        },
+    };
+    use test_common::{FakeCommandRunner, config::service_test_config_with_dir};
+    use tokio_util::sync::CancellationToken;
+
+    let temp_dir = TempDir::new().unwrap();
+    let package_dir = temp_dir.path().to_path_buf();
+    std::fs::write(
+        package_dir.join("root.yml"),
+        "name: root\nenvironments:\n  test:\n    check: \"check-root\"\n    install: \
+         \"install-root\"\n    recommends:\n      - rec\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package_dir.join("rec.yml"),
+        "name: rec\nenvironments:\n  test:\n    check: \"check-rec\"\n    install: \
+         \"install-rec\"\n    dependencies:\n      - dep\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package_dir.join("dep.yml"),
+        "name: dep\nenvironments:\n  test:\n    check: \"check-dep\"\n    install: \
+         \"install-dep\"\n",
+    )
+    .unwrap();
+
+    let token = CancellationToken::new();
+    let runner = FakeCommandRunner::new()
+        .succeeding("check-root", b"")
+        .succeeding("check-dep", b"")
+        .cancelling("check-dep", &token);
+    let config = service_test_config_with_dir(&package_dir);
+    let service = PackageServiceImpl::new(
+        YamlPackageRepository::new(
+            RealFileSystem,
+            package_dir.clone(),
+            SpecOrigin::PackageDirectory,
+        ),
+        YamlPackageRepository::new(
+            RealFileSystem,
+            config.dotfiles_directory(),
+            SpecOrigin::DotfilesDirectory,
+        ),
+        runner.clone(),
+        GixGitStatusProvider,
+        config,
+        token,
+    );
+
+    let events = collect_events(service.install("root", InstallOptions::default()).await).await;
+
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::RecommendStarted { recommend_name, .. } if recommend_name == "rec"
+        )),
+        "control: the recommend started before the cancel: {events:#?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::RecommendFailed { .. })),
+        "{events:#?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            PackageEvent::RecommendsUntried { names, .. } if names == &["rec".to_string()]
+        )),
+        "{events:#?}"
+    );
+}
+
+// A recommend whose own command ran and failed is reported failed, and is not
+// among the untried, whether the cancel interrupted the command or landed while
+// the command failed for its own reason. Only what happened decides it, never
+// the token's state afterwards.
+#[tokio::test]
+async fn a_recommend_whose_command_failed_under_a_cancel_is_reported_failed() {
+    use selfie::{
+        commands::CommandError,
+        fs::RealFileSystem,
+        package::{
+            SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
+            service::PackageServiceImpl,
+        },
+    };
+    use test_common::{FakeCommandRunner, config::service_test_config_with_dir};
+    use tokio_util::sync::CancellationToken;
+
+    for (case, interrupted) in [
+        ("interrupted", true),
+        ("failed as the cancel landed", false),
+    ] {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().to_path_buf();
+        std::fs::write(
+            package_dir.join("root.yml"),
+            "name: root\nenvironments:\n  test:\n    check: \"check-root\"\n    install: \
+             \"install-root\"\n    recommends:\n      - rec\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package_dir.join("rec.yml"),
+            "name: rec\nenvironments:\n  test:\n    check: \"check-rec\"\n    install: \
+             \"install-rec\"\n",
+        )
+        .unwrap();
+
+        let token = CancellationToken::new();
+        let runner = FakeCommandRunner::new()
+            .succeeding("check-root", b"")
+            .failing("check-rec", b"");
+        let runner = if interrupted {
+            runner.erroring(
+                "install-rec",
+                CommandError::Cancelled {
+                    command: "install-rec".to_string(),
+                    working_directory: package_dir.clone(),
+                },
+            )
+        } else {
+            runner.failing("install-rec", b"no such formula")
+        }
+        .cancelling("install-rec", &token);
+        let config = service_test_config_with_dir(&package_dir);
+        let service = PackageServiceImpl::new(
+            YamlPackageRepository::new(
+                RealFileSystem,
+                package_dir.clone(),
+                SpecOrigin::PackageDirectory,
+            ),
+            YamlPackageRepository::new(
+                RealFileSystem,
+                config.dotfiles_directory(),
+                SpecOrigin::DotfilesDirectory,
+            ),
+            runner,
+            GixGitStatusProvider,
+            config,
+            token,
+        );
+
+        let events = collect_events(service.install("root", InstallOptions::default()).await).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::RecommendFailed { recommend_name, .. } if recommend_name == "rec"
+            )),
+            "{case}: the recommend must be reported failed: {events:#?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::RecommendsUntried { names, .. } if names.iter().any(|n| n == "rec")
+            )),
+            "{case}: a recommend that ran is not untried: {events:#?}"
+        );
+    }
+}

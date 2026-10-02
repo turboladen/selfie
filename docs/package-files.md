@@ -446,6 +446,10 @@ selfie package install fnm --no-recommends
 Recommends are only one level deep — a recommended package's own recommends are not followed. This
 keeps installation predictable and avoids deep recursive recommend chains.
 
+Pressing Ctrl+C while recommends install ends the run as canceled, and selfie names every recommend
+it did not try: one it had not started, or one stopped before installing the next of its packages. A
+recommend whose own command the Ctrl+C interrupted is reported as failed.
+
 ## Command Execution
 
 ### Working Directory

@@ -495,6 +495,16 @@ impl EventSender {
         .await;
     }
 
+    /// Report the recommended packages a cancel left untried.
+    pub(crate) async fn send_recommends_untried(&self, names: Vec<String>) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::RecommendsUntried {
+            operation_info,
+            names,
+        })
+        .await;
+    }
+
     /// Send a cancellation event
     pub(crate) async fn send_canceled(&self, reason: impl fmt::Display) {
         let operation_info = self.touch_operation_info();
@@ -2724,6 +2734,15 @@ pub enum PackageEvent {
         reason: String,
         /// Every package refused for this reason, in the order they were met.
         packages: Vec<RefusedPackage>,
+    },
+
+    /// Recommended packages a cancel kept from being tried, in the order the
+    /// package lists them: not started, or stopped before installing the next
+    /// of their packages. One whose own command was interrupted is reported
+    /// failed instead.
+    RecommendsUntried {
+        operation_info: OperationInfo,
+        names: Vec<String>,
     },
 
     /// A recommended (soft) dependency failed to install (non-fatal)

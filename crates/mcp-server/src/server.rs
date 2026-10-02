@@ -559,7 +559,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_install",
-        description = "Install a package using its configured method for the current environment."
+        description = "Install a package using its configured method for the current environment. Its recommended packages install after it: one that fails is reported in a `recommend_failed` row and does not fail the call."
     )]
     async fn package_install(
         &self,

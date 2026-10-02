@@ -534,6 +534,12 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "package": recommend_name,
             "error": error,
         })),
+        // Only a canceled install sends it, and this server never cancels one;
+        // rendered so that a server that can will report it.
+        PackageEvent::RecommendsUntried { names, .. } => Some(serde_json::json!({
+            "type": "recommends_untried",
+            "packages": names,
+        })),
         PackageEvent::Warning { message, .. } => Some(serde_json::json!({
             "type": "warning",
             "message": message,
@@ -1461,6 +1467,21 @@ mod tests {
         );
         assert_eq!(rows[1]["package"], "b");
         assert_eq!(rows[1]["paths"], serde_json::json!(["/p/b.yml"]));
+    }
+
+    #[tokio::test]
+    async fn untried_recommends_are_one_row_listing_them() {
+        let events = vec![PackageEvent::RecommendsUntried {
+            operation_info: test_op_info(),
+            names: vec!["r2".to_string(), "r3".to_string()],
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(
+            result.data["data"],
+            serde_json::json!([{ "type": "recommends_untried", "packages": ["r2", "r3"] }])
+        );
     }
 
     // A skipped spec reaches a tool caller as fields it can branch on, and the
