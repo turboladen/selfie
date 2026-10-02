@@ -17,15 +17,55 @@
 // snippet quotes a window of lines around the failure rather than the failing line.
 //
 // The exception `clippy.toml` exists to create. This module holds the workspace's
-// only deserializing call of serde-saphyr, and the classifier has to name the
-// parser's own error type to take one apart. Everywhere else, both are denied.
+// only call of serde-saphyr in each direction, and the classifiers have to name
+// its own error types to take one apart. Everywhere else, all of them are denied.
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    reason = "the entry point and classifier every other caller is funneled into"
+    reason = "the entry points and classifiers every other caller is funneled into"
 )]
 
 use serde::de::DeserializeOwned;
+
+/// Write `value` as YAML.
+///
+/// # Errors
+///
+/// A [`SerializeFailure`] when `value` cannot be written as YAML. It names the
+/// kind of failure and never quotes the value.
+pub fn serialize<T: serde::Serialize>(value: &T) -> Result<String, SerializeFailure> {
+    serde_saphyr::to_string(value).map_err(|e| SerializeFailure::of(&e))
+}
+
+/// Why a value could not be written as YAML, without quoting it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerializeFailure {
+    class: &'static str,
+}
+
+impl SerializeFailure {
+    // Classified from the variant alone. Two of serde-saphyr's variants carry free
+    // text: `Message` holds whatever a `Serialize` impl said, which can name a key
+    // or quote a value, and `Unexpected` holds the serializer's own words. Neither
+    // is rendered.
+    fn of(error: &serde_saphyr::SerializeError) -> Self {
+        use serde_saphyr::SerializeError as E;
+        let class = match error {
+            E::Message { .. } | E::Unexpected { .. } => "a value has a shape YAML cannot hold",
+            E::Format { .. } | E::IO { .. } => "the output could not be written",
+            _ => "the serializer was asked for YAML it cannot produce",
+        };
+        Self { class }
+    }
+}
+
+impl std::fmt::Display for SerializeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "could not be written as YAML: {}", self.class)
+    }
+}
+
+impl std::error::Error for SerializeFailure {}
 
 /// Read `content` as `T`.
 ///
@@ -442,6 +482,32 @@ impl std::error::Error for ParseFailure {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A value whose `Serialize` impl fails with its own words, as one naming a
+    // key or a value would.
+    struct Refuses;
+
+    impl serde::Serialize for Refuses {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("hunter2-is-the-value"))
+        }
+    }
+
+    // A write failure never quotes what the value said; the control shows the
+    // raw error does.
+    #[test]
+    fn a_write_failure_does_not_quote_the_value() {
+        let raw = serde_saphyr::to_string(&Refuses).unwrap_err().to_string();
+        assert!(raw.contains("hunter2-is-the-value"), "control: {raw}");
+
+        let failure = serialize(&Refuses).unwrap_err().to_string();
+
+        assert!(!failure.contains("hunter2"), "{failure}");
+        assert!(
+            failure.contains("could not be written as YAML"),
+            "{failure}"
+        );
+    }
     use serde::Deserialize;
     use std::collections::HashMap;
 

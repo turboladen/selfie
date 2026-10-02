@@ -1717,7 +1717,7 @@ mod package_tests {
         let entry: DotfileEntry =
             crate::yaml::parse("source: creds.tpl\ntarget: ~/.creds\n").unwrap();
 
-        let yaml = serde_saphyr::to_string(&entry).unwrap();
+        let yaml = crate::yaml::serialize(&entry).unwrap();
 
         assert!(yaml.contains("source: creds.tpl"), "got: {yaml}");
         assert!(yaml.contains("target: ~/.creds"), "got: {yaml}");
@@ -2131,7 +2131,7 @@ vars: {}
     #[test]
     fn a_plain_entry_round_trips_without_gaining_empty_fields() {
         let entry = DotfileEntry::new("bat/config", "~/.config/bat/config");
-        let yaml = serde_saphyr::to_string(&entry).unwrap();
+        let yaml = crate::yaml::serialize(&entry).unwrap();
 
         assert!(!yaml.contains("command"), "got: {yaml}");
         assert!(!yaml.contains("vars"), "got: {yaml}");
@@ -2141,7 +2141,7 @@ vars: {}
     #[test]
     fn a_provider_entry_round_trips() {
         let entry = entry_from_yaml("command: op read x\ntarget: ~/.x");
-        let yaml = serde_saphyr::to_string(&entry).unwrap();
+        let yaml = crate::yaml::serialize(&entry).unwrap();
 
         assert!(!yaml.contains("source"), "got: {yaml}");
         assert_eq!(entry, crate::yaml::parse(&yaml).unwrap());
@@ -2185,7 +2185,7 @@ vars: {}
         // dropped rather than round-tripped into the user's file. Asserted so the
         // capture field cannot start leaking into saved packages unnoticed.
         let entry = entry_from_yaml("source: a\ntarget: ~/.x\nvar:\n  k: v\n");
-        let yaml = serde_saphyr::to_string(&entry).unwrap();
+        let yaml = crate::yaml::serialize(&entry).unwrap();
 
         assert!(!yaml.contains("var"), "got: {yaml}");
         assert!(
@@ -2399,7 +2399,7 @@ environments:
 
         let mut seen = std::collections::BTreeSet::new();
         for entry in [&template, &provider] {
-            let yaml = serde_saphyr::to_string(entry).unwrap();
+            let yaml = crate::yaml::serialize(entry).unwrap();
             let raw: HashMap<String, serde_json::Value> = crate::yaml::parse(&yaml).unwrap();
             seen.extend(raw.into_keys());
         }

@@ -2756,7 +2756,7 @@ environments:
             .environment("test-env", |b| b.install("echo hi"))
             .build();
 
-        let yaml = serde_saphyr::to_string(&full).unwrap();
+        let yaml = crate::yaml::serialize(&full).unwrap();
         let emitted: std::collections::BTreeSet<String> =
             crate::yaml::parse::<std::collections::HashMap<String, serde_json::Value>>(&yaml)
                 .unwrap()
@@ -2796,7 +2796,7 @@ environments:
             unknown_keys: Vec::new(),
         };
 
-        let yaml = serde_saphyr::to_string(&full).unwrap();
+        let yaml = crate::yaml::serialize(&full).unwrap();
         let emitted: std::collections::BTreeSet<String> =
             crate::yaml::parse::<std::collections::HashMap<String, serde_json::Value>>(&yaml)
                 .unwrap()

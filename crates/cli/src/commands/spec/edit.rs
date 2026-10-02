@@ -235,7 +235,7 @@ mod tests {
             .build();
 
         // Serialize to YAML
-        let yaml_content = serde_saphyr::to_string(&original_package).unwrap();
+        let yaml_content = selfie::yaml::serialize(&original_package).unwrap();
 
         // Deserialize back
         let deserialized: selfie::package::Package = selfie::yaml::parse(&yaml_content).unwrap();

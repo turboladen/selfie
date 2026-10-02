@@ -67,9 +67,18 @@ disallowed-methods = [
   { path = "serde_saphyr::with_deserializer_from_slice_with_options", reason = "use selfie::yaml::parse, which does not quote the file" },
   { path = "serde_saphyr::with_deserializer_from_reader", reason = "use selfie::yaml::parse, which does not quote the file" },
   { path = "serde_saphyr::with_deserializer_from_reader_with_options", reason = "use selfie::yaml::parse, which does not quote the file" },
+  { path = "serde_saphyr::to_string", reason = "use selfie::yaml::serialize, whose failure does not quote the value" },
+  { path = "serde_saphyr::to_string_with_options", reason = "use selfie::yaml::serialize, whose failure does not quote the value" },
+  { path = "serde_saphyr::to_fmt_writer", reason = "use selfie::yaml::serialize, whose failure does not quote the value" },
+  { path = "serde_saphyr::to_fmt_writer_with_options", reason = "use selfie::yaml::serialize, whose failure does not quote the value" },
+  { path = "serde_saphyr::to_io_writer", reason = "use selfie::yaml::serialize, whose failure does not quote the value" },
+  { path = "serde_saphyr::to_io_writer_with_options", reason = "use selfie::yaml::serialize, whose failure does not quote the value" },
+  { path = "serde_saphyr::to_string_multiple", reason = "use selfie::yaml::serialize, whose failure does not quote the value" },
+  { path = "serde_saphyr::to_string_multiple_with_options", reason = "use selfie::yaml::serialize, whose failure does not quote the value" },
 ]
 
 disallowed-types = [
   { path = "serde_saphyr::Error", reason = "let selfie::yaml::ParseFailure carry a parse failure; the raw error renders the file's text" },
   { path = "serde_saphyr::Deserializer", reason = "let selfie::yaml::parse drive the deserializer; a hand-driven one keeps the raw error" },
+  { path = "serde_saphyr::SerializeError", reason = "let selfie::yaml::SerializeFailure carry a write failure; the raw error can quote the value" },
 ]

@@ -314,7 +314,7 @@ mod tests {
     fn the_written_shape_round_trips_keyed_by_target() {
         let mut state = DeployState::empty();
         state.record_deployment("/home/user/b.txt", "a/b.txt", "hash1", None, None);
-        let yaml = serde_saphyr::to_string(&state).unwrap();
+        let yaml = crate::yaml::serialize(&state).unwrap();
         assert!(
             yaml.contains("/home/user/b.txt:") && yaml.contains("source: a/b.txt"),
             "{yaml}"
@@ -338,7 +338,7 @@ mod tests {
         let mut state = DeployState::empty();
         state.record_deployment("/t/a", "a/a", "h1", Some("alpha"), None);
         state.record_deployment("/t/b", "b/b", "h2", None, None);
-        let yaml = serde_saphyr::to_string(&state).unwrap();
+        let yaml = crate::yaml::serialize(&state).unwrap();
         assert_eq!(yaml.matches("package:").count(), 1, "{yaml}");
         let loaded: DeployState = crate::yaml::parse(&yaml).unwrap();
         assert_eq!(loaded.get("/t/a").unwrap().package(), Some("alpha"));

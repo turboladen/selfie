@@ -127,7 +127,7 @@ pub(crate) enum StateLoadFailure {
 pub(super) enum StateSaveError {
     /// selfie's own state would not serialize: a bug, not a filesystem condition.
     #[error("Cannot serialize the deploy state: {0}")]
-    Serialize(serde_saphyr::SerializeError),
+    Serialize(crate::yaml::SerializeFailure),
     /// The write failed.
     #[error("Cannot write deploy state '{}': {cause}", .path.display())]
     Write {
@@ -338,7 +338,7 @@ pub(super) fn save_deploy_state<F: FileSystem>(
     // write it describes, so making the state survive a crash the target write did
     // not would widen that window. The ordering is established at the other end:
     // `write_file_no_follow` is durable before `record_deployment` runs (selfie-aub).
-    let yaml = serde_saphyr::to_string(&loaded.state).map_err(StateSaveError::Serialize)?;
+    let yaml = crate::yaml::serialize(&loaded.state).map_err(StateSaveError::Serialize)?;
     filesystem
         .write_file_private(&loaded.path, yaml.as_bytes())
         .map_err(|source| StateSaveError::Write {
