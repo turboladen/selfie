@@ -205,13 +205,13 @@ selfie --help
 Every `selfie` command exits with one of these codes. Scripts and CI steps should branch on them
 rather than on output text.
 
-| Code  | Meaning                                                                                         |
-| ----- | ----------------------------------------------------------------------------------------------- |
-| `0`   | Clean: the command did what it was asked and found nothing to report.                           |
-| `1`   | Failed: an error, **a refusal**, a declined `spec create`, or a run that ends without a result. |
-| `2`   | Usage: the command line could not be parsed, or a command had to ask and had no terminal.       |
-| `3`   | Found: the command did what it was asked, and **found what it was asked to look for**.          |
-| `130` | Cancelled (Ctrl+C). This is the usual `128 + SIGINT` value.                                     |
+| Code  | Meaning                                                                                   |
+| ----- | ----------------------------------------------------------------------------------------- |
+| `0`   | Clean: the command did what it was asked and found nothing to report.                     |
+| `1`   | Failed: an error, **a refusal**, a declined prompt, or a run that ends without a result.  |
+| `2`   | Usage: the command line could not be parsed, or a command had to ask and had no terminal. |
+| `3`   | Found: the command did what it was asked, and **found what it was asked to look for**.    |
+| `130` | Cancelled (Ctrl+C). This is the usual `128 + SIGINT` value.                               |
 
 A command that has to ask a question and has no terminal to ask on, as in a script, a pipe or a CI
 job, does not wait for an answer: it exits `2` and names on stderr the flag or command that does the
@@ -234,7 +234,11 @@ takes the next free value from `3` to `63`; `64` to `78` (the `sysexits.h` codes
 | `package audit --all` | every audited package clean; a package with no audit command is skipped | a conflict; not installed                                                 | an audit command exited non-zero; a spec left out                        |
 | `spec validate`       | no warnings                                                             | warnings                                                                  | errors; the spec does not parse                                          |
 | `config validate`     | no warnings                                                             | warnings, including unrecognized keys                                     | errors; the file cannot be loaded                                        |
-| `spec create`         | created                                                                 | never                                                                     | declined, because the name already exists; an error                      |
+| `spec create`         | created                                                                 | never                                                                     | declined at the "already exists" menu; an error                          |
+| `spec edit`           | opened; created and opened                                              | never                                                                     | declined creating a new spec; an error                                   |
+| `spec remove`         | removed                                                                 | never                                                                     | declined; an error                                                       |
+| `track`               | tracked; already tracked                                                | never                                                                     | declined (Esc, or a blank name); an entry no apply can deploy; an error  |
+| `sync push`           | pushed; nothing to push                                                 | never                                                                     | an error                                                                 |
 
 A configured command's exit status is all selfie knows about it. Your shell reports a command killed
 by a signal as an ordinary non-zero status, so a check that was killed reads as "not installed". An

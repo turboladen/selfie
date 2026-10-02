@@ -5,6 +5,7 @@ use crate::config::CliConfig;
 use tracing::info;
 
 use crate::display_manager::DisplayManager;
+use crate::event_processor::Exit;
 use crate::formatters::name_argument;
 
 use crate::commands::common;
@@ -129,9 +130,10 @@ fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(
 
     match confirm {
         Ok(true) => Ok(()),
+        // A create that wrote nothing did not do what it was asked.
         Ok(false) => {
             display.print_info("Package creation cancelled.");
-            Err(0)
+            Err(Exit::Failed.code())
         }
         Err(failure) => Err(display
             .refuse_prompt(
@@ -182,6 +184,15 @@ mod tests {
         let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
 
         assert_eq!(confirm_new_package("fresh", &display), Err(130));
+    }
+
+    // No at the confirmation is a decline: nothing was created, so the run fails.
+    #[test]
+    fn declining_the_create_confirmation_fails() {
+        let display =
+            DisplayManager::new(false).answering(vec![crate::display_manager::answer(false)]);
+
+        assert_eq!(confirm_new_package("fresh", &display), Err(1));
     }
 
     #[test]

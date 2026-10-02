@@ -7,7 +7,7 @@ use selfie::package::{
 
 use crate::config::CliConfig;
 use crate::display_manager::DisplayManager;
-use crate::event_processor::EventProcessor;
+use crate::event_processor::{EventProcessor, Exit};
 use tracing::info;
 
 use crate::commands::common;
@@ -118,9 +118,10 @@ pub(crate) async fn handle_remove(
 
         match confirm_removal {
             Ok(true) => {}
+            // A remove that removed nothing did not do what it was asked.
             Ok(false) => {
                 display.print_info("Package removal cancelled.");
-                return 0;
+                return Exit::Failed.code();
             }
             Err(failure) => {
                 return display
@@ -230,6 +231,20 @@ mod tests {
         let code = super::handle_remove(&service, "tool", &config, &display, false).await;
 
         assert_eq!(code, 130);
+        assert!(spec.exists());
+    }
+
+    // No at the confirmation is a decline: the spec stays, and the run fails.
+    #[tokio::test]
+    async fn declining_the_removal_fails_and_keeps_the_spec() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        let (_temp, spec, config, service) = one_spec();
+        let display = DisplayManager::new(false).answering(vec![answer(false)]);
+
+        let code = super::handle_remove(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(code, 1);
         assert!(spec.exists());
     }
 

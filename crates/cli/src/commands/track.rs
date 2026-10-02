@@ -24,6 +24,7 @@ use crate::{
     commands::common::{self, create_dotfiles_repository, create_package_repository},
     config::CliConfig,
     display_manager::{DisplayManager, PromptFailure},
+    event_processor::Exit,
 };
 
 /// Sentinel item appended after real package names in the select list.
@@ -38,8 +39,8 @@ enum TrackChoice {
     ExistingPackage(String),
     /// Create a new standalone dotfile with the given name
     NewStandalone(String),
-    /// User cancelled
-    Cancelled,
+    /// The user declined: Esc at the picker, or an empty name.
+    Declined,
 }
 
 /// Handle the `selfie track` interactive command
@@ -124,9 +125,10 @@ pub(crate) async fn handle_track(
             }
             common::handle_track_standalone(name, file, config, display, cancellation_token).await
         }
-        TrackChoice::Cancelled => {
+        // Nothing was tracked, so the run did not do what it was asked.
+        TrackChoice::Declined => {
             display.print_info("Cancelled.");
-            0
+            Exit::Failed.code()
         }
     }
 }
@@ -211,7 +213,7 @@ fn prompt_track_choice(
     );
 
     let Some(choice) = selection? else {
-        return Ok(TrackChoice::Cancelled);
+        return Ok(TrackChoice::Declined);
     };
 
     resolve_choice(&items, choice, file, display)
@@ -241,7 +243,7 @@ fn resolve_choice(
 
     Ok(match prompt_for_name(default, display)? {
         Some(name) => TrackChoice::NewStandalone(name),
-        None => TrackChoice::Cancelled,
+        None => TrackChoice::Declined,
     })
 }
 
@@ -697,6 +699,47 @@ mod tests {
             "got: {}",
             skipped[0]
         );
+    }
+
+    // A file in a fresh home with an empty package directory, and a config
+    // naming that directory.
+    fn untracked_file() -> (tempfile::TempDir, String, CliConfig) {
+        let temp = tempfile::tempdir().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir(&packages).unwrap();
+        let file = temp.path().join("x.conf");
+        std::fs::write(&file, "x").unwrap();
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(&packages));
+        (temp, file.to_string_lossy().into_owned(), config)
+    }
+
+    // Esc at the destination picker is a decline: nothing was tracked, so the
+    // run fails.
+    #[tokio::test]
+    async fn esc_at_the_destination_picker_fails() {
+        let (_temp, file, config) = untracked_file();
+        let display = DisplayManager::new(false)
+            .answering(vec![crate::display_manager::answer(None::<usize>)]);
+
+        let code = handle_track(&file, &config, &display, CancellationToken::new()).await;
+
+        assert_eq!(code, 1);
+    }
+
+    // A blank name is a decline too. dialoguer asks again on an empty line, so
+    // only blanks reach the check.
+    #[tokio::test]
+    async fn a_blank_name_fails() {
+        use crate::display_manager::answer;
+
+        // With no packages, index 1 is "Let me type a name".
+        let (_temp, file, config) = untracked_file();
+        let display = DisplayManager::new(false)
+            .answering(vec![answer(Some(1_usize)), answer("  ".to_string())]);
+
+        let code = handle_track(&file, &config, &display, CancellationToken::new()).await;
+
+        assert_eq!(code, 1);
     }
 
     // Ctrl+C at the destination picker ends the run canceled.
