@@ -22,7 +22,7 @@ use crate::{
     },
     package::{
         DotfileEntry,
-        event::{EventSender, StepEnding},
+        event::{EventSender, LinkAtTarget, SkipReason, StepEnding},
     },
 };
 
@@ -330,20 +330,16 @@ where
         // Counted as a skip, because that is how a preview counts every deploy it
         // would make -- the repository-file path does the same -- so a dry run never
         // reports a deployment for a run that wrote nothing.
-        let commands = target.entry.command_count();
-        let reason = match &target.link {
-            Some(link) => {
-                let dest = match link.destination() {
-                    Some(dest) => format!(" to '{}'", dest.display()),
-                    None => String::new(),
-                };
-                format!(
-                    "dry run: would run {commands} command(s), then replace the symlink{dest} with a regular file readable only by you"
-                )
-            }
-            None => format!(
-                "dry run: would run {commands} command(s); content not resolved, so no comparison is possible"
-            ),
+        let link = match &target.link {
+            Some(link) => match link.destination() {
+                Some(dest) => LinkAtTarget::To(dest.to_path_buf()),
+                None => LinkAtTarget::DestinationUnknown,
+            },
+            None => LinkAtTarget::NoLink,
+        };
+        let reason = SkipReason::SecretDryRun {
+            commands: target.entry.command_count(),
+            link,
         };
         self.sender
             .send_dotfile_skipped(&target.source, target.path.display(), reason)
@@ -448,7 +444,7 @@ where
             }
             Ok(true) | Err(_) => {
                 self.sender
-                    .send_dotfile_skipped(&target.source, target.path.display(), "already in sync")
+                    .send_dotfile_skipped(&target.source, target.path.display(), SkipReason::InSync)
                     .await;
                 return Err(SecretOutcome::Skipped);
             }
@@ -473,7 +469,7 @@ where
             .send_dotfile_skipped(
                 &target.source,
                 target.path.display(),
-                "already in sync (permissions tightened to owner-only)",
+                SkipReason::PermissionsTightened,
             )
             .await;
         Err(SecretOutcome::Skipped)

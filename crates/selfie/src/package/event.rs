@@ -732,14 +732,14 @@ impl EventSender {
         &self,
         source: &DotfileSource,
         target: impl fmt::Display,
-        reason: impl fmt::Display,
+        reason: SkipReason,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileSkipped {
             operation_info,
             source: source.clone(),
             target: target.to_string(),
-            reason: reason.to_string(),
+            reason,
         })
         .await;
     }
@@ -782,13 +782,13 @@ impl EventSender {
     pub(crate) async fn send_dotfile_drift_detected(
         &self,
         target: impl fmt::Display,
-        drift_type: impl fmt::Display,
+        drift_type: DriftType,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDriftDetected {
             operation_info,
             target: target.to_string(),
-            drift_type: drift_type.to_string(),
+            drift_type,
         })
         .await;
     }
@@ -2775,12 +2775,13 @@ pub enum PackageEvent {
         backup: Option<String>,
     },
 
-    /// A config file was skipped (already current or user declined)
+    /// A config file was left as it is, with nothing wrong: already current, a
+    /// dry run, or content selfie does not check without running commands.
     DotfileSkipped {
         operation_info: OperationInfo,
         source: DotfileSource,
         target: String,
-        reason: String,
+        reason: SkipReason,
     },
 
     /// A conflict was detected between repo and deployed version
@@ -2809,12 +2810,9 @@ pub enum PackageEvent {
     DotfileDriftDetected {
         operation_info: OperationInfo,
         target: String,
-        /// The drift classification, and nothing else.
-        ///
-        /// A bare label — `not tracked`, `repo changed` — which the MCP server
-        /// serializes as a typed field and the CLI prints as one. Appending prose
-        /// here corrupts a value callers treat as an enum.
-        drift_type: String,
+        /// How the target and its source have moved since selfie last deployed
+        /// it. Never [`DriftType::None`]: a target with no drift sends no event.
+        drift_type: DriftType,
     },
 
     /// Post-install note to display to user
@@ -3073,6 +3071,113 @@ pub struct RefusedPackage {
     /// The spec file it was read from, or every file claiming the name for
     /// [`RefusalKind::AmbiguousName`].
     pub paths: Vec<std::path::PathBuf>,
+}
+
+/// How a deployed target and its source have moved since selfie last deployed
+/// it.
+///
+/// [`Display`](fmt::Display) words it for a person: "repo changed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriftType {
+    /// The target holds what selfie last deployed, and the source has not
+    /// changed since.
+    None,
+    /// The source changed since the last deploy; the target did not.
+    RepoChanged,
+    /// The target changed since the last deploy; the source did not.
+    TargetChanged,
+    /// The source and the target both changed since the last deploy.
+    BothChanged,
+    /// Selfie has no record of deploying to the target.
+    NotTracked,
+}
+
+impl std::fmt::Display for DriftType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DriftType::None => write!(f, "none"),
+            DriftType::RepoChanged => write!(f, "repo changed"),
+            DriftType::TargetChanged => write!(f, "target changed"),
+            DriftType::BothChanged => write!(f, "both changed"),
+            DriftType::NotTracked => write!(f, "not tracked"),
+        }
+    }
+}
+
+/// Why a dotfile was left as it is.
+///
+/// [`Display`](fmt::Display) words the reason as a clause for a person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The target holds what selfie last deployed, and the source has not
+    /// changed since.
+    UpToDate,
+    /// The target already holds what would be written.
+    InSync,
+    /// A secret-bearing target already held what would be written; only its
+    /// permissions were narrowed to owner-only.
+    PermissionsTightened,
+    /// A dry run: the repository file would have been written.
+    DryRun,
+    /// A dry run of a secret-bearing entry: nothing ran, so its content and
+    /// whether it differs are unknown.
+    SecretDryRun {
+        /// How many commands the deploy would run.
+        commands: usize,
+        /// What the deploy would do about a symlink at the target.
+        link: LinkAtTarget,
+    },
+    /// A secret-bearing entry `dotfiles drift` reports without checking, since
+    /// checking would run its commands.
+    Unverifiable,
+}
+
+/// Whether a symlink is at a secret-bearing entry's target, which its deploy
+/// would replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkAtTarget {
+    /// No symlink is at the target.
+    NoLink,
+    /// A symlink is at the target, and this is its destination as the link
+    /// spells it.
+    To(std::path::PathBuf),
+    /// A symlink whose destination could not be read.
+    DestinationUnknown,
+}
+
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UpToDate => f.write_str("already up to date"),
+            Self::InSync => f.write_str("already in sync"),
+            Self::PermissionsTightened => {
+                f.write_str("already in sync (permissions tightened to owner-only)")
+            }
+            Self::DryRun => f.write_str("dry run"),
+            Self::SecretDryRun {
+                commands,
+                link: LinkAtTarget::NoLink,
+            } => write!(
+                f,
+                "dry run: would run {commands} command(s); content not resolved, so no comparison \
+                 is possible"
+            ),
+            Self::SecretDryRun { commands, link } => {
+                let destination = match link {
+                    LinkAtTarget::To(path) => format!(" to '{}'", path.display()),
+                    LinkAtTarget::NoLink | LinkAtTarget::DestinationUnknown => String::new(),
+                };
+                write!(
+                    f,
+                    "dry run: would run {commands} command(s), then replace the symlink{destination} \
+                     with a regular file readable only by you"
+                )
+            }
+            Self::Unverifiable => {
+                f.write_str("provider-sourced (not verifiable without resolving)")
+            }
+        }
+    }
 }
 
 /// Carries one package refused whole, before refusals are grouped by reason.
@@ -3338,6 +3443,50 @@ mod tests {
             .to_string()
             .contains("Invalid command")
         );
+    }
+
+    // The CLI prints these sentences for a skipped entry, so each is pinned.
+    #[test]
+    fn a_skip_reason_reads_as_a_sentence() {
+        let cases = [
+            (SkipReason::UpToDate, "already up to date"),
+            (SkipReason::InSync, "already in sync"),
+            (
+                SkipReason::PermissionsTightened,
+                "already in sync (permissions tightened to owner-only)",
+            ),
+            (SkipReason::DryRun, "dry run"),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 2,
+                    link: LinkAtTarget::NoLink,
+                },
+                "dry run: would run 2 command(s); content not resolved, so no comparison is possible",
+            ),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 1,
+                    link: LinkAtTarget::To("/etc/real".into()),
+                },
+                "dry run: would run 1 command(s), then replace the symlink to '/etc/real' with a \
+                 regular file readable only by you",
+            ),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 1,
+                    link: LinkAtTarget::DestinationUnknown,
+                },
+                "dry run: would run 1 command(s), then replace the symlink with a regular file \
+                 readable only by you",
+            ),
+            (
+                SkipReason::Unverifiable,
+                "provider-sourced (not verifiable without resolving)",
+            ),
+        ];
+        for (reason, sentence) in cases {
+            assert_eq!(reason.to_string(), sentence, "{reason:?}");
+        }
     }
 
     #[test]
