@@ -124,7 +124,7 @@ fn display_validation_issues_table(
             category: &issue.category,
             field: &issue.field,
             message: &issue.message,
-            location: issue.location.as_deref(),
+            location: issue.location,
             suggestion: issue.suggestion.as_deref(),
         })
         .collect();

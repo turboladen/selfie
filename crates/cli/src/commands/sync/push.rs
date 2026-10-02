@@ -68,7 +68,7 @@ pub(crate) async fn handle_push(
                             category: &i.category,
                             field: &i.field,
                             message: &i.message,
-                            location: i.location.as_deref(),
+                            location: i.location,
                             suggestion: i.suggestion.as_deref(),
                         })
                         .collect(),

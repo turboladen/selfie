@@ -56,9 +56,9 @@ pub struct PackageValidationIssue {
     pub field: String,
     /// Human-readable description.
     pub message: String,
-    /// Source location from parse errors (e.g., `"line 17 column 1"`), or `None`
-    /// for logical validation errors that don't map to a specific location.
-    pub location: Option<String>,
+    /// Where in the file the issue is, or `None` for one that does not map to a
+    /// position.
+    pub location: Option<crate::yaml::SourceLocation>,
     /// How to fix it, when the issue says.
     pub suggestion: Option<String>,
 }

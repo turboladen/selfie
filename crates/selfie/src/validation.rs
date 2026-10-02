@@ -135,8 +135,8 @@ pub struct ValidationIssue {
     ///
     pub(crate) suggestion: Option<String>,
 
-    /// Source location in the YAML file (e.g., `"line 5, column 3"`)
-    pub(crate) location: Option<String>,
+    /// Where in the YAML file the issue is, when the file says.
+    pub(crate) location: Option<crate::yaml::SourceLocation>,
 }
 
 impl ValidationIssue {
@@ -186,7 +186,7 @@ impl ValidationIssue {
         field: &str,
         message: &str,
         suggestion: Option<&str>,
-        location: Option<String>,
+        location: Option<crate::yaml::SourceLocation>,
     ) -> Self {
         Self {
             category,
@@ -221,7 +221,7 @@ impl ValidationIssue {
         field: &str,
         message: &str,
         suggestion: Option<&str>,
-        location: Option<String>,
+        location: Option<crate::yaml::SourceLocation>,
     ) -> Self {
         Self {
             category,
@@ -259,8 +259,8 @@ impl ValidationIssue {
     }
 
     #[must_use]
-    pub fn location(&self) -> Option<&str> {
-        self.location.as_deref()
+    pub fn location(&self) -> Option<crate::yaml::SourceLocation> {
+        self.location
     }
 }
 

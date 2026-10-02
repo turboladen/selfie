@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use serde_saphyr::Location;
 
+use crate::yaml::SourceLocation;
+
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
@@ -179,13 +181,9 @@ fn not_posix_sh(field_name: &str, why: &str) -> ValidationIssue {
     )
 }
 
-/// Format a `Location` as a human-readable string, returning `None` for unknown locations.
-fn location_string(loc: &Location) -> Option<String> {
-    if *loc == Location::UNKNOWN {
-        None
-    } else {
-        Some(format!("line {}, column {}", loc.line(), loc.column()))
-    }
+/// Where `loc` is in the file, or `None` for an unknown location.
+fn source_location(loc: &Location) -> Option<SourceLocation> {
+    (*loc != Location::UNKNOWN).then(|| SourceLocation::new(loc.line(), loc.column()))
 }
 
 /// Results of a package validation
@@ -359,7 +357,7 @@ impl Package {
     /// Returns a `ValidationIssue` if the package name is empty or breaks the
     /// rule.
     fn validate_name(&self) -> Result<(), ValidationIssue> {
-        let name_loc = location_string(&self.name.defined);
+        let name_loc = source_location(&self.name.defined);
 
         if self.name.value.is_empty() {
             return Err(ValidationIssue::error_at(
@@ -398,7 +396,7 @@ impl Package {
                 "environments",
                 "At least one environment must be defined",
                 Some("Add an 'environments' section with at least one environment."),
-                location_string(&self.environments.defined),
+                source_location(&self.environments.defined),
             ))
         } else {
             Ok(())
@@ -462,7 +460,7 @@ impl Package {
         // Check homepage URL if present
         if let Some(spanned_homepage) = &self.homepage {
             let homepage = &spanned_homepage.value;
-            let hp_loc = location_string(&spanned_homepage.defined);
+            let hp_loc = source_location(&spanned_homepage.defined);
             match url::Url::parse(homepage) {
                 Ok(url) => {
                     // Check scheme
@@ -475,7 +473,7 @@ impl Package {
                                 url.scheme()
                             ),
                             Some("Use https:// prefix for the URL."),
-                            hp_loc.clone(),
+                            hp_loc,
                         ));
                     }
                 }
@@ -485,7 +483,7 @@ impl Package {
                         "homepage",
                         &format!("Invalid URL format: {err}"),
                         Some("Provide a valid URL with http:// or https:// prefix."),
-                        hp_loc.clone(),
+                        hp_loc,
                     ));
                 }
             }
@@ -650,7 +648,7 @@ impl Package {
                     collision.describe()
                 ),
                 Some(collision.remedy()),
-                location_string(first.entry.target_location()),
+                source_location(first.entry.target_location()),
             )
         }));
         issues.extend(self.report_apply_time_commands());
@@ -800,13 +798,10 @@ impl Package {
         // Each diagnostic points at the field it is about, so a package with
         // several entries does not make the reader count list items. `target` is
         // the fallback: it is the one field every entry has.
-        let target_loc = location_string(dotfile.target_location());
-        let source_loc = dotfile.source_location().and_then(location_string);
-        let command_loc = dotfile.command_location().and_then(location_string);
-        let entry_loc = source_loc
-            .clone()
-            .or_else(|| command_loc.clone())
-            .or_else(|| target_loc.clone());
+        let target_loc = source_location(dotfile.target_location());
+        let source_loc = dotfile.source_location().and_then(source_location);
+        let command_loc = dotfile.command_location().and_then(source_location);
+        let entry_loc = source_loc.or(command_loc).or(target_loc);
 
         // Content-source shape. All of these checks are offline: validation must
         // work without network access and must never trigger an authentication
@@ -820,7 +815,7 @@ impl Package {
                     "Use 'source' for a file in the repository, or 'command' for content produced \
                      by a command.",
                 ),
-                command_loc.clone(),
+                command_loc,
             )),
             (None, None) => issues.push(ValidationIssue::error_at(
                 ValidationErrorCategory::RequiredField,
@@ -830,7 +825,7 @@ impl Package {
                     "Use 'source' for a file in the repository, or 'command' for content produced \
                      by a command.",
                 ),
-                entry_loc.clone(),
+                entry_loc,
             )),
             (None, Some(_)) if !dotfile.vars().is_empty() => {
                 issues.push(ValidationIssue::error_at(
@@ -841,7 +836,7 @@ impl Package {
                         "Drop 'vars', or replace 'command' with a 'source' template that \
                          references them.",
                     ),
-                    command_loc.clone(),
+                    command_loc,
                 ));
             }
             _ => {}
@@ -862,7 +857,7 @@ impl Package {
                     // `entry_loc`, not `command_loc`: a `vars` block belongs to a
                     // template, which has a `source` and no `command`, so the
                     // command location is `None` for every entry this fires on.
-                    entry_loc.clone(),
+                    entry_loc,
                 ));
             }
         }
@@ -876,7 +871,7 @@ impl Package {
                     &format!("{field}.source"),
                     "Dotfile source path cannot be empty",
                     Some("Provide a relative path to the dotfile within the repository."),
-                    source_loc.clone(),
+                    source_loc,
                 ));
             }
 
@@ -889,7 +884,7 @@ impl Package {
                     &format!("{field}.source"),
                     "Dotfile source path must not contain '..' (path traversal)",
                     Some("Use a relative path without parent directory references."),
-                    source_loc.clone(),
+                    source_loc,
                 ));
             }
 
@@ -899,7 +894,7 @@ impl Package {
                     &format!("{field}.source"),
                     "Dotfile source path must be relative",
                     Some("Use a path relative to the dotfiles directory, e.g., 'pkg/config.toml'."),
-                    source_loc.clone(),
+                    source_loc,
                 ));
             }
         }
@@ -919,7 +914,7 @@ impl Package {
                 &format!("{field}.target"),
                 &format!("Dotfile {}", rejection.message()),
                 Some(rejection.suggestion()),
-                target_loc.clone(),
+                target_loc,
             ));
         }
 
@@ -2347,7 +2342,7 @@ dotfiles:
         // The exact line, not merely "some location": an off-by-one here sends
         // the reader to the wrong entry, which is worse than no location.
         assert_eq!(
-            traversal.location(),
+            traversal.location().map(|at| at.to_string()).as_deref(),
             Some("line 6, column 13"),
             "got: {:?}",
             traversal.location()
@@ -2380,7 +2375,7 @@ dotfiles:
             .expect("the var-name error must be reported");
 
         assert_eq!(
-            var_error.location(),
+            var_error.location().map(|at| at.to_string()).as_deref(),
             Some("line 6, column 13"),
             "got: {:?}",
             var_error.location()
