@@ -493,21 +493,10 @@ pub(crate) fn display_environment_summary(
         table.use_stderr();
         table.set_header(vec!["Environment"]);
 
-        // Sort environments, highlighting the current one if present
-        let mut sorted_envs = available_environments.to_vec();
-        sorted_envs.sort();
-
-        for env in sorted_envs {
-            let env_display = if config.use_colors() {
-                if env == current_environment {
-                    console::style(&env).green().bold().to_string()
-                } else {
-                    env.clone()
-                }
-            } else {
-                env
-            };
-            table.add_row(vec![env_display]);
+        // The spec file's order, which every other surface lists them in. The
+        // current environment is never among them: its absence is the error.
+        for env in available_environments {
+            table.add_row(vec![env.as_str()]);
         }
 
         display.print_note(format!("{table}"));
@@ -731,6 +720,33 @@ mod tests {
             args.iter()
                 .any(|arg| *arg == std::ffi::OsStr::new("--wait"))
         );
+    }
+
+    // The environments a package supports are listed in its file's order, as
+    // everywhere else, not sorted.
+    #[test]
+    fn the_environment_summary_lists_environments_in_file_order() {
+        let config = CliConfig::wrap_for_test(test_config_with_dir("/test/packages"));
+        let display = DisplayManager::new(false);
+
+        display_environment_summary(
+            "tool",
+            "work",
+            &["zeta".to_string(), "alpha".to_string()],
+            &config,
+            &display,
+            "install",
+        );
+
+        let printed: String = display
+            .printed()
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let zeta = printed.find("zeta").expect("zeta listed");
+        let alpha = printed.find("alpha").expect("alpha listed");
+        assert!(zeta < alpha, "{printed}");
     }
 
     #[test]
