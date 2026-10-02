@@ -7,7 +7,7 @@ use crate::{
     package::{
         Package, SpecOrigin,
         event::{
-            EventSender, OperationFailure, OperationResult, OperationSuccess, Outcome,
+            EventSender, OperationFailure, OperationResult, OperationSuccess, Outcome, Uncreatable,
             ValidationResultData,
         },
         port::{PackageRepoError, PackageRepository},
@@ -21,7 +21,7 @@ use crate::{
 /// `identity` is [`creatable_identity`]'s answer for `package`.
 pub(super) async fn handle_create<PR>(
     package: Package,
-    identity: Result<String, String>,
+    identity: Result<String, Uncreatable>,
     repo: &PR,
     config: &SelfieConfig,
     sender: &EventSender,
@@ -34,7 +34,12 @@ where
     // outside the package directory is ever asked about or written.
     let package_name = match identity {
         Ok(identity) => identity,
-        Err(refusal) => return OperationResult::Failure(OperationFailure::Generic(refusal)),
+        Err(reason) => {
+            return OperationResult::Failure(OperationFailure::Uncreatable {
+                package_name: package.name().to_string(),
+                reason,
+            });
+        }
     };
 
     // Step 1: Check if package already exists
@@ -169,13 +174,13 @@ where
 ///
 /// # Errors
 ///
-/// The refusal to show, when `package.name()` breaks the spec-name rule, when the
-/// spec's path is not directly in the package directory, or when its file name is
+/// Why `package` cannot be created: `package.name()` breaks the spec-name rule,
+/// the spec's path is not directly in the package directory, or its file name is
 /// not one the loader reads as a spec.
 pub(super) fn creatable_identity(
     package: &Package,
     config: &SelfieConfig,
-) -> Result<String, String> {
+) -> Result<String, Uncreatable> {
     // Three checks, in this order. The name first, so a name such as `../x` is
     // refused as a name. Then the path, because `--interactive` asks for a file
     // name separately and a stem alone drops every directory component: `../evil`
@@ -184,21 +189,16 @@ pub(super) fn creatable_identity(
     // `name:`, is what every later command finds the spec by.
     let name = package.name();
     if !crate::package::is_valid_spec_name(name) {
-        return Err(format!(
-            "Refusing to create '{name}': it is not a valid spec name. Rename it: {}.",
-            crate::package::SPEC_NAME_RULE
-        ));
+        return Err(Uncreatable::InvalidName);
     }
 
     let path = package.path();
     let directory = config.package_directory();
     if path.parent() != Some(directory.as_path()) {
-        return Err(format!(
-            "Refusing to create '{name}': {} is not directly in the package directory {}, \
-             where every spec has to be.",
-            path.display(),
-            directory.display()
-        ));
+        return Err(Uncreatable::OutsidePackageDirectory {
+            path: path.to_path_buf(),
+            directory: directory.clone(),
+        });
     }
 
     let stem = crate::package::spec_name_of(path)
@@ -207,11 +207,9 @@ pub(super) fn creatable_identity(
         .filter(|stem| crate::package::is_valid_spec_name(stem));
     match stem {
         Some(stem) => Ok(stem.to_string()),
-        None => Err(format!(
-            "Refusing to create '{name}': selfie would not load {} as a spec. Its name before \
-             the .yml or .yaml extension has to follow the rule for a package name.",
-            path.display()
-        )),
+        None => Err(Uncreatable::UnloadableFileName {
+            path: path.to_path_buf(),
+        }),
     }
 }
 
@@ -673,7 +671,8 @@ mod tests {
 
             // The name rule's own refusal, not the path check behind it: that one
             // would also refuse, and only the words tell them apart.
-            let message = generic_refusal(result);
+            let (message, reason) = refusal(result);
+            assert_eq!(reason, Uncreatable::InvalidName, "{message}");
             assert!(message.contains(&format!("'{name}'")), "got: {message}");
             assert!(message.contains("not a valid spec name"), "got: {message}");
             assert!(message.contains("'@' and '+'"), "got: {message}");
@@ -690,10 +689,16 @@ mod tests {
         repo
     }
 
-    // The message of a `Generic` refusal, or a panic naming what came back.
-    fn generic_refusal(result: OperationResult) -> String {
+    // The sentence and the reason of an `Uncreatable` refusal, or a panic naming
+    // what came back.
+    fn refusal(result: OperationResult) -> (String, Uncreatable) {
         match result {
-            OperationResult::Failure(OperationFailure::Generic(message)) => message,
+            OperationResult::Failure(failure @ OperationFailure::Uncreatable { .. }) => {
+                let OperationFailure::Uncreatable { reason, .. } = &failure else {
+                    unreachable!()
+                };
+                (failure.to_string(), reason.clone())
+            }
             other => panic!("expected the create to be refused, got: {other:?}"),
         }
     }
@@ -715,7 +720,11 @@ mod tests {
         let repo = untouched_repository();
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 
-        let message = generic_refusal(result);
+        let (message, reason) = refusal(result);
+        assert!(
+            matches!(reason, Uncreatable::OutsidePackageDirectory { .. }),
+            "{message}"
+        );
         assert!(
             message.contains("is not directly in the package directory"),
             "got: {message}"
@@ -739,7 +748,11 @@ mod tests {
             let repo = untouched_repository();
             let result = create(package, &repo, &config, &sender, &mut progress).await;
 
-            let message = generic_refusal(result);
+            let (message, reason) = refusal(result);
+            assert!(
+                matches!(reason, Uncreatable::UnloadableFileName { .. }),
+                "{file_name}: {message}"
+            );
             assert!(
                 message.contains("selfie would not load"),
                 "{file_name}: got: {message}"

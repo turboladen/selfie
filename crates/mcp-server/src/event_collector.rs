@@ -3,7 +3,7 @@ use selfie::package::SpecOrigin;
 use selfie::package::event::{
     AuditResult, BaseKind, CheckResult, ConflictReport, DotfileSource, DriftType, EventStream,
     LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
-    RefusalKind, SkipReason, SourceKind,
+    RefusalKind, SkipReason, SourceKind, Uncreatable,
 };
 use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
@@ -20,6 +20,18 @@ fn failure_json(failure: &OperationFailure) -> Value {
     // without parsing the sentence in `error`.
     if let OperationFailure::InvalidSpec { issues, .. } = failure {
         payload["issues"] = issues.iter().map(issue_json).collect::<Vec<_>>().into();
+    }
+    // Why create refused the spec, and the path it refused, as fields.
+    if let OperationFailure::Uncreatable { reason, .. } = failure {
+        let (label, path) = match reason {
+            Uncreatable::InvalidName => ("invalid_name", None),
+            Uncreatable::OutsidePackageDirectory { path, .. } => {
+                ("outside_package_directory", Some(path))
+            }
+            Uncreatable::UnloadableFileName { path } => ("unloadable_file_name", Some(path)),
+        };
+        payload["reason"] = label.into();
+        payload["path"] = path.map(|path| path.display().to_string()).into();
     }
     // A field, so an assistant can tell a typo from a spec that failed to load
     // without matching the sentence in `error`.
@@ -1503,6 +1515,27 @@ mod tests {
         assert_eq!(rows[0]["failure"], Value::Null);
         assert_eq!(rows[1]["status"], "installed");
         assert_eq!(rows[1]["reason"], Value::Null);
+    }
+
+    // A spec create refused for its path says why as a label, with the path.
+    #[test]
+    fn an_uncreatable_spec_carries_its_reason_and_path() {
+        let payload = failure_json(&OperationFailure::Uncreatable {
+            package_name: "myapp".to_string(),
+            reason: Uncreatable::UnloadableFileName {
+                path: "/p/my file.yml".into(),
+            },
+        });
+
+        assert_eq!(payload["reason"], "unloadable_file_name");
+        assert_eq!(payload["path"], "/p/my file.yml");
+
+        let named = failure_json(&OperationFailure::Uncreatable {
+            package_name: "../x".to_string(),
+            reason: Uncreatable::InvalidName,
+        });
+        assert_eq!(named["reason"], "invalid_name");
+        assert_eq!(named["path"], Value::Null);
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

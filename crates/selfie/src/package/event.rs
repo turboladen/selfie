@@ -1229,6 +1229,12 @@ pub enum OperationFailure {
         package_name: String,
         issues: Vec<ValidationIssueData>,
     },
+    /// A spec `spec create` refuses to write for its name or its path, before
+    /// anything is looked up or written.
+    Uncreatable {
+        package_name: String,
+        reason: Uncreatable,
+    },
     /// A command named a package it could not find.
     // Typed rather than folded into `Generic` so an adapter can tell a typo from
     // a spec that failed to load without parsing the sentence.
@@ -1238,6 +1244,20 @@ pub enum OperationFailure {
     },
     /// Generic failure with a freeform message
     Generic(String),
+}
+
+/// Why `spec create` refuses a spec by its name or its path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Uncreatable {
+    /// The package name breaks the spec-name rule.
+    InvalidName,
+    /// The spec's path is not directly in the package directory.
+    OutsidePackageDirectory {
+        path: std::path::PathBuf,
+        directory: std::path::PathBuf,
+    },
+    /// The spec's file name is not one the loader reads as a spec.
+    UnloadableFileName { path: std::path::PathBuf },
 }
 
 /// A write to a spec that validation can refuse.
@@ -1366,6 +1386,31 @@ impl std::fmt::Display for OperationFailure {
                     crate::pluralize(errors, "error", "errors")
                 )
             }
+            OperationFailure::Uncreatable {
+                package_name,
+                reason,
+            } => match reason {
+                Uncreatable::InvalidName => write!(
+                    f,
+                    "Refusing to create '{package_name}': it is not a valid spec name. Rename \
+                     it: {}.",
+                    crate::package::SPEC_NAME_RULE
+                ),
+                Uncreatable::OutsidePackageDirectory { path, directory } => write!(
+                    f,
+                    "Refusing to create '{package_name}': {} is not directly in the package \
+                     directory {}, where every spec has to be.",
+                    path.display(),
+                    directory.display()
+                ),
+                Uncreatable::UnloadableFileName { path } => write!(
+                    f,
+                    "Refusing to create '{package_name}': selfie would not load {} as a spec. \
+                     Its name before the .yml or .yaml extension has to follow the rule for a \
+                     package name.",
+                    path.display()
+                ),
+            },
             OperationFailure::NoSuchPackage { name, reason } => match reason {
                 NoSuchPackageReason::NotFound => write!(f, "No package named '{name}' was found"),
                 NoSuchPackageReason::MaybeInUnlistableDirectory => write!(
