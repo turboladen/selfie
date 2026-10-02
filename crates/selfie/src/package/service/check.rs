@@ -209,10 +209,9 @@ fn create_operation_result(
         CheckResult::Error(error) => {
             OperationResult::Failure(OperationFailure::Generic(error.clone()))
         }
-        _ => {
-            // This case is already handled above, but included for completeness
-            OperationResult::Failure("Unexpected check result".into())
-        }
+        // A package with no check command is answered before any command runs,
+        // so this result never reaches here.
+        CheckResult::NoCheckCommand => OperationResult::Failure("Unexpected check result".into()),
     }
 }
 
@@ -275,10 +274,10 @@ where
 pub(super) fn check_ending(result: &CheckResult, token: &CancellationToken) -> StepEnding {
     match result {
         CheckResult::Error(_) if token.is_cancelled() => StepEnding::Cancelled,
-        CheckResult::Error(_) | CheckResult::TimedOut(_) | CheckResult::CommandNotFound => {
-            StepEnding::Failed
+        CheckResult::Error(_) | CheckResult::TimedOut(_) => StepEnding::Failed,
+        CheckResult::Success { .. } | CheckResult::Failed { .. } | CheckResult::NoCheckCommand => {
+            StepEnding::Succeeded
         }
-        _ => StepEnding::Succeeded,
     }
 }
 
