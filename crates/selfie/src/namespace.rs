@@ -25,23 +25,26 @@ pub struct NamespaceConflict {
     pub name: String,
     /// Where the name was found
     pub found_in: NameLocation,
+    /// The spec file that already holds the name.
+    pub path: std::path::PathBuf,
 }
 
 /// The sentence [`spec_name_taken`] gives for this name and location.
 impl fmt::Display for NamespaceConflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&spec_name_taken(&self.name, &self.found_in))
+        f.write_str(&spec_name_taken(&self.name, &self.found_in, &self.path))
     }
 }
 
-/// The fact that `name` is already taken in `found_in`, as one sentence. It
-/// carries no remedy: what to do about it depends on what the caller was
-/// trying to do.
+/// The fact that `name` is already taken in `found_in`, by the spec at `path`,
+/// as one sentence. It carries no remedy: what to do about it depends on what
+/// the caller was trying to do.
 #[must_use]
-pub fn spec_name_taken(name: &str, found_in: &NameLocation) -> String {
+pub fn spec_name_taken(name: &str, found_in: &NameLocation, path: &std::path::Path) -> String {
+    let path = path.display();
     match found_in {
-        NameLocation::Dotfiles => format!("A dotfile spec named '{name}' already exists."),
-        NameLocation::Packages => format!("'{name}' is already a package."),
+        NameLocation::Dotfiles => format!("A dotfile spec named '{name}' already exists ({path})."),
+        NameLocation::Packages => format!("'{name}' is already a package ({path})."),
     }
 }
 
@@ -119,10 +122,11 @@ pub fn validate_unique_name(
         Err(error) if error.may_be_created() => Vec::new(),
         Err(error) => return Err(NamespaceValidationError::PackageDirectoryUnreadable(error)),
     };
-    if !files.is_empty() {
+    if let Some(path) = files.into_iter().next() {
         return Err(NamespaceConflict {
             name: name.to_string(),
             found_in: NameLocation::Packages,
+            path,
         }
         .into());
     }
@@ -136,6 +140,7 @@ pub fn validate_unique_name(
                 return Err(NamespaceConflict {
                     name: name.to_string(),
                     found_in: NameLocation::Dotfiles,
+                    path: files[0].clone(),
                 }
                 .into());
             }
@@ -197,8 +202,9 @@ mod tests {
             result,
             Err(NamespaceValidationError::Conflict(NamespaceConflict {
                 found_in: NameLocation::Packages,
+                ref path,
                 ..
-            }))
+            })) if path == std::path::Path::new("/packages/existing.yaml")
         ));
     }
 
@@ -219,8 +225,9 @@ mod tests {
             result,
             Err(NamespaceValidationError::Conflict(NamespaceConflict {
                 found_in: NameLocation::Dotfiles,
+                ref path,
                 ..
-            }))
+            })) if path == std::path::Path::new("/dotfiles/existing.yaml")
         ));
     }
 
@@ -495,15 +502,20 @@ mod tests {
         let package = NamespaceConflict {
             name: "starship".to_string(),
             found_in: NameLocation::Packages,
+            path: "/p/starship.yml".into(),
         };
-        assert_eq!(package.to_string(), "'starship' is already a package.");
+        assert_eq!(
+            package.to_string(),
+            "'starship' is already a package (/p/starship.yml)."
+        );
         let dotfile = NamespaceConflict {
             name: "starship".to_string(),
             found_in: NameLocation::Dotfiles,
+            path: "/d/starship.yaml".into(),
         };
         assert_eq!(
             dotfile.to_string(),
-            "A dotfile spec named 'starship' already exists."
+            "A dotfile spec named 'starship' already exists (/d/starship.yaml)."
         );
     }
 }

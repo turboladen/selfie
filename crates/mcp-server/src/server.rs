@@ -930,6 +930,7 @@ mod tests {
             selfie::namespace::NamespaceConflict {
                 name: "rc".to_string(),
                 found_in: selfie::namespace::NameLocation::Dotfiles,
+                path: "/d/rc.yml".into(),
             },
         );
 
@@ -939,7 +940,8 @@ mod tests {
 
         assert_eq!(
             refusal.message,
-            "A dotfile spec named 'rc' already exists. Remove it first or choose a different name."
+            "A dotfile spec named 'rc' already exists (/d/rc.yml). Remove it first or choose a \
+             different name."
         );
     }
 
@@ -952,6 +954,7 @@ mod tests {
                 selfie::namespace::NamespaceConflict {
                     name: "bat".to_string(),
                     found_in: selfie::namespace::NameLocation::Packages,
+                    path: "/p/bat.yml".into(),
                 },
             )
         };
@@ -963,7 +966,11 @@ mod tests {
             panic!("a conflict is an error");
         };
 
-        assert!(create.message.starts_with("'bat' is already a package."));
+        assert!(
+            create
+                .message
+                .starts_with("'bat' is already a package (/p/bat.yml).")
+        );
         assert!(create.message.contains("selfie_spec_update"), "{create:?}");
         assert!(
             track.message.contains("selfie_package_track_dotfile"),
