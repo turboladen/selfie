@@ -441,12 +441,8 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         }
 
         // Serialize the package to YAML
-        let yaml_content = serde_saphyr::to_string(package).map_err(|e| {
-            PackageRepoError::IoError(Arc::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to serialize package to YAML: {e}"),
-            )))
-        })?;
+        let yaml_content =
+            crate::yaml::serialize(package).map_err(PackageRepoError::Unserializable)?;
 
         // Write the YAML content to the specified path.
         //

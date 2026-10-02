@@ -2535,7 +2535,7 @@ mod blank_commands {
     async fn the_spec_create_template_does_not_install() {
         let dir = TempDir::new().unwrap();
         let template = Package::new_template("fresh");
-        let yaml = serde_saphyr::to_string(&template)
+        let yaml = selfie::yaml::serialize(&template)
             .unwrap()
             .replace("default:", "test:");
         std::fs::write(dir.path().join("fresh.yml"), yaml).unwrap();

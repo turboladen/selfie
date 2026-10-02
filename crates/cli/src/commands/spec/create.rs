@@ -867,7 +867,7 @@ mod tests {
         let env = package.environments().get("test-env").unwrap();
         // The placeholders are comments, which name the package and run nothing,
         // so install and check refuse the template until it is edited.
-        let yaml = serde_saphyr::to_string(&package).unwrap();
+        let yaml = selfie::yaml::serialize(&package).unwrap();
         assert!(
             yaml.contains("# TODO: Add install command for template-test"),
             "{yaml}"
@@ -950,7 +950,7 @@ mod tests {
         assert!(!environments.contains_key("default"));
 
         let staging_env = &environments["staging"];
-        let yaml = serde_saphyr::to_string(&package).unwrap();
+        let yaml = selfie::yaml::serialize(&package).unwrap();
         assert!(
             yaml.contains("# TODO: Add install command for test-staging"),
             "{yaml}"

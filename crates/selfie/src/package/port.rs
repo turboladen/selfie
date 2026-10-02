@@ -145,6 +145,10 @@ pub enum PackageRepoError {
     #[error("File system error: {0}")]
     FileSystemError(FileSystemError),
 
+    /// The package could not be written as YAML, so nothing was saved.
+    #[error("The package cannot be written as YAML: {0}")]
+    Unserializable(crate::yaml::SerializeFailure),
+
     /// Refused to rewrite a package whose dotfile entries carry unrecognized keys.
     ///
     /// Saving re-serializes from the struct, so a key the struct does not model
@@ -380,6 +384,7 @@ impl PackageRepoError {
             Self::PackageListError(_) => Some(Lookup::PackageDirectoryUnreadable),
             // Raised by `save_package`, never by a lookup.
             Self::IoError(_)
+            | Self::Unserializable(_)
             | Self::UnknownDotfileFields { .. }
             | Self::UnknownTopLevelFields { .. }
             | Self::UncheckedTopLevel { .. }
@@ -1153,6 +1158,7 @@ mod tests {
                 other_envs_with_check: Vec::new(),
             }),
             PackageRepoError::IoError(Arc::new(std::io::Error::other("save"))),
+            PackageRepoError::Unserializable(crate::yaml::SerializeFailure::Value),
             package_error(PackageError::PackageAlreadyExists {
                 name: "dep".to_string(),
                 file_path: "/packages/dep.yml".into(),

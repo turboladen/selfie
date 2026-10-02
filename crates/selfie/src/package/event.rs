@@ -2597,7 +2597,8 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             // and must not pick up the "File system error: " frame above, which is
             // what would reintroduce the target-facing phrasing it exists to
             // avoid. Each message is worth stating in exactly one place.
-            err @ (crate::package::port::PackageRepoError::UnknownDotfileFields { .. }
+            err @ (crate::package::port::PackageRepoError::Unserializable(_)
+            | crate::package::port::PackageRepoError::UnknownDotfileFields { .. }
             | crate::package::port::PackageRepoError::UnknownTopLevelFields { .. }
             | crate::package::port::PackageRepoError::UncheckedTopLevel { .. }
             | crate::package::port::PackageRepoError::UnknownEnvironmentFields { .. }
@@ -3855,6 +3856,21 @@ mod tests {
             panic!("expected an unusable working directory");
         };
         assert_eq!((command.as_str(), working_directory), ("check-x", dir()));
+    }
+
+    // A package that cannot be written as YAML fails as that, not as an I/O
+    // error, and the sentence names the failure's class.
+    #[test]
+    fn an_unserializable_package_is_not_an_io_error() {
+        let failure =
+            OperationFailure::from(crate::package::port::PackageRepoError::Unserializable(
+                crate::yaml::SerializeFailure::Value,
+            ));
+
+        assert_eq!(
+            failure.to_string(),
+            "The package cannot be written as YAML: a value in it has a shape YAML cannot hold"
+        );
     }
 
     // The label set is the MCP contract, so each label is pinned.
