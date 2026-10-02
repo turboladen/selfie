@@ -893,22 +893,44 @@ fn check_status_label(result: &CheckResult) -> &'static str {
     }
 }
 
+/// Each dependency's status: `status`, and for an unknown one a `reason` label
+/// to branch on, `detail` to display, and, for a spec that could not be used,
+/// `failure` with the parse failure's fields. Each is null where it does not
+/// apply.
 fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -> Vec<Value> {
+    use selfie::package::event::{EnvironmentStatus, UnknownStatus};
+
     statuses
         .iter()
         .map(|dep| {
-            let (status, reason) = match &dep.status {
-                selfie::package::event::EnvironmentStatus::Installed => ("installed", None),
-                selfie::package::event::EnvironmentStatus::NotInstalled => ("not installed", None),
-                selfie::package::event::EnvironmentStatus::Unknown(reason) => {
-                    ("unknown", Some(reason.as_str()))
-                }
-            };
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "name": &dep.name,
-                "status": status,
-                "reason": reason,
-            })
+                "reason": null,
+                "detail": null,
+                "failure": null,
+            });
+            row["status"] = Value::from(match &dep.status {
+                EnvironmentStatus::Installed => "installed",
+                EnvironmentStatus::NotInstalled => "not installed",
+                EnvironmentStatus::Unknown(_) => "unknown",
+            });
+            if let EnvironmentStatus::Unknown(unknown) = &dep.status {
+                row["reason"] = Value::from(match unknown {
+                    UnknownStatus::NotFound(_) => "not_found",
+                    UnknownStatus::Unloadable(_) => "unloadable",
+                    UnknownStatus::Refused { .. } => "refused",
+                    UnknownStatus::NotInEnvironment => "not_in_environment",
+                    UnknownStatus::NoCheckCommand => "no_check_command",
+                    UnknownStatus::CheckError(_) => "check_error",
+                });
+                row["detail"] = Value::from(unknown.to_string());
+                if let UnknownStatus::Unloadable(error) = unknown
+                    && let Some(failure) = error.parse_failure()
+                {
+                    row["failure"] = parse_failure_json(failure);
+                }
+            }
+            row
         })
         .collect()
 }
@@ -1457,6 +1479,30 @@ mod tests {
         let outcomes: Vec<&Value> = rows.iter().map(|r| &r["outcome"]).collect();
         assert_eq!(outcomes, ["clean", "found", "failed"]);
         assert!(rows.iter().all(|r| r.get("status").is_none()), "{rows:?}");
+    }
+
+    // An unknown dependency says why as a label, with the sentence beside it.
+    #[test]
+    fn an_unknown_dependency_says_why_as_a_label() {
+        use selfie::package::event::{DependencyStatus, EnvironmentStatus, UnknownStatus};
+
+        let rows = dep_statuses_to_json(&[
+            DependencyStatus {
+                name: "a".to_string(),
+                status: EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment),
+            },
+            DependencyStatus {
+                name: "b".to_string(),
+                status: EnvironmentStatus::Installed,
+            },
+        ]);
+
+        assert_eq!(rows[0]["status"], "unknown");
+        assert_eq!(rows[0]["reason"], "not_in_environment");
+        assert_eq!(rows[0]["detail"], "not in current environment");
+        assert_eq!(rows[0]["failure"], Value::Null);
+        assert_eq!(rows[1]["status"], "installed");
+        assert_eq!(rows[1]["reason"], Value::Null);
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

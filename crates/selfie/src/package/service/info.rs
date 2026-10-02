@@ -18,6 +18,7 @@ use crate::{
         event::{
             CheckResult, DependencyStatus, EnvironmentStatus, EnvironmentStatusData, EventSender,
             OperationResult, OperationSuccess, PackageInfoData, ScopedDotfile, StepEnding,
+            UnknownStatus,
         },
         git::GitStatusProvider,
         port::PackageRepository,
@@ -327,9 +328,14 @@ where
     let dep_package = match repo.get_package(dep_name) {
         Ok(pkg) => pkg,
         Err(err) => {
+            let status = if err.means_no_such_package() {
+                UnknownStatus::NotFound(err)
+            } else {
+                UnknownStatus::Unloadable(err)
+            };
             return DependencyStatus {
                 name: dep_name.to_string(),
-                status: EnvironmentStatus::Unknown(format!("{err}")),
+                status: EnvironmentStatus::Unknown(status),
             };
         }
     };
@@ -339,14 +345,17 @@ where
     if let Some(reason) = dep_package.package.spec_refusal(current_env) {
         return DependencyStatus {
             name: dep_name.to_string(),
-            status: EnvironmentStatus::Unknown(format!("is refused: {reason}")),
+            status: EnvironmentStatus::Unknown(UnknownStatus::Refused {
+                kind: reason.kind(),
+                reason: reason.to_string(),
+            }),
         };
     }
 
     let Some(env_config) = dep_package.package.environments().get(current_env) else {
         return DependencyStatus {
             name: dep_name.to_string(),
-            status: EnvironmentStatus::Unknown("not in current environment".to_string()),
+            status: EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment),
         };
     };
 
@@ -371,8 +380,8 @@ fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
     match result {
         CheckResult::Success { .. } => EnvironmentStatus::Installed,
         CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
-        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown("no check command".to_string()),
-        CheckResult::Error(e) => EnvironmentStatus::Unknown(e),
+        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand),
+        CheckResult::Error(e) => EnvironmentStatus::Unknown(UnknownStatus::CheckError(e)),
     }
 }
 
@@ -747,7 +756,7 @@ mod tests {
                 );
                 assert!(matches!(
                     &environment_status.dependency_statuses[0].status,
-                    EnvironmentStatus::Unknown(reason) if reason.contains("not found")
+                    EnvironmentStatus::Unknown(UnknownStatus::NotFound(_))
                 ));
                 found = true;
             }
@@ -840,7 +849,7 @@ mod tests {
                 assert_eq!(environment_status.dependency_statuses.len(), 1);
                 assert!(matches!(
                     &environment_status.dependency_statuses[0].status,
-                    EnvironmentStatus::Unknown(reason) if reason.contains("not in current environment")
+                    EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment)
                 ));
                 found = true;
             }

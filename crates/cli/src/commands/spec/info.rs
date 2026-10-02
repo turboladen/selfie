@@ -314,10 +314,15 @@ mod tests {
     fn test_format_dependency_with_status_unknown() {
         let dep = DependencyStatus {
             name: "missing".to_string(),
-            status: EnvironmentStatus::Unknown("package not found".to_string()),
+            status: EnvironmentStatus::Unknown(
+                selfie::package::event::UnknownStatus::NotInEnvironment,
+            ),
         };
         let result = format_dependency_with_status(&dep, false);
         assert!(result.starts_with("missing: "));
-        assert!(result.contains("package not found"));
+        assert!(
+            result.contains("Unknown (not in current environment)"),
+            "{result}"
+        );
     }
 }
