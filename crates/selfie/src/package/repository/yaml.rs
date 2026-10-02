@@ -209,7 +209,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 // rather than carried through. An `IoError` has no such wording to correct and is
 // carried as it stands.
 //
-// Exhaustive, so a fifth variant is worded for a read here rather than inheriting
+// Exhaustive, so a sixth variant is worded for a read here rather than inheriting
 // a sentence meant for elsewhere.
 fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError {
     let kind = match failure {
@@ -225,6 +225,11 @@ fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError
         // worded so that if one ever does, it does not claim a refusal.
         FileSystemError::HomeDirNotFound => PackageParseKind::Unreadable {
             reason: "the home directory could not be determined".to_string(),
+        },
+        // Not reachable either: only the question about creating a file asks it.
+        // The whole error is kept as the reason, so the directory it names is not lost.
+        error @ FileSystemError::CannotCreateIn { .. } => PackageParseKind::Unreadable {
+            reason: error.to_string(),
         },
     };
 

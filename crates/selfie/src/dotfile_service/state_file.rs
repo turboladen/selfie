@@ -1,9 +1,12 @@
 //! The deploy state file: where it lives, loading it, and writing it back.
 //!
 //! [`LoadedState`] is what separates the two halves. Only [`load_deploy_state`]
-//! builds one and [`save_deploy_state`] accepts nothing else, so a state file
-//! selfie could not read is never written over: a caller that did not get a
-//! usable load has no value to hand the writer.
+//! builds one, so a state file selfie could not read is never written over: a
+//! caller that did not get a usable load has no value to hand the writer.
+//!
+//! [`save_deploy_state`] accepts only a [`WritableState`], which only a
+//! [`Recorder`] hands out, after it has written the state back once. Holding one
+//! means the state file could be written.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +35,11 @@ pub(crate) struct LoadedState {
     path: TargetPath,
     state: DeployState,
     directory_warning: Option<String>,
+    // Why the state directory would refuse the first write, judged once at load
+    // by its permissions.
+    creation_refusal: Option<StateLoadFailure>,
+    // Whether the user named the state directory, rather than taking the default.
+    configured: bool,
 }
 
 impl LoadedState {
@@ -60,10 +68,161 @@ impl LoadedState {
         &mut self.state
     }
 
+    /// Why the state directory's permissions would keep this state from being
+    /// written, or `None` when they allow it.
+    ///
+    /// A permission check, made when the state was loaded: a write can still
+    /// fail, as on a full disk or over an immutable state file.
+    pub(crate) fn creation_refusal(&self) -> Option<&StateLoadFailure> {
+        self.creation_refusal.as_ref()
+    }
+
+    fn configured(&self) -> bool {
+        self.configured
+    }
+
     /// The state alone, for a caller that only reads it.
     pub(super) fn into_state(self) -> DeployState {
         self.state
     }
+}
+
+/// The deploy state of a command that records what it writes.
+///
+/// Writes the state back once, the first time [`writable`](Self::writable) is
+/// asked for it, and never before. A command asks just before its first write of
+/// any kind, so a state it cannot write stops it with nothing written, and a
+/// command that writes nothing never touches the state.
+pub(crate) struct Recorder {
+    loaded: LoadedState,
+    written: bool,
+}
+
+impl Recorder {
+    pub(crate) fn new(loaded: LoadedState) -> Self {
+        Self {
+            loaded,
+            written: false,
+        }
+    }
+
+    pub(crate) fn loaded(&self) -> &LoadedState {
+        &self.loaded
+    }
+
+    /// The state, to change in memory; the next save writes it.
+    pub(crate) fn state_mut(&mut self) -> &mut DeployState {
+        self.loaded.state_mut()
+    }
+
+    /// The state as one that may be saved, writing it back first if this
+    /// command has not yet.
+    ///
+    /// # Errors
+    ///
+    /// Why the state could not be written. Nothing else has been written.
+    pub(crate) fn writable<F: FileSystem>(
+        &mut self,
+        filesystem: &F,
+    ) -> Result<WritableState<'_>, StateLoadFailure> {
+        if !self.written {
+            write_state(filesystem, &self.loaded).map_err(|source| {
+                // The permissions name the directory to fix and the typo to check
+                // for; the write's own error is the fallback when they allow it.
+                match creation_failure(filesystem, &self.loaded) {
+                    Some(refusal) => refusal,
+                    None => StateLoadFailure::StateNotWritable(source),
+                }
+            })?;
+            self.written = true;
+        }
+        Ok(WritableState(&mut self.loaded))
+    }
+
+    /// Write the state as it now stands.
+    ///
+    /// # Errors
+    ///
+    /// [`StateSaveError`] if the state cannot be serialized or written.
+    pub(crate) fn save<F: FileSystem>(&mut self, filesystem: &F) -> Result<(), StateSaveError> {
+        write_state(filesystem, &self.loaded)?;
+        self.written = true;
+        Ok(())
+    }
+}
+
+/// A deploy state this command has written once: the only kind
+/// [`save_deploy_state`] writes.
+// The field is private and only `Recorder::writable` builds one, after the
+// write-back succeeded.
+pub(crate) struct WritableState<'a>(&'a mut LoadedState);
+
+impl std::ops::Deref for WritableState<'_> {
+    type Target = LoadedState;
+
+    fn deref(&self) -> &LoadedState {
+        self.0
+    }
+}
+
+impl WritableState<'_> {
+    pub(super) fn state_mut(&mut self) -> &mut DeployState {
+        self.0.state_mut()
+    }
+}
+
+// Why the permissions of `loaded`'s directory would refuse the first write.
+fn creation_failure<F: FileSystem>(
+    filesystem: &F,
+    loaded: &LoadedState,
+) -> Option<StateLoadFailure> {
+    let directory = state_directory_of(&loaded.path);
+    creation_failure_at(filesystem, directory, loaded.configured())
+}
+
+// Where the deploy state lives, and what is known about its directory before
+// the file is read.
+struct Located {
+    path: TargetPath,
+    directory_warning: Option<String>,
+    creation_refusal: Option<StateLoadFailure>,
+    configured: bool,
+}
+
+impl Located {
+    fn holding(self, state: DeployState) -> LoadedState {
+        LoadedState {
+            path: self.path,
+            state,
+            directory_warning: self.directory_warning,
+            creation_refusal: self.creation_refusal,
+            configured: self.configured,
+        }
+    }
+}
+
+// The writer replaces the file by renaming a sibling into place, so the
+// directory decides it, never the file's own mode.
+fn creation_failure_at<F: FileSystem>(
+    filesystem: &F,
+    directory: &Path,
+    configured: bool,
+) -> Option<StateLoadFailure> {
+    let refusal = filesystem.file_creation_refusal(directory)?;
+    let (blocked, why) = match refusal {
+        FileSystemError::CannotCreateIn { path, source } => (path, source.to_string()),
+        other => (directory.to_path_buf(), other.to_string()),
+    };
+    Some(StateLoadFailure::StateDirectoryNotWritable {
+        directory: directory.to_path_buf(),
+        blocked,
+        why,
+        configured,
+    })
+}
+
+fn state_directory_of(path: &TargetPath) -> &Path {
+    path.path().parent().unwrap_or_else(|| path.path())
 }
 
 /// What loading the deploy state produced.
@@ -93,6 +252,24 @@ pub(crate) enum StateLoadFailure {
         .path.display()
     )]
     StateDirectoryUnreadable { path: PathBuf, why: String },
+    /// The state directory does not accept a new file, or is not there and
+    /// cannot be created, so the deploy state cannot be written.
+    #[error("{}", not_writable_sentence(directory, blocked, why, *configured))]
+    StateDirectoryNotWritable {
+        directory: PathBuf,
+        /// The directory that refused: `directory` itself, or the nearest of its
+        /// ancestors that exists.
+        blocked: PathBuf,
+        why: String,
+        /// Whether the user named `directory`, which makes a typo worth a word.
+        configured: bool,
+    },
+    /// The state file could not be written, though the permissions allow it.
+    #[error(
+        "The deploy state cannot be written: {0}. Free the space or lift the lock that stops \
+         it, or point state_directory elsewhere"
+    )]
+    StateNotWritable(#[source] StateSaveError),
     /// Something that is not a regular file sits at the path.
     #[error(
         "Cannot read the deploy state: '{}' is a {kind}. Remove it, or point state_directory elsewhere",
@@ -127,9 +304,31 @@ pub(crate) enum StateLoadFailure {
     },
 }
 
+fn not_writable_sentence(directory: &Path, blocked: &Path, why: &str, configured: bool) -> String {
+    if directory == blocked {
+        return format!(
+            "The deploy state cannot be written: the state directory '{}' does not accept a new \
+             file ({why}). Make it writable, or point state_directory elsewhere",
+            directory.display()
+        );
+    }
+    let typo = if configured {
+        "Correct state_directory if that path is a typo, or make"
+    } else {
+        "Make"
+    };
+    format!(
+        "The deploy state cannot be written: the state directory '{}' is not there, and selfie \
+         cannot create it under '{}' ({why}). {typo} '{}' writable",
+        directory.display(),
+        blocked.display(),
+        blocked.display()
+    )
+}
+
 /// Why the deploy state could not be written.
 #[derive(Debug, Error)]
-pub(super) enum StateSaveError {
+pub(crate) enum StateSaveError {
     /// selfie's own state would not serialize: a bug, not a filesystem condition.
     #[error("Cannot serialize the deploy state: {0}")]
     Serialize(#[source] serde_saphyr::SerializeError),
@@ -140,6 +339,12 @@ pub(super) enum StateSaveError {
         #[source]
         source: FileSystemError,
     },
+}
+
+/// How apply reports a state its [`Recorder`] could not write back. The
+/// write-back comes before the run's first write, so nothing was written.
+pub(super) fn stopped_before_writing(failure: &StateLoadFailure) -> String {
+    format!("Stopped with nothing written. {failure}")
 }
 
 /// How a command that only reads the state reports an unusable one.
@@ -193,13 +398,23 @@ pub(crate) fn state_directory_verdict(
 }
 
 /// The warning for a configured state directory at `directory` that is not
-/// there yet.
-pub(crate) fn not_there_yet_warning(directory: &Path) -> String {
-    format!(
-        "state_directory '{}' is not there yet, so nothing shows as deployed; selfie creates \
-         it on the first write. Correct the setting if that path is a typo",
-        directory.display()
-    )
+/// there yet, where `cannot_create` says why it could not be created, if it
+/// could not.
+pub(crate) fn not_there_yet_warning(
+    directory: &Path,
+    cannot_create: Option<&StateLoadFailure>,
+) -> String {
+    match cannot_create {
+        None => format!(
+            "state_directory '{}' is not there yet, so nothing shows as deployed; selfie creates \
+             it on the first write. Correct the setting if that path is a typo",
+            directory.display()
+        ),
+        Some(failure) => format!(
+            "state_directory '{}' is not there yet, so nothing shows as deployed. {failure}",
+            directory.display()
+        ),
+    }
 }
 
 /// Where the deploy state lives, with a warning about its directory when one is
@@ -207,7 +422,7 @@ pub(crate) fn not_there_yet_warning(directory: &Path) -> String {
 fn deploy_state_path<F: FileSystem>(
     filesystem: &F,
     state_directory: Option<&Path>,
-) -> Result<(TargetPath, Option<String>), StateLoadFailure> {
+) -> Result<Located, StateLoadFailure> {
     let path = state_file_path(filesystem, state_directory, DEPLOY_STATE_FILENAME)
         .map_err(StateLoadFailure::Locate)?;
     // The state directory is selfie's own, so selfie creates it — whether the user
@@ -220,9 +435,16 @@ fn deploy_state_path<F: FileSystem>(
     // rather than the configured value, so the default gets the same checks: a file
     // in the way would otherwise surface as a write error after the run had done
     // its work.
-    let directory = path.path().parent().unwrap_or_else(|| path.path());
-    match state_directory_verdict(directory, filesystem.directory_state(directory)) {
-        StateDirectoryVerdict::InUse => Ok((path, None)),
+    let directory = state_directory_of(&path).to_path_buf();
+    let configured = state_directory.is_some();
+    let creation_refusal = || creation_failure_at(filesystem, &directory, configured);
+    match state_directory_verdict(&directory, filesystem.directory_state(&directory)) {
+        StateDirectoryVerdict::InUse => Ok(Located {
+            creation_refusal: creation_refusal(),
+            path,
+            directory_warning: None,
+            configured,
+        }),
         // Said out loud when the user named the path, because the two ways to reach
         // this are a first run and a typo, and they are indistinguishable from the
         // run's output otherwise: a mistyped directory reports every deployed
@@ -230,8 +452,17 @@ fn deploy_state_path<F: FileSystem>(
         // instead of reporting conflicts. An unnamed default needs no warning, since
         // a first run is its ordinary state and nothing was typed to get it wrong.
         StateDirectoryVerdict::NotThereYet => {
-            let warning = state_directory.map(|_| not_there_yet_warning(directory));
-            Ok((path, warning))
+            // Says it will be created only when it can be: a drift run over an
+            // uncreatable path must not promise a first write that will fail.
+            let creation_refusal = creation_refusal();
+            let directory_warning =
+                configured.then(|| not_there_yet_warning(&directory, creation_refusal.as_ref()));
+            Ok(Located {
+                path,
+                directory_warning,
+                creation_refusal,
+                configured,
+            })
         }
         StateDirectoryVerdict::Refused(failure) => Err(failure),
     }
@@ -246,10 +477,11 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
     filesystem: &F,
     state_directory: Option<&Path>,
 ) -> StateLoad {
-    let (path, directory_warning) = match deploy_state_path(filesystem, state_directory) {
-        Ok(pair) => pair,
+    let located = match deploy_state_path(filesystem, state_directory) {
+        Ok(located) => located,
         Err(failure) => return StateLoad::Unusable(failure),
     };
+    let path = &located.path;
     // Ahead of the read: `read_file` opens the path, and opening a fifo blocks
     // until a writer arrives, which hangs every dotfile command before it does
     // any work. A missing path answers `None` here, so an absent file goes on
@@ -258,7 +490,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
     // There is no existence probe: the port's `path_exists` answers false for
     // any path it cannot stat, which read a state file beneath an inaccessible
     // parent as absent and let a run deploy what it could never record.
-    match filesystem.irregular_target_refusal(&path) {
+    match filesystem.irregular_target_refusal(path) {
         Some(FileSystemError::IrregularTarget { path, kind }) => {
             return StateLoad::Unusable(StateLoadFailure::Irregular { path, kind });
         }
@@ -276,11 +508,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         // condition is absence; a permission failure on the file or any parent
         // is a file selfie cannot read.
         Err(FileSystemError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return StateLoad::Usable(LoadedState {
-                path,
-                state: DeployState::empty(),
-                directory_warning,
-            });
+            return StateLoad::Usable(located.holding(DeployState::empty()));
         }
         Err(source) => {
             return StateLoad::Unusable(StateLoadFailure::Read {
@@ -310,11 +538,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
     // character a scanner failure stopped on still get through; the reasoning for
     // accepting those is on `ParseFailure`.
     match crate::yaml::parse(&content) {
-        Ok(state) => StateLoad::Usable(LoadedState {
-            path,
-            state,
-            directory_warning,
-        }),
+        Ok(state) => StateLoad::Usable(located.holding(state)),
         Err(source) => StateLoad::Unusable(StateLoadFailure::Parse {
             path: path.path().to_path_buf(),
             source,
@@ -323,6 +547,8 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
 }
 
 /// Write the deploy state, owner-only.
+///
+/// Used for every save after a [`Recorder`] has written the state back.
 ///
 /// Owner-only because the file names every repository-file dotfile selfie
 /// manages here, with checksums: no credentials, but a reconnaissance aid on a
@@ -333,8 +559,12 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
 /// [`StateSaveError`] if the state cannot be serialized or the write fails.
 pub(super) fn save_deploy_state<F: FileSystem>(
     filesystem: &F,
-    loaded: &LoadedState,
+    loaded: &WritableState,
 ) -> Result<(), StateSaveError> {
+    write_state(filesystem, loaded)
+}
+
+fn write_state<F: FileSystem>(filesystem: &F, loaded: &LoadedState) -> Result<(), StateSaveError> {
     // Deliberately less durable than `write_file_no_follow`: both sync the file's
     // data before renaming, and `write_file_private` skips the directory fsync,
     // which is the safe direction. Losing this file costs nothing -- the next run
@@ -374,6 +604,7 @@ mod tests {
     fn under_a_state_directory() -> MockFileSystem {
         let mut fs = MockFileSystem::default();
         fs.mock_directories_exist();
+        fs.mock_creatable_directories();
         fs
     }
 
@@ -386,6 +617,7 @@ mod tests {
     fn a_configured_state_directory_that_is_not_there_is_created_rather_than_refused() {
         let mut fs = MockFileSystem::default();
         fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.mock_creatable_directories();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
@@ -409,6 +641,7 @@ mod tests {
     fn a_configured_state_directory_that_is_not_there_is_warned_about() {
         let mut fs = MockFileSystem::default();
         fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.mock_creatable_directories();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
@@ -429,6 +662,72 @@ mod tests {
         );
     }
 
+    // The warning promises the first write creates the directory only when it can.
+    // Where the parent refuses, it says why instead, so `dotfiles drift` does not
+    // promise a write `apply` will refuse.
+    #[test]
+    fn a_state_directory_that_cannot_be_created_is_not_promised_a_first_write() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.expect_file_creation_refusal().returning(|_| {
+            Some(FileSystemError::CannotCreateIn {
+                path: PathBuf::from("/"),
+                source: std::sync::Arc::new(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                )),
+            })
+        });
+        fs.mock_no_irregular_files();
+        fs.expect_read_file().returning(|_| {
+            Err(FileSystemError::IoError(std::sync::Arc::new(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
+            )))
+        });
+
+        let StateLoad::Usable(loaded) = load_deploy_state(&fs, Some(Path::new(STATE_DIR))) else {
+            panic!("a directory that is not there still loads as empty");
+        };
+        let warning = loaded
+            .directory_warning()
+            .expect("a word about the directory");
+
+        assert!(
+            !warning.contains("creates it on the first write"),
+            "the warning promises a write that cannot happen: {warning}"
+        );
+        assert!(warning.contains("cannot create it under '/'"), "{warning}");
+    }
+
+    // The typo remedy is offered only for a directory the user named: the default
+    // has no setting to correct.
+    #[test]
+    fn only_a_configured_state_directory_is_offered_the_typo_remedy() {
+        let sentence = |configured| {
+            not_writable_sentence(
+                Path::new("/home/me/.local/state/selfie"),
+                Path::new("/home/me/.local"),
+                "Permission denied",
+                configured,
+            )
+        };
+
+        assert!(
+            sentence(true).contains("Correct state_directory"),
+            "{}",
+            sentence(true)
+        );
+        assert!(
+            !sentence(false).contains("state_directory if"),
+            "{}",
+            sentence(false)
+        );
+        assert!(
+            sentence(false).contains("Make '/home/me/.local' writable"),
+            "{}",
+            sentence(false)
+        );
+    }
+
     // The default path gets none, because a first run is its ordinary state and
     // nothing was typed to get it wrong. This is the control: without it, warning on
     // every state directory would pass the test above.
@@ -436,6 +735,7 @@ mod tests {
     fn an_unset_default_state_directory_is_not_warned_about() {
         let mut fs = MockFileSystem::default();
         fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.mock_creatable_directories();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
@@ -468,6 +768,7 @@ mod tests {
     fn a_default_state_directory_that_is_not_there_is_created_rather_than_refused() {
         let mut fs = MockFileSystem::default();
         fs.mock_directory_state(DirectoryState::Absent(AbsentReason::Empty));
+        fs.mock_creatable_directories();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
@@ -1063,12 +1364,13 @@ mod tests {
                 std::io::Error::other("disk full"),
             )))
         });
-        let loaded = match load_deploy_state(&fs, Some(Path::new(STATE_DIR))) {
+        let mut loaded = match load_deploy_state(&fs, Some(Path::new(STATE_DIR))) {
             StateLoad::Usable(loaded) => loaded,
             StateLoad::Unusable(failure) => panic!("an absent file must be usable: {failure}"),
         };
 
-        let error = save_deploy_state(&fs, &loaded).expect_err("the write was made to fail");
+        let error = save_deploy_state(&fs, &WritableState(&mut loaded))
+            .expect_err("the write was made to fail");
 
         assert!(matches!(error, StateSaveError::Write { .. }));
         let message = error.to_string();

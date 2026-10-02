@@ -406,8 +406,10 @@ mod tests {
         fs.expect_list_directory().returning(|_| Ok(Vec::new()));
     }
 
-    // No deploy state has been written yet, which a run loads as an empty one.
+    // No deploy state has been written yet, which a run loads as an empty one,
+    // in a directory that accepts the first write.
     fn no_deploy_state(fs: &mut crate::fs::MockFileSystem) {
+        fs.mock_creatable_directories();
         fs.expect_irregular_target_refusal().returning(|_| None);
         fs.expect_read_file().returning(|_| {
             Err(crate::fs::FileSystemError::IoError(std::sync::Arc::new(

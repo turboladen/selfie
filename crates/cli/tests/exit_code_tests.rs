@@ -215,6 +215,33 @@ fn apply_exits_one_when_it_refused_an_entry() {
     assert_eq!(code, Some(FAILED), "{output}");
 }
 
+// Make the sandbox's state directory mode 0o500, which a run can read but not
+// record in. `None` when this user can write into it anyway, as root can, so the
+// caller skips.
+fn read_only_state_directory(temp: &tempfile::TempDir) -> Option<test_common::LockedDir> {
+    let locked = test_common::LockedDir::create(&temp.path().join("state"), 0o500);
+    locked.refuses_new_files().then_some(locked)
+}
+
+// A deploy apply could not record is never made: the run stops before it writes.
+#[test]
+fn apply_exits_one_without_deploying_when_the_state_directory_refuses_writes() {
+    let temp = sandbox();
+    write_dotfile_package(&temp, "app", "~/.apprc");
+    let Some(_locked) = read_only_state_directory(&temp) else {
+        eprintln!("SKIP: this user can write into a 0o500 directory");
+        return;
+    };
+
+    let (code, output) = run(&temp, &["apply", "-y"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+    assert!(
+        output.contains("deploy state cannot be written"),
+        "{output}"
+    );
+    assert!(!temp.path().join(".apprc").exists(), "{output}");
+}
+
 // ── package audit ───────────────────────────────────────────────────────────
 
 #[test]

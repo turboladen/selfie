@@ -41,6 +41,19 @@ impl LockedDir {
     pub fn holds(&self) -> bool {
         std::fs::read_dir(&self.path).is_err()
     }
+
+    /// Whether this process is kept from creating a file in the directory.
+    ///
+    /// The question for a write-protecting mode such as `0o500`, which still lets
+    /// the directory be listed, so [`holds`](Self::holds) answers false for it.
+    /// False when running as root.
+    #[must_use]
+    pub fn refuses_new_files(&self) -> bool {
+        let probe = self.path.join(".locked-dir-probe");
+        let refused = std::fs::write(&probe, "x").is_err();
+        let _ = std::fs::remove_file(&probe);
+        refused
+    }
 }
 
 impl Drop for LockedDir {
