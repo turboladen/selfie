@@ -24,6 +24,7 @@ use crate::{
     package::{
         Package,
         event::{EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount},
+        refusal::refuse_up_front,
     },
 };
 
@@ -66,6 +67,7 @@ enum Stop {
     /// entry's target as the package file spells it.
     Entry(String),
     /// A package was refused whole while `stop_on_error` is on. Carries its name.
+    /// Packages are judged before any is walked, so nothing has deployed.
     Package(String),
     /// Collecting the packages refused something while `stop_on_error` is on.
     Collection(CollectionRefusal),
@@ -84,7 +86,8 @@ impl std::fmt::Display for Stop {
             ),
             Self::Package(name) => write!(
                 f,
-                "Stopped after refusing package '{name}' (stop_on_error is enabled)"
+                "Stopped before applying anything: package '{name}' is refused (stop_on_error is \
+                 enabled)"
             ),
             Self::Collection(CollectionRefusal::UnreadableDotfilesDirectory) => f.write_str(
                 "Stopped before applying anything: the standalone dotfiles directory could not \
@@ -289,7 +292,29 @@ where
             break;
         }
     }
-    let packages = if stopped.is_some() { &[][..] } else { packages };
+
+    // Packages refused whole are known before any is walked, through the one
+    // function that answers whether apply refuses a package at all, so they are
+    // reported together and, under `stop_on_error`, stop the run before anything
+    // deploys. A `configs:` or a `_dotfiles:` anchor leaves the list selfie read
+    // empty or short, so the `is_empty` check below would pass over such a package
+    // in silence (selfie-g199, selfie-jt6m).
+    let packages = if stopped.is_some() {
+        Vec::new()
+    } else {
+        let (packages, refused) = refuse_up_front(packages, config.environment(), sender).await;
+        for package in &refused {
+            stopped = tally.refuse(config, token, Stop::Package(package.name().to_string()));
+            if stopped.is_some() {
+                break;
+            }
+        }
+        if stopped.is_some() {
+            Vec::new()
+        } else {
+            packages
+        }
+    };
 
     // The programs whose commands have failed in this run. A failure is usually
     // shared by that program's later commands: a locked vault or a dismissed
@@ -303,27 +328,6 @@ where
     let home = ResolvedHome::of(filesystem);
 
     'packages: for package in packages {
-        // Refuse the whole package before asking what dotfiles it has, through
-        // the one function that answers whether apply refuses a package at all.
-        // A `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty
-        // or short, so the `is_empty` check below would pass over the package in
-        // silence (selfie-g199, selfie-jt6m).
-        //
-        // The reason arrives already worded for the level it came from, so this
-        // adds only the package it belongs to.
-        if let Some(reason) = package.spec_refusal(config.environment()) {
-            sender
-                .send_warning(format!("Skipping package '{}': {reason}", package.name()))
-                .await;
-            if let Some(stop) =
-                tally.refuse(config, token, Stop::Package(package.name().to_string()))
-            {
-                stopped = Some(stop);
-                break 'packages;
-            }
-            continue;
-        }
-
         let dotfiles = package.effective_dotfiles(Some(config.environment()));
         let package_name = package.spec_name();
         let collisions = PackageCollisions::of(package, &home, config.environment());

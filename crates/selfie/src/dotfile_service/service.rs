@@ -409,7 +409,8 @@ where
                     let mut listable = Vec::new();
                     for package in packages {
                         if let Some(reason) = package.listing_refusal() {
-                            refused.push(crate::package::event::RefusedSpec::new(&package, reason));
+                            refused
+                                .push(crate::package::event::RefusedSpec::new(&package, &reason));
                         } else if !package.dotfiles_with_scope().is_empty() {
                             listable.push(package);
                         }

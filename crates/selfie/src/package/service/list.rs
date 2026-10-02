@@ -67,11 +67,12 @@ where
     // environments the listing shows: apply's question in this one, and any
     // environment's with `--all`.
     let shown = if show_all {
-        super::steps::Shown::Every
+        crate::package::refusal::Shown::Every
     } else {
-        super::steps::Shown::Current(config.environment())
+        crate::package::refusal::Shown::Current(config.environment())
     };
-    let (sorted_packages, refused) = super::steps::separate_refused(sorted_packages, shown);
+    let (sorted_packages, refused) =
+        crate::package::refusal::separate_refused(sorted_packages, shown);
     let refused: Vec<RefusedSpec> = refused.into_iter().map(|(_, spec)| spec).collect();
 
     // Calculate environment statistics from all valid packages (before filtering)

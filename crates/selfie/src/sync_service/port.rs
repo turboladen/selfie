@@ -134,9 +134,10 @@ pub trait SyncService: Send + Sync {
     ///
     /// Emits [`SyncRepoStatus`](crate::package::event::PackageEvent::SyncRepoStatus),
     /// then the drift check's own
-    /// [`Warning`](crate::package::event::PackageEvent::Warning) and
-    /// [`SpecSkipped`](crate::package::event::PackageEvent::SpecSkipped) events
-    /// in the order the drift check reported them, then
+    /// [`Warning`](crate::package::event::PackageEvent::Warning),
+    /// [`PackagesRefused`](crate::package::event::PackageEvent::PackagesRefused)
+    /// and [`SpecSkipped`](crate::package::event::PackageEvent::SpecSkipped)
+    /// events in the order the drift check reported them, then
     /// [`SyncDriftSummary`](crate::package::event::PackageEvent::SyncDriftSummary),
     /// then completes.
     fn status(&self) -> impl Future<Output = EventStream> + Send;

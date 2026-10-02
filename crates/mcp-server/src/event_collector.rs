@@ -2,7 +2,7 @@ use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
     AuditResult, BaseKind, CheckResult, DotfileSource, EventStream, NoSuchPackageReason,
-    OperationFailure, OperationResult, Outcome, PackageEvent,
+    OperationFailure, OperationResult, Outcome, PackageEvent, RefusalKind,
 };
 use serde_json::Value;
 
@@ -100,9 +100,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
             _ => {}
         }
 
-        if let Some(json) = event_to_json(&event) {
-            data_events.push(json);
-        }
+        data_events.extend(event_to_json(&event));
     }
 
     // The envelope follows the library's verdict: a Failed outcome is an error
@@ -269,11 +267,23 @@ fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
         .map(|r| {
             serde_json::json!({
                 "package": &r.package_name,
-                "path": &r.path,
+                "path": r.path.display().to_string(),
+                "kind": refusal_kind_label(r.kind),
                 "reason": &r.reason,
             })
         })
         .collect()
+}
+
+/// The `kind` field's value for a package refused whole.
+fn refusal_kind_label(kind: RefusalKind) -> &'static str {
+    match kind {
+        RefusalKind::UnknownTopLevelKeys => "unknown_top_level_keys",
+        RefusalKind::UnknownEnvironmentKeys => "unknown_environment_keys",
+        RefusalKind::UncheckedTopLevel => "unchecked_top_level",
+        RefusalKind::NoEnvironments => "no_environments",
+        RefusalKind::AmbiguousName => "ambiguous_name",
+    }
 }
 
 /// One parse failure as fields, shared by every surface that reports one.
@@ -305,8 +315,34 @@ fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value
     })
 }
 
-fn event_to_json(event: &PackageEvent) -> Option<Value> {
-    match event {
+/// The JSON rows one event contributes: none for an event a tool caller does
+/// not act on, one for most, and one per package for a group of refusals, so a
+/// caller reads each refused package's row as it would any other.
+fn event_to_json(event: &PackageEvent) -> Vec<Value> {
+    let row = match event {
+        PackageEvent::PackagesRefused {
+            kind,
+            reason,
+            packages,
+            ..
+        } => {
+            return packages
+                .iter()
+                .map(|package| {
+                    serde_json::json!({
+                        "type": "package_refused",
+                        "package": &package.name,
+                        "paths": package
+                            .paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>(),
+                        "kind": refusal_kind_label(*kind),
+                        "reason": reason,
+                    })
+                })
+                .collect();
+        }
         PackageEvent::CheckResultCompleted { check_result, .. } => Some(serde_json::json!({
             "type": "check_result",
             "package": &check_result.package_name,
@@ -662,7 +698,8 @@ fn event_to_json(event: &PackageEvent) -> Option<Value> {
         | PackageEvent::Canceled { .. }
         | PackageEvent::Trace { .. }
         | PackageEvent::Debug { .. } => None,
-    }
+    };
+    row.into_iter().collect()
 }
 
 fn git_status_label(status: Option<&selfie::package::git::GitFileStatus>) -> Value {
@@ -1390,6 +1427,42 @@ mod tests {
     // passes for the wrong reason.
     const SECRET: &str = "Xq7Rm2Kz9Wp4Ns6Tv8Bh3Gd5";
 
+    // A group of refused packages reaches an assistant as one row per package,
+    // each with its own files, the kind to branch on and the shared reason.
+    #[tokio::test]
+    async fn refused_packages_are_one_row_each() {
+        let package = |name: &str, paths: &[&str]| selfie::package::event::RefusedPackage {
+            name: name.to_string(),
+            paths: paths.iter().map(std::path::PathBuf::from).collect(),
+        };
+        let events = vec![PackageEvent::PackagesRefused {
+            operation_info: test_op_info(),
+            kind: RefusalKind::AmbiguousName,
+            reason: "several files claim it".to_string(),
+            packages: vec![
+                package("a", &["/p/a.yml", "/p/a.yaml"]),
+                package("b", &["/p/b.yml"]),
+            ],
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = result.data["data"].as_array().expect("data is an array");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(
+            rows[0],
+            serde_json::json!({
+                "type": "package_refused",
+                "package": "a",
+                "paths": ["/p/a.yml", "/p/a.yaml"],
+                "kind": "ambiguous_name",
+                "reason": "several files claim it",
+            })
+        );
+        assert_eq!(rows[1]["package"], "b");
+        assert_eq!(rows[1]["paths"], serde_json::json!(["/p/b.yml"]));
+    }
+
     // A skipped spec reaches a tool caller as fields it can branch on, and the
     // kind is what it branches on: `reason` is prose to display, and matching on
     // prose is what the fields exist to spare a caller.
@@ -1454,7 +1527,8 @@ mod tests {
                 packages: vec![from_packages, from_dotfiles],
                 refused: vec![selfie::package::event::RefusedSpec {
                     package_name: "shadowed".to_string(),
-                    path: "/packages/shadowed.yml".to_string(),
+                    path: "/packages/shadowed.yml".into(),
+                    kind: RefusalKind::UnknownTopLevelKeys,
                     reason: "unrecognized top-level key `_dotfiles`".to_string(),
                 }],
                 package_directory: "/packages".to_string(),
@@ -1574,7 +1648,8 @@ mod tests {
                 invalid_packages: vec![],
                 refused: vec![selfie::package::event::RefusedSpec {
                     package_name: "shadowed".to_string(),
-                    path: "/packages/shadowed.yml".to_string(),
+                    path: "/packages/shadowed.yml".into(),
+                    kind: RefusalKind::UnknownTopLevelKeys,
                     reason: "'_environments' is refused".to_string(),
                 }],
                 current_environment: "test".to_string(),
@@ -1589,6 +1664,7 @@ mod tests {
         let row = &summary["refused"][0];
         assert_eq!(row["package"], "shadowed");
         assert_eq!(row["path"], "/packages/shadowed.yml");
+        assert_eq!(row["kind"], "unknown_top_level_keys");
         assert_eq!(row["reason"], "'_environments' is refused");
     }
 

@@ -216,7 +216,7 @@ fn handle_list_event(
             // file cannot say which environments it declares. Its path is relative
             // to the package directory named above the table.
             for refused in &package_list.refused {
-                let path = std::path::Path::new(&refused.path);
+                let path = refused.path.as_path();
                 let shown = path.strip_prefix(package_dir).unwrap_or(path);
                 add(
                     &ListItemResult::Failure,

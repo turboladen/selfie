@@ -1560,6 +1560,12 @@ key, **nothing at all** to deploy, a run that looks completely successful and di
 ⚠ Skipping package 'myapp': '_dotfiles' cannot be told apart from a misspelling of the 'dotfiles' field; rename it, or correct it to 'dotfiles'. Anchors are legal here; only a name matching a top-level field is refused. Unknown field 'configs'; expected one of: name, homepage, description, dotfiles, post_install_note, environments
 ```
 
+When several packages are refused for the same reason, `selfie apply`, `selfie dotfiles drift`,
+`selfie package audit --all` and `selfie sync status` print one line naming them all, such as
+`⚠ Skipping 3 packages (a, b, c): unknown field 'version'; …`, so the finding you ran the command
+for is not buried under copies of one sentence. With `--verbose` each package gets its own line.
+Every package refused whole is reported before anything is deployed.
+
 The refusal covers the package rather than a single entry, because the problem is in the file's top
 level: there is no entry to attach it to, and the entries the file does have may not be the ones you
 wrote. It counts as a refusal, so [the run exits non-zero](../README.md#a-refusal-is-not-a-success).

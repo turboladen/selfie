@@ -95,7 +95,9 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
     for refused in &data.refused {
         let text = format!(
             "Refused: {} ({}) — {}",
-            refused.package_name, refused.path, refused.reason
+            refused.package_name,
+            refused.path.display(),
+            refused.reason
         );
         let msg = if use_colors {
             format!("  {} {}", style("⚠").yellow(), style(text).dim())

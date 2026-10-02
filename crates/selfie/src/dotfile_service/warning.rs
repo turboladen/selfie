@@ -62,10 +62,14 @@ impl CollectionRefusal {
             Self::UnreadableDotfilesDirectory | Self::UnloadableSpec(_) => {}
             Self::AmbiguousName { name, paths } => {
                 sender
-                    .send_warning(format!(
-                        "Skipping package '{name}': {}",
-                        crate::package::port::ambiguous_files_sentence(name, paths)
-                    ))
+                    .send_packages_refused([crate::package::event::PackageRefusal {
+                        kind: crate::package::event::RefusalKind::AmbiguousName,
+                        reason: crate::package::port::ambiguous_files_sentence(name, paths),
+                        package: crate::package::event::RefusedPackage {
+                            name: name.clone(),
+                            paths: paths.clone(),
+                        },
+                    }])
                     .await;
             }
         }

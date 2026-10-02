@@ -365,7 +365,9 @@ a provider command that failed), a package refused whole, a package file it coul
 several package files claim, or a dotfiles directory it could not read. A conflict is not a failure
 and never stops a run, and neither is a warning. A run that carries on counts every failure in its
 summary and exits `1`. A run that stops reports the refused entry's warning and the sentence naming
-what stopped it, with no summary counts, and exits `1`.
+what stopped it, with no summary counts, and exits `1`. Packages refused whole, package files that
+could not be loaded, names several files claim and an unreadable dotfiles directory are all known
+before anything is deployed, so any of them stops the run before it deploys anything.
 
 With this set, a failed provider command stops the run there, so no later entry is reached. With it
 off, once a provider command fails, later entries whose command, or any of whose template bindings,

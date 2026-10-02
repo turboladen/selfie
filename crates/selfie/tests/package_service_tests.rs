@@ -1581,6 +1581,8 @@ mod validate_all_covers_standalone_specs {
     // the ambiguity through, and a count that ignored it would pass the run.
     #[tokio::test]
     async fn an_ambiguous_name_fails_the_run_without_validating_either_file() {
+        use selfie::package::event::RefusalKind;
+
         let dirs = dirs();
         write_package(&dirs.packages, "dup.yml", "");
         write_package(&dirs.packages, "dup.yaml", "    audt: x\n");
@@ -1592,10 +1594,14 @@ mod validate_all_covers_standalone_specs {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                PackageEvent::Warning { message, .. }
-                    if message.contains("'dup'") && message.contains("dup.yaml")
+                PackageEvent::PackagesRefused { kind: RefusalKind::AmbiguousName, reason, packages, .. }
+                    if reason.contains("dup.yaml")
+                        && reason.contains("dup.yml")
+                        && packages.len() == 1
+                        && packages[0].name == "dup"
+                        && packages[0].paths.len() == 2
             )),
-            "the failure must name the ambiguous files"
+            "the failure must name the ambiguous files: {events:#?}"
         );
     }
 
@@ -1782,4 +1788,44 @@ async fn a_failed_command_warning_names_the_command() {
         vec!["The `install` command failed with exit code 3"],
         "{events:#?}"
     );
+}
+
+// `audit --all` reports the packages it leaves out once per reason, naming
+// each, and counts every one as a refusal.
+#[tokio::test]
+async fn an_audit_of_every_package_groups_the_packages_it_refuses() {
+    let temp_dir = TempDir::new().unwrap();
+    for (name, key) in [("a", "version"), ("b", "audt"), ("c", "version")] {
+        std::fs::write(
+            temp_dir.path().join(format!("{name}.yaml")),
+            format!("name: {name}\n{key}: 1\nenvironments:\n  test:\n    install: \"true\"\n"),
+        )
+        .unwrap();
+    }
+    let service = create_service_test_service(&temp_dir);
+
+    let events = collect_events(service.audit_all().await).await;
+
+    let refused: Vec<(String, Vec<String>)> = events
+        .iter()
+        .filter_map(|e| match e {
+            PackageEvent::PackagesRefused {
+                reason, packages, ..
+            } => Some((
+                reason.clone(),
+                packages.iter().map(|p| p.name.clone()).collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refused.len(), 2, "{refused:#?}");
+    assert!(refused[0].0.contains("version"), "{refused:#?}");
+    assert_eq!(refused[0].1, ["a", "c"]);
+    assert_eq!(refused[1].1, ["b"]);
+    match get_operation_result(&events) {
+        Some(OperationResult::Success(
+            selfie::package::event::OperationSuccess::PackagesAudited { refused_count, .. },
+        )) => assert_eq!(*refused_count, 3, "{events:#?}"),
+        other => panic!("expected an audit result, got {other:?}"),
+    }
 }

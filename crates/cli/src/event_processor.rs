@@ -9,7 +9,7 @@ use futures::StreamExt;
 use selfie::package::{
     event::{
         ConsoleOutput, EventStream, OperationInfo, OperationResult, OperationType, Outcome,
-        PackageEvent, StepKind,
+        PackageEvent, RefusedPackage, StepKind,
     },
     port::{PackageError, PackageParseKind},
 };
@@ -216,6 +216,14 @@ impl EventProcessor {
             PackageEvent::SpecSkipped { error, .. } => {
                 self.display
                     .print_warning(selfie::package::service::skipped_spec_warning(&error));
+            }
+
+            PackageEvent::PackagesRefused {
+                reason, packages, ..
+            } => {
+                for line in refused_packages_lines(&reason, &packages, self.display.is_verbose()) {
+                    self.display.print_warning(line);
+                }
             }
 
             PackageEvent::Warning { message, .. } => {
@@ -611,6 +619,27 @@ impl ToTitleCase for str {
     }
 }
 
+/// The warning lines for packages refused for `reason`: one line naming them
+/// all, or under `verbose` one line per package.
+fn refused_packages_lines(reason: &str, packages: &[RefusedPackage], verbose: bool) -> Vec<String> {
+    match packages {
+        [] => Vec::new(),
+        [package] => vec![format!("Skipping package '{}': {reason}", package.name)],
+        _ if verbose => packages
+            .iter()
+            .map(|package| format!("Skipping package '{}': {reason}", package.name))
+            .collect(),
+        _ => {
+            let names: Vec<&str> = packages.iter().map(|p| p.name.as_str()).collect();
+            vec![format!(
+                "Skipping {} packages ({}): {reason}",
+                packages.len(),
+                names.join(", ")
+            )]
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,6 +885,69 @@ mod tests {
                 "Package check package 'bat' in environment 'test'".to_string()
             )]
         );
+    }
+
+    fn refused(names: &[&str]) -> PackageEvent {
+        PackageEvent::PackagesRefused {
+            operation_info: make_operation_info(""),
+            kind: selfie::package::event::RefusalKind::UnknownTopLevelKeys,
+            reason: "unknown field 'version'".to_string(),
+            packages: names
+                .iter()
+                .map(|name| RefusedPackage {
+                    name: (*name).to_string(),
+                    paths: vec![std::path::PathBuf::from(format!("/p/{name}.yml"))],
+                })
+                .collect(),
+        }
+    }
+
+    // Packages refused for one reason are one line on stderr, a single package
+    // is named in a sentence of its own, `--verbose` gives each its own line, and
+    // an empty group prints nothing.
+    #[tokio::test]
+    async fn refused_packages_print_one_line_unless_verbose() {
+        use crate::display_manager::Channel;
+
+        let lines = |printed: Vec<(Channel, String)>| -> Vec<String> {
+            assert!(
+                printed
+                    .iter()
+                    .all(|(channel, _)| *channel == Channel::Stderr),
+                "{printed:?}"
+            );
+            printed.into_iter().map(|(_, line)| line).collect()
+        };
+
+        let grouped =
+            lines(printed_for(DisplayManager::new(false), vec![refused(&["a", "b", "c"])]).await);
+        assert_eq!(grouped.len(), 1, "{grouped:?}");
+        assert!(
+            grouped[0].contains("Skipping 3 packages (a, b, c): unknown field 'version'"),
+            "{grouped:?}"
+        );
+
+        let single = lines(printed_for(DisplayManager::new(false), vec![refused(&["a"])]).await);
+        assert_eq!(single.len(), 1, "{single:?}");
+        assert!(
+            single[0].contains("Skipping package 'a': unknown field 'version'"),
+            "{single:?}"
+        );
+
+        let empty = lines(printed_for(DisplayManager::new(false), vec![refused(&[])]).await);
+        assert!(empty.is_empty(), "{empty:?}");
+
+        let each = lines(printed_for(verbose(), vec![refused(&["a", "b", "c"])]).await);
+        let each: Vec<&String> = each.iter().filter(|l| l.contains("Skipping")).collect();
+        assert_eq!(each.len(), 3, "{each:?}");
+        for (line, name) in each.iter().zip(["a", "b", "c"]) {
+            assert!(
+                line.contains(&format!(
+                    "Skipping package '{name}': unknown field 'version'"
+                )),
+                "{each:?}"
+            );
+        }
     }
 
     #[test]

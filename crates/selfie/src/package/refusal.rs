@@ -5,6 +5,7 @@ use std::fmt;
 use super::{
     DotfileEntry, EnvironmentField, Package, PackageField, SpecOrigin, TopLevelKeys, UnknownKey,
 };
+use crate::package::event::{EventSender, RefusalKind, RefusedSpec};
 use crate::validation::ValidationIssue;
 
 /// Why a package cannot be deployed as it stands.
@@ -30,6 +31,16 @@ pub(crate) enum SpecRefusal {
 }
 
 impl SpecRefusal {
+    /// What this refusal objects to, without its detail.
+    pub(crate) fn kind(&self) -> RefusalKind {
+        match self {
+            Self::UnknownTopLevelKeys(_) => RefusalKind::UnknownTopLevelKeys,
+            Self::UnknownEnvironmentKeys(_) => RefusalKind::UnknownEnvironmentKeys,
+            Self::UncheckedTopLevel(_) => RefusalKind::UncheckedTopLevel,
+            Self::NoEnvironments(_) => RefusalKind::NoEnvironments,
+        }
+    }
+
     /// The field paths `selfie spec validate` reports this refusal's problems at,
     /// one per problem, so a caller holding its issues can tell whether each is
     /// already reported.
@@ -295,6 +306,59 @@ impl Package {
             _ => None,
         }
     }
+}
+
+/// The environments a listing shows, which decide when it refuses a spec.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Shown<'a> {
+    /// The current environment only: a spec is refused when apply would refuse
+    /// it here.
+    Current(&'a str),
+    /// Every environment: a spec is refused when a key in any of them, or at its
+    /// top level, cannot be trusted.
+    Every,
+}
+
+/// Split `packages` into the specs readable in the environments `shown` covers
+/// and the ones refused there, each with its refusal.
+pub(crate) fn separate_refused<'a>(
+    packages: impl IntoIterator<Item = &'a Package>,
+    shown: Shown<'_>,
+) -> (Vec<&'a Package>, Vec<(&'a Package, RefusedSpec)>) {
+    let mut readable = Vec::new();
+    let mut refused = Vec::new();
+    for package in packages {
+        let refusal = match shown {
+            Shown::Current(environment) => package.spec_refusal(environment),
+            Shown::Every => package.listing_refusal(),
+        };
+        match refusal {
+            Some(reason) => refused.push((package, RefusedSpec::new(package, &reason))),
+            None => readable.push(package),
+        }
+    }
+    (readable, refused)
+}
+
+/// Split `packages` into the ones a command over `environment` may act on and
+/// the ones refused whole there, and report the refused ones on `sender`,
+/// grouped by reason.
+///
+/// Every refusal is reported before the caller acts on any package, so a
+/// consumer can say each reason once.
+pub(crate) async fn refuse_up_front<'a>(
+    packages: impl IntoIterator<Item = &'a Package>,
+    environment: &str,
+    sender: &EventSender,
+) -> (Vec<&'a Package>, Vec<&'a Package>) {
+    let (readable, refused) = separate_refused(packages, Shown::Current(environment));
+    sender
+        .send_packages_refused(refused.iter().map(|(_, spec)| spec.into()))
+        .await;
+    (
+        readable,
+        refused.into_iter().map(|(package, _)| package).collect(),
+    )
 }
 
 #[cfg(test)]

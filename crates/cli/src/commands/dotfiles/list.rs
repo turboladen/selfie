@@ -69,7 +69,9 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
     for refused in &data.refused {
         display.print_warning(format!(
             "Cannot read the dotfiles in '{}' ({}): {}",
-            refused.package_name, refused.path, refused.reason
+            refused.package_name,
+            refused.path.display(),
+            refused.reason
         ));
     }
 
