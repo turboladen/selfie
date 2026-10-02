@@ -280,7 +280,7 @@ where
 pub(super) fn check_ending(result: &CheckResult, token: &CancellationToken) -> StepEnding {
     match result {
         CheckResult::Error(_) if token.is_cancelled() => StepEnding::Cancelled,
-        CheckResult::Error(_) | CheckResult::CommandNotFound => StepEnding::Failed,
+        CheckResult::Error(_) => StepEnding::Failed,
         _ => StepEnding::Succeeded,
     }
 }

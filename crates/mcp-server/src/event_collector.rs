@@ -833,7 +833,6 @@ fn check_status_label(result: &CheckResult) -> &'static str {
     match result {
         CheckResult::Success { .. } => "installed",
         CheckResult::Failed { .. } => "not installed",
-        CheckResult::CommandNotFound => "check command not found",
         CheckResult::NoCheckCommand => "no check command defined",
         CheckResult::Error(_) => "error",
     }

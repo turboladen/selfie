@@ -3351,8 +3351,6 @@ pub enum CheckResult {
         stderr: String,
         exit_code: Option<i32>,
     },
-    #[strum(to_string = "but command not found")]
-    CommandNotFound,
     #[strum(to_string = "but no check command defined")]
     NoCheckCommand,
     #[strum(to_string = "with errors")]
@@ -3608,10 +3606,6 @@ mod tests {
                 }
             ),
             "with failures"
-        );
-        assert_eq!(
-            format!("{}", CheckResult::CommandNotFound),
-            "but command not found"
         );
         assert_eq!(
             format!("{}", CheckResult::NoCheckCommand),
