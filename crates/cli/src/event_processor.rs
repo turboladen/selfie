@@ -1226,6 +1226,7 @@ mod tests {
         let failed = PackageEvent::Completed {
             operation_info: make_operation_info("tool"),
             result: OperationResult::Failure(OperationFailure::InvalidSpec {
+                action: selfie::package::event::SpecWrite::Create,
                 package_name: "tool".to_string(),
                 issues: vec![
                     issue(ValidationLevel::Error, "environments.work.install"),

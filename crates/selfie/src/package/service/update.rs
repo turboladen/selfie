@@ -6,7 +6,9 @@ use crate::{
     config::SelfieConfig,
     package::{
         EnvironmentConfig,
-        event::{EventSender, OperationResult, OperationSuccess, PackageUpdateFields},
+        event::{
+            EventSender, OperationFailure, OperationResult, OperationSuccess, PackageUpdateFields,
+        },
         port::PackageRepository,
         service::ProgressTracker,
         unspanned,
@@ -152,14 +154,11 @@ where
 
     let issues: crate::validation::ValidationIssues = all_issues.into();
     if issues.has_errors() {
-        let error_messages: Vec<String> = issues
-            .errors()
-            .iter()
-            .map(|i| format!("{}: {}", i.field(), i.message()))
-            .collect();
-        return OperationResult::Failure(
-            format!("Validation failed: {}", error_messages.join("; ")).into(),
-        );
+        return OperationResult::Failure(OperationFailure::InvalidSpec {
+            action: crate::package::event::SpecWrite::Update,
+            package_name: package_name.to_string(),
+            issues: super::validate::issue_payload(&issues),
+        });
     }
 
     if let Err(err) = repo.save_package(&package, &file_path) {
@@ -231,6 +230,61 @@ mod tests {
             })
             .path("/test/packages/test-pkg.yml")
             .build()
+    }
+
+    // An update that would leave the spec invalid is refused as invalid, with
+    // its issues, as a create is, and nothing is saved: the mock has no
+    // expectation for a save, so one fails the test.
+    #[tokio::test]
+    async fn an_invalid_update_is_refused_with_its_issues() {
+        let mut mock_repo = MockPackageRepository::new();
+        let config = test_config();
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+        let get_package = GetPackage::from_existing(
+            create_test_package("test-pkg"),
+            PathBuf::from("/test/packages/test-pkg.yml"),
+        );
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+
+        let fields = PackageUpdateFields {
+            homepage: Some("not a url".to_string()),
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &mock_repo,
+            &config,
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        let OperationResult::Failure(
+            failure @ OperationFailure::InvalidSpec {
+                action: crate::package::event::SpecWrite::Update,
+                package_name,
+                issues,
+            },
+        ) = &result
+        else {
+            panic!("expected the update to be refused as invalid, got: {result:?}");
+        };
+        assert_eq!(package_name, "test-pkg");
+        assert!(
+            issues.iter().any(|issue| issue.field == "homepage"),
+            "{issues:?}"
+        );
+        assert!(
+            failure
+                .to_string()
+                .contains("Refusing to update 'test-pkg'"),
+            "{failure}"
+        );
     }
 
     #[tokio::test]

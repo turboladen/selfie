@@ -1224,6 +1224,8 @@ pub enum OperationFailure {
     // Typed so an adapter can render each issue in its own channel, and an MCP
     // client gets the fields rather than a sentence to parse.
     InvalidSpec {
+        /// Whether the spec was being created or updated.
+        action: SpecWrite,
         package_name: String,
         issues: Vec<ValidationIssueData>,
     },
@@ -1236,6 +1238,15 @@ pub enum OperationFailure {
     },
     /// Generic failure with a freeform message
     Generic(String),
+}
+
+/// A write to a spec that validation can refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum SpecWrite {
+    #[strum(to_string = "create")]
+    Create,
+    #[strum(to_string = "update")]
+    Update,
 }
 
 /// Why a named package could not be found.
@@ -1340,6 +1351,7 @@ impl std::fmt::Display for OperationFailure {
                 reason,
             } => write!(f, "Cannot use package `{package_name}`: {reason}"),
             OperationFailure::InvalidSpec {
+                action,
                 package_name,
                 issues,
             } => {
@@ -1349,8 +1361,8 @@ impl std::fmt::Display for OperationFailure {
                     .count();
                 write!(
                     f,
-                    "Refusing to create '{package_name}': it would not pass spec validate ({errors} \
-                     {}), so nothing was written",
+                    "Refusing to {action} '{package_name}': it would not pass spec validate \
+                     ({errors} {}), so nothing was written",
                     crate::pluralize(errors, "error", "errors")
                 )
             }
