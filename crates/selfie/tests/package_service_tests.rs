@@ -1433,7 +1433,7 @@ async fn spec_info_counts_no_commands_for_a_spec_apply_refuses() {
 mod validate_all_covers_standalone_specs {
     use std::path::Path;
 
-    use selfie::{config::SelfieConfigBuilder, package::event::ValidationStatus};
+    use selfie::{config::SelfieConfigBuilder, package::event::Outcome};
     use test_common::create_test_service_with_config;
 
     use super::*;
@@ -1495,7 +1495,7 @@ mod validate_all_covers_standalone_specs {
         .unwrap();
     }
 
-    fn results(events: &[PackageEvent]) -> Vec<(String, String)> {
+    fn results(events: &[PackageEvent]) -> Vec<(String, Outcome)> {
         events
             .iter()
             .filter_map(|event| match event {
@@ -1503,15 +1503,11 @@ mod validate_all_covers_standalone_specs {
                     validation_result, ..
                 } => Some((
                     validation_result.package_name.clone(),
-                    validation_result.status.to_string(),
+                    validation_result.outcome,
                 )),
                 _ => None,
             })
             .collect()
-    }
-
-    fn status_name(status: &ValidationStatus) -> String {
-        status.to_string()
     }
 
     #[tokio::test]
@@ -1522,10 +1518,7 @@ mod validate_all_covers_standalone_specs {
         let events = collect_events(dirs.service().validate_all().await).await;
 
         assert_successful_operation(&events);
-        assert_eq!(
-            results(&events),
-            [("gemrc".to_string(), status_name(&ValidationStatus::Valid))]
-        );
+        assert_eq!(results(&events), [("gemrc".to_string(), Outcome::Clean)]);
     }
 
     #[tokio::test]
@@ -1536,13 +1529,7 @@ mod validate_all_covers_standalone_specs {
         let events = collect_events(dirs.service().validate_all().await).await;
 
         assert_failed_answer(&events);
-        assert_eq!(
-            results(&events),
-            [(
-                "gemrc".to_string(),
-                status_name(&ValidationStatus::HasErrors)
-            )]
-        );
+        assert_eq!(results(&events), [("gemrc".to_string(), Outcome::Failed)]);
     }
 
     // The package spec wins the name, as it does for apply, so the dotfiles copy
@@ -1556,10 +1543,7 @@ mod validate_all_covers_standalone_specs {
         let events = collect_events(dirs.service().validate_all().await).await;
 
         assert_successful_operation(&events);
-        assert_eq!(
-            results(&events),
-            [("gemrc".to_string(), status_name(&ValidationStatus::Valid))]
-        );
+        assert_eq!(results(&events), [("gemrc".to_string(), Outcome::Clean)]);
         let warnings: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
@@ -1622,10 +1606,7 @@ mod validate_all_covers_standalone_specs {
         assert_failed_answer(&events);
         assert_eq!(
             results(&events),
-            [(
-                "elsewhere".to_string(),
-                status_name(&ValidationStatus::HasErrors)
-            )]
+            [("elsewhere".to_string(), Outcome::Failed)]
         );
     }
 
@@ -1753,10 +1734,7 @@ mod validate_all_covers_standalone_specs {
         let events = collect_events(dirs.service().validate("gemrc", None).await).await;
 
         assert_successful_operation(&events);
-        assert_eq!(
-            results(&events),
-            [("gemrc".to_string(), status_name(&ValidationStatus::Valid))]
-        );
+        assert_eq!(results(&events), [("gemrc".to_string(), Outcome::Clean)]);
     }
 }
 

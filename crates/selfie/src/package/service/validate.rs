@@ -8,7 +8,7 @@ use crate::{
         Package,
         event::{
             EventSender, OperationResult, OperationSuccess, Outcome, ValidationIssueData,
-            ValidationResultData, ValidationStatus,
+            ValidationResultData,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -122,26 +122,22 @@ where
     // Convert validation issues to structured data
     let validation_issues = issue_payload(issues);
 
-    // Determine overall validation status
-    let status = match issues.outcome() {
-        Outcome::Failed => ValidationStatus::HasErrors,
-        Outcome::Found => ValidationStatus::HasWarnings,
-        Outcome::Clean => ValidationStatus::Valid,
-    };
+    // Scored once, here, from the issues; every consumer reads this value.
+    let outcome = issues.outcome();
 
     // Send structured validation result
     let validation_result = ValidationResultData {
         package_name: package_name.to_string(),
         environment: config.environment().to_string(),
-        status: status.clone(),
+        outcome,
         issues: validation_issues,
     };
 
     sender.send_validation_result(validation_result).await;
 
     // Return appropriate operation result
-    match status {
-        ValidationStatus::Valid => {
+    match outcome {
+        Outcome::Clean => {
             sender
                 .send_debug("Package definition is valid for the current environment")
                 .await;
@@ -149,18 +145,18 @@ where
             OperationResult::Success(OperationSuccess::package_validated(
                 package_name.to_string(),
                 config.environment().to_string(),
-                ValidationStatus::Valid,
+                Outcome::Clean,
                 0,
                 None,
                 (progress.current_step(), progress.total_steps()).into(),
             ))
         }
-        ValidationStatus::HasWarnings => {
+        Outcome::Found => {
             let warning_count = issues.warnings().len();
             OperationResult::Success(OperationSuccess::package_validated(
                 package_name.to_string(),
                 config.environment().to_string(),
-                ValidationStatus::HasWarnings,
+                Outcome::Found,
                 0,
                 Some(warning_count),
                 (progress.current_step(), progress.total_steps()).into(),
@@ -168,15 +164,13 @@ where
         }
         // A spec with errors is still a validation that answered: its outcome,
         // Failed, is what makes the run fail.
-        ValidationStatus::HasErrors => {
-            OperationResult::Success(OperationSuccess::package_validated(
-                package_name.to_string(),
-                config.environment().to_string(),
-                ValidationStatus::HasErrors,
-                issues.errors().len(),
-                Some(issues.warnings().len()),
-                (progress.current_step(), progress.total_steps()).into(),
-            ))
-        }
+        Outcome::Failed => OperationResult::Success(OperationSuccess::package_validated(
+            package_name.to_string(),
+            config.environment().to_string(),
+            Outcome::Failed,
+            issues.errors().len(),
+            Some(issues.warnings().len()),
+            (progress.current_step(), progress.total_steps()).into(),
+        )),
     }
 }
