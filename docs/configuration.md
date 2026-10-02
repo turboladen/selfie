@@ -574,11 +574,14 @@ warning, that it is not there yet, since selfie creates it on first use, and tha
 typo; it does not stop the file validating. Anything else in its way, a path selfie could not check,
 a state file it cannot read (such as one inside a mode `000` directory), and a state file that is
 empty or does not parse are errors, because every command that records a deploy refuses to run over
-them.
+them. A directory selfie cannot write into or create is a warning: a run that writes anything stops
+over it, and one that writes nothing does not. The note that selfie creates a missing directory is
+given only when it can.
 
 When `dotfiles_directory` or `state_directory` is not set, the default the commands use is checked
 the same way. Nothing at an unset default is not reported, since that is the ordinary state of a
-setup with no standalone dotfiles, or of a first run.
+setup with no standalone dotfiles, or of a first run, unless the default state directory could not
+be created there, which is a warning as it is for a configured one.
 
 ## Troubleshooting
 

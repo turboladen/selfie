@@ -586,6 +586,24 @@ fn config_validate_exits_clean_for_a_clean_file() {
     assert!(output.contains("Configuration is valid."), "{output}");
 }
 
+// A run that writes anything stops over this state directory, and one that
+// writes nothing does not, so the configuration is usable, with a warning.
+#[test]
+fn config_validate_exits_three_when_the_state_directory_refuses_writes() {
+    let temp = sandbox();
+    let Some(_locked) = read_only_state_directory(&temp) else {
+        eprintln!("SKIP: this user can write into a 0o500 directory");
+        return;
+    };
+
+    let (code, output) = run(&temp, &["config", "validate"]);
+    assert_eq!(code, Some(FOUND), "{output}");
+    assert!(
+        output.contains("deploy state cannot be written"),
+        "{output}"
+    );
+}
+
 // An unknown top-level key is a warning: the file is usable, and says so.
 #[test]
 fn config_validate_exits_three_on_a_warning() {

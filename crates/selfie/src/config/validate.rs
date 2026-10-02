@@ -352,26 +352,40 @@ fn deploy_state_issue(
     // directory, so a mode 000 directory is caught by the read that refuses it.
     // Listing the directory instead would refuse a 0o300 one, which a run can
     // read the file from and write to.
-    match load_deploy_state(fs, state_directory) {
-        // Present only for a configured directory that is not there yet. A
-        // note, not a warning: selfie creates it on the first write, so a fresh
-        // machine needs nothing done.
-        StateLoad::Usable(loaded) => loaded.directory_warning().map(|note| {
-            ValidationIssue::info(
-                ValidationErrorCategory::Advisory,
-                "state_directory",
-                note,
-                None,
-            )
-        }),
-        // An error, because every command that records a deploy refuses it.
-        StateLoad::Unusable(failure) => Some(ValidationIssue::error(
-            ValidationErrorCategory::PathFormat,
-            "state_directory",
-            &failure.to_string(),
-            None,
-        )),
-    }
+    let failure = match load_deploy_state(fs, state_directory) {
+        // The note is present only for a configured directory that is not there
+        // yet, and already says when it cannot be created. A directory that cannot
+        // be written into is a warning, not an error: a run that writes nothing is
+        // not stopped by it, and one that writes anything stops before it does.
+        StateLoad::Usable(loaded) => {
+            return match loaded.creation_refusal() {
+                Some(refusal) => Some(ValidationIssue::warning(
+                    ValidationErrorCategory::PathFormat,
+                    "state_directory",
+                    &loaded
+                        .directory_warning()
+                        .map_or_else(|| refusal.to_string(), str::to_string),
+                    None,
+                )),
+                None => loaded.directory_warning().map(|note| {
+                    ValidationIssue::info(
+                        ValidationErrorCategory::Advisory,
+                        "state_directory",
+                        note,
+                        None,
+                    )
+                }),
+            };
+        }
+        StateLoad::Unusable(failure) => failure,
+    };
+    // An error, because every command that records a deploy refuses it.
+    Some(ValidationIssue::error(
+        ValidationErrorCategory::PathFormat,
+        "state_directory",
+        &failure.to_string(),
+        None,
+    ))
 }
 
 /// Validate the command timeout value
@@ -1643,5 +1657,69 @@ mod tests {
         std::fs::write(dir.path().join("deploy-state.yml"), "deployed: {}\n").unwrap();
 
         assert_eq!(state_issue(dir.path()), None);
+    }
+
+    // apply stops before its first write over a state directory that will not
+    // take a new file, and a run that writes nothing is not stopped, so validate
+    // warns about it.
+    #[test]
+    fn a_state_directory_that_refuses_new_files_is_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::write(state.join("deploy-state.yml"), "deployed: {}\n").unwrap();
+        let locked = test_common::LockedDir::create(&state, 0o500);
+        if !locked.refuses_new_files() {
+            eprintln!("SKIP: this user can write into a 0o500 directory");
+            return;
+        }
+
+        let issue = state_issue(&state).expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Warning, "{issue:?}");
+        assert!(
+            issue.message.contains("does not accept a new file"),
+            "{issue:?}"
+        );
+    }
+
+    // A state directory that is not there yet, whose parent will not take it: the
+    // first write would fail, so this is a warning, and the note that selfie
+    // creates the directory is not given.
+    #[test]
+    fn a_state_directory_that_cannot_be_created_is_a_warning_and_not_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = test_common::LockedDir::create(&dir.path().join("locked"), 0o500);
+        if !locked.refuses_new_files() {
+            eprintln!("SKIP: this user can write into a 0o500 directory");
+            return;
+        }
+
+        let issue = state_issue(&locked.path().join("state")).expect("an issue");
+
+        assert_eq!(issue.level, ValidationLevel::Warning, "{issue:?}");
+        assert!(
+            issue.message.contains("cannot create it under") && issue.message.contains("typo"),
+            "{issue:?}"
+        );
+        assert!(
+            !issue.message.contains("creates it on the first write"),
+            "{issue:?}"
+        );
+    }
+
+    // Its control: a state directory that is not there yet, under a parent that
+    // takes it, is the note and nothing more.
+    #[test]
+    fn a_state_directory_that_can_be_created_is_only_a_note() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let issue = state_issue(&dir.path().join("state")).expect("the note");
+
+        assert_eq!(issue.level, ValidationLevel::Info, "{issue:?}");
+        assert!(
+            issue.message.contains("creates it on the first write"),
+            "{issue:?}"
+        );
     }
 }
