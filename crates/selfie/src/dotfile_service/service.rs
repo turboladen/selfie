@@ -480,9 +480,7 @@ where
                     handle_track_standalone(
                         &name,
                         &target_path,
-                        // Always `Some`: handle_track_standalone takes an
-                        // Option, and this service always holds a repository.
-                        Some(&dotfiles_repo),
+                        &dotfiles_repo,
                         &fs,
                         &sender,
                         &config,
