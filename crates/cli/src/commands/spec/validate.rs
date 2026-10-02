@@ -5,9 +5,7 @@ use selfie::package::{
 
 use crate::display_manager::Channel;
 use crate::{
-    commands::validation_display::{
-        ValidationGroup, ValidationRow, display_validation_groups, level_label,
-    },
+    commands::validation_display::{ValidationGroup, ValidationRow, display_validation_groups},
     config::CliConfig,
     display_manager::DisplayManager,
     event_processor::EventProcessor,
@@ -120,8 +118,8 @@ fn display_validation_issues_table(
         .issues
         .iter()
         .map(|issue| ValidationRow {
-            level: level_label(&issue.level),
-            category: &issue.category,
+            level: issue.level,
+            category: issue.category.to_string(),
             field: &issue.field,
             message: &issue.message,
             location: issue.location,

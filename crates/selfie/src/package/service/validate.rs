@@ -8,7 +8,7 @@ use crate::{
         Package,
         event::{
             EventSender, OperationResult, OperationSuccess, Outcome, ValidationIssueData,
-            ValidationLevel, ValidationResultData, ValidationStatus,
+            ValidationResultData, ValidationStatus,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -55,22 +55,16 @@ where
 /// Shared with `validate_all`: one conversion, so a newly added level cannot be
 /// wired into one command and forgotten in the other.
 pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueData> {
-    let level_of = |issue: &ValidationIssue| match issue.level() {
-        crate::validation::ValidationLevel::Error => ValidationLevel::Error,
-        crate::validation::ValidationLevel::Warning => ValidationLevel::Warning,
-        crate::validation::ValidationLevel::Info => ValidationLevel::Info,
-    };
-
     issues
         .errors()
         .into_iter()
         .chain(issues.warnings())
         .chain(issues.infos())
         .map(|issue| ValidationIssueData {
-            category: format!("{:?}", issue.category()),
+            category: issue.category(),
             field: issue.field().to_string(),
             message: issue.message().to_string(),
-            level: level_of(issue),
+            level: issue.level(),
             suggestion: issue.suggestion().map(std::string::ToString::to_string),
             location: issue.location(),
         })

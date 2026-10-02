@@ -500,7 +500,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate",
-        description = "Validate a single spec file for correctness. The package directory is searched first, then the dotfiles directory for a standalone dotfile spec. Returns validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. A spec with warnings is a successful call with status 'found'; a notice alone leaves it 'success'. A spec with errors is an error result with status 'failed', whose message counts its errors and warnings; its issues are still in the data rows. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
+        description = "Validate a single spec file for correctness. The package directory is searched first, then the dotfiles directory for a standalone dotfile spec. Returns validation issues at three levels: errors, warnings, and informational notices. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\"; branch on it. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. A spec with warnings is a successful call with status 'found'; a notice alone leaves it 'success'. A spec with errors is an error result with status 'failed', whose message counts its errors and warnings; its issues are still in the data rows. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
     )]
     async fn spec_validate(
         &self,
@@ -523,7 +523,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate_all",
-        description = "Validate all spec files for correctness: the package specs and the standalone dotfile specs in the dotfiles directory, read as 'selfie apply' reads them. A name several files claim fails the run and is reported as a `package_refused` row with `package`, `paths` (every file claiming the name), `kind` \"ambiguous_name\" and `reason`. A dotfiles directory that cannot be listed fails the run with a warning naming it. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A run whose specs have warnings but no errors is a successful call with status 'found'. A run with a spec that has errors, a spec file that could not be loaded, or a name several files claim is an error result with status 'failed', whose message counts each. Fast — no commands executed."
+        description = "Validate all spec files for correctness: the package specs and the standalone dotfile specs in the dotfiles directory, read as 'selfie apply' reads them. A name several files claim fails the run and is reported as a `package_refused` row with `package`, `paths` (every file claiming the name), `kind` \"ambiguous_name\" and `reason`. A dotfiles directory that cannot be listed fails the run with a warning naming it. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\"; branch on it. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A run whose specs have warnings but no errors is a successful call with status 'found'. A run with a spec that has errors, a spec file that could not be loaded, or a name several files claim is an error result with status 'failed', whose message counts each. Fast — no commands executed."
     )]
     async fn spec_validate_all(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::validate_all(&*self.service).await;
@@ -765,7 +765,7 @@ with all=true, when a key in any environment cannot be trusted. A result that co
 
     #[tool(
         name = "selfie_sync_push",
-        description = "Currently disabled for anything that would create a commit: with changes to commit it refuses before staging anything, because its commit could record every tracked file as deleted; commit with git instead. With nothing new to commit it still pushes commits that already exist. The parameters are accepted but have no effect while disabled."
+        description = "Currently disabled for anything that would create a commit: with changes to commit it refuses before staging anything, because its commit could record every tracked file as deleted; commit with git instead. With nothing new to commit it still pushes commits that already exist. The parameters are accepted but have no effect while disabled. When a changed spec fails validation, the error result also carries `failures`: one per file, with `path` and `issues`, each issue with `level`, `category`, `field`, `message`, `suggestion`, `line` and `column`. Its `category` is a validation category or \"name_collision\", \"file_error\", \"parse_error\" or \"apply_refusal\"."
     )]
     async fn selfie_sync_push(
         &self,
@@ -782,12 +782,8 @@ with all=true, when a key in any environment cannot be trusted. A result that co
         let prepare_result = match self.sync_service.prepare_push(&options).await {
             Ok(result) => result,
             Err(e) => {
-                let data = serde_json::json!({
-                    "status": "error",
-                    "message": e.to_string(),
-                });
                 return Ok(CallToolResult::error(vec![ContentBlock::text(
-                    serde_json::to_string_pretty(&data).unwrap_or_default(),
+                    serde_json::to_string_pretty(&push_error_json(&e)).unwrap_or_default(),
                 )]));
             }
         };
@@ -926,9 +922,51 @@ fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult 
     }
 }
 
+/// The error result of a push that could not prepare its commits.
+fn push_error_json(error: &selfie::sync_service::SyncError) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "status": "error",
+        "message": error.to_string(),
+    });
+    // Which file and field failed, so an assistant can fix them without parsing
+    // the message.
+    if let selfie::sync_service::SyncError::ValidationFailed { failures } = error {
+        data["failures"] = event_collector::push_failures_json(failures).into();
+    }
+    data
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A push the validator stopped carries each failing file as fields.
+    #[test]
+    fn a_push_stopped_by_validation_carries_its_failures() {
+        use selfie::sync_service::{
+            PackageValidationFailure, PackageValidationIssue, PushIssueCategory, SyncError,
+        };
+
+        let error = SyncError::ValidationFailed {
+            failures: vec![PackageValidationFailure {
+                path: "packages/bat.yml".to_string(),
+                issues: vec![PackageValidationIssue {
+                    level: selfie::validation::ValidationLevel::Error,
+                    category: PushIssueCategory::ParseError,
+                    field: "-".to_string(),
+                    message: "unclosed bracket".to_string(),
+                    location: None,
+                    suggestion: None,
+                }],
+            }],
+        };
+
+        let data = push_error_json(&error);
+
+        assert_eq!(data["status"], "error");
+        assert_eq!(data["failures"][0]["path"], "packages/bat.yml");
+        assert_eq!(data["failures"][0]["issues"][0]["category"], "parse_error");
+    }
 
     // A taken name reaches an assistant as the fact and the remedy for its tool.
     #[test]
