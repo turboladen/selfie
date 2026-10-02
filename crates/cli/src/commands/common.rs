@@ -52,6 +52,9 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
 /// The names of the packages that loaded, sorted, along with a warning for every
 /// spec file that did not.
 ///
+/// Each name comes from [`file_name_of`], the name selfie looks the package up
+/// by; a package with no spec file name is left out.
+///
 /// # Errors
 ///
 /// [`PackageListError`] if the package directory itself cannot be listed. The
@@ -71,13 +74,26 @@ pub(crate) fn package_names_and_skipped(
         .map(selfie::package::service::skipped_spec_warning)
         .collect();
 
-    let mut names: Vec<String> = output
-        .valid_packages()
-        .map(|package| package.name().to_string())
-        .collect();
+    // Not the `name:` field: a dependency or a track destination is resolved by
+    // file name, and a field that disagrees with it names nothing selfie finds.
+    let mut names: Vec<String> = output.valid_packages().filter_map(file_name_of).collect();
     names.sort();
+    names.dedup();
 
     Ok((names, skipped))
+}
+
+/// The name `package` is offered and reported under: its spec file's stem as
+/// spelled, which lookup resolves ignoring case. `None` for a package with no
+/// spec file name.
+pub(crate) fn file_name_of(package: &selfie::package::Package) -> Option<String> {
+    // `spec_name` decides whether the file names a spec at all; its answer is
+    // folded to lower case, so the stem is taken as the file spells it.
+    package.spec_name()?;
+    package
+        .path()
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
 }
 
 /// Build the command runner every CLI service uses.
@@ -685,6 +701,36 @@ mod tests {
             printed.iter().all(|(stream, _)| *stream == Channel::Stderr),
             "{printed:?}"
         );
+    }
+
+    // A picker offers the name selfie looks a package up by, the file's, even
+    // where the `name:` field says otherwise; a package with no spec file name
+    // is not offered at all.
+    #[test]
+    fn pickers_offer_the_name_the_file_gives() {
+        use selfie::package::PackageBuilder;
+        use selfie::package::port::ListPackagesOutput;
+
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Ok(ListPackagesOutput::from_packages(vec![
+                PackageBuilder::default()
+                    .name("foo")
+                    .path("/packages/bar.yml")
+                    .build(),
+                PackageBuilder::default()
+                    .name("neovim")
+                    .path("/packages/Neovim.yml")
+                    .build(),
+                PackageBuilder::default().name("in-memory").build(),
+            ]))
+        });
+
+        let (names, skipped) = package_names_and_skipped(&repo).unwrap();
+
+        // As the file spells it: lookup ignores case, and the user sees the file.
+        assert_eq!(names, vec!["Neovim", "bar"]);
+        assert!(skipped.is_empty());
     }
 
     #[test]

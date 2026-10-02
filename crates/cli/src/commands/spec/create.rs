@@ -551,9 +551,9 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         Exit::Failed.code()
     })?;
 
-    // A dependency is resolved by name, and selfie does not know the name inside
-    // a spec it could not read, so these cannot be offered. Naming them stops
-    // the picker reading as every package the user has.
+    // A spec selfie could not read is not offered: nothing says it would load
+    // when the dependency is resolved. Naming these stops the picker reading as
+    // every package the user has.
     for warning in skipped {
         display.print_warning(warning);
     }
@@ -1106,6 +1106,7 @@ mod tests {
     fn named(name: &str) -> selfie::package::Package {
         selfie::package::PackageBuilder::default()
             .name(name)
+            .path(format!("/test/packages/{name}.yml"))
             .build()
     }
 
@@ -1119,9 +1120,8 @@ mod tests {
         assert!(skipped.is_empty());
     }
 
-    // The picker resolves a dependency by the name inside the spec, which selfie
-    // does not have for a file it could not read, so the caller is handed
-    // something to say about it.
+    // The picker lists a spec selfie could read, and a file it could not read is
+    // left out, so the caller is handed something to say about it.
     #[test]
     fn available_dependency_names_names_the_spec_it_could_not_read() {
         let repo = dependency_repo(vec![

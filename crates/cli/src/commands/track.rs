@@ -660,7 +660,12 @@ mod tests {
             Ok(ListPackagesOutput::from_packages(
                 ["zsh", "alacritty", "fnm"]
                     .into_iter()
-                    .map(|name| PackageBuilder::default().name(name).build())
+                    .map(|name| {
+                        PackageBuilder::default()
+                            .name(name)
+                            .path(format!("/packages/{name}.yml"))
+                            .build()
+                    })
                     .collect(),
             ))
         });
@@ -680,7 +685,10 @@ mod tests {
         let mut repo = MockPackageRepository::new();
         repo.expect_list_packages().returning(|| {
             Ok(ListPackagesOutput::from_results(vec![
-                Ok(PackageBuilder::default().name("fnm").build()),
+                Ok(PackageBuilder::default()
+                    .name("fnm")
+                    .path("/test/packages/fnm.yml")
+                    .build()),
                 Err(selfie::package::port::PackageParseError::new(
                     "/test/packages/broken.yml",
                     selfie::package::port::PackageParseKind::IrregularFile {

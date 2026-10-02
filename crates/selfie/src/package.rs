@@ -1698,7 +1698,7 @@ impl Package {
     /// `None` when the file name is not a spec's, as for a package built in
     /// memory with no file behind it.
     #[must_use]
-    pub(crate) fn spec_name(&self) -> Option<String> {
+    pub fn spec_name(&self) -> Option<String> {
         spec_name_of(&self.path)
     }
 }
