@@ -2,7 +2,7 @@
 
 use super::steps;
 use crate::{
-    commands::runner::{CommandError, CommandRunner},
+    commands::runner::{CommandError, CommandRunner, TimedOut},
     config::SelfieConfig,
     package::{
         GetPackage,
@@ -202,17 +202,12 @@ fn create_operation_result(
             exit_code: *exit_code,
             stderr: crate::commands::BoundedText::bound(stderr.as_bytes()),
         }),
+        CheckResult::TimedOut(timed_out) => OperationResult::Failure(
+            OperationFailure::CommandError(CommandFailure::TimedOut(timed_out.clone())),
+        ),
+        // Every error recorded here names the command already.
         CheckResult::Error(error) => {
-            let command = check_result
-                .check_command
-                .as_deref()
-                .unwrap_or("unknown command");
-            OperationResult::Failure(OperationFailure::CommandError(
-                CommandFailure::InvalidCommand {
-                    command: command.to_string(),
-                    reason: error.clone(),
-                },
-            ))
+            OperationResult::Failure(OperationFailure::Generic(error.clone()))
         }
         _ => {
             // This case is already handled above, but included for completeness
@@ -280,7 +275,9 @@ where
 pub(super) fn check_ending(result: &CheckResult, token: &CancellationToken) -> StepEnding {
     match result {
         CheckResult::Error(_) if token.is_cancelled() => StepEnding::Cancelled,
-        CheckResult::Error(_) | CheckResult::CommandNotFound => StepEnding::Failed,
+        CheckResult::Error(_) | CheckResult::TimedOut(_) | CheckResult::CommandNotFound => {
+            StepEnding::Failed
+        }
         _ => StepEnding::Succeeded,
     }
 }
@@ -368,6 +365,9 @@ where
             | CommandError::SpawnFailed { .. }
             | CommandError::Cancelled { .. }),
         ) => return Err(err),
+        Err(CommandError::Timeout {
+            command, timeout, ..
+        }) => CheckResult::TimedOut(TimedOut::new(command, timeout)),
         Err(err) => CheckResult::Error(err.to_string()),
     };
 

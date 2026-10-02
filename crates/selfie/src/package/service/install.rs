@@ -8,8 +8,8 @@ use crate::{
     package::{
         EnvironmentConfig,
         event::{
-            CheckResult, CheckResultData, EventSender, OperationFailure, OperationResult,
-            OperationSuccess,
+            CheckResult, CheckResultData, CommandFailure, EventSender, OperationFailure,
+            OperationResult, OperationSuccess,
         },
         port::PackageRepository,
         service::{InstallOptions, ProgressTracker},
@@ -179,6 +179,11 @@ async fn confirm_installable<CR: CommandRunner>(
         // write an install command when the fix is elsewhere.
         match &result.result {
             CheckResult::Success { .. } => {}
+            CheckResult::TimedOut(timed_out) => {
+                return Err(Box::new(OperationFailure::CommandError(
+                    CommandFailure::TimedOut(timed_out.clone()),
+                )));
+            }
             CheckResult::Error(error) => {
                 return Err(Box::new(OperationFailure::Generic(error.clone())));
             }
@@ -423,7 +428,7 @@ async fn log_proceeding_with_installation(
                 .send_debug("No check command defined, proceeding with installation")
                 .await;
         }
-        CheckResult::Error(_) | CheckResult::CommandNotFound => {
+        CheckResult::Error(_) | CheckResult::TimedOut(_) | CheckResult::CommandNotFound => {
             sender
                 .send_warning("Check command failed, but proceeding with installation anyway")
                 .await;
@@ -598,7 +603,7 @@ where
                     ))
                     .await;
             }
-            CheckResult::Error(_) | CheckResult::CommandNotFound => {
+            CheckResult::Error(_) | CheckResult::TimedOut(_) | CheckResult::CommandNotFound => {
                 sender
                     .send_warning(
                         "Post-installation check failed, but installation command completed",

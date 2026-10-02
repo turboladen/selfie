@@ -376,6 +376,7 @@ fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
             EnvironmentStatus::Unknown("check command not found".to_string())
         }
         CheckResult::Error(e) => EnvironmentStatus::Unknown(e),
+        CheckResult::TimedOut(timed_out) => EnvironmentStatus::Unknown(timed_out.to_string()),
     }
 }
 

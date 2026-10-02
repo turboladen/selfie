@@ -56,6 +56,9 @@ pub(crate) async fn handle_install(
                         selfie::package::event::CheckResult::Error(err) => {
                             format!("Check error ({err}), proceeding with installation")
                         }
+                        selfie::package::event::CheckResult::TimedOut(timed_out) => {
+                            format!("Check {timed_out}; proceeding with installation")
+                        }
                     };
                     display.print_status(message);
                     true

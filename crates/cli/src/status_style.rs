@@ -84,6 +84,9 @@ pub(crate) fn format_check_result(
             let msg = format!("Error: {e}");
             styled_text(&msg, use_colors, |s| s.red())
         }
+        Some(CheckResult::TimedOut(timed_out)) => {
+            styled_text(&timed_out.to_string(), use_colors, |s| s.red())
+        }
         None => styled_text("N/A", use_colors, |s| s.dim()),
     }
 }

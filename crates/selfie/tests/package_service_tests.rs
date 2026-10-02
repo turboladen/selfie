@@ -2291,6 +2291,57 @@ mod blank_commands {
         assert_eq!(commands, ["check-pre"], "nothing may install: {events:?}");
     }
 
+    // A blank install whose check cannot answer reports why it could not, here a
+    // timeout naming `command_timeout`, rather than sending the user to write an
+    // install command. Nothing installs.
+    #[tokio::test]
+    async fn a_blank_install_whose_check_times_out_reports_the_timeout() {
+        use selfie::{
+            commands::runner::{CommandError, TimedOut},
+            package::event::CommandFailure,
+        };
+
+        let dir = TempDir::new().unwrap();
+        spec(
+            &dir,
+            "app",
+            "    install: \"install-app\"\n    dependencies: [slow]\n",
+        );
+        spec(
+            &dir,
+            "slow",
+            "    install: \"# TODO\"\n    check: \"check-slow\"\n",
+        );
+        let runner = FakeCommandRunner::new()
+            .erroring(
+                "check-slow",
+                CommandError::Timeout {
+                    command: "check-slow".to_string(),
+                    timeout: std::time::Duration::from_secs(1),
+                    working_directory: std::path::PathBuf::from("/"),
+                },
+            )
+            .succeeding("install-app", b"");
+
+        let events = collect_events(
+            service(&dir, &runner)
+                .install("app", InstallOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                failure(&events),
+                OperationFailure::CommandError(CommandFailure::TimedOut(timed_out))
+                    if *timed_out == TimedOut::new("check-slow", std::time::Duration::from_secs(1))
+            ),
+            "{events:?}"
+        );
+        let commands: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        assert_eq!(commands, ["check-slow"], "nothing may install: {events:?}");
+    }
+
     // A dependency with no entry for this environment is refused before anything
     // installs, named with the package that requires it.
     #[tokio::test]
@@ -2483,5 +2534,81 @@ mod blank_commands {
             "{events:?}"
         );
         assert_eq!(runner.calls(), Vec::new());
+    }
+}
+
+// A command that runs past `command_timeout` is reported as having timed out, by
+// one value whichever command it was, never as an invalid command.
+mod timeouts {
+    use std::{path::PathBuf, time::Duration};
+
+    use selfie::{
+        commands::runner::{CommandError, TimedOut},
+        package::event::CommandFailure,
+    };
+    use test_common::{FakeCommandRunner, create_service_test_service_with_runner};
+
+    use super::*;
+
+    fn timing_out(command: &str) -> FakeCommandRunner {
+        FakeCommandRunner::new().erroring(
+            command,
+            CommandError::Timeout {
+                command: command.to_string(),
+                timeout: Duration::from_secs(2),
+                working_directory: PathBuf::from("/"),
+            },
+        )
+    }
+
+    async fn run(
+        runner: FakeCommandRunner,
+        check: bool,
+    ) -> Vec<selfie::package::event::PackageEvent> {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("app.yml"),
+            "name: app\nenvironments:\n  test:\n    install: \"install-app\"\n    check: \
+             \"check-app\"\n",
+        )
+        .unwrap();
+        let service = create_service_test_service_with_runner(&dir, runner);
+        if check {
+            collect_events(service.check("app").await).await
+        } else {
+            collect_events(service.install("app", InstallOptions::default()).await).await
+        }
+    }
+
+    fn timed_out(events: &[selfie::package::event::PackageEvent]) -> TimedOut {
+        match get_operation_result(events) {
+            Some(OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::TimedOut(timed_out),
+            ))) => timed_out.clone(),
+            other => panic!("expected a timeout, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_check_that_times_out_fails_as_a_timeout() {
+        let events = run(timing_out("check-app"), true).await;
+
+        assert_eq!(
+            timed_out(&events),
+            TimedOut::new("check-app", Duration::from_secs(2))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_install_that_times_out_fails_as_the_same_timeout() {
+        // The pre-install check answers "not installed", so the install runs.
+        let runner = timing_out("install-app").failing("check-app", b"");
+
+        let events = run(runner, false).await;
+
+        assert_eq!(
+            timed_out(&events),
+            TimedOut::new("install-app", Duration::from_secs(2))
+        );
     }
 }
