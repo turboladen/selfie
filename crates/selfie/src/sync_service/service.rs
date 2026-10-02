@@ -899,9 +899,7 @@ fn validate_changed_packages(
                 // The location is its own field here, so the message must not repeat
                 // it. `ParseFailure` appends it when rendered, so the sentence is
                 // built from the parts rather than rendered and cut back down.
-                let location = e
-                    .location()
-                    .map(|at| format!("line {} column {}", at.line(), at.column()));
+                let location = e.location();
                 let message = e.reason();
 
                 failures.push(PackageValidationFailure {
@@ -950,7 +948,7 @@ fn validate_changed_packages(
                 category: format!("{:?}", i.category()),
                 field: i.field().to_string(),
                 message: i.message().to_string(),
-                location: i.location().map(str::to_string),
+                location: i.location(),
                 suggestion: i.suggestion().cloned(),
             })
             .collect();
@@ -3070,7 +3068,10 @@ mod push_validation_tests {
 
         assert_eq!(issue.category, "ParseError");
         assert_eq!(issue.message, "unclosed bracket '{'");
-        assert_eq!(issue.location.as_deref(), Some("line 5 column 15"));
+        assert_eq!(
+            issue.location.map(|at| at.to_string()).as_deref(),
+            Some("line 5, column 15")
+        );
     }
 }
 
