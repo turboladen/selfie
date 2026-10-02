@@ -711,13 +711,13 @@ mod tests {
             (
                 "Yaml",
                 PackageParseKind::Yaml {
-                    source: yaml_failure,
+                    cause: yaml_failure,
                 },
             ),
             (
                 "Io",
                 PackageParseKind::Io {
-                    source: Arc::new(std::io::Error::other("permission denied")),
+                    cause: Arc::new(std::io::Error::other("permission denied")),
                 },
             ),
             (
@@ -770,7 +770,7 @@ mod tests {
             (
                 "Io",
                 PackageParseKind::Io {
-                    source: Arc::new(std::io::Error::other(format!(
+                    cause: Arc::new(std::io::Error::other(format!(
                         "{}: permission denied",
                         path.display()
                     ))),

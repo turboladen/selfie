@@ -353,7 +353,7 @@ impl EventProcessor {
                         OperationFailure::Package(PackageError::ParseError {
                             name,
                             failed_file,
-                            source,
+                            cause,
                             ..
                         }) => {
                             // Built from the parts rather than from `Display`,
@@ -361,8 +361,8 @@ impl EventProcessor {
                             // "at line N, column M" suffix. The location header
                             // below states it once, so `Display` would say it
                             // twice.
-                            match source.kind() {
-                                PackageParseKind::Yaml { source: failure } => {
+                            match cause.kind() {
+                                PackageParseKind::Yaml { cause: failure } => {
                                     self.display.print_error(format!(
                                         "Parse error in package `{name}`: {}",
                                         failure.reason()

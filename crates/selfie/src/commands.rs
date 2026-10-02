@@ -59,7 +59,7 @@ mod tests {
         let error = CommandError::IoError {
             command: "nonexistent-command".to_string(),
             working_directory: PathBuf::from("/tmp"),
-            source: Arc::new(io_error),
+            cause: Arc::new(io_error),
         };
 
         // Test error message content
@@ -71,7 +71,7 @@ mod tests {
             CommandError::IoError {
                 command,
                 working_directory,
-                source,
+                cause: source,
             } => {
                 assert_eq!(command, "nonexistent-command");
                 assert_eq!(working_directory, PathBuf::from("/tmp"));
@@ -95,26 +95,50 @@ mod tests {
         assert!(debug_output.contains("/debug/test"));
     }
 
+    // An error that names its cause in its message does not also chain it: a
+    // consumer walking the chain would print the cause twice.
     #[test]
-    fn test_command_error_source_chain() {
-        let original_error =
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied");
-        let error = CommandError::IoError {
-            command: "restricted-command".to_string(),
-            working_directory: PathBuf::from("/restricted"),
-            source: Arc::new(original_error),
+    fn a_command_error_names_its_cause_once() {
+        let cause = || {
+            Arc::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "Permission denied",
+            ))
         };
-
-        // Test that we can access the source error through the Arc
-        let source = std::error::Error::source(&error);
-        assert!(source.is_some());
-
-        // The source is the Arc<std::io::Error>, so we need to dereference it
-        let arc_error = source
-            .unwrap()
-            .downcast_ref::<Arc<std::io::Error>>()
-            .unwrap();
-        assert_eq!(arc_error.kind(), std::io::ErrorKind::PermissionDenied);
+        let dir = || PathBuf::from("/restricted");
+        let command = || "restricted-command".to_string();
+        let errors = [
+            CommandError::IoError {
+                command: command(),
+                working_directory: dir(),
+                cause: cause(),
+            },
+            CommandError::SpawnFailed {
+                command: command(),
+                program: "/bin/sh".to_string(),
+                working_directory: dir(),
+                cause: cause(),
+            },
+            CommandError::WorkingDirectoryUnusable {
+                command: command(),
+                working_directory: dir(),
+                cause: cause(),
+            },
+            CommandError::OutputReadFailed {
+                command: command(),
+                working_directory: dir(),
+                stream: crate::commands::runner::OutputStream::Stdout,
+                cause: cause(),
+            },
+        ];
+        for error in errors {
+            let message = error.to_string();
+            assert_eq!(message.matches("Permission denied").count(), 1, "{message}");
+            assert!(
+                std::error::Error::source(&error).is_none(),
+                "{message} also chains its cause"
+            );
+        }
     }
 
     #[test]
@@ -173,12 +197,12 @@ mod tests {
         let command_error = CommandError::IoError {
             command: "pipe-command".to_string(),
             working_directory: PathBuf::from("/pipes"),
-            source: Arc::new(original_error),
+            cause: Arc::new(original_error),
         };
 
         // Verify the original error information is preserved
         match command_error {
-            CommandError::IoError { source, .. } => {
+            CommandError::IoError { cause: source, .. } => {
                 assert_eq!(source.kind(), original_kind);
                 assert_eq!(source.to_string(), original_message);
             }

@@ -347,9 +347,9 @@ mod tests {
                     name: "broken".to_string(),
                     packages_path: "/packages".into(),
                     failed_file: "/packages/broken.yml".into(),
-                    source: selfie::package::port::PackageParseError::new(
+                    cause: selfie::package::port::PackageParseError::new(
                         "/packages/broken.yml",
-                        selfie::package::port::PackageParseKind::Yaml { source },
+                        selfie::package::port::PackageParseKind::Yaml { cause: source },
                     ),
                 })
                 .into_lookup_failure()

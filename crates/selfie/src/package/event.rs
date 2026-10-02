@@ -3784,7 +3784,7 @@ mod tests {
         let unusable_directory = CommandError::WorkingDirectoryUnusable {
             command: cmd(),
             working_directory: dir(),
-            source: io(),
+            cause: io(),
         };
         let cases = [
             (
@@ -3799,7 +3799,7 @@ mod tests {
                     command: cmd(),
                     program: "sh".to_string(),
                     working_directory: dir(),
-                    source: io(),
+                    cause: io(),
                 },
                 "could_not_start",
             ),
@@ -3819,7 +3819,7 @@ mod tests {
                     command: cmd(),
                     working_directory: dir(),
                     stream: OutputStream::Stdout,
-                    source: io(),
+                    cause: io(),
                 },
                 "result_unreadable",
             ),
@@ -3834,7 +3834,7 @@ mod tests {
                 CommandError::IoError {
                     command: cmd(),
                     working_directory: dir(),
-                    source: io(),
+                    cause: io(),
                 },
                 "result_unreadable",
             ),

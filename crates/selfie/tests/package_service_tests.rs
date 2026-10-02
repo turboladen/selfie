@@ -2726,7 +2726,7 @@ mod checks_that_gave_no_answer {
             CommandError::WorkingDirectoryUnusable {
                 command: "check-app".to_string(),
                 working_directory: PathBuf::from("/gone"),
-                source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                cause: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
             },
         );
 
@@ -2932,7 +2932,7 @@ async fn status_classifies_each_dependency_it_could_not_look_up() {
             assert!(
                 matches!(
                     spec.failure().kind(),
-                    selfie::package::port::PackageParseKind::Yaml { source }
+                    selfie::package::port::PackageParseKind::Yaml { cause: source }
                         if source.location().is_some()
                 ),
                 "{spec:?}"
