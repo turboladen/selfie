@@ -80,6 +80,22 @@ pub struct SourceLocation {
 }
 
 impl SourceLocation {
+    /// The location at `line` and `column`, both 1-indexed, or `None` when
+    /// either is 0, which no place in a file is.
+    #[must_use]
+    pub fn new(line: u64, column: u64) -> Option<Self> {
+        (line != 0 && column != 0).then_some(Self { line, column })
+    }
+
+    /// Where `location` is, or `None` when serde-saphyr does not know.
+    // Line 0 is the library's "unknown" sentinel. Comparing against
+    // `Location::UNKNOWN` instead would miss it: that constant carries a span and a
+    // source id, which the derived `PartialEq` compares as well, so a
+    // located-but-line-0 value would render as "line 0, column 0".
+    pub(crate) fn from_location(location: &serde_saphyr::Location) -> Option<Self> {
+        Self::new(location.line(), location.column())
+    }
+
     /// The 1-indexed line.
     #[must_use]
     pub fn line(&self) -> u64 {
@@ -90,6 +106,13 @@ impl SourceLocation {
     #[must_use]
     pub fn column(&self) -> u64 {
         self.column
+    }
+}
+
+/// "line N, column M": the one way selfie words a location.
+impl std::fmt::Display for SourceLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "line {}, column {}", self.line, self.column)
     }
 }
 
@@ -390,18 +413,11 @@ fn parser_wording(scan: &serde_saphyr::granit_parser::ScanError) -> Option<Strin
     }
 }
 
-// Line 0 is the library's "unknown" sentinel. Comparing against `Location::UNKNOWN`
-// instead would miss it: that constant carries a span and a source id, which the
-// derived `PartialEq` compares as well, so a located-but-line-0 value would render
-// as "at line 0, column 0".
 fn located(error: &serde_saphyr::Error) -> Option<SourceLocation> {
     error
         .location()
-        .filter(|l| l.line() != 0)
-        .map(|l| SourceLocation {
-            line: l.line(),
-            column: l.column(),
-        })
+        .as_ref()
+        .and_then(SourceLocation::from_location)
 }
 
 impl std::fmt::Display for ParseFailure {
@@ -418,7 +434,7 @@ impl std::fmt::Display for ParseFailure {
             Wording::Parser(sentence) => f.write_str(sentence)?,
         }
         if let Some(at) = self.location {
-            write!(f, " at line {}, column {}", at.line(), at.column())?;
+            write!(f, " at {at}")?;
         }
         Ok(())
     }
@@ -431,6 +447,19 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     use std::collections::HashMap;
+
+    // No place in a file is at line or column 0, so neither can be built.
+    #[test]
+    fn a_location_at_line_or_column_zero_is_none() {
+        assert_eq!(SourceLocation::new(0, 5), None);
+        assert_eq!(SourceLocation::new(5, 0), None);
+        assert_eq!(
+            SourceLocation::new(5, 15)
+                .map(|at| at.to_string())
+                .as_deref(),
+            Some("line 5, column 15")
+        );
+    }
 
     // Shaped like a package spec, because the failures worth covering are the ones a
     // hand-edited spec produces.

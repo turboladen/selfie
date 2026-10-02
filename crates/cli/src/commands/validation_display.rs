@@ -17,7 +17,7 @@ pub(crate) struct ValidationRow<'a> {
     pub category: &'a str,
     pub field: &'a str,
     pub message: &'a str,
-    pub location: Option<&'a str>,
+    pub location: Option<selfie::yaml::SourceLocation>,
     /// How to fix it, when the issue says.
     pub suggestion: Option<&'a str>,
 }
@@ -139,15 +139,11 @@ pub(crate) fn display_validation_groups(
                 row.field.to_string()
             };
 
-            let location = row.location.unwrap_or("-");
+            let location = row
+                .location
+                .map_or_else(|| "-".to_string(), |at| at.to_string());
 
-            let mut cells = vec![
-                level,
-                category,
-                field,
-                row.message.to_string(),
-                location.to_string(),
-            ];
+            let mut cells = vec![level, category, field, row.message.to_string(), location];
             if suggested {
                 cells.push(row.suggestion.unwrap_or("-").to_string());
             }
@@ -238,6 +234,24 @@ mod tests {
             assert!(printed.len() > 2, "{printed:?}");
             assert!(printed.iter().all(|(s, _)| *s == stream), "{printed:?}");
         }
+    }
+
+    // A location renders as "line N, column M" in the table, and an issue with
+    // none as "-".
+    #[test]
+    fn a_location_reads_line_and_column() {
+        let mut located = groups();
+        located[0].rows[0].location = selfie::yaml::SourceLocation::new(2, 1);
+        let display = DisplayManager::new(false);
+
+        display_validation_groups(&located, false, &display, Channel::Stdout);
+
+        let printed: String = display
+            .printed()
+            .into_iter()
+            .map(|(_, l)| l + "\n")
+            .collect();
+        assert!(printed.contains("line 2, column 1"), "{printed}");
     }
 
     fn issue(level: ValidationLevel, suggestion: Option<&str>) -> ValidationIssueData {
