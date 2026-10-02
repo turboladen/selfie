@@ -441,7 +441,7 @@ fn spawn_error(
         return CommandError::WorkingDirectoryUnusable {
             command: command.to_string(),
             working_directory: working_dir.to_path_buf(),
-            source: Arc::new(source),
+            cause: Arc::new(source),
         };
     }
     CommandError::SpawnFailed {
@@ -452,7 +452,7 @@ fn spawn_error(
             .to_string_lossy()
             .into_owned(),
         working_directory: working_dir.to_path_buf(),
-        source: Arc::new(source),
+        cause: Arc::new(source),
     }
 }
 
@@ -520,7 +520,7 @@ where
             command: command.to_string(),
             working_directory: working_directory.to_path_buf(),
             stream,
-            source: Arc::new(source),
+            cause: Arc::new(source),
         }
     };
 
@@ -529,7 +529,7 @@ where
             wait.await.map_err(|e| CommandError::IoError {
                 command: command.to_string(),
                 working_directory: working_directory.to_path_buf(),
-                source: Arc::new(e),
+                cause: Arc::new(e),
             })
         },
         async { stdout.await.map_err(read_failed(OutputStream::Stdout)) },
@@ -670,7 +670,7 @@ where
                     command: command.to_string(),
                     working_directory: working_directory.to_path_buf(),
                     stream,
-                    source: Arc::new(source),
+                    cause: Arc::new(source),
                 })?;
 
             // The captured output accumulates the raw bytes...
@@ -702,7 +702,7 @@ where
         child.wait().await.map_err(|e| CommandError::IoError {
             command: command.to_string(),
             working_directory: working_directory.to_path_buf(),
-            source: Arc::new(e),
+            cause: Arc::new(e),
         })
     };
 
@@ -1302,7 +1302,7 @@ mod tests {
         let cmd_error = CommandError::IoError {
             command: "test-command".to_string(),
             working_directory: PathBuf::from("/tmp"),
-            source: Arc::new(io_error),
+            cause: Arc::new(io_error),
         };
         assert!(cmd_error.to_string().contains("test-command"));
 

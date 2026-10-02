@@ -268,9 +268,9 @@ mod tests {
             name: "myapp".to_string(),
             packages_path: PathBuf::from("/packages"),
             failed_file: PathBuf::from("/packages/myapp.yml"),
-            source: PackageParseError::new(
+            cause: PackageParseError::new(
                 PathBuf::from("/packages/myapp.yml"),
-                crate::package::port::PackageParseKind::Yaml { source },
+                crate::package::port::PackageParseKind::Yaml { cause: source },
             ),
         }
     }

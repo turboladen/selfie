@@ -82,7 +82,7 @@ impl FakeCommandRunner {
             command: command.to_string(),
             working_directory: PathBuf::from("."),
             stream: OutputStream::Stdout,
-            source: Arc::new(std::io::Error::other("pipe died mid-read")),
+            cause: Arc::new(std::io::Error::other("pipe died mid-read")),
         };
         self.erroring(command, error)
     }
@@ -173,7 +173,7 @@ impl FakeCommandRunner {
             None => Err(CommandError::IoError {
                 command: command.to_string(),
                 working_directory: working_dir.to_path_buf(),
-                source: Arc::new(std::io::Error::new(
+                cause: Arc::new(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "command not scripted in this test",
                 )),

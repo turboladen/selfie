@@ -401,33 +401,30 @@ pub enum CommandError {
     },
 
     /// IO error occurred while running the command
-    #[error("IO Error executing command '{command}': {source}")]
+    #[error("IO Error executing command '{command}': {cause}")]
     IoError {
         command: String,
         working_directory: PathBuf,
-        #[source]
-        source: Arc<std::io::Error>,
+        cause: Arc<std::io::Error>,
     },
 
     /// The program that runs the command, normally a shell, could not be
     /// started. No part of the command ran.
-    #[error("Could not start '{program}' to run '{command}': {source}")]
+    #[error("Could not start '{program}' to run '{command}': {cause}")]
     SpawnFailed {
         command: String,
         program: String,
         working_directory: PathBuf,
-        #[source]
-        source: Arc<std::io::Error>,
+        cause: Arc<std::io::Error>,
     },
 
     /// The directory the command was to run in could not be entered: it is
     /// missing, not a directory, or not searchable. No part of the command ran.
-    #[error("Cannot run '{command}' in {}: {source}", working_directory.display())]
+    #[error("Cannot run '{command}' in {}: {cause}", working_directory.display())]
     WorkingDirectoryUnusable {
         command: String,
         working_directory: PathBuf,
-        #[source]
-        source: Arc<std::io::Error>,
+        cause: Arc<std::io::Error>,
     },
 
     /// One of the command's output pipes could not be read to the end.
@@ -449,13 +446,12 @@ pub enum CommandError {
     // Carries no output bytes by construction, which
     // `OperationFailure::from(CommandError)` depends on and this variant's
     // `Display` has to satisfy.
-    #[error("Failed reading {stream} of command '{command}': {source}")]
+    #[error("Failed reading {stream} of command '{command}': {cause}")]
     OutputReadFailed {
         command: String,
         working_directory: PathBuf,
         stream: OutputStream,
-        #[source]
-        source: Arc<std::io::Error>,
+        cause: Arc<std::io::Error>,
     },
 
     /// Command was cancelled via a cancellation token

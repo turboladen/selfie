@@ -2712,7 +2712,7 @@ environments:
         let parse_error = PackageParseError::new(
             PathBuf::from("/packages/broken.yml"),
             crate::package::port::PackageParseKind::Yaml {
-                source: crate::yaml::parse::<serde_json::Value>("invalid: yaml: [unclosed")
+                cause: crate::yaml::parse::<serde_json::Value>("invalid: yaml: [unclosed")
                     .unwrap_err(),
             },
         );
@@ -2721,7 +2721,7 @@ environments:
             name: "broken-package".to_string(),
             packages_path: PathBuf::from("/packages"),
             failed_file: PathBuf::from("/packages/broken.yml"),
-            source: parse_error,
+            cause: parse_error,
         };
 
         // Test that file context is available
@@ -2730,7 +2730,7 @@ environments:
                 name,
                 packages_path,
                 failed_file,
-                source,
+                cause: source,
             } => {
                 assert_eq!(name, "broken-package");
                 assert_eq!(packages_path, PathBuf::from("/packages"));

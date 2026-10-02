@@ -79,7 +79,7 @@ pub(crate) enum StateLoad {
 pub(crate) enum StateLoadFailure {
     /// The file has no location.
     #[error("Cannot locate the deploy state file: {0}")]
-    Locate(#[source] StatePathError),
+    Locate(StatePathError),
     /// Something that is not a directory occupies the state directory's path.
     #[error(
         "Cannot use the deploy state: '{}' {what}. Remove it, or point state_directory elsewhere",
@@ -101,13 +101,12 @@ pub(crate) enum StateLoadFailure {
     Irregular { path: PathBuf, kind: &'static str },
     /// The file exists and could not be read.
     #[error(
-        "Cannot read deploy state '{}': {source}. Fix the file's permissions, or move it aside",
+        "Cannot read deploy state '{}': {cause}. Fix the file's permissions, or move it aside",
         .path.display()
     )]
     Read {
         path: PathBuf,
-        #[source]
-        source: FileSystemError,
+        cause: FileSystemError,
     },
     /// The file exists and holds nothing.
     #[error(
@@ -117,14 +116,10 @@ pub(crate) enum StateLoadFailure {
     Empty { path: PathBuf },
     /// The file exists and is not a deploy state selfie can read.
     #[error(
-        "Cannot parse deploy state '{}': {source}. Repair the file, or move it aside to start over",
+        "Cannot parse deploy state '{}': {cause}. Repair the file, or move it aside to start over",
         .path.display()
     )]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: ParseFailure,
-    },
+    Parse { path: PathBuf, cause: ParseFailure },
 }
 
 /// Why the deploy state could not be written.
@@ -132,13 +127,12 @@ pub(crate) enum StateLoadFailure {
 pub(super) enum StateSaveError {
     /// selfie's own state would not serialize: a bug, not a filesystem condition.
     #[error("Cannot serialize the deploy state: {0}")]
-    Serialize(#[source] serde_saphyr::SerializeError),
+    Serialize(serde_saphyr::SerializeError),
     /// The write failed.
-    #[error("Cannot write deploy state '{}': {source}", .path.display())]
+    #[error("Cannot write deploy state '{}': {cause}", .path.display())]
     Write {
         path: PathBuf,
-        #[source]
-        source: FileSystemError,
+        cause: FileSystemError,
     },
 }
 
@@ -265,7 +259,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         Some(source) => {
             return StateLoad::Unusable(StateLoadFailure::Read {
                 path: path.path().to_path_buf(),
-                source,
+                cause: source,
             });
         }
         None => {}
@@ -285,7 +279,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         Err(source) => {
             return StateLoad::Unusable(StateLoadFailure::Read {
                 path: path.path().to_path_buf(),
-                source,
+                cause: source,
             });
         }
     };
@@ -317,7 +311,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         }),
         Err(source) => StateLoad::Unusable(StateLoadFailure::Parse {
             path: path.path().to_path_buf(),
-            source,
+            cause: source,
         }),
     }
 }
@@ -349,7 +343,7 @@ pub(super) fn save_deploy_state<F: FileSystem>(
         .write_file_private(&loaded.path, yaml.as_bytes())
         .map_err(|source| StateSaveError::Write {
             path: loaded.path.path().to_path_buf(),
-            source,
+            cause: source,
         })
 }
 
@@ -368,6 +362,28 @@ mod tests {
 
     const STATE_DIR: &str = "/state";
     const STATE_FILE: &str = "/state/deploy-state.yml";
+
+    // A state error that names its cause in its message does not also chain it.
+    #[test]
+    fn every_state_error_names_its_cause_once() {
+        let cause =
+            || FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other("the cause")));
+        let errors: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(StateLoadFailure::Read {
+                path: STATE_FILE.into(),
+                cause: cause(),
+            }),
+            Box::new(StateSaveError::Write {
+                path: STATE_FILE.into(),
+                cause: cause(),
+            }),
+        ];
+        for error in errors {
+            let message = error.to_string();
+            assert_eq!(message.matches("the cause").count(), 1, "{message}");
+            assert!(error.source().is_none(), "{message} also chains its cause");
+        }
+    }
 
     // A filesystem on which the state directory is a directory. Every test whose
     // subject is the state file rather than the directory starts here.

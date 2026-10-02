@@ -2119,7 +2119,7 @@ async fn status_reports_an_unparsable_dependency_with_its_failure() {
             assert!(
                 matches!(
                     failure.kind(),
-                    selfie::package::port::PackageParseKind::Yaml { source }
+                    selfie::package::port::PackageParseKind::Yaml { cause: source }
                         if source.location().is_some()
                 ),
                 "{failure:?}"

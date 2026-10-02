@@ -357,7 +357,7 @@ fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value
     // reports a location, rather than inheriting `None` from an arm that never
     // considered it.
     let (at, reason) = match error.kind() {
-        PackageParseKind::Yaml { source } => (source.location(), source.reason()),
+        PackageParseKind::Yaml { cause } => (cause.location(), cause.reason()),
         other @ (PackageParseKind::Io { .. }
         | PackageParseKind::Unreadable { .. }
         | PackageParseKind::IrregularFile { .. }
@@ -1953,7 +1953,7 @@ mod tests {
             .expect_err("the fixture must not parse");
         let error = selfie::package::port::PackageParseError::new(
             "/packages/creds.yml",
-            selfie::package::port::PackageParseKind::Yaml { source },
+            selfie::package::port::PackageParseKind::Yaml { cause: source },
         );
 
         let events = vec![PackageEvent::SpecSkipped {
@@ -2050,7 +2050,7 @@ mod tests {
                 .expect_err("the fixture must not parse");
         let error = selfie::package::port::PackageParseError::new(
             "/packages/creds.yml",
-            selfie::package::port::PackageParseKind::Yaml { source },
+            selfie::package::port::PackageParseKind::Yaml { cause: source },
         );
 
         let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::SpecListLoaded {
@@ -2085,7 +2085,7 @@ mod tests {
                 .expect_err("the fixture must not parse");
         let error = selfie::package::port::PackageParseError::new(
             "/packages/creds.yml",
-            selfie::package::port::PackageParseKind::Yaml { source },
+            selfie::package::port::PackageParseKind::Yaml { cause: source },
         );
 
         let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::PackageListLoaded {
@@ -2260,9 +2260,9 @@ mod tests {
             name: "creds".to_string(),
             packages_path: std::path::PathBuf::from("/packages"),
             failed_file: std::path::PathBuf::from("/packages/creds.yml"),
-            source: selfie::package::port::PackageParseError::new(
+            cause: selfie::package::port::PackageParseError::new(
                 "/packages/creds.yml",
-                selfie::package::port::PackageParseKind::Yaml { source },
+                selfie::package::port::PackageParseKind::Yaml { cause: source },
             ),
         };
 

@@ -513,7 +513,7 @@ mod tests {
                     command: command.to_string(),
                     working_directory: working_dir.to_path_buf(),
                     stream: crate::commands::OutputStream::Stdout,
-                    source: std::sync::Arc::new(std::io::Error::other("pipe died mid-read")),
+                    cause: std::sync::Arc::new(std::io::Error::other("pipe died mid-read")),
                 });
             }
 

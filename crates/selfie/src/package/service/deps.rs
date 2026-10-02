@@ -640,7 +640,7 @@ mod tests {
                     name: "brokendep".to_string(),
                     packages_path: std::path::PathBuf::from("/tmp"),
                     failed_file: std::path::PathBuf::from("/tmp/brokendep.yml"),
-                    source: crate::package::port::PackageParseError::new(
+                    cause: crate::package::port::PackageParseError::new(
                         "/tmp/brokendep.yml",
                         crate::package::port::PackageParseKind::IrregularFile {
                             kind: "named pipe (fifo)",

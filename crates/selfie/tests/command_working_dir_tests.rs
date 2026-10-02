@@ -382,7 +382,7 @@ async fn install_stops_at_a_check_that_cannot_enter_the_package_directory() {
     let unusable = selfie::commands::CommandError::WorkingDirectoryUnusable {
         command: CHECK_CMD.to_string(),
         working_directory: gone.clone(),
-        source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        cause: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
     };
     let runner = FakeCommandRunner::new()
         .erroring(CHECK_CMD, unusable)
@@ -429,7 +429,7 @@ async fn check_names_a_package_directory_it_cannot_enter_not_the_command() {
     let unusable = selfie::commands::CommandError::WorkingDirectoryUnusable {
         command: CHECK_CMD.to_string(),
         working_directory: gone.clone(),
-        source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        cause: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
     };
     let runner = FakeCommandRunner::new().erroring(CHECK_CMD, unusable);
 
