@@ -125,6 +125,7 @@ where
     let report = match outcome {
         Outcome::Failed => {
             return OperationResult::Failure(OperationFailure::InvalidSpec {
+                action: crate::package::event::SpecWrite::Create,
                 package_name,
                 issues: issue_payload(&issues),
             });
@@ -341,6 +342,7 @@ mod tests {
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         let OperationResult::Failure(OperationFailure::InvalidSpec {
+            action: crate::package::event::SpecWrite::Create,
             package_name,
             issues,
         }) = result

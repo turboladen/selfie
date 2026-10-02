@@ -1219,13 +1219,15 @@ pub enum OperationFailure {
         package_name: String,
         reason: String,
     },
-    /// A spec that would not pass `spec validate`, so nothing was written.
+    /// A spec write that validation refused, so nothing was written.
     ///
     /// `issues` lists every issue the validation found, errors first, then
     /// warnings and notices, in the shape a validation result carries.
     // Typed so an adapter can render each issue in its own channel, and an MCP
     // client gets the fields rather than a sentence to parse.
     InvalidSpec {
+        /// Whether the spec was being created or updated.
+        action: SpecWrite,
         package_name: String,
         issues: Vec<ValidationIssueData>,
     },
@@ -1238,6 +1240,13 @@ pub enum OperationFailure {
     },
     /// Generic failure with a freeform message
     Generic(String),
+}
+
+/// A write to a spec that validation can refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecWrite {
+    Create,
+    Update,
 }
 
 /// Why a named package could not be found.
@@ -1340,6 +1349,7 @@ impl std::fmt::Display for OperationFailure {
                 reason,
             } => write!(f, "Cannot use package `{package_name}`: {reason}"),
             OperationFailure::InvalidSpec {
+                action,
                 package_name,
                 issues,
             } => {
@@ -1347,12 +1357,25 @@ impl std::fmt::Display for OperationFailure {
                     .iter()
                     .filter(|issue| issue.level == crate::validation::ValidationLevel::Error)
                     .count();
-                write!(
-                    f,
-                    "Refusing to create '{package_name}': it would not pass spec validate ({errors} \
-                     {}), so nothing was written",
-                    crate::pluralize(errors, "error", "errors")
-                )
+                let errors = format!("{errors} {}", crate::pluralize(errors, "error", "errors"));
+                // A create validates the whole spec, as `spec validate` does. An
+                // update writes the whole spec, so required fields, URLs and
+                // environment contents are checked across all of it, and an error
+                // can sit in a field the update never touched. Only command syntax
+                // is narrowed, to the environments the update changed, so the count
+                // can be lower than `spec validate`'s.
+                match action {
+                    SpecWrite::Create => write!(
+                        f,
+                        "Refusing to create '{package_name}': it would not pass spec validate \
+                         ({errors}), so nothing was written"
+                    ),
+                    SpecWrite::Update => write!(
+                        f,
+                        "Refusing to update '{package_name}': the updated spec would not pass \
+                         validation ({errors}), so nothing was written"
+                    ),
+                }
             }
             OperationFailure::NoSuchPackage { name, reason } => match reason {
                 NoSuchPackageReason::NotFound => write!(f, "No package named '{name}' was found"),

@@ -360,7 +360,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update",
-        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved."
+        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved. An update that would leave the spec with validation errors writes nothing: the call fails, and the result carries every issue under `issues`, each with `level`, `category`, `field`, `message`, `suggestion`, `line` and `column`, as selfie_spec_create's does; `line` and `column` are null for an issue on a field the update changed, which has no place in the file yet."
     )]
     async fn spec_update(
         &self,
@@ -406,7 +406,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update_batch",
-        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update. Prefer this over calling selfie_spec_update repeatedly."
+        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. Prefer this over calling selfie_spec_update repeatedly."
     )]
     async fn spec_update_batch(
         &self,
