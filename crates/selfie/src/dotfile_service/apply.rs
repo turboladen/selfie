@@ -18,12 +18,14 @@ use crate::{
         deploy::{DeployDecision, compute_checksum, deploy_decision},
         diff::unified_diff,
         port::{ConflictDetail, ConflictResolution},
-        state::{DeployState, DriftType},
+        state::DeployState,
     },
     fs::filesystem::FileSystem,
     package::{
         Package,
-        event::{EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount},
+        event::{
+            DriftType, EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount,
+        },
         refusal::refuse_up_front,
     },
 };
@@ -514,7 +516,7 @@ where
                         }
 
                         sender
-                            .send_dotfile_skipped(&event_source, target_path.display(), &reason)
+                            .send_dotfile_skipped(&event_source, target_path.display(), reason)
                             .await;
                         break 'entry EntryOutcome::Skipped;
                     }

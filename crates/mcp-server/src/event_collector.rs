@@ -1,8 +1,9 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, BaseKind, CheckResult, DotfileSource, EventStream, NoSuchPackageReason,
-    OperationFailure, OperationResult, Outcome, PackageEvent, RefusalKind,
+    AuditResult, BaseKind, CheckResult, DotfileSource, DriftType, EventStream, LinkAtTarget,
+    NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent, RefusalKind,
+    SkipReason,
 };
 use serde_json::Value;
 
@@ -273,6 +274,55 @@ fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// The `drift_type` field's value.
+fn drift_type_label(drift: &DriftType) -> &'static str {
+    match drift {
+        DriftType::None => "none",
+        DriftType::RepoChanged => "repo_changed",
+        DriftType::TargetChanged => "target_changed",
+        DriftType::BothChanged => "both_changed",
+        DriftType::NotTracked => "not_tracked",
+    }
+}
+
+/// `row` with a skip's `reason` label, and for a secret-bearing dry run the
+/// `commands` it would run and the `link` at its target, null otherwise.
+fn skip_reason_fields(mut row: Value, reason: &SkipReason) -> Value {
+    let label = match reason {
+        SkipReason::UpToDate => "up_to_date",
+        SkipReason::InSync => "in_sync",
+        SkipReason::PermissionsTightened => "permissions_tightened",
+        SkipReason::DryRun => "dry_run",
+        SkipReason::SecretDryRun { .. } => "secret_dry_run",
+        SkipReason::Unverifiable => "unverifiable",
+    };
+    let (commands, link) = match reason {
+        SkipReason::SecretDryRun { commands, link } => (
+            Value::from(*commands),
+            match link {
+                LinkAtTarget::NoLink => serde_json::json!({ "kind": "none", "destination": null }),
+                LinkAtTarget::To(path) => serde_json::json!({
+                    "kind": "symlink",
+                    "destination": path.display().to_string(),
+                }),
+                LinkAtTarget::DestinationUnknown => {
+                    serde_json::json!({ "kind": "symlink", "destination": null })
+                }
+            },
+        ),
+        SkipReason::UpToDate
+        | SkipReason::InSync
+        | SkipReason::PermissionsTightened
+        | SkipReason::DryRun
+        | SkipReason::Unverifiable => (Value::Null, Value::Null),
+    };
+    let map = row.as_object_mut().expect("constructed as an object");
+    map.insert("reason".into(), label.into());
+    map.insert("commands".into(), commands);
+    map.insert("link".into(), link);
+    row
 }
 
 /// The `kind` field's value for a package refused whole.
@@ -572,11 +622,13 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             reason,
             ..
         } => Some(with_source(
-            serde_json::json!({
-                "type": "dotfile_skipped",
-                "target": target,
-                "reason": reason,
-            }),
+            skip_reason_fields(
+                serde_json::json!({
+                    "type": "dotfile_skipped",
+                    "target": target,
+                }),
+                reason,
+            ),
             source,
         )),
         PackageEvent::DotfileConflict {
@@ -598,7 +650,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         } => Some(serde_json::json!({
             "type": "dotfile_drift_detected",
             "target": target,
-            "drift_type": drift_type,
+            "drift_type": drift_type_label(drift_type),
         })),
         PackageEvent::DotfileOrphaned {
             source,
@@ -822,7 +874,7 @@ mod tests {
             operation_info: test_op_info(),
             source: package_file("bat/config"),
             target: "/home/u/.config/bat/config".to_string(),
-            reason: "dry run".to_string(),
+            reason: SkipReason::DryRun,
         }];
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
@@ -1023,7 +1075,7 @@ mod tests {
             PackageEvent::DotfileDriftDetected {
                 operation_info: test_op_info(),
                 target: "/home/u/.gitconfig".to_string(),
-                drift_type: "repo changed".to_string(),
+                drift_type: DriftType::RepoChanged,
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
@@ -1034,7 +1086,7 @@ mod tests {
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
         let row = &result.data["data"][0];
-        assert_eq!(row["drift_type"], "repo changed");
+        assert_eq!(row["drift_type"], "repo_changed");
         // A set, so the assertion holds whatever order the map keeps its keys in.
         let keys: std::collections::BTreeSet<&str> = row
             .as_object()
@@ -1047,6 +1099,94 @@ mod tests {
             std::collections::BTreeSet::from(["drift_type", "target", "type"]),
             "row: {row}"
         );
+    }
+
+    // Each skip reason reaches an assistant as its own label, with the command
+    // count and the link only for a secret-bearing dry run. The labels differ
+    // from the sentences the terminal prints, so a row carrying the sentence
+    // fails here.
+    #[tokio::test]
+    async fn a_skip_row_carries_its_reason_as_a_label() {
+        let cases = [
+            (SkipReason::UpToDate, "up_to_date", Value::Null, Value::Null),
+            (SkipReason::InSync, "in_sync", Value::Null, Value::Null),
+            (
+                SkipReason::PermissionsTightened,
+                "permissions_tightened",
+                Value::Null,
+                Value::Null,
+            ),
+            (SkipReason::DryRun, "dry_run", Value::Null, Value::Null),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 2,
+                    link: LinkAtTarget::To("/etc/real".into()),
+                },
+                "secret_dry_run",
+                Value::from(2),
+                serde_json::json!({ "kind": "symlink", "destination": "/etc/real" }),
+            ),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 1,
+                    link: LinkAtTarget::NoLink,
+                },
+                "secret_dry_run",
+                Value::from(1),
+                serde_json::json!({ "kind": "none", "destination": null }),
+            ),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 1,
+                    link: LinkAtTarget::DestinationUnknown,
+                },
+                "secret_dry_run",
+                Value::from(1),
+                serde_json::json!({ "kind": "symlink", "destination": null }),
+            ),
+            (
+                SkipReason::Unverifiable,
+                "unverifiable",
+                Value::Null,
+                Value::Null,
+            ),
+        ];
+        for (reason, label, commands, link) in cases {
+            let events = vec![PackageEvent::DotfileSkipped {
+                operation_info: test_op_info(),
+                source: package_file("bat/config"),
+                target: "/home/u/.batrc".to_string(),
+                reason: reason.clone(),
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            let row = &result.data["data"][0];
+            assert_eq!(row["reason"], label, "{reason:?}");
+            assert_eq!(row["commands"], commands, "{reason:?}");
+            assert_eq!(row["link"], link, "{reason:?}");
+        }
+    }
+
+    // Each drift type reaches an assistant as a label it can match on.
+    #[tokio::test]
+    async fn a_drift_row_carries_its_type_as_a_label() {
+        for (drift, label) in [
+            (DriftType::RepoChanged, "repo_changed"),
+            (DriftType::TargetChanged, "target_changed"),
+            (DriftType::BothChanged, "both_changed"),
+            (DriftType::NotTracked, "not_tracked"),
+        ] {
+            let events = vec![PackageEvent::DotfileDriftDetected {
+                operation_info: test_op_info(),
+                target: "/home/u/.batrc".to_string(),
+                drift_type: drift.clone(),
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            assert_eq!(result.data["data"][0]["drift_type"], label, "{drift:?}");
+        }
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

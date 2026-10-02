@@ -26,7 +26,10 @@ use selfie::{
     },
     fs::RealFileSystem,
     package::{
-        event::{OperationFailure, OperationResult, OperationSuccess, PackageEvent},
+        event::{
+            LinkAtTarget, OperationFailure, OperationResult, OperationSuccess, PackageEvent,
+            SkipReason,
+        },
         repository::YamlPackageRepository,
     },
     privilege::{Elevation, Privilege, SudoPolicy},
@@ -1689,7 +1692,7 @@ async fn a_dry_run_reports_a_conflict_even_when_yes_would_accept_it() {
 
     assert!(
         !events.iter().any(
-            |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run")
+            |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::DryRun)
         ),
         "the entry was reported as a dry-run skip as well as a conflict: {events:?}"
     );
@@ -1783,7 +1786,7 @@ async fn test_apply_dry_run_does_not_write() {
 
     let has_skipped_dry_run = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run"));
+        .any(|e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::DryRun));
     assert!(
         has_skipped_dry_run,
         "Should emit DotfileSkipped with 'dry run' reason"
@@ -4505,7 +4508,7 @@ mod secret_bearing {
             matches!(
                 e,
                 PackageEvent::DotfileSkipped { reason, .. }
-                    if reason.starts_with("already in sync")
+                    if matches!(reason, SkipReason::InSync | SkipReason::PermissionsTightened)
             )
         });
         assert!(skipped, "expected an in-sync skip, got: {events:?}");
@@ -4628,7 +4631,7 @@ mod secret_bearing {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("permissions")
+                PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::PermissionsTightened
             )),
             "the tightening must be reported rather than done silently: {events:?}"
         );
@@ -4686,7 +4689,7 @@ mod secret_bearing {
             events.iter().any(|e| matches!(
                 e,
                 PackageEvent::DotfileSkipped { reason, .. }
-                    if reason == "already in sync"
+                    if *reason == SkipReason::InSync
             )),
             "expected a plain in-sync skip, got: {events:?}"
         );
@@ -5297,8 +5300,13 @@ mod secret_bearing {
             events.iter().any(|e| matches!(
                 e,
                 PackageEvent::DotfileSkipped { reason, .. }
-                    if reason.contains("would run 1 command(s)")
-                        && reason.contains("then replace the symlink")
+                    if matches!(
+                        reason,
+                        SkipReason::SecretDryRun {
+                            commands: 1,
+                            link: LinkAtTarget::To(_) | LinkAtTarget::DestinationUnknown,
+                        }
+                    )
             )),
             "the preview must name the outcome a real run would reach: {:?}",
             events
@@ -5630,7 +5638,7 @@ mod secret_bearing {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("dry run")
+                PackageEvent::DotfileSkipped { reason, .. } if matches!(reason, SkipReason::DryRun | SkipReason::SecretDryRun { .. })
             )),
             "the dry run should still report the entry, got: {events:?}"
         );
@@ -5712,7 +5720,7 @@ mod secret_bearing {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("provider-sourced")
+                PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::Unverifiable
             )),
             "secret entries should be identified, got: {events:?}"
         );
@@ -6583,7 +6591,7 @@ mod secret_bearing {
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("provider-sourced")
+                PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::Unverifiable
             )),
             "an undeployable entry is not merely unverifiable, got: {events:?}"
         );
@@ -7479,7 +7487,7 @@ mod symlinked_targets {
         );
         assert!(
             !events.iter().any(
-                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run")
+                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::DryRun)
             ),
             "the entry must not also be previewed as a deploy: {events:?}"
         );
@@ -7890,7 +7898,9 @@ mod symlink_consistency {
         events
             .iter()
             .filter_map(|event| match event {
-                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => {
+                    Some(drift_type.to_string())
+                }
                 _ => None,
             })
             .collect()
@@ -11292,7 +11302,9 @@ mod target_classification {
         events
             .iter()
             .filter_map(|event| match event {
-                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => {
+                    Some(drift_type.to_string())
+                }
                 _ => None,
             })
             .collect()
@@ -11753,7 +11765,7 @@ mod target_reads_never_follow {
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("already in sync")
+                PackageEvent::DotfileSkipped { reason, .. } if matches!(reason, SkipReason::InSync | SkipReason::PermissionsTightened)
             )),
             "a link must not be reported in sync: {events:?}"
         );
@@ -13341,7 +13353,7 @@ mod backups_before_overwrite {
         // not pass this test by skipping the entry for an unrelated reason.
         assert!(
             events.iter().any(
-                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run")
+                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::DryRun)
             ),
             "the entry must have reached the dry-run return in the writer: {events:?}"
         );
@@ -17587,5 +17599,58 @@ mod refusals_grouped_by_reason {
 
         assert_grouped(&events);
         assert_eq!(drift_summary(&events).2, 4, "{events:#?}");
+    }
+}
+
+// Drift reports how each target moved as the type itself.
+mod drift_reports_its_type {
+    use super::*;
+    use selfie::package::event::DriftType;
+
+    fn drift_of(events: &[PackageEvent]) -> Vec<DriftType> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // One deployed target, then the source, the target, or both edited. Each
+    // edit gives its own type, so a check sending one type for every drift
+    // fails at least two of them.
+    #[tokio::test]
+    async fn each_kind_of_edit_is_its_own_type() {
+        for (edit_source, edit_target, expected) in [
+            (true, false, DriftType::RepoChanged),
+            (false, true, DriftType::TargetChanged),
+            (true, true, DriftType::BothChanged),
+        ] {
+            let dirs = TestDirs::new();
+            std::fs::write(dirs.package_dir.join("bat.conf"), "one").unwrap();
+            let target = dirs.target_dir.join("bat.conf");
+            create_package_with_dotfiles(
+                &dirs.package_dir,
+                "bat",
+                &[("bat.conf", target.to_str().unwrap())],
+            );
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+            assert!(target.exists(), "control: the target deployed");
+            if edit_source {
+                std::fs::write(dirs.package_dir.join("bat.conf"), "two").unwrap();
+            }
+            if edit_target {
+                std::fs::write(&target, "three").unwrap();
+            }
+
+            let events = collect_events(dirs.service().check_drift().await).await;
+
+            assert_eq!(
+                drift_of(&events),
+                std::slice::from_ref(&expected),
+                "{expected:?}: {events:#?}"
+            );
+        }
     }
 }

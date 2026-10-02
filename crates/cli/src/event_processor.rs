@@ -1113,7 +1113,7 @@ mod tests {
                 vars: Vec::new(),
             },
             target: "/h/.config/bat/config".to_string(),
-            reason: "dry run".to_string(),
+            reason: selfie::package::event::SkipReason::DryRun,
         };
 
         let held = display.hold_block();

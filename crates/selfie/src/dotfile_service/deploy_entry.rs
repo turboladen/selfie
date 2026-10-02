@@ -107,7 +107,11 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
 ) -> DeployOutcome {
     let Ledger::Record(loaded) = ledger else {
         sender
-            .send_dotfile_skipped(unit.event_source, unit.target_path.display(), "dry run")
+            .send_dotfile_skipped(
+                unit.event_source,
+                unit.target_path.display(),
+                crate::package::event::SkipReason::DryRun,
+            )
             .await;
         return DeployOutcome::Previewed;
     };
