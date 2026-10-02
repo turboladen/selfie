@@ -264,7 +264,7 @@ impl ValidationIssue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationLevel {
     Error,
     Warning,
@@ -274,31 +274,33 @@ pub enum ValidationLevel {
 }
 
 /// Categories of package validation errors
+///
+/// [`Display`](std::fmt::Display) words a category for a person: "required
+/// field", "command syntax".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
-#[strum(serialize_all = "snake_case")]
 pub enum ValidationErrorCategory {
     /// Missing required fields
-    ///
+    #[strum(to_string = "required field")]
     RequiredField,
 
     /// Invalid field values
-    ///
+    #[strum(to_string = "invalid value")]
     InvalidValue,
 
     /// Environment-specific errors
-    ///
+    #[strum(to_string = "environment")]
     Environment,
 
     /// Shell command syntax errors
-    ///
+    #[strum(to_string = "command syntax")]
     CommandSyntax,
 
     /// URL format errors
-    ///
+    #[strum(to_string = "URL format")]
     UrlFormat,
 
     /// Path format errors
-    ///
+    #[strum(to_string = "path format")]
     PathFormat,
 
     /// Something the user should know that is not a defect
@@ -307,6 +309,7 @@ pub enum ValidationErrorCategory {
     /// kind of mistake, and filing a notice under one of them (`InvalidValue`,
     /// say) mislabels it in every table and JSON payload that shows the
     /// category.
+    #[strum(to_string = "advisory")]
     Advisory,
 }
 

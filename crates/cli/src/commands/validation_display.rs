@@ -6,15 +6,17 @@
 use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 
-use selfie::package::event::{ValidationIssueData, ValidationLevel};
+use selfie::package::event::ValidationIssueData;
+use selfie::validation::ValidationLevel;
 
 use crate::display_manager::{Channel, DisplayManager};
 
 /// A single validation issue row, used as a common representation for both
 /// event-driven validation results and sync push validation failures.
 pub(crate) struct ValidationRow<'a> {
-    pub level: &'a str,
-    pub category: &'a str,
+    pub level: ValidationLevel,
+    /// The issue's category, worded for a person.
+    pub category: String,
     pub field: &'a str,
     pub message: &'a str,
     pub location: Option<selfie::yaml::SourceLocation>,
@@ -40,17 +42,17 @@ pub(crate) fn display_validation_groups(
     let total_errors: usize = groups
         .iter()
         .flat_map(|g| &g.rows)
-        .filter(|r| r.level == "ERROR")
+        .filter(|r| r.level == ValidationLevel::Error)
         .count();
     let total_warnings: usize = groups
         .iter()
         .flat_map(|g| &g.rows)
-        .filter(|r| r.level == "WARN")
+        .filter(|r| r.level == ValidationLevel::Warning)
         .count();
     let total_notices: usize = groups
         .iter()
         .flat_map(|g| &g.rows)
-        .filter(|r| r.level == "INFO")
+        .filter(|r| r.level == ValidationLevel::Info)
         .count();
 
     let total = groups.iter().map(|g| g.rows.len()).sum::<usize>();
@@ -87,7 +89,7 @@ pub(crate) fn display_validation_groups(
 
         // File/package header. A group holding only informational notices is not
         // a failure, so it must not be marked with a red cross.
-        let blocking = group.rows.iter().any(|r| r.level != "INFO");
+        let blocking = group.rows.iter().any(|r| r.level != ValidationLevel::Info);
         let (marker, marked) = if blocking {
             ("✗", style("✗").red())
         } else {
@@ -117,20 +119,21 @@ pub(crate) fn display_validation_groups(
         table.set_header(header);
 
         for row in &group.rows {
+            let label = level_label(&row.level);
             let level = if use_colors {
                 match row.level {
-                    "ERROR" => style(row.level).red().bold().to_string(),
-                    "WARN" => style(row.level).yellow().bold().to_string(),
-                    _ => row.level.to_string(),
+                    ValidationLevel::Error => style(label).red().bold().to_string(),
+                    ValidationLevel::Warning => style(label).yellow().bold().to_string(),
+                    ValidationLevel::Info => label.to_string(),
                 }
             } else {
-                row.level.to_string()
+                label.to_string()
             };
 
             let category = if use_colors {
-                style(row.category).magenta().to_string()
+                style(&row.category).magenta().to_string()
             } else {
-                row.category.to_string()
+                row.category.clone()
             };
 
             let field = if use_colors {
@@ -209,8 +212,8 @@ mod tests {
         vec![ValidationGroup {
             label: "noenv",
             rows: vec![ValidationRow {
-                level: "ERROR",
-                category: "RequiredField",
+                level: ValidationLevel::Error,
+                category: "required field".to_string(),
                 field: "environments",
                 message: "At least one environment must be defined",
                 location: None,
@@ -256,7 +259,7 @@ mod tests {
 
     fn issue(level: ValidationLevel, suggestion: Option<&str>) -> ValidationIssueData {
         ValidationIssueData {
-            category: "CommandSyntax".to_string(),
+            category: selfie::validation::ValidationErrorCategory::CommandSyntax,
             field: "environments.work.install".to_string(),
             message: "Unmatched double quote in command".to_string(),
             level,
