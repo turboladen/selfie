@@ -443,24 +443,42 @@ fn prompt_environments(
     Ok(environments)
 }
 
+/// The name to offer for the next environment: the configured one, then
+/// "production", and none once the spec has both.
+fn default_environment_name<'a>(
+    existing_environments: &Environments,
+    config: &'a CliConfig,
+) -> Option<&'a str> {
+    // A default the spec already has could only be refused.
+    [config.environment(), "production"]
+        .into_iter()
+        .find(|name| !existing_environments.contains_key(*name))
+}
+
 fn prompt_environment_name(
     existing_environments: &Environments,
     config: &CliConfig,
     display: &DisplayManager,
 ) -> Result<String, i32> {
-    let default_env = if existing_environments.is_empty() {
-        config.environment().to_string()
-    } else {
-        "production".to_string()
-    };
+    let default_env = default_environment_name(existing_environments, config);
 
-    display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("Environment name")
-                .default(default_env),
-        )
-        .map_err(|failure| refuse_interactive(display, &failure))
+    loop {
+        let mut input = Input::with_theme(&SimpleTheme).with_prompt("Environment name");
+        if let Some(default_env) = default_env {
+            input = input.default(default_env.to_string());
+        }
+        let name = display
+            .prompt(input)
+            .map_err(|failure| refuse_interactive(display, &failure))?;
+
+        // A second entry under one name would replace the first.
+        if !existing_environments.contains_key(&name) {
+            return Ok(name);
+        }
+        display.print_warning(format!(
+            "Environment '{name}' is already in this spec. Choose a different name."
+        ));
+    }
 }
 
 fn prompt_install_command(display: &DisplayManager) -> Result<String, i32> {
@@ -724,6 +742,61 @@ mod tests {
                 .any(|(_, line)| line.contains("'my app': it is not a valid spec name")),
             "{:?}",
             display.printed()
+        );
+    }
+
+    // A repeated environment name is refused and asked again, so the first
+    // environment keeps its commands and both are written.
+    #[test]
+    fn a_repeated_environment_name_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let (_temp, _packages, config, _service) = packages_holding(&[]);
+        let display = DisplayManager::new(false).answering(vec![
+            answer("work".to_string()),
+            answer("install-work".to_string()),
+            answer(String::new()), // check
+            answer(true),          // another environment?
+            answer("work".to_string()),
+            answer("home".to_string()),
+            answer("install-home".to_string()),
+            answer(String::new()), // check
+            answer(false),         // another environment?
+        ]);
+
+        let environments = prompt_environments("tool", &config, &display).unwrap();
+
+        let installs: Vec<(&str, &str)> = environments
+            .iter()
+            .map(|(name, env)| (name.as_str(), env.install()))
+            .collect();
+        assert_eq!(
+            installs,
+            vec![("work", "install-work"), ("home", "install-home")]
+        );
+    }
+
+    // The default offered for a further environment is never one the spec
+    // already has.
+    #[test]
+    fn the_environment_default_skips_a_taken_name() {
+        let config = CliConfig::wrap_for_test(test_config_with_dir_and_env("/p", "production"));
+        let env = || EnvironmentConfig::new("true".to_string(), None, None, Vec::new(), Vec::new());
+        let mut existing = Environments::new();
+
+        assert_eq!(
+            default_environment_name(&existing, &config),
+            Some("production")
+        );
+        existing.insert("production".to_string(), env());
+        assert_eq!(default_environment_name(&existing, &config), None);
+
+        let config = CliConfig::wrap_for_test(test_config_with_dir_and_env("/p", "work"));
+        let mut existing = Environments::new();
+        existing.insert("work".to_string(), env());
+        assert_eq!(
+            default_environment_name(&existing, &config),
+            Some("production")
         );
     }
 
