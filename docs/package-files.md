@@ -720,7 +720,9 @@ side and the repository file on the `+` side:
   Accept (overwrite target; anything it would destroy is copied aside first)
 ```
 
-The prompt appears only in a terminal; a run without one skips the conflict and reports it.
+The prompt appears only in a terminal; a run without one skips the conflict, reports it, and ends by
+saying what would settle it: `--yes` for a repository file, a terminal for a secret-bearing entry,
+which `--yes` never overwrites.
 
 Without `--yes`, conflicts are reported but the target file is left untouched. With `--dry-run` they
 are reported the same way, diff included, and you are not asked to resolve them: nothing would be

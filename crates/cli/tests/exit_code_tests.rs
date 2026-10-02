@@ -197,9 +197,17 @@ fn apply_exits_clean_over_a_conflict_it_left_alone() {
     write_dotfile_package(&temp, "app", "~/.apprc");
     std::fs::write(temp.path().join(".apprc"), "MINE\n").unwrap();
 
-    let (code, output) = run(&temp, &["apply"]);
-    assert_eq!(code, Some(CLEAN), "{output}");
+    let out = common::run_sandboxed(&temp, &["apply"]);
+    let output = format!("stdout:\n{}\nstderr:\n{}", out.stdout, out.stderr);
+    assert_eq!(out.code, Some(CLEAN), "{output}");
     assert!(output.contains("1 conflict(s)"), "{output}");
+    // Nobody chose to leave it, so the run says what would settle it, on stderr.
+    assert!(
+        out.stderr
+            .contains("1 conflict was left as it is with no terminal to ask on. Pass --yes"),
+        "{output}"
+    );
+    assert!(!out.stdout.contains("Pass --yes"), "{output}");
     assert_eq!(
         std::fs::read_to_string(temp.path().join(".apprc")).unwrap(),
         "MINE\n",

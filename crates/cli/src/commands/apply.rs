@@ -74,6 +74,43 @@ struct InteractiveConflictResolver {
     shown: Arc<Mutex<HashSet<String>>>,
     // The run's token, canceled when the user presses Ctrl+C at a prompt.
     token: CancellationToken,
+    // The conflicts skipped because there was no terminal to ask on.
+    unasked: Arc<Mutex<Unasked>>,
+}
+
+/// Conflicts left as they are because there was no terminal to ask on, by what
+/// would settle them.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct Unasked {
+    /// Repository-file conflicts, which `--yes` overwrites.
+    files: usize,
+    /// Secret-bearing conflicts, which only a terminal can accept.
+    secrets: usize,
+}
+
+impl Unasked {
+    /// Tell the user what settles each kind left unasked.
+    fn report(&self, display: &DisplayManager) {
+        use selfie::pluralize;
+
+        let Self { files, secrets } = *self;
+        if files > 0 {
+            display.print_suggestion(format!(
+                "{files} {} left as {} with no terminal to ask on. Pass --yes to overwrite {}.",
+                pluralize(files, "conflict was", "conflicts were"),
+                pluralize(files, "it is", "they are"),
+                pluralize(files, "it", "them"),
+            ));
+        }
+        if secrets > 0 {
+            display.print_suggestion(format!(
+                "{secrets} secret-bearing {} left as {} with no terminal to ask on. Only a \
+                 terminal can accept one; --yes does not.",
+                pluralize(secrets, "conflict was", "conflicts were"),
+                pluralize(secrets, "it is", "they are"),
+            ));
+        }
+    }
 }
 
 /// Which conflict is being asked about, and so what accepting costs.
@@ -124,12 +161,20 @@ impl InteractiveConflictResolver {
                     .items(&items)
                     .default(0),
             ),
+            |unasked| match kind {
+                Prompt::RepositoryFile => unasked.files += 1,
+                Prompt::Secret { .. } => unasked.secrets += 1,
+            },
         )
     }
 
     /// The answer a prompt got, or `None` when it got none. Ctrl+C cancels the
-    /// run as well.
-    fn answered<T>(&self, answer: Result<T, PromptFailure>) -> Option<T> {
+    /// run as well, and no terminal counts the conflict with `unasked`.
+    fn answered<T>(
+        &self,
+        answer: Result<T, PromptFailure>,
+        unasked: impl FnOnce(&mut Unasked),
+    ) -> Option<T> {
         match answer {
             Ok(answer) => Some(answer),
             // Canceled here rather than left to the SIGINT console raises, so
@@ -138,7 +183,18 @@ impl InteractiveConflictResolver {
                 self.token.cancel();
                 None
             }
-            Err(PromptFailure::NoTerminal | PromptFailure::Unreadable(_)) => None,
+            Err(PromptFailure::NoTerminal) => {
+                if let Ok(mut count) = self.unasked.lock() {
+                    unasked(&mut count);
+                }
+                None
+            }
+            Err(PromptFailure::Unreadable(error)) => {
+                self.display.print_error(format!(
+                    "Could not read the answer, so the conflict is left as it is: {error}"
+                ));
+                None
+            }
         }
     }
 
@@ -157,6 +213,7 @@ impl InteractiveConflictResolver {
              in any session recording or shared screen.",
         );
 
+        // Reveal is offered only on a terminal, so this prompt is never unasked.
         let confirmed = self
             .answered(
                 self.display.prompt(
@@ -164,6 +221,7 @@ impl InteractiveConflictResolver {
                         .with_prompt("Show values?")
                         .default(false),
                 ),
+                |_| {},
             )
             .unwrap_or(false);
 
@@ -232,10 +290,9 @@ impl ConflictResolver for InteractiveConflictResolver {
                 self.print_source(source, &short_target);
                 self.display.println(summary);
 
-                // Reveal is offered only on a terminal. Without one there is
-                // nobody to read it and no way to confirm the second prompt.
-                // Uses the display's own check, which covers stdout and stderr,
-                // rather than a fresh stdout-only probe.
+                // Reveal is offered only when stdout is a terminal as well as
+                // stderr: the values print on stdout, and a redirected stdout
+                // would put them in a file.
                 let can_reveal = self.display.is_tty();
 
                 match self.prompt(Prompt::Secret { reveal: can_reveal }) {
@@ -289,6 +346,7 @@ pub(crate) async fn handle_apply(
     cancellation_token: CancellationToken,
 ) -> i32 {
     let shown = Arc::new(Mutex::new(HashSet::new()));
+    let unasked = Arc::new(Mutex::new(Unasked::default()));
     let options = ApplyOptions {
         dry_run: args.dry_run,
         auto_accept: args.yes,
@@ -296,6 +354,7 @@ pub(crate) async fn handle_apply(
             display: display.clone(),
             shown: Arc::clone(&shown),
             token: cancellation_token.clone(),
+            unasked: Arc::clone(&unasked),
         })),
     };
 
@@ -343,6 +402,12 @@ pub(crate) async fn handle_apply(
             _ => false,
         })
         .await;
+
+    // The summary counts every conflict; this says what settles the ones
+    // nobody was asked about.
+    if let Ok(unasked) = unasked.lock() {
+        unasked.report(display);
+    }
 
     result.exit_code
 }
@@ -392,6 +457,7 @@ mod tests {
             display: display.clone(),
             shown: Arc::default(),
             token: CancellationToken::new(),
+            unasked: Arc::default(),
         };
         let source = DotfileSource::File {
             base: Some(SourceBase {
@@ -429,6 +495,7 @@ mod tests {
             display: display.clone(),
             shown: Arc::default(),
             token: CancellationToken::new(),
+            unasked: Arc::default(),
         };
         let source = DotfileSource::File {
             base: Some(SourceBase {
@@ -464,6 +531,7 @@ mod tests {
             display: display.clone(),
             shown: Arc::default(),
             token: token.clone(),
+            unasked: Arc::default(),
         };
         (resolver, token)
     }
@@ -500,6 +568,34 @@ mod tests {
 
         assert!(matches!(resolution, ConflictResolution::Skip));
         assert!(token.is_cancelled());
+    }
+
+    // A terminal that fails mid-answer leaves the conflict, and says so.
+    #[test]
+    fn an_unreadable_answer_skips_the_conflict_and_says_why() {
+        let failed = Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone").into());
+        let display = DisplayManager::new(false).answering(vec![failed]);
+        let (resolver, token) = resolver(&display);
+        let source = source();
+
+        let resolution = resolver.resolve(
+            "~/.creds",
+            ConflictDetail::Diff {
+                source: &source,
+                diff: "",
+            },
+        );
+
+        assert!(matches!(resolution, ConflictResolution::Skip));
+        assert!(!token.is_cancelled());
+        assert!(
+            display
+                .printed()
+                .iter()
+                .any(|(_, line)| line.starts_with("Could not read the answer")),
+            "{:?}",
+            display.printed()
+        );
     }
 
     // Ctrl+C at "Show values?" cancels the run; it is not a "No".
