@@ -5,6 +5,7 @@ use selfie::package::event::{
     LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
     RefusalKind, SkipReason, SourceKind,
 };
+use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
 
 pub struct EventCollectorResult {
@@ -806,7 +807,7 @@ fn git_status_label(status: Option<&selfie::package::git::GitFileStatus>) -> Val
 fn issue_json(issue: &selfie::package::event::ValidationIssueData) -> Value {
     serde_json::json!({
         "level": validation_level_label(&issue.level),
-        "category": &issue.category,
+        "category": validation_category_label(issue.category),
         "field": &issue.field,
         "message": &issue.message,
         "suggestion": &issue.suggestion,
@@ -815,13 +816,66 @@ fn issue_json(issue: &selfie::package::event::ValidationIssueData) -> Value {
     })
 }
 
+/// Each changed spec `sync push` refused, with its issues as fields: `path`,
+/// then per issue `level`, `category`, `field`, `message`, `suggestion`, and
+/// `line` and `column` (null when the issue has no place in the file).
+pub(crate) fn push_failures_json(
+    failures: &[selfie::sync_service::PackageValidationFailure],
+) -> Vec<Value> {
+    use selfie::sync_service::PushIssueCategory;
+
+    failures
+        .iter()
+        .map(|failure| {
+            let issues: Vec<Value> = failure
+                .issues
+                .iter()
+                .map(|issue| {
+                    let category = match issue.category {
+                        PushIssueCategory::Validation(category) => {
+                            validation_category_label(category)
+                        }
+                        PushIssueCategory::NameCollision => "name_collision",
+                        PushIssueCategory::FileError => "file_error",
+                        PushIssueCategory::ParseError => "parse_error",
+                        PushIssueCategory::ApplyRefusal => "apply_refusal",
+                    };
+                    serde_json::json!({
+                        "level": validation_level_label(&issue.level),
+                        "category": category,
+                        "field": &issue.field,
+                        "message": &issue.message,
+                        "suggestion": &issue.suggestion,
+                        "line": issue.location.map(|at| at.line()),
+                        "column": issue.location.map(|at| at.column()),
+                    })
+                })
+                .collect();
+            serde_json::json!({ "path": &failure.path, "issues": issues })
+        })
+        .collect()
+}
+
+/// The `category` field's value for an issue `selfie spec validate` reports.
+fn validation_category_label(category: ValidationErrorCategory) -> &'static str {
+    match category {
+        ValidationErrorCategory::RequiredField => "required_field",
+        ValidationErrorCategory::InvalidValue => "invalid_value",
+        ValidationErrorCategory::Environment => "environment",
+        ValidationErrorCategory::CommandSyntax => "command_syntax",
+        ValidationErrorCategory::UrlFormat => "url_format",
+        ValidationErrorCategory::PathFormat => "path_format",
+        ValidationErrorCategory::Advisory => "advisory",
+    }
+}
+
 /// Label a validation issue's severity for an assistant reading the JSON.
 ///
 /// Without this the three levels are indistinguishable, and an informational
 /// notice — which never makes a package invalid — reads as a defect alongside a
 /// `status` that says the package validated successfully.
-fn validation_level_label(level: &selfie::package::event::ValidationLevel) -> &'static str {
-    use selfie::package::event::ValidationLevel;
+fn validation_level_label(level: &selfie::validation::ValidationLevel) -> &'static str {
+    use selfie::validation::ValidationLevel;
 
     match level {
         ValidationLevel::Error => "error",
@@ -1296,10 +1350,10 @@ mod tests {
     #[tokio::test]
     async fn a_validation_issue_carries_its_location_as_numbers() {
         let issue = |location| selfie::package::event::ValidationIssueData {
-            category: "RequiredField".to_string(),
+            category: ValidationErrorCategory::RequiredField,
             field: "name".to_string(),
             message: "m".to_string(),
-            level: selfie::package::event::ValidationLevel::Error,
+            level: selfie::validation::ValidationLevel::Error,
             suggestion: None,
             location,
         };
@@ -1324,6 +1378,58 @@ mod tests {
         assert_eq!(issues[1]["line"], Value::Null);
         assert_eq!(issues[1]["column"], Value::Null);
         assert!(issues[0].get("location").is_none(), "{issues}");
+    }
+
+    // A validation issue's category reaches an assistant as a label, apart from
+    // the words the terminal shows.
+    #[test]
+    fn a_category_is_a_snake_case_label() {
+        assert_eq!(
+            validation_category_label(ValidationErrorCategory::RequiredField),
+            "required_field"
+        );
+        assert_eq!(
+            validation_category_label(ValidationErrorCategory::UrlFormat),
+            "url_format"
+        );
+    }
+
+    // A refused push names each file and each issue as fields.
+    #[test]
+    fn a_push_failure_names_its_file_and_issues() {
+        use selfie::sync_service::{
+            PackageValidationFailure, PackageValidationIssue, PushIssueCategory,
+        };
+
+        let failures = vec![PackageValidationFailure {
+            path: "packages/bat.yml".to_string(),
+            issues: vec![PackageValidationIssue {
+                level: selfie::validation::ValidationLevel::Error,
+                category: PushIssueCategory::ParseError,
+                field: "-".to_string(),
+                message: "unclosed bracket".to_string(),
+                location: Some(selfie::yaml::SourceLocation::new(2, 1)),
+                suggestion: None,
+            }],
+        }];
+
+        let json = push_failures_json(&failures);
+
+        assert_eq!(
+            json,
+            vec![serde_json::json!({
+                "path": "packages/bat.yml",
+                "issues": [{
+                    "level": "error",
+                    "category": "parse_error",
+                    "field": "-",
+                    "message": "unclosed bracket",
+                    "suggestion": null,
+                    "line": 2,
+                    "column": 1,
+                }],
+            })]
+        );
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

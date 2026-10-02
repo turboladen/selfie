@@ -1343,7 +1343,7 @@ impl std::fmt::Display for OperationFailure {
             } => {
                 let errors = issues
                     .iter()
-                    .filter(|issue| matches!(issue.level, ValidationLevel::Error))
+                    .filter(|issue| issue.level == crate::validation::ValidationLevel::Error)
                     .count();
                 write!(
                     f,
@@ -3448,21 +3448,13 @@ impl ValidationStatus {
 /// Individual validation issue
 #[derive(Debug, Clone)]
 pub struct ValidationIssueData {
-    pub category: String,
+    pub category: crate::validation::ValidationErrorCategory,
     pub field: String,
     pub message: String,
-    pub level: ValidationLevel,
+    pub level: crate::validation::ValidationLevel,
     pub suggestion: Option<String>,
     /// Where in the file the issue is, when the file says.
     pub location: Option<crate::yaml::SourceLocation>,
-}
-
-/// Validation issue level
-#[derive(Debug, Clone)]
-pub enum ValidationLevel {
-    Error,
-    Warning,
-    Info,
 }
 
 /// Log levels for the `EventSender` log method

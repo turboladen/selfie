@@ -221,14 +221,12 @@ pub(super) fn creatable_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationLevel;
     use crate::{
         config::SelfieConfigBuilder,
         package::{
             PackageBuilder,
-            event::{
-                OperationContext, OperationFailure, PackageEvent, ValidationLevel,
-                metadata::OperationType,
-            },
+            event::{OperationContext, OperationFailure, PackageEvent, metadata::OperationType},
             port::{
                 MockPackageRepository, PackageError, PackageListError, PackageParseError,
                 PackageRepoError,

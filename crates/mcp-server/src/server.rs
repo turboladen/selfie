@@ -753,7 +753,7 @@ with all=true, when a key in any environment cannot be trusted. A result that co
 
     #[tool(
         name = "selfie_sync_push",
-        description = "Currently disabled for anything that would create a commit: with changes to commit it refuses before staging anything, because its commit could record every tracked file as deleted; commit with git instead. With nothing new to commit it still pushes commits that already exist. The parameters are accepted but have no effect while disabled."
+        description = "Currently disabled for anything that would create a commit: with changes to commit it refuses before staging anything, because its commit could record every tracked file as deleted; commit with git instead. With nothing new to commit it still pushes commits that already exist. The parameters are accepted but have no effect while disabled. When a changed spec fails validation, the error result also carries `failures`: one per file, with `path` and `issues`, each issue with `level`, `category`, `field`, `message`, `suggestion`, `line` and `column`."
     )]
     async fn selfie_sync_push(
         &self,
@@ -770,10 +770,15 @@ with all=true, when a key in any environment cannot be trusted. A result that co
         let prepare_result = match self.sync_service.prepare_push(&options).await {
             Ok(result) => result,
             Err(e) => {
-                let data = serde_json::json!({
+                let mut data = serde_json::json!({
                     "status": "error",
                     "message": e.to_string(),
                 });
+                // Which file and field failed, so an assistant can fix them
+                // without parsing the message.
+                if let selfie::sync_service::SyncError::ValidationFailed { failures } = &e {
+                    data["failures"] = event_collector::push_failures_json(failures).into();
+                }
                 return Ok(CallToolResult::error(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&data).unwrap_or_default(),
                 )]));
