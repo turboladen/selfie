@@ -65,10 +65,18 @@ pub(crate) async fn handle_track(
     let dotfiles_repo = create_dotfiles_repository(config);
 
     // Check if this file is already tracked anywhere
-    let (existing_tracker, unchecked) = find_existing_tracker(file, config, &dotfiles_repo);
+    let (trackers, unchecked) = find_existing_trackers(file, config, &dotfiles_repo);
 
-    if let Some(tracked) = existing_tracker {
-        return report_existing_tracker(&tracked, display);
+    if !trackers.is_empty() {
+        // A spec selfie could not read may track the file as well, so the count
+        // below may be short; say so first.
+        let mut reported: HashSet<String> = HashSet::new();
+        for warning in unchecked {
+            if reported.insert(warning.clone()) {
+                display.print_warning(warning);
+            }
+        }
+        return report_existing_trackers(&trackers, display);
     }
 
     // Collect available package names for the prompt. Done before anything from
@@ -133,10 +141,40 @@ pub(crate) async fn handle_track(
     }
 }
 
+/// Report every spec that already tracks a file, and the exit code for them:
+/// the worst of each one's.
+fn report_existing_trackers(trackers: &[ExistingTracker], display: &DisplayManager) -> i32 {
+    let mut warned = HashSet::new();
+    let worst = trackers
+        .iter()
+        .map(|tracked| report_existing_tracker(tracked, display, &mut warned))
+        .max()
+        .unwrap_or(Exit::Clean.code());
+
+    // Two specs deploying one file overwrite each other on every apply, so the
+    // file is not handled, whatever each entry says on its own.
+    if let [_, _, ..] = trackers {
+        let names: Vec<&str> = trackers.iter().map(|t| t.spec_name.as_str()).collect();
+        display.print_error(format!(
+            "{} specs track this file: {}. Keep it in one of them.",
+            trackers.len(),
+            names.join(", ")
+        ));
+        return worst.max(Exit::Failed.code());
+    }
+    worst
+}
+
 /// Report a file some spec already tracks, and the exit code for it.
 ///
-/// Returns 1 for an entry no apply can ever deploy, 0 otherwise.
-fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) -> i32 {
+/// Returns 1 for an entry no apply can ever deploy, 0 otherwise. A warning
+/// about the target is printed once, however many specs track it: `warned`
+/// holds the ones already printed.
+fn report_existing_tracker(
+    tracked: &ExistingTracker,
+    display: &DisplayManager,
+    warned: &mut HashSet<String>,
+) -> i32 {
     let ExistingTracker {
         spec_name,
         spec_path,
@@ -182,7 +220,9 @@ fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) 
     // that is not a regular file would otherwise be reported here as plainly
     // tracked and mentioned by nothing. Shares the library's wording so the two
     // cannot describe one situation differently.
-    if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded) {
+    if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded)
+        && warned.insert(warning.clone())
+    {
         display.print_warning(warning);
     }
 
@@ -366,11 +406,11 @@ fn package_listing_warning(error: &PackageListError) -> String {
     )
 }
 
-/// Check if a file is already tracked by any package or standalone dotfile.
+/// Find every package or standalone dotfile spec that already tracks a file.
 ///
 /// Scans both the packages directory and the dotfiles directory for a dotfile
-/// entry whose target matches the given file path. Returns the name of the
-/// package that tracks it and the entry's own target, or `None`, paired with a
+/// entry whose target matches the given file path. Returns each spec that tracks
+/// it, with the entry's own target, in the order scanned, paired with a
 /// warning for every spec it could not read, for a package directory it could not
 /// list, and for a dotfiles directory it could not read or write a new entry into.
 ///
@@ -380,14 +420,18 @@ fn package_listing_warning(error: &PackageListError) -> String {
 ///
 /// The entry's target rather than the argument, because the two differ: the spec
 /// holds `~/…` and the caller may pass an absolute path for the same file.
-fn find_existing_tracker(
+fn find_existing_trackers(
     file: &str,
     config: &CliConfig,
     dotfiles_repo: &YamlPackageRepository<RealFileSystem>,
-) -> (Option<ExistingTracker>, Vec<String>) {
+) -> (Vec<ExistingTracker>, Vec<String>) {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
     let mut skipped = Vec::new();
+    let mut trackers: Vec<ExistingTracker> = Vec::new();
+    // The two directories may be one, or one may link to the other, so a spec
+    // file is counted once however many scans list it.
+    let mut seen = HashSet::new();
 
     let package_repo = YamlPackageRepository::new(
         RealFileSystem,
@@ -422,23 +466,27 @@ fn find_existing_tracker(
             skipped.push(selfie::package::service::skipped_spec_warning(invalid));
         }
 
+        // Every spec, not the first: a file two specs track is one the user
+        // has to hear about twice. One entry per spec is enough to name it.
         for pkg in output.valid_packages() {
-            for (_scope, entry) in pkg.dotfiles_with_scope() {
-                let entry_expanded = selfie::fs::expand_target_path(&fs, entry.target());
-                if entry_expanded == expanded {
-                    return (
-                        Some(ExistingTracker {
-                            spec_name: pkg.name().to_string(),
-                            spec_path: pkg.path().to_path_buf(),
-                            target: entry.target().to_string(),
-                        }),
-                        skipped,
-                    );
-                }
+            if let Some((_scope, entry)) = pkg
+                .dotfiles_with_scope()
+                .into_iter()
+                .find(|(_, entry)| selfie::fs::expand_target_path(&fs, entry.target()) == expanded)
+                && seen.insert(
+                    std::fs::canonicalize(pkg.path()).unwrap_or_else(|_| pkg.path().clone()),
+                )
+            {
+                trackers.push(ExistingTracker {
+                    // The name selfie finds the spec by, which is its file's.
+                    spec_name: common::file_name_of(pkg).unwrap_or_else(|| pkg.name().to_string()),
+                    spec_path: pkg.path().to_path_buf(),
+                    target: entry.target().to_string(),
+                });
             }
         }
     }
-    (None, skipped)
+    (trackers, skipped)
 }
 
 /// Load sorted package names from the repository, along with a warning for every
@@ -492,7 +540,7 @@ mod tests {
     // distinguishable to the caller. Asserted on the returned list because the
     // prompt that follows needs a terminal, which a test cannot give it.
     #[test]
-    fn find_existing_tracker_reports_a_spec_it_could_not_read() {
+    fn find_existing_trackers_reports_a_spec_it_could_not_read() {
         use selfie::config::SelfieConfigBuilder;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -512,9 +560,9 @@ mod tests {
         );
 
         let (found, skipped) =
-            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
-        assert!(found.is_none(), "nothing readable tracks that file");
+        assert!(found.is_empty(), "nothing readable tracks that file");
         assert_eq!(skipped.len(), 1, "the unreadable spec must be reported");
         assert!(skipped[0].contains("brokenpkg.yaml"), "got: {}", skipped[0]);
     }
@@ -522,7 +570,7 @@ mod tests {
     // The control: with every spec readable, a run that finds no tracker has
     // nothing to report, so a `skipped` that is never empty would fail here.
     #[test]
-    fn find_existing_tracker_reports_nothing_for_a_clean_directory() {
+    fn find_existing_trackers_reports_nothing_for_a_clean_directory() {
         use selfie::config::SelfieConfigBuilder;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -546,16 +594,16 @@ mod tests {
         );
 
         let (found, skipped) =
-            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
-        assert!(found.is_none());
+        assert!(found.is_empty());
         assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
     // The package directory is always expected, so one that will not list is a
     // place the scan could not check, and the answer says so.
     #[test]
-    fn find_existing_tracker_warns_about_a_package_directory_that_is_not_there() {
+    fn find_existing_trackers_warns_about_a_package_directory_that_is_not_there() {
         use selfie::config::SelfieConfigBuilder;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -573,9 +621,9 @@ mod tests {
         );
 
         let (found, skipped) =
-            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
-        assert!(found.is_none());
+        assert!(found.is_empty());
         assert_eq!(skipped.len(), 1, "got: {skipped:?}");
         assert!(
             skipped[0].starts_with("The package directory /"),
@@ -592,7 +640,7 @@ mod tests {
     // A dotfiles directory that is not there holds no spec that could track the
     // file, so it is not something the scan failed to check.
     #[test]
-    fn find_existing_tracker_is_silent_about_a_dotfiles_directory_that_is_not_there() {
+    fn find_existing_trackers_is_silent_about_a_dotfiles_directory_that_is_not_there() {
         use selfie::config::SelfieConfigBuilder;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -612,9 +660,9 @@ mod tests {
         );
 
         let (found, skipped) =
-            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
-        assert!(found.is_none());
+        assert!(found.is_empty());
         assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
