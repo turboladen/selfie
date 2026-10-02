@@ -290,7 +290,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate would before it is written: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way."
+        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate would before it is written: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\")."
     )]
     async fn spec_create(
         &self,
@@ -1001,6 +1001,22 @@ mod tests {
                 assert_eq!(quoted(text, label), offered, "{name} and {label}");
             }
         }
+    }
+
+    // The spec_create description lists exactly the refusal labels MCP can
+    // produce. It builds every spec at `<package_directory>/<name>.yml`, so only a
+    // bad name can be refused; the other two cannot arise from it.
+    #[test]
+    fn the_spec_create_description_lists_its_refusal_labels() {
+        use selfie::package::event::Uncreatable;
+
+        let description = SelfieServer::spec_create_tool_attr()
+            .description
+            .unwrap_or_default();
+        assert_eq!(
+            labels_after(&description, "A name that breaks the spec-name rule"),
+            [Uncreatable::InvalidName.kind()]
+        );
     }
 
     // The quoted labels in the sentence of `description` that starts at `lead`.

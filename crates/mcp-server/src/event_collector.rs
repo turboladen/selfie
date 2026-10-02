@@ -21,6 +21,10 @@ fn failure_json(failure: &OperationFailure) -> Value {
     if let OperationFailure::InvalidSpec { issues, .. } = failure {
         payload["issues"] = issues.iter().map(issue_json).collect::<Vec<_>>().into();
     }
+    // A refused create carries its reason as a label.
+    if let OperationFailure::Uncreatable { reason, .. } = failure {
+        payload["kind"] = reason.kind().into();
+    }
     // A field, so an assistant can tell a typo from a spec that failed to load
     // without matching the sentence in `error`.
     if let OperationFailure::NoSuchPackage { reason, .. } = failure {
@@ -1609,6 +1613,19 @@ mod tests {
         let outcomes: Vec<&Value> = rows.iter().map(|r| &r["outcome"]).collect();
         assert_eq!(outcomes, ["clean", "found", "failed"]);
         assert!(rows.iter().all(|r| r.get("status").is_none()), "{rows:?}");
+    }
+
+    // A refused spec create says why as a label.
+    #[test]
+    fn an_uncreatable_spec_carries_its_kind() {
+        use selfie::package::event::Uncreatable;
+
+        let payload = failure_json(&OperationFailure::Uncreatable {
+            package_name: "../x".to_string(),
+            reason: Uncreatable::InvalidName,
+        });
+
+        assert_eq!(payload["kind"], "invalid_name");
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

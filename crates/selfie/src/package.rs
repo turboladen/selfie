@@ -297,11 +297,8 @@ pub(crate) fn is_valid_spec_name(name: &str) -> bool {
 /// breaks the rule every spec's name follows.
 #[must_use]
 pub fn spec_name_refusal(name: &str) -> Option<String> {
-    (!is_valid_spec_name(name)).then(|| {
-        format!(
-            "Refusing to create '{name}': it is not a valid spec name. Rename it: {SPEC_NAME_RULE}."
-        )
-    })
+    (!is_valid_spec_name(name))
+        .then(|| crate::package::event::Uncreatable::InvalidName.refusal(name))
 }
 
 /// The rule [`is_valid_spec_name`] applies, worded as a remedy for a refusal.

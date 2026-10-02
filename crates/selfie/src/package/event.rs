@@ -1231,6 +1231,12 @@ pub enum OperationFailure {
         package_name: String,
         issues: Vec<ValidationIssueData>,
     },
+    /// A spec `spec create` refuses to write for its name or its path, before
+    /// anything is looked up or written.
+    Uncreatable {
+        package_name: String,
+        reason: Uncreatable,
+    },
     /// A command named a package it could not find.
     // Typed rather than folded into `Generic` so an adapter can tell a typo from
     // a spec that failed to load without parsing the sentence.
@@ -1240,6 +1246,54 @@ pub enum OperationFailure {
     },
     /// Generic failure with a freeform message
     Generic(String),
+}
+
+/// Why `spec create` refuses a spec by its name or its path.
+///
+/// [`kind`](Self::kind) is its label, the variant's name in snake_case.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum Uncreatable {
+    /// The package name breaks the spec-name rule.
+    InvalidName,
+    /// The spec's path is not directly in the package directory.
+    OutsidePackageDirectory {
+        path: std::path::PathBuf,
+        directory: std::path::PathBuf,
+    },
+    /// The spec's file name is not one the loader reads as a spec.
+    UnloadableFileName { path: std::path::PathBuf },
+}
+
+impl Uncreatable {
+    /// The label for this refusal, such as `"invalid_name"`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+
+    /// The sentence refusing to create `package_name` for this reason.
+    #[must_use]
+    pub fn refusal(&self, package_name: &str) -> String {
+        match self {
+            Self::InvalidName => format!(
+                "Refusing to create '{package_name}': it is not a valid spec name. Rename it: {}.",
+                crate::package::SPEC_NAME_RULE
+            ),
+            Self::OutsidePackageDirectory { path, directory } => format!(
+                "Refusing to create '{package_name}': {} is not directly in the package \
+                 directory {}, where every spec has to be.",
+                path.display(),
+                directory.display()
+            ),
+            Self::UnloadableFileName { path } => format!(
+                "Refusing to create '{package_name}': selfie would not load {} as a spec. Its \
+                 name before the .yml or .yaml extension has to follow the rule for a package \
+                 name.",
+                path.display()
+            ),
+        }
+    }
 }
 
 /// A write to a spec that validation can refuse.
@@ -1377,6 +1431,10 @@ impl std::fmt::Display for OperationFailure {
                     ),
                 }
             }
+            OperationFailure::Uncreatable {
+                package_name,
+                reason,
+            } => f.write_str(&reason.refusal(package_name)),
             OperationFailure::NoSuchPackage { name, reason } => match reason {
                 NoSuchPackageReason::NotFound => write!(f, "No package named '{name}' was found"),
                 NoSuchPackageReason::MaybeInUnlistableDirectory => write!(
@@ -3893,6 +3951,46 @@ mod tests {
         assert_eq!(
             failure.to_string(),
             "The package cannot be written as YAML: a value in it has a shape YAML cannot hold"
+        );
+    }
+
+    // Each refusal's label is pinned, since an MCP client branches on it.
+    #[test]
+    fn every_uncreatable_reason_has_its_label() {
+        let cases = [
+            (Uncreatable::InvalidName, "invalid_name"),
+            (
+                Uncreatable::OutsidePackageDirectory {
+                    path: "/x/a.yml".into(),
+                    directory: "/p".into(),
+                },
+                "outside_package_directory",
+            ),
+            (
+                Uncreatable::UnloadableFileName {
+                    path: "/p/a b.yml".into(),
+                },
+                "unloadable_file_name",
+            ),
+        ];
+        for (reason, label) in cases {
+            assert_eq!(reason.kind(), label, "{reason:?}");
+            // The failure reads as its reason's sentence, which the CLI's own
+            // name check shares.
+            let failure = OperationFailure::Uncreatable {
+                package_name: "x y".to_string(),
+                reason: reason.clone(),
+            };
+            assert_eq!(failure.to_string(), reason.refusal("x y"), "{reason:?}");
+        }
+        assert_eq!(
+            crate::package::spec_name_refusal("x y"),
+            Some(Uncreatable::InvalidName.refusal("x y"))
+        );
+        assert!(
+            Uncreatable::InvalidName
+                .refusal("x y")
+                .contains("it is not a valid spec name")
         );
     }
 
