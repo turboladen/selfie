@@ -167,39 +167,35 @@ where
         return failure;
     }
 
-    // Step 2: Check installation status for the current environment. Waiting
-    // when a check command may run: the package's own, or one belonging to a
-    // dependency or recommend, each of which is looked up and checked.
+    // Step 2: Check installation status for the current environment. The
+    // dependencies and recommends are looked up first, so the step is marked
+    // waiting only when a check command will actually run, and names whose.
     let env_config = package_blob.package.environments().get(current_env);
-    let step = match env_config {
-        Some(env) if env.dependencies().is_empty() && env.recommends().is_empty() => {
-            match env.check() {
-                Some(_) => Some(
-                    progress
-                        .next_waiting(
-                            sender,
-                            format!("Running the check command for {package_name}"),
-                        )
-                        .await,
-                ),
-                None => None,
+    let looked_up = env_config.map(|env| {
+        (
+            look_up_dependencies(env.dependencies(), current_env, repo),
+            look_up_dependencies(env.recommends(), current_env, repo),
+        )
+    });
+    let mut checked: Vec<&str> = Vec::new();
+    if env_config.is_some_and(|env| env.check().is_some()) {
+        checked.push(package_name);
+    }
+    if let Some((dependencies, recommends)) = &looked_up {
+        for (name, lookup) in dependencies.iter().chain(recommends) {
+            if matches!(lookup, DependencyLookup::Check(_)) && !checked.contains(&name.as_str()) {
+                checked.push(name);
             }
         }
-        Some(_) => Some(
-            progress
-                .next_waiting(
-                    sender,
-                    format!("Running check commands for {package_name} and what it depends on"),
-                )
-                .await,
-        ),
-        None => None,
-    };
-    if step.is_none() {
-        progress.next(sender, "Checking installation status").await;
     }
+    let step = if checked.is_empty() {
+        progress.next(sender, "Checking installation status").await;
+        None
+    } else {
+        Some(progress.next_waiting(sender, checks_label(&checked)).await)
+    };
 
-    if let Some(env_config) = env_config {
+    if let (Some(env_config), Some((dependencies, recommends))) = (env_config, looked_up) {
         let package_dir = config.package_directory();
         let status = get_installation_status(
             package_name,
@@ -212,20 +208,18 @@ where
         .await;
         let max_concurrent = config.max_concurrency().get();
         let dependency_statuses = check_dependency_statuses(
-            env_config.dependencies(),
+            dependencies,
             current_env,
             package_dir,
-            repo,
             command_runner,
             token,
             max_concurrent,
         )
         .await;
         let recommend_statuses = check_dependency_statuses(
-            env_config.recommends(),
+            recommends,
             current_env,
             package_dir,
-            repo,
             command_runner,
             token,
             max_concurrent,
@@ -275,96 +269,130 @@ where
     ))
 }
 
-async fn check_dependency_statuses<PR, CR>(
-    dependencies: &[String],
-    current_env: &str,
-    package_dir: &Path,
-    repo: &PR,
-    command_runner: &CR,
-    token: &CancellationToken,
-    max_concurrent: usize,
-) -> Vec<DependencyStatus>
-where
-    PR: PackageRepository,
-    CR: CommandRunner,
-{
-    if dependencies.is_empty() {
-        return vec![];
+/// The status step's label: the packages whose checks run, the first few by
+/// name and the rest counted, so the line stays one terminal line long.
+fn checks_label(checked: &[&str]) -> String {
+    const NAMED: usize = 3;
+    let commands = if checked.len() == 1 {
+        "command"
+    } else {
+        "commands"
+    };
+    let mut names = checked
+        .iter()
+        .take(NAMED)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if checked.len() > NAMED {
+        names.push_str(&format!(" and {} more", checked.len() - NAMED));
     }
-
-    let mut results = Vec::with_capacity(dependencies.len());
-    for chunk in dependencies.chunks(max_concurrent) {
-        let futures: Vec<_> = chunk
-            .iter()
-            .map(|dep_name| {
-                check_single_dependency(
-                    dep_name,
-                    current_env,
-                    package_dir,
-                    repo,
-                    command_runner,
-                    token,
-                )
-            })
-            .collect();
-        results.extend(futures::future::join_all(futures).await);
-    }
-    results
+    format!("Running the check {commands} for {names}")
 }
 
-async fn check_single_dependency<PR, CR>(
+/// What looking a dependency up found, before any command runs.
+enum DependencyLookup {
+    /// The dependency has a check command, still to run.
+    Check(String),
+    /// The dependency's status is known without running anything.
+    Known(EnvironmentStatus),
+}
+
+/// Look each of `dependencies` up, in order, running nothing.
+fn look_up_dependencies<PR: PackageRepository>(
+    dependencies: &[String],
+    current_env: &str,
+    repo: &PR,
+) -> Vec<(String, DependencyLookup)> {
+    dependencies
+        .iter()
+        .map(|name| (name.clone(), look_up_dependency(name, current_env, repo)))
+        .collect()
+}
+
+fn look_up_dependency<PR: PackageRepository>(
     dep_name: &str,
     current_env: &str,
-    package_dir: &Path,
     repo: &PR,
-    command_runner: &CR,
-    token: &CancellationToken,
-) -> DependencyStatus
-where
-    PR: PackageRepository,
-    CR: CommandRunner,
-{
+) -> DependencyLookup {
     let dep_package = match repo.get_package(dep_name) {
         Ok(pkg) => pkg,
-        Err(err) => {
-            return DependencyStatus {
-                name: dep_name.to_string(),
-                status: EnvironmentStatus::Unknown(format!("{err}")),
-            };
-        }
+        Err(err) => return DependencyLookup::Known(EnvironmentStatus::Unknown(format!("{err}"))),
     };
 
     // The refusal is asked before the lookup below, which a shadowing key makes
     // miss or find a decoy.
     if let Some(reason) = dep_package.package.spec_refusal(current_env) {
-        return DependencyStatus {
-            name: dep_name.to_string(),
-            status: EnvironmentStatus::Unknown(format!("is refused: {reason}")),
-        };
+        return DependencyLookup::Known(EnvironmentStatus::Unknown(format!(
+            "is refused: {reason}"
+        )));
     }
 
     let Some(env_config) = dep_package.package.environments().get(current_env) else {
-        return DependencyStatus {
-            name: dep_name.to_string(),
-            status: EnvironmentStatus::Unknown("not in current environment".to_string()),
-        };
+        return DependencyLookup::Known(EnvironmentStatus::Unknown(
+            "not in current environment".to_string(),
+        ));
     };
 
-    let check_cmd = env_config.check().map(str::to_string);
-    let result = super::check::execute_check_command_quiet(
-        dep_name,
-        current_env,
-        check_cmd.as_deref(),
-        package_dir,
-        command_runner,
-        token,
-    )
-    .await;
-
-    DependencyStatus {
-        name: dep_name.to_string(),
-        status: check_result_to_status(result.result),
+    match env_config.check() {
+        Some(command) => DependencyLookup::Check(command.to_string()),
+        None => DependencyLookup::Known(check_result_to_status(CheckResult::NoCheckCommand)),
     }
+}
+
+/// The status of each looked-up dependency, in the order given, running the
+/// check commands at most `max_concurrent` at a time.
+async fn check_dependency_statuses<CR: CommandRunner>(
+    looked_up: Vec<(String, DependencyLookup)>,
+    current_env: &str,
+    package_dir: &Path,
+    command_runner: &CR,
+    token: &CancellationToken,
+    max_concurrent: usize,
+) -> Vec<DependencyStatus> {
+    // Only the checks are chunked, so a known status never takes a slot a
+    // command could use. `join_all` answers in the order it was given.
+    let checks: Vec<(&str, &str)> = looked_up
+        .iter()
+        .filter_map(|(name, lookup)| match lookup {
+            DependencyLookup::Check(command) => Some((name.as_str(), command.as_str())),
+            DependencyLookup::Known(_) => None,
+        })
+        .collect();
+    let mut checked = Vec::with_capacity(checks.len());
+    for chunk in checks.chunks(max_concurrent.max(1)) {
+        let futures: Vec<_> = chunk
+            .iter()
+            .map(|(name, command)| async move {
+                let result = super::check::execute_check_command_quiet(
+                    name,
+                    current_env,
+                    Some(command),
+                    package_dir,
+                    command_runner,
+                    token,
+                )
+                .await;
+                check_result_to_status(result.result)
+            })
+            .collect();
+        checked.extend(futures::future::join_all(futures).await);
+    }
+
+    let mut checked = checked.into_iter();
+    looked_up
+        .into_iter()
+        .map(|(name, lookup)| DependencyStatus {
+            status: match lookup {
+                DependencyLookup::Known(status) => status,
+                // One status per check, taken in the same order the checks ran.
+                DependencyLookup::Check(_) => checked
+                    .next()
+                    .unwrap_or_else(|| EnvironmentStatus::Unknown("not checked".to_string())),
+            },
+            name,
+        })
+        .collect()
 }
 
 fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
@@ -418,6 +446,21 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Output;
     use tokio::sync::mpsc;
+
+    // The step's label names the first three packages and counts the rest, so it
+    // stays one line however many dependencies a package has.
+    #[test]
+    fn the_status_step_names_three_checks_and_counts_the_rest() {
+        assert_eq!(checks_label(&["a"]), "Running the check command for a");
+        assert_eq!(
+            checks_label(&["a", "b", "c"]),
+            "Running the check commands for a, b, c"
+        );
+        assert_eq!(
+            checks_label(&["a", "b", "c", "d", "e"]),
+            "Running the check commands for a, b, c and 2 more"
+        );
+    }
 
     fn test_sender() -> (EventSender, mpsc::Receiver<PackageEvent>) {
         let (tx, rx) = mpsc::channel(256);
