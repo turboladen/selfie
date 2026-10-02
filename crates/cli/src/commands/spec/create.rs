@@ -89,12 +89,63 @@ pub(crate) async fn handle_create(
         create_basic_package(&package_name, config)
     };
 
-    // Use PackageService::create to persist (hexagonal pattern)
+    let (created_name, file_path) = match write_spec(service, package, display).await {
+        Ok(created) => created,
+        Err(exit_code) => return exit_code,
+    };
+
+    if !interactive {
+        display.print_info("Package created. Use 'selfie spec edit' to customize it.");
+        return Exit::Clean.code();
+    }
+
+    let edit_now = display.prompt(
+        Confirm::with_theme(&SimpleTheme)
+            .with_prompt("Would you like to open the package file for editing now?")
+            .default(true),
+    );
+
+    match edit_now {
+        Ok(true) => {
+            let success_message = format!(
+                "Package '{created_name}' created and saved at {}",
+                file_path.display()
+            );
+            common::open_editor(&file_path, display, Some(success_message))
+        }
+        Ok(false) => {
+            display.print_info("Package created. You can edit it later with 'selfie spec edit'.");
+            Exit::Clean.code()
+        }
+        Err(failure) => display
+            .refuse_prompt(
+                &failure,
+                "Asking whether to open the editor",
+                format!(
+                    "Open it later with `selfie spec edit {}`.",
+                    name_argument(&created_name)
+                )
+                .as_str(),
+            )
+            .code(),
+    }
+}
+
+/// Write `package` through the service, printing what the run reports, and
+/// return the name and path the spec was created under.
+///
+/// # Errors
+///
+/// The exit code when the spec was not created.
+pub(super) async fn write_spec(
+    service: &impl SpecService,
+    package: selfie::package::Package,
+    display: &DisplayManager,
+) -> Result<(String, PathBuf), i32> {
     let event_stream = service.create(package).await;
 
-    // Process the event stream with custom handling for create-specific events
-    // The name and path the library created the spec under. The name is the file's,
-    // which the interactive prompts may have made different from the argument.
+    // The name and path the library created the spec under. The name is the
+    // file's, which the library judges the spec by.
     let mut created: Option<(String, PathBuf)> = None;
     let processor = EventProcessor::new(display.clone());
     let result = processor
@@ -127,47 +178,23 @@ pub(crate) async fn handle_create(
         .await;
 
     if result.exit_code != 0 {
-        return result.exit_code;
+        return Err(result.exit_code);
     }
+    created.ok_or(Exit::Failed.code())
+}
 
-    // Ask if user wants to edit the file (only in interactive mode)
-    if interactive {
-        if let Some((ref created_name, ref file_path)) = created {
-            let edit_now = display.prompt(
-                Confirm::with_theme(&SimpleTheme)
-                    .with_prompt("Would you like to open the package file for editing now?")
-                    .default(true),
-            );
-
-            match edit_now {
-                Ok(true) => {
-                    let success_message = format!(
-                        "Package '{}' created and saved at {}",
-                        created_name,
-                        file_path.display()
-                    );
-                    common::open_editor(file_path, display, Some(success_message))
-                }
-                Ok(false) => {
-                    display.print_info(
-                        "Package created. You can edit it later with 'selfie spec edit'.",
-                    );
-                    Exit::Clean.code()
-                }
-                Err(failure) => display
-                    .refuse_prompt(
-                        &failure,
-                        "Asking whether to open the editor",
-                        format!("Open {} with 'selfie spec edit'.", file_path.display()).as_str(),
-                    )
-                    .code(),
-            }
-        } else {
-            Exit::Clean.code()
+/// Why a spec cannot be created under `name`, given the namespace check's
+/// refusal.
+pub(super) fn name_check_refusal(name: &str, error: &NamespaceValidationError) -> String {
+    match error {
+        NamespaceValidationError::Conflict(conflict) => {
+            format!("{conflict} Choose a different name.")
         }
-    } else {
-        display.print_info("Package created. Use 'selfie spec edit' to customize it.");
-        Exit::Clean.code()
+        // The directory is the problem, not the name.
+        NamespaceValidationError::PackageDirectoryUnreadable(_)
+        | NamespaceValidationError::DotfilesDirectoryUnreadable(_) => {
+            format!("Cannot create '{name}': {error}")
+        }
     }
 }
 
@@ -207,7 +234,7 @@ fn get_valid_package_name(
                 error @ (NamespaceValidationError::PackageDirectoryUnreadable(_)
                 | NamespaceValidationError::DotfilesDirectoryUnreadable(_)),
             ) => {
-                display.print_error(format!("Cannot create '{current_name}': {error}"));
+                display.print_error(name_check_refusal(&current_name, &error));
                 return Err(Exit::Failed.code());
             }
             Err(NamespaceValidationError::Conflict(conflict)) => {
@@ -312,7 +339,12 @@ fn get_valid_package_name(
     }
 }
 
-fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::package::Package {
+/// The template spec for `package_name`: one environment, the configured one,
+/// with placeholder commands, written to `<name>.yml` in the package directory.
+pub(super) fn create_basic_package(
+    package_name: &str,
+    config: &CliConfig,
+) -> selfie::package::Package {
     let mut environments = Environments::new();
 
     // Use the environment from config (which may be overridden by --environment)

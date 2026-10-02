@@ -187,7 +187,6 @@ pub(crate) async fn handle_remove(
 #[cfg(test)]
 mod tests {
     use selfie::fs::MockFileSystem;
-    use selfie::package::port::MockPackageRepository;
     use std::path::PathBuf;
     use test_common::test_config_with_dir;
 
@@ -387,33 +386,6 @@ environments:
         let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].name(), "dependent-package");
-    }
-
-    #[test]
-    fn test_save_and_remove_workflow_mock_repo() {
-        use selfie::package::port::PackageRepository;
-
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        mock_repo
-            .expect_save_package()
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        mock_repo
-            .expect_remove_package()
-            .with(mockall::predicate::eq("workflow-test"))
-            .times(1)
-            .returning(|_| Ok(()));
-
-        let package_blob = common::create_new_package("workflow-test", &config);
-        let save_result = mock_repo.save_package(package_blob.package(), package_blob.file_path());
-        assert!(save_result.is_ok());
-
-        let remove_result = mock_repo.remove_package("workflow-test");
-        assert!(remove_result.is_ok());
     }
 
     #[test]

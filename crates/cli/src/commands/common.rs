@@ -12,7 +12,7 @@ use selfie::{
     fs::{filesystem::FileSystem, real::RealFileSystem},
     git::GixGitAdapter,
     package::{
-        GetPackage, SpecOrigin, SpecService,
+        SpecOrigin, SpecService,
         event::PackageEvent,
         git_adapter::GixGitStatusProvider,
         port::{PackageListError, PackageRepository},
@@ -309,19 +309,6 @@ fn handle_already_tracked(event: &PackageEvent, display: &DisplayManager) -> boo
     }
 }
 
-/// Save a package to the filesystem with consistent error handling
-pub(crate) fn save_package(
-    repo: &impl PackageRepository,
-    package_blob: &GetPackage,
-    display: &DisplayManager,
-) -> Result<(), i32> {
-    if let Err(e) = repo.save_package(package_blob.package(), package_blob.file_path()) {
-        display.print_error(format!("Failed to save package file: {e}"));
-        return Err(1);
-    }
-    Ok(())
-}
-
 /// Open a file in the user's preferred editor
 ///
 /// Handles common editor functionality including:
@@ -405,11 +392,6 @@ pub(crate) fn check_editor_available(
         }
         None
     }
-}
-
-/// Create a new package template
-pub(crate) fn create_new_package(package_name: &str, config: &CliConfig) -> GetPackage {
-    GetPackage::new(package_name, config.package_directory())
 }
 
 /// Create a package service with repository and command runner
@@ -607,7 +589,7 @@ pub(crate) fn display_generic_environment_suggestion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::package::port::{MockPackageRepository, PackageRepoError};
+    use selfie::package::port::MockPackageRepository;
     use test_common::test_config_with_dir;
 
     // The environments that have the command are listed in order, whatever
@@ -734,23 +716,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_new_package() {
-        // Test package creation logic without filesystem operations
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        let package_blob = create_new_package("test-package", &config);
-
-        assert!(package_blob.is_new());
-        assert_eq!(package_blob.package().name(), "test-package");
-
-        assert_eq!(
-            package_blob.file_path(),
-            package_dir.join("test-package.yml")
-        );
-    }
-
-    #[test]
     fn test_vs_code_wait_flag_logic() {
         // Test that VS Code gets the --wait flag
         let editor = "code";
@@ -766,47 +731,6 @@ mod tests {
             args.iter()
                 .any(|arg| *arg == std::ffi::OsStr::new("--wait"))
         );
-    }
-
-    #[test]
-    fn test_save_package_logic() {
-        // Test save package logic without filesystem operations
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        let package_blob = create_new_package("save-test", &config);
-
-        // Verify package structure is correct before saving
-        assert!(package_blob.is_new());
-        assert_eq!(package_blob.package().name(), "save-test");
-
-        assert_eq!(package_blob.file_path(), package_dir.join("save-test.yml"));
-
-        // Verify it has default environment (since create_new_package uses GetPackage::new)
-        let environments = package_blob.package().environments();
-        assert!(environments.contains_key("default"));
-    }
-
-    #[test]
-    fn test_create_new_package_structure() {
-        // Test package creation logic without filesystem operations
-        // Note: create_new_package uses GetPackage::new which creates a "default" environment
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        let package_blob = create_new_package("structure-test", &config);
-
-        assert!(package_blob.is_new());
-        assert_eq!(package_blob.package().name(), "structure-test");
-
-        assert_eq!(
-            package_blob.file_path(),
-            package_dir.join("structure-test.yml")
-        );
-
-        // create_new_package uses GetPackage::new which creates "default" environment
-        let environments = package_blob.package().environments();
-        assert!(environments.contains_key("default"));
     }
 
     #[test]
@@ -873,87 +797,5 @@ mod tests {
         // Test with colors (just ensure no panic)
         let _colored_key = format_field_key("Test Key", true);
         let _colored_value = format_field_value("Test Value", true);
-    }
-
-    #[test]
-    fn test_save_package_with_mock_repository() {
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        // Mock successful save operation
-        mock_repo
-            .expect_save_package()
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        let package_blob = create_new_package("mock-repo-test", &config);
-        let display = DisplayManager::new(false);
-
-        // Test saving using mocked repository - tests CLI logic, not repository implementation
-        let result = save_package(&mock_repo, &package_blob, &display);
-        assert!(result.is_ok());
-
-        // This demonstrates testing CLI logic without repository implementation details
-    }
-
-    #[test]
-    fn test_save_package_repository_error_handling() {
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        // Mock repository error
-        mock_repo.expect_save_package().times(1).returning(|_, _| {
-            Err(PackageRepoError::IoError(std::sync::Arc::new(
-                std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Simulated repository error",
-                ),
-            )))
-        });
-
-        let package_blob = create_new_package("error-test", &config);
-        let display = DisplayManager::new(false);
-
-        // Test error handling in CLI layer
-        let result = save_package(&mock_repo, &package_blob, &display);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), 1); // Should return error code 1
-
-        // This tests CLI error handling without filesystem dependencies
-    }
-
-    #[test]
-    fn test_package_workflow_with_mock_repository() {
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        // Mock successful save
-        mock_repo
-            .expect_save_package()
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        // Create package blob
-        let package_blob = create_new_package("workflow-test", &config);
-
-        // Verify package structure before saving
-        assert_eq!(package_blob.package().name(), "workflow-test");
-
-        assert!(
-            package_blob
-                .package()
-                .environments()
-                .contains_key("default")
-        );
-
-        // Test saving through CLI layer
-        let display = DisplayManager::new(false);
-        let result = save_package(&mock_repo, &package_blob, &display);
-        assert!(result.is_ok());
-
-        // This demonstrates testing complete CLI workflows without repository implementation
     }
 }

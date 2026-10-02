@@ -1463,15 +1463,14 @@ anchor inside the entry whose name matches one of the entry's fields, such as `_
   install and check commands are unaffected. A refused entry makes the run
   [exit non-zero](../README.md#a-refusal-is-not-a-success), so a script cannot mistake it for a
   clean deploy.
-- Commands that rewrite the file **refuse to save** it, naming the key: `selfie spec edit`,
-  `selfie package track-dotfile`, and the `selfie_spec_update` MCP tool. A rewrite is produced from
+- Commands that rewrite the file **refuse to save** it, naming the key:
+  `selfie package track-dotfile` and the `selfie_spec_update` MCP tool. A rewrite is produced from
   the fields selfie understands, so saving would delete the unrecognized key and quietly turn an
   entry that was being skipped into one that deploys.
 
-  Correct the key by editing the package file in your editor directly. `selfie spec edit` cannot be
-  used for this: it saves the package before opening your editor, so on an affected file it refuses
-  and exits without opening anything. `selfie spec remove` is unaffected — it deletes the file
-  rather than rewriting it.
+  Correct the key in your editor. `selfie spec edit` opens an existing package file exactly as it is
+  written, without saving it first, so it opens an affected file too. `selfie spec remove` is
+  unaffected — it deletes the file rather than rewriting it.
 
 ## YAML anchors
 
@@ -1499,7 +1498,7 @@ dotfiles:
 
 Any other unrecognized key is an error — see [Unrecognized keys](#unrecognized-keys). Anchors are a
 convenience for writing the file; they are resolved when it is read, and are not preserved if selfie
-rewrites the file (for example via `selfie spec edit`).
+rewrites the file (for example via `selfie package track-dotfile`).
 
 ### An anchor inside an entry may not be named after one of that entry's fields
 
