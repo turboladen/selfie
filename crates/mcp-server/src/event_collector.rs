@@ -77,6 +77,14 @@ fn with_source(mut row: Value, source: &DotfileSource) -> Value {
     row
 }
 
+/// The whole payload for a call that failed before it ran an operation, shaped as
+/// a failed operation's is.
+pub(crate) fn failure_payload(failure: &OperationFailure) -> Value {
+    let mut result = failure_json(failure);
+    result["outcome"] = outcome_label(Outcome::Failed).into();
+    serde_json::json!({ "result": result, "data": [] })
+}
+
 /// The `outcome` field's value.
 fn outcome_label(outcome: Outcome) -> &'static str {
     match outcome {
@@ -2033,7 +2041,7 @@ mod tests {
                 environment_status: EnvironmentStatusData {
                     environment_name: "macos".to_string(),
                     is_current: true,
-                    install_command: "brew install git".to_string(),
+                    install_command: Some("brew install git".to_string()),
                     check_command: Some("which git".to_string()),
                     dependencies: vec!["curl".to_string(), "wget".to_string()],
                     dependency_statuses: vec![

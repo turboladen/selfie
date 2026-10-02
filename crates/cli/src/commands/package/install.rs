@@ -69,6 +69,9 @@ pub(crate) async fn handle_install(
 }
 
 /// Display environment error with helpful suggestions from the typed failure data
+///
+/// The failure names the package it is about, which may be a dependency or a
+/// recommend of `package_name`, the package the user asked for.
 fn display_environment_error(
     package_name: &str,
     failure: &OperationFailure,
@@ -79,30 +82,36 @@ fn display_environment_error(
 
     match failure {
         OperationFailure::Package(PackageError::EnvironmentNotFound {
+            package_name: failing,
             available_environments,
+            required_by,
             ..
         }) => {
             common::display_environment_summary(
-                package_name,
+                failing,
                 config.environment(),
                 available_environments,
                 config,
                 display,
                 "install",
             );
+            display_required_by(display, required_by.as_deref());
         }
         OperationFailure::Package(PackageError::NoInstallCommand {
+            package_name: failing,
             environment,
             other_envs_with_install,
+            required_by,
             ..
         }) => {
             common::display_missing_command(
                 display,
                 "install",
-                package_name,
+                failing,
                 environment,
                 other_envs_with_install,
             );
+            display_required_by(display, required_by.as_deref());
         }
         _ => {
             common::display_generic_environment_suggestion(
@@ -113,6 +122,17 @@ fn display_environment_error(
                 "install",
             );
         }
+    }
+}
+
+/// Say which package needs the one the failure is about, when it is a dependency
+/// or a recommend.
+fn display_required_by(display: &DisplayManager, required_by: Option<&str>) {
+    if let Some(required_by) = required_by {
+        display.print_note(format!(
+            "{}'{required_by}' requires it.",
+            crate::display_manager::INDENT
+        ));
     }
 }
 

@@ -246,7 +246,7 @@ where
         let environment_status = EnvironmentStatusData {
             environment_name: current_env.to_string(),
             is_current: true,
-            install_command: env_config.install().to_string(),
+            install_command: env_config.install().map(str::to_string),
             check_command: env_config.check().map(std::string::ToString::to_string),
             dependencies: env_config.dependencies().to_vec(),
             dependency_statuses,

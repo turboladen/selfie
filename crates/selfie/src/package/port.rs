@@ -517,13 +517,19 @@ pub enum PackageError {
     },
 
     /// The requested environment is not configured for this package
-    #[error("Environment `{environment}` not found in package `{package_name}`")]
+    #[error(
+        "Environment `{environment}` not found in package `{package_name}`{}",
+        required_by_clause(required_by.as_deref())
+    )]
     EnvironmentNotFound {
         package_name: String,
         environment: String,
         /// Available environments for suggestions
         available_environments: Vec<String>,
         package_file: PathBuf,
+        /// The package that needs this one, when it is a dependency or a
+        /// recommend of the package being installed.
+        required_by: Option<String>,
     },
 
     /// Package environment exists but has no check command configured
@@ -550,7 +556,9 @@ pub enum PackageError {
 
     /// Package environment exists but has no install command configured
     #[error(
-        "No install command defined for package `{package_name}` in environment `{environment}`"
+        "No install command defined for package `{package_name}` in environment \
+         `{environment}`{}",
+        required_by_clause(required_by.as_deref())
     )]
     NoInstallCommand {
         package_name: String,
@@ -558,7 +566,14 @@ pub enum PackageError {
         package_file: PathBuf,
         /// Whether other environments have install commands (for suggestions)
         other_envs_with_install: Vec<String>,
+        /// The package that needs this one, when it is a dependency or a
+        /// recommend of the package being installed.
+        required_by: Option<String>,
     },
+}
+
+fn required_by_clause(required_by: Option<&str>) -> String {
+    required_by.map_or_else(String::new, |by| format!(", which `{by}` requires"))
 }
 
 /// Output from listing packages in the repository

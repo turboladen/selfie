@@ -120,14 +120,14 @@ async fn get_check_command(
     };
 
     // Get check command from environment
-    match env_config.check.as_ref() {
+    match env_config.check() {
         Some(check_cmd) => {
             sender
                 .send_debug(format!(
                     "Found check command for environment '{current_env}': {check_cmd}"
                 ))
                 .await;
-            Ok(Some(check_cmd.clone()))
+            Ok(Some(check_cmd.to_string()))
         }
         None => handle_missing_check_command(package_name, package_blob, current_env, sender).await,
     }
@@ -145,7 +145,7 @@ async fn handle_missing_check_command(
         .environments()
         .iter()
         .filter_map(|(env_name, env_config)| {
-            if env_config.check.is_some() {
+            if env_config.check().is_some() {
                 Some(env_name.clone())
             } else {
                 None

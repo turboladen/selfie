@@ -2093,3 +2093,395 @@ async fn a_recommend_whose_command_failed_under_a_cancel_is_reported_failed() {
         );
     }
 }
+
+// A blank command is one with no words once whitespace and comments are set
+// aside. It runs nothing, so install, check and audit treat it as no command
+// rather than running it and reporting what an empty shell returns.
+mod blank_commands {
+    use selfie::{
+        fs::RealFileSystem,
+        package::{
+            Package,
+            event::{AuditResult, OperationSuccess},
+            git_adapter::GixGitStatusProvider,
+            port::PackageError,
+            repository::YamlPackageRepository,
+            service::PackageServiceImpl,
+        },
+    };
+    use test_common::{FakeCommandRunner, create_service_test_service_with_runner};
+
+    use super::*;
+
+    fn service(
+        dir: &TempDir,
+        runner: &FakeCommandRunner,
+    ) -> PackageServiceImpl<
+        YamlPackageRepository<RealFileSystem>,
+        FakeCommandRunner,
+        GixGitStatusProvider,
+    > {
+        create_service_test_service_with_runner(dir, runner.clone())
+    }
+
+    // A spec named `name` whose `test` environment holds `body`.
+    fn spec(dir: &TempDir, name: &str, body: &str) {
+        std::fs::write(
+            dir.path().join(format!("{name}.yml")),
+            format!("name: {name}\nenvironments:\n  test:\n{body}"),
+        )
+        .unwrap();
+    }
+
+    fn failure(events: &[PackageEvent]) -> &OperationFailure {
+        match get_operation_result(events) {
+            Some(OperationResult::Failure(failure)) => failure,
+            other => panic!("expected a failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_blank_install_refuses_and_runs_nothing() {
+        for blank in ["\"\"", "\"   \"", "\"# TODO\""] {
+            let dir = TempDir::new().unwrap();
+            spec(&dir, "app", &format!("    install: {blank}\n"));
+            let runner = FakeCommandRunner::new();
+
+            let events = collect_events(
+                service(&dir, &runner)
+                    .install("app", InstallOptions::default())
+                    .await,
+            )
+            .await;
+
+            assert!(
+                matches!(
+                    failure(&events),
+                    OperationFailure::Package(PackageError::NoInstallCommand { .. })
+                ),
+                "{blank}: {events:?}"
+            );
+            assert_eq!(runner.calls(), Vec::new(), "{blank}");
+        }
+    }
+
+    // A blank install is refused before anything runs, so the dependency ahead of
+    // it in the install order is not installed for a package that cannot be.
+    #[tokio::test]
+    async fn a_blank_install_is_refused_before_its_dependencies_install() {
+        let dir = TempDir::new().unwrap();
+        spec(
+            &dir,
+            "app",
+            "    install: \"# TODO\"\n    dependencies: [dep]\n",
+        );
+        spec(
+            &dir,
+            "dep",
+            "    install: \"install-dep\"\n    check: \"check-dep\"\n",
+        );
+        let runner = FakeCommandRunner::new()
+            .failing("check-dep", b"")
+            .succeeding("install-dep", b"");
+
+        let events = collect_events(
+            service(&dir, &runner)
+                .install("app", InstallOptions::default())
+                .await,
+        )
+        .await;
+
+        let OperationFailure::Package(PackageError::NoInstallCommand { package_name, .. }) =
+            failure(&events)
+        else {
+            panic!("expected no install command: {events:?}");
+        };
+        assert_eq!(package_name, "app");
+        assert_eq!(runner.calls(), Vec::new(), "{events:?}");
+    }
+
+    // An installed dependency whose spec still has a placeholder install does not
+    // block what depends on it: its check says it is installed, so nothing about
+    // it needs installing. The check runs once, before anything installs.
+    #[tokio::test]
+    async fn an_installed_dependency_with_a_blank_install_does_not_block() {
+        let dir = TempDir::new().unwrap();
+        spec(
+            &dir,
+            "app",
+            "    install: \"install-app\"\n    check: \"check-app\"\n    dependencies: [pre]\n",
+        );
+        spec(
+            &dir,
+            "pre",
+            "    install: \"# TODO\"\n    check: \"check-pre\"\n",
+        );
+        let runner = FakeCommandRunner::new()
+            .succeeding("check-pre", b"")
+            .failing("check-app", b"")
+            .succeeding("install-app", b"");
+
+        let events = collect_events(
+            service(&dir, &runner)
+                .install("app", InstallOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        let commands: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        assert_eq!(
+            commands.first().map(String::as_str),
+            Some("check-pre"),
+            "{commands:?}"
+        );
+        assert_eq!(
+            commands.iter().filter(|c| *c == "check-pre").count(),
+            1,
+            "{commands:?}"
+        );
+        assert!(
+            commands.contains(&"install-app".to_string()),
+            "{commands:?}"
+        );
+    }
+
+    // A dependency whose install is blank and whose check says it is not installed
+    // cannot be installed, so it is refused, named with the package that requires
+    // it, before anything installs.
+    #[tokio::test]
+    async fn a_dependency_that_cannot_be_installed_is_refused_first_and_named() {
+        let dir = TempDir::new().unwrap();
+        spec(
+            &dir,
+            "app",
+            "    install: \"install-app\"\n    dependencies: [first, pre]\n",
+        );
+        spec(&dir, "first", "    install: \"install-first\"\n");
+        spec(&dir, "pre", "    install: \"\"\n    check: \"check-pre\"\n");
+        let runner = FakeCommandRunner::new()
+            .failing("check-pre", b"")
+            .succeeding("install-first", b"")
+            .succeeding("install-app", b"");
+
+        let events = collect_events(
+            service(&dir, &runner)
+                .install("app", InstallOptions::default())
+                .await,
+        )
+        .await;
+
+        let OperationFailure::Package(PackageError::NoInstallCommand {
+            package_name,
+            required_by,
+            ..
+        }) = failure(&events)
+        else {
+            panic!("expected no install command: {events:?}");
+        };
+        assert_eq!(package_name, "pre");
+        assert_eq!(required_by.as_deref(), Some("app"));
+        let commands: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        assert_eq!(commands, ["check-pre"], "nothing may install: {events:?}");
+    }
+
+    // A dependency with no entry for this environment is refused before anything
+    // installs, named with the package that requires it.
+    #[tokio::test]
+    async fn a_dependency_missing_this_environment_is_refused_first() {
+        let dir = TempDir::new().unwrap();
+        spec(
+            &dir,
+            "app",
+            "    install: \"install-app\"\n    dependencies: [first, elsewhere]\n",
+        );
+        spec(&dir, "first", "    install: \"install-first\"\n");
+        std::fs::write(
+            dir.path().join("elsewhere.yml"),
+            "name: elsewhere\nenvironments:\n  other:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        let runner = FakeCommandRunner::new();
+
+        let events = collect_events(
+            service(&dir, &runner)
+                .install("app", InstallOptions::default())
+                .await,
+        )
+        .await;
+
+        let OperationFailure::Package(PackageError::EnvironmentNotFound {
+            package_name,
+            required_by,
+            ..
+        }) = failure(&events)
+        else {
+            panic!("expected environment not found: {events:?}");
+        };
+        assert_eq!(package_name, "elsewhere");
+        assert_eq!(required_by.as_deref(), Some("app"));
+        assert_eq!(runner.calls(), Vec::new(), "nothing may run: {events:?}");
+    }
+
+    // A recommend is judged the same way: one that cannot be installed fails as a
+    // recommend, and its dependencies are not installed for it.
+    #[tokio::test]
+    async fn a_recommend_that_cannot_be_installed_installs_none_of_its_dependencies() {
+        let dir = TempDir::new().unwrap();
+        spec(
+            &dir,
+            "root",
+            "    install: \"install-root\"\n    recommends: [rec]\n",
+        );
+        spec(
+            &dir,
+            "rec",
+            "    install: \"# TODO\"\n    dependencies: [rdep]\n",
+        );
+        spec(&dir, "rdep", "    install: \"install-rdep\"\n");
+        let runner = FakeCommandRunner::new().succeeding("install-root", b"");
+
+        let events = collect_events(
+            service(&dir, &runner)
+                .install("root", InstallOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::RecommendFailed { recommend_name, .. } if recommend_name == "rec"
+            )),
+            "{events:?}"
+        );
+        let commands: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        assert!(
+            !commands.contains(&"install-rdep".to_string()),
+            "{commands:?}"
+        );
+    }
+
+    // The worst case: a real install beside a blank check. The blank check is no
+    // check, so the install runs.
+    #[tokio::test]
+    async fn a_blank_check_does_not_make_install_think_it_is_installed() {
+        let dir = TempDir::new().unwrap();
+        spec(
+            &dir,
+            "app",
+            "    install: \"install-app\"\n    check: \"\"\n",
+        );
+        let runner = FakeCommandRunner::new().succeeding("install-app", b"");
+
+        let events = collect_events(
+            service(&dir, &runner)
+                .install("app", InstallOptions::default())
+                .await,
+        )
+        .await;
+
+        // The install runs first, with no check before it. (Locating the
+        // installed executable runs `which` afterwards.)
+        let commands: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
+        assert_eq!(
+            commands.first().map(String::as_str),
+            Some("install-app"),
+            "{commands:?}"
+        );
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(
+                    OperationSuccess::PackageInstalled {
+                        was_already_installed: false,
+                        ..
+                    }
+                ))
+            ),
+            "{events:?}"
+        );
+    }
+
+    // An environment whose check is blank is not offered as one that has a check.
+    #[tokio::test]
+    async fn a_blank_check_refuses_and_is_not_offered_elsewhere() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("app.yml"),
+            "name: app\nenvironments:\n  test:\n    install: \"true\"\n    check: \" \"\n  \
+             other:\n    install: \"true\"\n    check: \"# later\"\n  third:\n    install: \
+             \"true\"\n    check: \"check-app\"\n",
+        )
+        .unwrap();
+        let runner = FakeCommandRunner::new();
+
+        let events = collect_events(service(&dir, &runner).check("app").await).await;
+
+        let OperationFailure::Package(PackageError::NoCheckCommand {
+            other_envs_with_check,
+            ..
+        }) = failure(&events)
+        else {
+            panic!("expected no check command: {events:?}");
+        };
+        assert_eq!(other_envs_with_check, &["third".to_string()]);
+        assert_eq!(runner.calls(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn a_blank_audit_is_no_audit_command() {
+        let dir = TempDir::new().unwrap();
+        spec(&dir, "app", "    install: \"true\"\n    audit: \"\"\n");
+        let runner = FakeCommandRunner::new();
+
+        let events = collect_events(service(&dir, &runner).audit("app").await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(OperationSuccess::PackageAudited {
+                    audit_result: AuditResult::NoAuditCommand,
+                    ..
+                }))
+            ),
+            "{events:?}"
+        );
+        assert_eq!(runner.calls(), Vec::new());
+    }
+
+    // spec create's template writes its install and check as comments, which run
+    // nothing, so installing it refuses as having no install command.
+    #[tokio::test]
+    async fn the_spec_create_template_does_not_install() {
+        let dir = TempDir::new().unwrap();
+        let template = Package::new_template("fresh");
+        let yaml = serde_saphyr::to_string(&template)
+            .unwrap()
+            .replace("default:", "test:");
+        std::fs::write(dir.path().join("fresh.yml"), yaml).unwrap();
+        let runner = FakeCommandRunner::new();
+
+        let events = collect_events(
+            service(&dir, &runner)
+                .install("fresh", InstallOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                failure(&events),
+                OperationFailure::Package(PackageError::NoInstallCommand { .. })
+            ),
+            "{events:?}"
+        );
+        assert_eq!(runner.calls(), Vec::new());
+    }
+}

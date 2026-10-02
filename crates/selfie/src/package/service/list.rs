@@ -152,7 +152,7 @@ where
 
             // Determine status based on environment support and check command
             let env_config = package.environments().get(config.environment());
-            let check_command = env_config.and_then(|ec| ec.check.as_ref()).cloned();
+            let check_command = env_config.and_then(|ec| ec.check()).map(str::to_string);
             let supports_current_env = env_config.is_some();
 
             let command_runner = command_runner.clone();

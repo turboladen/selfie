@@ -278,11 +278,13 @@ A command that shows every environment refuses a file with an unrecognized key i
 treating it as one offered to create a template over the file the user opened the editor to repair.
 
 `selfie spec create` and the MCP server's `selfie_spec_create` check a new spec as
-`selfie spec validate` would before writing it. A spec with an error, such as an empty install
-command or no environment at all, is not written: the run exits 1 and lists every issue on stderr
-(the MCP result carries them under `issues`). A spec with only warnings, such as one that configures
-an environment other than the current one, or a command that does not parse as POSIX sh, is written,
-and the warnings are listed on stderr; the run still exits 0.
+`selfie spec validate` would before writing it. A spec with an error, such as no environment at all,
+is not written: the run exits 1 and lists every issue on stderr (the MCP result carries them under
+`issues`). A spec with only warnings, such as one that configures an environment other than the
+current one, a command that does not parse as POSIX sh, or a blank install command such as the
+template's `# TODO`, is written, and the warnings are listed on stderr; the run still exits 0. An
+install command given to the MCP tools `selfie_spec_create` or `selfie_spec_update` is refused when
+it is blank, since it would put a command that runs nothing where one was meant.
 
 A package directory that does not exist yet holds no names, so it does not stop
 `selfie spec create`, `selfie dotfiles track` or the MCP tools that check a new name: the first spec
@@ -347,6 +349,21 @@ install: |
     && tar xzf ripgrep.tar.gz \
     && sudo cp ripgrep-13.0.0-x86_64-unknown-linux-musl/rg /usr/local/bin/
 ```
+
+A blank command counts as no command at all: one with nothing in it but whitespace or a comment,
+such as `install: ""` or the `# TODO` placeholder `selfie spec create` writes. It runs nothing, so a
+package whose install is blank can be installed only by already being installed:
+`selfie package install` runs its check, and refuses it unless the check says it is installed. A
+blank `check` or `audit` behaves as a missing one does when a command runs, and
+`selfie spec validate` adds a note about it.
+
+`selfie package install` decides this for the package and every dependency before it installs
+anything, and refuses one that cannot be installed, naming it and the package that requires it. A
+dependency with no entry for the current environment is refused the same way. A recommend that
+cannot be installed is reported as a failed recommend, and none of its dependencies are installed.
+`selfie spec validate` reports a blank install as a warning, and a blank check or audit as a note,
+since leaving one out is valid. A command that is only a comment is blank in any shell's syntax,
+since every shell selfie runs commands through reads `#` as a comment.
 
 > **Working Directory**: All install, check and audit commands automatically run in the package
 > directory (where the `.yaml` file is located). This means you can use relative paths like

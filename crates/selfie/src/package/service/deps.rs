@@ -3,6 +3,8 @@
 //! Resolves package dependencies into a topological install order and detects
 //! circular dependencies using DFS with four-state visit tracking.
 
+use std::collections::HashMap;
+
 use crate::package::{
     event::{EventSender, OperationFailure},
     port::PackageRepository,
@@ -16,6 +18,24 @@ pub(crate) struct DependencyGraph {
     /// The root package's recommends for the environment, from the same read
     /// that produced its dependencies.
     pub root_recommends: Vec<String>,
+    /// Whether each package in `install_order` can be installed here, judged
+    /// from its spec by the same read.
+    pub installability: HashMap<String, Installability>,
+}
+
+/// Whether a package can be installed in the current environment, as its spec
+/// alone answers it.
+#[derive(Debug, Clone)]
+pub(crate) enum Installability {
+    /// It has an install command here.
+    Install,
+    /// Its install command is blank, so it can be installed only by already
+    /// being installed: its check command, the `String`, has to say so.
+    /// Otherwise it is refused with the failure it carries.
+    CheckFirst(String, Box<OperationFailure>),
+    /// It cannot be installed here: the environment is missing, or the install
+    /// command is blank and there is no check to ask.
+    Refused(Box<OperationFailure>),
 }
 
 /// Visit state for cycle detection during DFS traversal.
@@ -47,10 +67,9 @@ pub(crate) async fn resolve_dependencies<PR>(
 where
     PR: PackageRepository,
 {
-    use std::collections::HashMap;
-
     let mut visit_state: HashMap<String, VisitState> = HashMap::new();
     let mut install_order: Vec<String> = Vec::new();
+    let mut installability: HashMap<String, Installability> = HashMap::new();
 
     sender
         .send_trace(format!(
@@ -68,6 +87,7 @@ where
         sender,
         &mut visit_state,
         &mut install_order,
+        &mut installability,
         &mut vec![root_package.to_string()],
     )
     .await?;
@@ -82,7 +102,47 @@ where
     Ok(DependencyGraph {
         install_order,
         root_recommends,
+        installability,
     })
+}
+
+/// Whether `package` can be installed in `environment`, as its spec answers it.
+/// `required_by` names the package that pulled it in, if one did.
+fn installability_of(
+    package: &crate::package::GetPackage,
+    package_name: &str,
+    environment: &str,
+    required_by: Option<String>,
+) -> Installability {
+    let package = &package.package;
+    let Some(env_config) = package.environments().get(environment) else {
+        return Installability::Refused(Box::new(OperationFailure::environment_not_found(
+            package_name.to_string(),
+            environment.to_string(),
+            package.environments().keys().cloned().collect(),
+            package.path().clone(),
+            required_by,
+        )));
+    };
+    if env_config.install().is_some() {
+        return Installability::Install;
+    }
+    let no_install = Box::new(OperationFailure::no_install_command(
+        package_name.to_string(),
+        environment.to_string(),
+        package.path().clone(),
+        package
+            .environments()
+            .iter()
+            .filter(|(_, env)| env.install().is_some())
+            .map(|(name, _)| name.clone())
+            .collect(),
+        required_by,
+    ));
+    match env_config.check() {
+        Some(check) => Installability::CheckFirst(check.to_string(), no_install),
+        None => Installability::Refused(no_install),
+    }
 }
 
 /// What [`dfs`] resolves to: the package's recommends, or the failure.
@@ -94,6 +154,7 @@ type DfsFuture<'a> = std::pin::Pin<
 ///
 /// Returns the package's recommends for the environment, or an empty list for a
 /// package already visited.
+#[allow(clippy::too_many_arguments)]
 fn dfs<'a, PR>(
     package_name: &'a str,
     repo: &'a PR,
@@ -101,6 +162,7 @@ fn dfs<'a, PR>(
     sender: &'a EventSender,
     visit_state: &'a mut std::collections::HashMap<String, VisitState>,
     install_order: &'a mut Vec<String>,
+    installability: &'a mut HashMap<String, Installability>,
     path: &'a mut Vec<String>,
 ) -> DfsFuture<'a>
 where
@@ -221,6 +283,7 @@ where
                 sender,
                 visit_state,
                 install_order,
+                installability,
                 path,
             )
             .await?;
@@ -238,6 +301,11 @@ where
             path.pop();
         }
 
+        let required_by = (path.len() >= 2).then(|| path[path.len() - 2].clone());
+        installability.insert(
+            package_name.to_string(),
+            installability_of(&package_blob, package_name, config_environment, required_by),
+        );
         visit_state.insert(package_name.to_string(), VisitState::Visited);
         install_order.push(package_name.to_string());
 

@@ -574,8 +574,19 @@ mod tests {
         assert!(package.environments().contains_key("test-env"));
 
         let env = package.environments().get("test-env").unwrap();
-        assert!(env.install().contains("template-test"));
-        assert!(env.check().unwrap().contains("template-test"));
+        // The placeholders are comments, which name the package and run nothing,
+        // so install and check refuse the template until it is edited.
+        let yaml = serde_saphyr::to_string(&package).unwrap();
+        assert!(
+            yaml.contains("# TODO: Add install command for template-test"),
+            "{yaml}"
+        );
+        assert!(
+            yaml.contains("# TODO: Add check command for template-test"),
+            "{yaml}"
+        );
+        assert_eq!(env.install(), None);
+        assert_eq!(env.check(), None);
         assert!(env.dependencies().is_empty());
     }
 
@@ -589,7 +600,7 @@ mod tests {
             Vec::new(),
         );
 
-        assert_eq!(env_config.install(), "brew install test");
+        assert_eq!(env_config.install(), Some("brew install test"));
         assert_eq!(env_config.check(), Some("command -v test"));
         assert_eq!(env_config.dependencies(), &["dependency1", "dependency2"]);
     }
@@ -628,8 +639,8 @@ mod tests {
         assert!(environments.contains_key("test-env"));
 
         let default_env = environments.get("test-env").unwrap();
-        assert!(default_env.install().starts_with("# TODO:"));
-        assert!(default_env.check().is_some());
+        assert_eq!(default_env.install(), None);
+        assert_eq!(default_env.check(), None);
         assert!(default_env.dependencies().is_empty());
     }
 
@@ -648,8 +659,11 @@ mod tests {
         assert!(!environments.contains_key("default"));
 
         let staging_env = &environments["staging"];
-        assert!(staging_env.install().contains("test-staging"));
-        assert!(staging_env.check().unwrap().contains("test-staging"));
+        let yaml = serde_saphyr::to_string(&package).unwrap();
+        assert!(
+            yaml.contains("# TODO: Add install command for test-staging"),
+            "{yaml}"
+        );
         assert!(staging_env.dependencies().is_empty());
     }
 

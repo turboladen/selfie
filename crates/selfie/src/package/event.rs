@@ -2348,12 +2348,14 @@ impl OperationFailure {
         environment: String,
         available_environments: Vec<String>,
         package_file: std::path::PathBuf,
+        required_by: Option<String>,
     ) -> Self {
         OperationFailure::Package(crate::package::port::PackageError::EnvironmentNotFound {
             package_name,
             environment,
             available_environments,
             package_file,
+            required_by,
         })
     }
 
@@ -2380,12 +2382,14 @@ impl OperationFailure {
         environment: String,
         package_file: std::path::PathBuf,
         other_envs_with_install: Vec<String>,
+        required_by: Option<String>,
     ) -> Self {
         OperationFailure::Package(crate::package::port::PackageError::NoInstallCommand {
             package_name,
             environment,
             package_file,
             other_envs_with_install,
+            required_by,
         })
     }
 
@@ -2919,7 +2923,9 @@ pub struct ScopedDotfile {
 pub struct EnvironmentStatusData {
     pub environment_name: String,
     pub is_current: bool,
-    pub install_command: String,
+    /// The install command, or `None` when it is blank, as `check_command` is `None`
+    /// when there is no check.
+    pub install_command: Option<String>,
     pub check_command: Option<String>,
     pub dependencies: Vec<String>,
     pub dependency_statuses: Vec<DependencyStatus>,
