@@ -625,8 +625,8 @@ mod tests {
     use super::*;
     use crate::fs::filesystem::MockFileSystem;
     use crate::fs::real::RealFileSystem;
+    use crate::package::Environments;
     use crate::package::port::PackageRepoError;
-    use std::collections::HashMap;
     use tempfile::TempDir;
 
     #[test]
@@ -2061,7 +2061,7 @@ environments:
             None,
             Vec::new(),
             None,
-            HashMap::new(),
+            Environments::new(),
             package_path.clone(),
         );
 
@@ -2441,7 +2441,7 @@ environments:
             None,
             Vec::new(),
             None,
-            HashMap::new(),
+            Environments::new(),
             package_path.clone(),
         );
 
@@ -2466,6 +2466,73 @@ environments:
         ));
     }
 
+    // Parses `yaml` as a package, saves it, and returns the text the save wrote.
+    fn saved_yaml(yaml: &str) -> String {
+        let package: Package = crate::yaml::parse(yaml).expect("fixture must parse");
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("myapp.yml");
+
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        let sink = Arc::clone(&written);
+        fs.expect_write_file_no_follow().returning(move |_, data| {
+            sink.lock().unwrap().extend_from_slice(data);
+            Ok(())
+        });
+
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+        repo.save_package(&package, &package_path)
+            .expect("the fixture must save");
+        let bytes = written.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    // Where each named environment starts in `text`, in `names` order.
+    fn environment_offsets(text: &str, names: &[&str]) -> Vec<usize> {
+        names
+            .iter()
+            .map(|name| {
+                text.find(&format!("  {name}:\n"))
+                    .unwrap_or_else(|| panic!("{name} missing from:\n{text}"))
+            })
+            .collect()
+    }
+
+    // A rewrite keeps the environments in the order the file gives them. The names
+    // are in neither sorted nor reverse-sorted order, so a save that sorted them,
+    // or reversed them, would put them somewhere else.
+    #[test]
+    fn save_package_writes_environments_in_the_order_the_file_gives_them() {
+        let text = saved_yaml(
+            "name: myapp\nenvironments:\n  zeta:\n    install: \"echo z\"\n  alpha:\n    \
+             install: \"echo a\"\n  mid:\n    install: \"echo m\"\n",
+        );
+
+        let offsets = environment_offsets(&text, &["zeta", "alpha", "mid"]);
+        assert!(
+            offsets.windows(2).all(|pair| pair[0] < pair[1]),
+            "the environments must keep the file's order, got:\n{text}"
+        );
+    }
+
+    // Environments brought in by a merge key come after the ones the mapping spells
+    // out, and a rewrite writes them there. The docs say so, and this holds them to
+    // it.
+    #[test]
+    fn save_package_puts_merged_environments_after_explicit_ones() {
+        let text = saved_yaml(
+            "name: myapp\n_shared: &shared\n  merged:\n    install: \"echo m\"\nenvironments:\n  \
+             <<: *shared\n  zeta:\n    install: \"echo z\"\n  alpha:\n    install: \"echo a\"\n",
+        );
+
+        let offsets = environment_offsets(&text, &["zeta", "alpha", "merged"]);
+        assert!(
+            offsets.windows(2).all(|pair| pair[0] < pair[1]),
+            "the merged environment must follow the explicit ones, got:\n{text}"
+        );
+    }
+
     // Builds a repository whose write fails with `refusal`, and returns the
     // rendered error from `save_package`.
     fn save_package_refused_with(refusal: FileSystemError) -> String {
@@ -2480,7 +2547,7 @@ environments:
             None,
             Vec::new(),
             None,
-            HashMap::new(),
+            Environments::new(),
             package_path.clone(),
         );
 

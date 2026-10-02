@@ -61,6 +61,10 @@ file whose name breaks it, such as `my app.yml` or `.hidden.yml`, is not loaded:
 lists specs reports it as a spec that could not be loaded (the MCP server's `kind` is
 `invalid_name`), and it deploys and installs nothing until it is renamed. `selfie spec create` and
 the MCP server's `selfie_spec_create` refuse such a name rather than write the file.
+`selfie spec create --interactive` also asks for a file name, and that file name is what every later
+command finds the spec by, so the create judges it the same way: it refuses a file name the loader
+would not read or one outside the package directory, looks up the name the file name gives, and
+reports the created package under that name.
 
 Names are compared ignoring case, so `neovim` and `Neovim` are one package: a spec stored as
 `Neovim.yml` answers to either. The extension folds the same way, and does not distinguish one
@@ -273,17 +277,31 @@ A command that shows every environment refuses a file with an unrecognized key i
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
 
+`selfie spec create` and the MCP server's `selfie_spec_create` check a new spec as
+`selfie spec validate` would before writing it. A spec with an error, such as an empty install
+command or no environment at all, is not written: the run exits 1 and lists every issue on stderr
+(the MCP result carries them under `issues`). A spec with only warnings, such as one that configures
+an environment other than the current one, or a command that does not parse as POSIX sh, is written,
+and the warnings are listed on stderr; the run still exits 0.
+
+A package directory that does not exist yet holds no names, so it does not stop
+`selfie spec create`, `selfie dotfiles track` or the MCP tools that check a new name: the first spec
+saved there creates it. Something other than a directory at that path, such as a regular file or a
+symlink to nothing, is refused, because the directory cannot be created through it.
+
 Creating a package refuses too when a file is already at that path and selfie cannot read it. Only a
 name with no file behind it is a create; anything else — a file that will not parse, one selfie
 refused to open, two files claiming the same name — would be overwritten, and the guards above
 cannot see it because the package being written was built in memory rather than read from disk.
 
 `selfie spec create` and `selfie spec edit` also refuse when the path is already taken, which is not
-the same question as whether the name is. Names are compared ignoring case, so an existing
-`Neovim.yml` does answer to `neovim` and the name check finds it. What that check cannot see is a
-path held by something no name resolves to — a directory, or a file selfie will not load as a spec —
-so selfie asks the file system about the path as well, and declines rather than replace whatever is
-there.
+the same question as whether the name is. Names are compared ignoring case and extension, so an
+existing `Neovim.yml` or `neovim.yaml` answers to `neovim` and the name check finds it. What that
+check cannot see is a path the file system matches and selfie's names do not: on macOS, a file or
+directory whose name spells the same letters in a different Unicode normalization, such as a
+decomposed `é`, or something created after the name check. So selfie asks the file system about the
+path as well, and declines: the path is already taken by something selfie did not find under that
+name, and selfie will not write over it.
 
 The rewriting commands also refuse a file selfie could not read back, even though no key is known to
 be wrong with it, and so does apply — a rewrite would delete whatever the file carries that selfie
@@ -297,11 +315,15 @@ would refuse to write can still be opened to fix it. Only a package that does no
 written before the editor opens.
 
 The rewriting commands named above write the file back from selfie's own model of it, and that model
-holds no comments, no key order and no anchors. A rewrite that succeeds therefore drops every
-comment, replaces every anchor reference with the value it expanded to, and reorders the keys. A
-top-level key beginning with `_`, which selfie allows as an anchor definition, is dropped the same
-way unless its name shadows a real field, in which case the rewrite is refused. `selfie spec create`
-writes only a file that does not exist yet, so nothing is lost there.
+holds no comments and no anchors, and keeps the order of only one thing, the environments. A rewrite
+that succeeds therefore drops every comment and replaces every anchor reference with the value it
+expanded to. It writes the top-level keys, and the keys inside each environment and each dotfile
+entry, in selfie's own order. The environments stay in the order the file gives them, except that
+environments brought in through a merge key (`<<:`) are written after the ones the mapping spells
+out, where they then stay. A top-level key beginning with `_`, which selfie allows as an anchor
+definition, is dropped the same way unless its name shadows a real field, in which case the rewrite
+is refused. `selfie spec create` writes only a file that does not exist yet, so nothing is lost
+there.
 
 Keys beginning with `_` are treated as YAML anchor definitions and allowed, unless the rest of the
 name matches a real field — `_check:` cannot be told apart from a misspelling of `check:` and is
@@ -1792,6 +1814,12 @@ Selfie validates package files according to these rules:
 ### Commands
 
 - Install and check commands should be valid shell scripts
+- Selfie runs a command through your login shell, which may be fish or zsh rather than POSIX sh, so
+  it never refuses a command for its syntax. A command that does not parse as POSIX sh, such as one
+  with a quote left open, a trailing backslash or an empty pipeline stage (`| |`), is reported as a
+  warning, which is fine if your shell accepts it. Quotes are read as a POSIX shell reads them, so
+  an escaped quote (`it\'s`), `'it'\''s'` and an apostrophe in a `#` comment draw no warning. A
+  command with a heredoc (`<<`) is not checked for quotes at all, because its body is raw text
 - Multi-line commands should consider including `set -e` for proper error handling (stops execution
   on first failure)
 - Commands should handle errors appropriately and provide meaningful error messages

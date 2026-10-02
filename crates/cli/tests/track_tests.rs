@@ -498,3 +498,29 @@ fn tracking_under_a_package_name_says_it_is_a_package() {
     );
     assert!(!stderr.contains("dotfile spec named"), "{stderr}");
 }
+
+// A fresh machine has no package directory yet. That is no packages to offer, not
+// a failure: the run gets as far as choosing a destination, which with no terminal
+// it refuses, rather than ending on the directory.
+#[test]
+fn track_before_the_package_directory_exists_gets_to_choosing_a_destination() {
+    let temp = setup_default_test_config();
+    std::fs::remove_dir(temp.path().join("packages")).unwrap();
+    std::fs::write(temp.path().join(".rc"), "x").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["track", "~/.rc"])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("Choosing where to track a file needs a terminal"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Failed to list packages"),
+        "a missing package directory must not end the run, stderr:\n{stderr}"
+    );
+}

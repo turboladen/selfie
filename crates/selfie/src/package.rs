@@ -1077,20 +1077,24 @@ impl DotfileEntry {
     }
 }
 
+/// A package's environments, by name, in the order the spec file gives them.
+///
+/// Writing a package back keeps that order, except that environments a mapping
+/// brings in through a merge key (`<<:`) come after the ones it spells out.
+pub type Environments = indexmap::IndexMap<String, EnvironmentConfig>;
+
 /// Default value for environments field when missing from YAML.
-fn default_environments() -> Spanned<HashMap<String, EnvironmentConfig>> {
-    unspanned(HashMap::new())
+fn default_environments() -> Spanned<Environments> {
+    unspanned(Environments::new())
 }
 
-/// Deserialize `Spanned<HashMap<...>>` with a fallback to an empty map when the key is missing.
-fn deserialize_environments<'de, D>(
-    deserializer: D,
-) -> Result<Spanned<HashMap<String, EnvironmentConfig>>, D::Error>
+/// Deserialize `Spanned<Environments>` with a fallback to an empty map when the key is missing.
+fn deserialize_environments<'de, D>(deserializer: D) -> Result<Spanned<Environments>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Option::<Spanned<HashMap<String, EnvironmentConfig>>>::deserialize(deserializer)
-        .map(|opt| opt.unwrap_or_else(|| unspanned(HashMap::new())))
+    Option::<Spanned<Environments>>::deserialize(deserializer)
+        .map(|opt| opt.unwrap_or_else(|| unspanned(Environments::new())))
 }
 
 /// Create a `Spanned<T>` with `Location::UNKNOWN` for programmatically created values.
@@ -1130,7 +1134,7 @@ pub struct Package {
         deserialize_with = "deserialize_environments",
         default = "default_environments"
     )]
-    pub(crate) environments: Spanned<HashMap<String, EnvironmentConfig>>,
+    pub(crate) environments: Spanned<Environments>,
 
     /// Path to the package file (not serialized/deserialized)
     #[serde(skip)]
@@ -1400,7 +1404,7 @@ impl Package {
         description: Option<String>,
         dotfiles: Vec<DotfileEntry>,
         post_install_note: Option<String>,
-        environments: HashMap<String, EnvironmentConfig>,
+        environments: Environments,
         path: PathBuf,
     ) -> Self {
         Self {
@@ -1421,7 +1425,7 @@ impl Package {
     /// environment.
     #[must_use]
     pub fn new_template(name: &str) -> Self {
-        let mut environments = HashMap::new();
+        let mut environments = Environments::new();
         environments.insert(
             "default".to_string(),
             EnvironmentConfig {
@@ -1639,10 +1643,8 @@ impl Package {
 
     /// Every environment, in name order.
     ///
-    /// `environments` is a `HashMap`, so anything a caller renders in sequence —
-    /// a diagnostic list, an inventory — has to impose an order or the same file
-    /// reports differently between runs. Hash order is not insertion order and is
-    /// randomized per process.
+    /// Anything a caller renders in sequence, such as a diagnostic list or an
+    /// inventory, reports in name order whatever order the file gives.
     pub(crate) fn environments_sorted(&self) -> Vec<(&str, &EnvironmentConfig)> {
         let mut envs: Vec<(&str, &EnvironmentConfig)> = self
             .environments
@@ -1670,7 +1672,7 @@ impl Package {
 
     /// Get the environment configurations
     #[must_use]
-    pub fn environments(&self) -> &HashMap<String, EnvironmentConfig> {
+    pub fn environments(&self) -> &Environments {
         &self.environments.value
     }
 

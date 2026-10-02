@@ -2629,6 +2629,7 @@ dependencies = [
  "etcetera",
  "futures",
  "gix",
+ "indexmap",
  "mockall",
  "nix",
  "serde",

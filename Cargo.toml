@@ -9,6 +9,7 @@ console = "0.16"
 dunce = "1.0"
 etcetera = "0.11"
 futures = "0.3.31"
+indexmap = { version = "2", features = ["serde"] }
 gix = { version = "0.86", default-features = false, features = ["sha1", "status", "index", "revision", "tree-editor"] }
 indicatif = "0.18"
 mockall = "0.15.0"

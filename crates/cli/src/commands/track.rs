@@ -449,12 +449,22 @@ fn find_existing_tracker(
 /// Load sorted package names from the repository, along with a warning for every
 /// spec file that could not be loaded.
 ///
+/// A package directory with nothing at its path yields no names: a fresh machine
+/// can still track the file as a new standalone dotfile.
+///
 /// # Errors
 ///
-/// A message to display when the package directory cannot be listed. There is
-/// nowhere to put the file if selfie cannot see the directory it would go in.
+/// A message to display when the package directory is there and cannot be
+/// listed, or something that is not a directory holds its path.
 fn load_package_names(repo: &impl PackageRepository) -> Result<(Vec<String>, Vec<String>), String> {
-    common::package_names_and_skipped(repo).map_err(|e| format!("Failed to list packages: {e}"))
+    match common::package_names_and_skipped(repo) {
+        Ok(loaded) => Ok(loaded),
+        // A package directory that does not exist yet holds no packages, and the
+        // file can still go into a new standalone spec. Anything else at the path
+        // is selfie unable to look, which may not be offered as "nothing there".
+        Err(listing) if listing.may_be_created() => Ok((Vec::new(), Vec::new())),
+        Err(e) => Err(format!("Failed to list packages: {e}")),
+    }
 }
 
 #[cfg(test)]
@@ -611,6 +621,38 @@ mod tests {
 
         assert!(found.is_none());
         assert!(skipped.is_empty(), "got: {skipped:?}");
+    }
+
+    // A fresh machine has no package directory yet. That is no packages to offer,
+    // not a failure; a file at the path still is one.
+    #[test]
+    fn load_package_names_treats_a_package_directory_not_there_yet_as_empty() {
+        use selfie::fs::{AbsentReason, DirectoryState};
+        use selfie::package::port::{MockPackageRepository, PackageListError};
+
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Err(PackageListError::new(
+                "/packages".into(),
+                DirectoryState::Absent(AbsentReason::Empty),
+            ))
+        });
+        assert_eq!(load_package_names(&repo), Ok((Vec::new(), Vec::new())));
+
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Err(PackageListError::new(
+                "/packages".into(),
+                DirectoryState::Absent(AbsentReason::Occupied {
+                    kind: "regular file",
+                }),
+            ))
+        });
+        let refusal = load_package_names(&repo).expect_err("a file at the path is a failure");
+        assert!(
+            refusal.starts_with("Failed to list packages: /packages"),
+            "{refusal}"
+        );
     }
 
     #[test]

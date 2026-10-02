@@ -2,12 +2,12 @@ use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
 use selfie::{
     namespace::{self, NamespaceValidationError},
     package::{
-        EnvironmentConfig, SpecService,
+        EnvironmentConfig, Environments, SpecService,
         event::{OperationResult, OperationSuccess, PackageEvent},
         port::PackageRepository,
     },
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 use tracing::info;
 
 use crate::{
@@ -72,18 +72,34 @@ pub(crate) async fn handle_create(
     let event_stream = service.create(package).await;
 
     // Process the event stream with custom handling for create-specific events
-    let mut created_file_path: Option<PathBuf> = None;
+    // The name and path the library created the spec under. The name is the file's,
+    // which the interactive prompts may have made different from the argument.
+    let mut created: Option<(String, PathBuf)> = None;
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
             PackageEvent::Completed {
-                result: OperationResult::Success(OperationSuccess::PackageCreated {
-                    file_path, ..
-                }),
+                result:
+                    OperationResult::Success(OperationSuccess::PackageCreated {
+                        package_name,
+                        file_path,
+                        ..
+                    }),
                 ..
             } => {
-                created_file_path = Some(file_path.clone());
+                created = Some((package_name.clone(), file_path.clone()));
                 false // Let default handler print success message
+            }
+            PackageEvent::ValidationResultCompleted {
+                validation_result, ..
+            } => {
+                // The spec is still written, and the answer on stdout is that it was
+                // created, so the issues go to stderr.
+                crate::commands::validation_display::print_issues(
+                    display,
+                    &validation_result.issues,
+                );
+                true
             }
             _ => false, // Default handling for everything else
         })
@@ -95,7 +111,7 @@ pub(crate) async fn handle_create(
 
     // Ask if user wants to edit the file (only in interactive mode)
     if interactive {
-        if let Some(ref file_path) = created_file_path {
+        if let Some((ref created_name, ref file_path)) = created {
             let edit_now = display.prompt(
                 Confirm::with_theme(&SimpleTheme)
                     .with_prompt("Would you like to open the package file for editing now?")
@@ -106,7 +122,7 @@ pub(crate) async fn handle_create(
                 Ok(true) => {
                     let success_message = format!(
                         "Package '{}' created and saved at {}",
-                        package_name,
+                        created_name,
                         file_path.display()
                     );
                     common::open_editor(file_path, display, Some(success_message))
@@ -148,14 +164,13 @@ fn get_valid_package_name(
     loop {
         // Check namespace conflict (packages + dotfiles directories)
         match namespace::validate_unique_name(&current_name, repo, Some(&dotfiles_repo)) {
-            Err(NamespaceValidationError::LookupFailed(msg)) => {
-                display.print_error(format!("Failed to check namespace: {msg}"));
-                return Err(Exit::Failed.code());
-            }
             // Not a retry with a different name: the directory is the problem, not
             // the name, so prompting again would ask the user to guess their way
             // past an unreadable directory.
-            Err(error @ NamespaceValidationError::DotfilesDirectoryUnreadable(_)) => {
+            Err(
+                error @ (NamespaceValidationError::PackageDirectoryUnreadable(_)
+                | NamespaceValidationError::DotfilesDirectoryUnreadable(_)),
+            ) => {
                 display.print_error(format!("Cannot create '{current_name}': {error}"));
                 return Err(Exit::Failed.code());
             }
@@ -235,7 +250,7 @@ fn get_valid_package_name(
 }
 
 fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::package::Package {
-    let mut environments = HashMap::new();
+    let mut environments = Environments::new();
 
     // Use the environment from config (which may be overridden by --environment)
     let env_name = config.environment();
@@ -341,8 +356,8 @@ fn prompt_environments(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<HashMap<String, EnvironmentConfig>, i32> {
-    let mut environments = HashMap::new();
+) -> Result<Environments, i32> {
+    let mut environments = Environments::new();
 
     loop {
         display.print_info("Adding environment configuration...");
@@ -365,7 +380,7 @@ fn prompt_environments(
 }
 
 fn prompt_environment_name(
-    existing_environments: &HashMap<String, EnvironmentConfig>,
+    existing_environments: &Environments,
     config: &CliConfig,
     display: &DisplayManager,
 ) -> Result<String, i32> {
@@ -712,6 +727,48 @@ mod tests {
             }
             other => panic!("Expected PackageCreated, got: {other:?}"),
         }
+    }
+
+    // The interactive prompts can give a file name other than the package name. The
+    // run is named, like its result, by the file name: that is the name selfie
+    // finds the spec by afterwards.
+    #[tokio::test]
+    async fn a_create_run_is_named_by_the_file_it_writes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = test_common::create_test_service(&temp_dir);
+        let config = CliConfig::wrap_for_test(test_config_with_dir(temp_dir.path()));
+        let basic = create_basic_package("myapp", &config);
+        let package = selfie::package::Package::new(
+            basic.name().to_string(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            basic.environments().clone(),
+            temp_dir.path().join("bar.yml"),
+        );
+
+        let mut stream = service.create(package).await;
+        let mut completed = None;
+        while let Some(event) = stream.next().await {
+            if let PackageEvent::Completed {
+                operation_info,
+                result,
+            } = event
+            {
+                completed = Some((operation_info.package_name, result));
+            }
+        }
+
+        let Some((
+            run_name,
+            OperationResult::Success(OperationSuccess::PackageCreated { package_name, .. }),
+        )) = completed
+        else {
+            panic!("expected the create to succeed, got: {completed:?}");
+        };
+        assert_eq!(run_name, "bar");
+        assert_eq!(package_name, "bar");
     }
 
     #[tokio::test]

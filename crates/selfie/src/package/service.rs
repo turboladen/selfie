@@ -382,14 +382,21 @@ where
 {
     #[instrument]
     async fn create(&self, package: super::Package) -> EventStream {
-        let package_name = package.name().to_string();
+        // Worked out once: the run is named the way the result names it, by the
+        // file name, and a refused create, which has no such name, keeps the one it
+        // was given.
+        let identity = create::creatable_identity(&package, &self.config);
+        let package_name = identity
+            .clone()
+            .unwrap_or_else(|_| package.name().to_string());
         self.execute_operation_with_deps(
             OperationType::PackageCreate,
             &package_name,
             OperationContext::default(),
             2, // Check existence + save
             move |repo, _, config, sender, mut progress, _token| async move {
-                create::handle_create(package, &repo, &config, &sender, &mut progress).await
+                create::handle_create(package, identity, &repo, &config, &sender, &mut progress)
+                    .await
             },
         )
     }

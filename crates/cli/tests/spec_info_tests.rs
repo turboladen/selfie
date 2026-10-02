@@ -127,3 +127,32 @@ fn spec_info_names_a_refusal_in_another_environment() {
     assert!(text.contains("audt"), "{text}");
     assert!(text.contains("work (refused)"), "{text}");
 }
+
+// Environments print in the order the spec file gives them, as the MCP server
+// reports them, with the current one marked where it stands. The names are in
+// neither sorted nor reverse order, so a sort anywhere would move them.
+#[test]
+fn spec_info_and_spec_list_show_environments_in_file_order() {
+    let temp_dir = setup_default_test_config();
+    fs::write(
+        temp_dir.path().join("packages").join("multi.yml"),
+        format!(
+            "name: multi\nenvironments:\n  zeta:\n    install: \"true\"\n  alpha:\n    install: \
+             \"true\"\n  {SELFIE_ENV}:\n    install: \"true\"\n  mid:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+
+    for args in [
+        ["spec", "info", "multi"].as_slice(),
+        ["spec", "list"].as_slice(),
+    ] {
+        let output = sandboxed_command(&temp_dir).args(args).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{args:?}: {stdout}");
+        assert!(
+            stdout.contains(&format!("zeta, alpha, *{SELFIE_ENV}, mid")),
+            "{args:?}: {stdout}"
+        );
+    }
+}

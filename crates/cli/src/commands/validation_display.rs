@@ -6,6 +6,8 @@
 use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 
+use selfie::package::event::{ValidationIssueData, ValidationLevel};
+
 use crate::display_manager::{Channel, DisplayManager};
 
 /// A single validation issue row, used as a common representation for both
@@ -164,6 +166,44 @@ fn create_validation_table() -> Table {
     table
 }
 
+/// The word a validation table and an issue line both use for `level`.
+pub(crate) fn level_label(level: &ValidationLevel) -> &'static str {
+    match level {
+        ValidationLevel::Error => "ERROR",
+        ValidationLevel::Warning => "WARN",
+        ValidationLevel::Info => "INFO",
+    }
+}
+
+/// One issue as a line: `<LEVEL> <field>: <message>`, then `. <suggestion>` when
+/// there is one.
+pub(crate) fn issue_line(issue: &ValidationIssueData) -> String {
+    let mut line = format!(
+        "{} {}: {}",
+        level_label(&issue.level),
+        issue.field,
+        issue.message
+    );
+    if let Some(suggestion) = &issue.suggestion {
+        line.push_str(". ");
+        line.push_str(suggestion);
+    }
+    line
+}
+
+/// Print each of `issues` on stderr, one line apiece, through the display method
+/// for its level.
+pub(crate) fn print_issues(display: &DisplayManager, issues: &[ValidationIssueData]) {
+    for issue in issues {
+        let line = issue_line(issue);
+        match issue.level {
+            ValidationLevel::Error => display.print_error(line),
+            ValidationLevel::Warning => display.print_warning(line),
+            ValidationLevel::Info => display.print_run_note(line),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +238,71 @@ mod tests {
             assert!(printed.len() > 2, "{printed:?}");
             assert!(printed.iter().all(|(s, _)| *s == stream), "{printed:?}");
         }
+    }
+
+    fn issue(level: ValidationLevel, suggestion: Option<&str>) -> ValidationIssueData {
+        ValidationIssueData {
+            category: "CommandSyntax".to_string(),
+            field: "environments.work.install".to_string(),
+            message: "Unmatched double quote in command".to_string(),
+            level,
+            suggestion: suggestion.map(str::to_string),
+            location: None,
+        }
+    }
+
+    #[test]
+    fn issue_line_reads_level_field_message_and_suggestion() {
+        assert_eq!(
+            issue_line(&issue(
+                ValidationLevel::Error,
+                Some("Add a closing double quote (\") to the command.")
+            )),
+            "ERROR environments.work.install: Unmatched double quote in command. Add a closing \
+             double quote (\") to the command."
+        );
+    }
+
+    #[test]
+    fn issue_line_without_a_suggestion_ends_at_the_message() {
+        assert_eq!(
+            issue_line(&issue(ValidationLevel::Warning, None)),
+            "WARN environments.work.install: Unmatched double quote in command"
+        );
+    }
+
+    // The issues are commentary on a run whose answer is elsewhere, so every line
+    // goes to stderr, whatever its level.
+    #[test]
+    fn print_issues_writes_every_level_to_stderr_only() {
+        use crate::display_manager::Channel;
+
+        let display = DisplayManager::new(false);
+        print_issues(
+            &display,
+            &[
+                issue(ValidationLevel::Error, None),
+                issue(ValidationLevel::Warning, None),
+                issue(ValidationLevel::Info, None),
+            ],
+        );
+
+        let line = |level: &str| {
+            (
+                Channel::Stderr,
+                format!("{level} environments.work.install: Unmatched double quote in command"),
+            )
+        };
+        assert_eq!(
+            display.printed(),
+            vec![line("ERROR"), line("WARN"), line("INFO")]
+        );
+    }
+
+    #[test]
+    fn level_label_names_each_level() {
+        assert_eq!(level_label(&ValidationLevel::Error), "ERROR");
+        assert_eq!(level_label(&ValidationLevel::Warning), "WARN");
+        assert_eq!(level_label(&ValidationLevel::Info), "INFO");
     }
 }

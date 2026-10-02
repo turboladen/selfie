@@ -542,8 +542,8 @@ pub enum PackageError {
 
     /// The write path for a new package is occupied, though the name is free
     #[error(
-        "Cannot create `{name}`: {} already exists, though no package answers to that name. \
-         Creating would replace that file.",
+        "Cannot create `{name}`: {} is already taken by something selfie did not find under \
+         that name; selfie will not write over it.",
         file_path.display()
     )]
     PackagePathOccupied { name: String, file_path: PathBuf },
@@ -804,7 +804,7 @@ mod tests {
 
                 use std::path::PathBuf;
 
-                let mut env1 = std::collections::HashMap::new();
+                let mut env1 = crate::package::Environments::new();
                 env1.insert(
                     "test".to_string(),
                     crate::package::EnvironmentConfig::new(
@@ -816,7 +816,7 @@ mod tests {
                     ),
                 );
 
-                let mut env2 = std::collections::HashMap::new();
+                let mut env2 = crate::package::Environments::new();
                 env2.insert(
                     "test".to_string(),
                     crate::package::EnvironmentConfig::new(

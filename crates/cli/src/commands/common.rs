@@ -202,11 +202,12 @@ pub(crate) fn name_check_message(
                  {name} <file>', or choose a different name."
             ),
         },
-        // A dotfiles directory that would not read says nothing about the name,
-        // and telling the user they cannot use it sends them off to pick another
+        // A package or dotfiles directory that would not read says nothing about the
+        // name, and telling the user they cannot use it sends them off to pick another
         // one, which fails in exactly the same way.
-        Invalid::DotfilesDirectoryUnreadable(_) => error.to_string(),
-        Invalid::LookupFailed(_) => format!("Cannot use name '{name}': {error}"),
+        Invalid::PackageDirectoryUnreadable(_) | Invalid::DotfilesDirectoryUnreadable(_) => {
+            error.to_string()
+        }
     }
 }
 
@@ -421,27 +422,14 @@ pub(crate) fn create_formatted_table() -> Table {
     table
 }
 
-/// Format environment names with current environment highlighting
-/// Current environment appears first, followed by others sorted alphabetically
+/// Environment names in the order given, which is the order the spec file gives
+/// them, with the current environment marked `*`.
 pub(crate) fn format_environment_names(
     environments: &[String],
     current_environment: &str,
     config: &CliConfig,
 ) -> String {
-    let mut sorted_envs = environments.to_vec();
-
-    // Sort so current environment comes first, then alphabetically
-    sorted_envs.sort_by(|a, b| {
-        if a == current_environment && b != current_environment {
-            std::cmp::Ordering::Less
-        } else if a != current_environment && b == current_environment {
-            std::cmp::Ordering::Greater
-        } else {
-            a.cmp(b)
-        }
-    });
-
-    sorted_envs
+    environments
         .iter()
         .map(|env_name| {
             if env_name == current_environment {
@@ -789,35 +777,19 @@ mod tests {
         assert!(result.contains("test"));
     }
 
+    // The spec file's order, on every surface: the same file must not list its
+    // environments one way here and another way in the MCP server's answer. The
+    // current environment is marked where it stands, not moved to the front.
     #[test]
     fn test_format_environment_names_ordering() {
         let package_dir = std::path::PathBuf::from("/test/packages");
         let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
 
-        // Test with current environment not first in input list
-        let environments = vec![
-            "arch-home".to_string(),
-            "macos-work".to_string(),
-            "ubuntu-server".to_string(),
-        ];
+        let environments = vec!["zeta".to_string(), "alpha".to_string(), "mid".to_string()];
 
-        let result = format_environment_names(&environments, "macos-work", &config);
+        let result = format_environment_names(&environments, "mid", &config);
 
-        // Current environment should come first, marked with *
-        assert!(result.starts_with("*macos-work"));
-
-        // Should contain all environments
-        assert!(result.contains("arch-home"));
-        assert!(result.contains("ubuntu-server"));
-
-        // Split by comma and check order
-        let parts: Vec<&str> = result.split(", ").collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], "*macos-work");
-
-        // Remaining should be alphabetically sorted
-        let remaining: Vec<&str> = parts[1..].to_vec();
-        assert_eq!(remaining, vec!["arch-home", "ubuntu-server"]);
+        assert_eq!(result, "zeta, alpha, *mid");
     }
 
     #[test]
@@ -841,8 +813,6 @@ mod tests {
 
         // Should not contain asterisk since current environment is not in the list
         assert!(!result.contains('*'));
-
-        // Should be alphabetically sorted
         assert_eq!(result, "arch-home, ubuntu-server");
     }
 

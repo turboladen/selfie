@@ -192,9 +192,8 @@ mod tests {
     #[test]
     fn test_dependency_check_integration() {
         use selfie::package::{EnvironmentConfig, Package};
-        use std::collections::HashMap;
 
-        let mut target_envs = HashMap::new();
+        let mut target_envs = selfie::package::Environments::new();
         target_envs.insert(
             "test".to_string(),
             EnvironmentConfig::new(
@@ -215,7 +214,7 @@ mod tests {
             PathBuf::from("/test/packages/target-package.yml"),
         );
 
-        let mut dependent_envs = HashMap::new();
+        let mut dependent_envs = selfie::package::Environments::new();
         dependent_envs.insert(
             "test".to_string(),
             EnvironmentConfig::new(

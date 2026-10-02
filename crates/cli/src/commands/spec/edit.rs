@@ -53,21 +53,16 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
         pkg
     } else {
         // Before offering to create, ask the file system whether the path is
-        // free. Names fold, so a differently-capitalized spec was already found
-        // above; what the name check cannot see is a path held by something no
-        // name resolves to, and writing there would replace it (selfie-6cg2).
+        // free. Names fold case and extension, so those were found above; what
+        // the name check cannot see is a path the file system matches and selfie's
+        // names do not, and selfie must not write over it (selfie-6cg2).
         //
         // Ahead of the prompt on purpose: asking someone to confirm a create
         // that is about to be refused wastes the answer, and it is the only
         // position a test without a terminal can reach.
         let prospective = common::create_new_package(package_name, config);
         if repo.path_is_occupied(prospective.file_path()) {
-            display.print_error(format!(
-                "Cannot create '{package_name}': {} is already taken. On this file system that \
-                 path may resolve to a file stored under a different capitalization, and creating \
-                 would replace it.",
-                prospective.file_path().display()
-            ));
+            display.print_error(occupied_path_refusal(package_name, prospective.file_path()));
             return 1;
         }
 
@@ -126,18 +121,45 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
     common::open_editor(package_blob.file_path(), display, Some(success_message))
 }
 
+/// Why `spec edit` will not create `package_name` at `path`: something is already
+/// there that the name lookup did not find.
+fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> String {
+    format!(
+        "Cannot create '{package_name}': {} is already taken by something selfie did not find \
+         under that name; selfie will not write over it.",
+        path.display()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use selfie::package::{
-        GetPackage, Package,
+        Environments, GetPackage, Package,
         port::{MockPackageRepository, PackageError},
     };
-    use std::collections::HashMap;
     use std::{fs, path::PathBuf};
     use tempfile::TempDir;
     use test_common::test_config_with_dir;
 
+    // The refusal names what the guard catches. Capitalization never reaches it,
+    // because the name lookup folds case and would have found the file. Checked
+    // here as well as end to end, because the end-to-end test can only run on a
+    // file system that matches names across Unicode normalizations.
+    #[test]
+    fn the_occupied_path_refusal_does_not_blame_capitalization() {
+        let refusal = occupied_path_refusal("naive", std::path::Path::new("/packages/naive.yml"));
+
+        assert_eq!(
+            refusal,
+            "Cannot create 'naive': /packages/naive.yml is already taken by something selfie did \
+             not find under that name; selfie will not write over it."
+        );
+        // What holds the path may be a directory, which nothing could replace.
+        for wrong in ["capitalization", "replace", "file"] {
+            assert!(!refusal.contains(wrong), "{wrong}: {refusal}");
+        }
+    }
     #[test]
     fn test_handle_edit_nonexistent_package() {
         // Test behavior when package doesn't exist and no EDITOR is available
@@ -274,7 +296,7 @@ mod tests {
             None,
             Vec::new(),
             None,
-            HashMap::new(),
+            Environments::new(),
             PathBuf::from("/test/packages/edit-test.yml"),
         );
         let get_package =

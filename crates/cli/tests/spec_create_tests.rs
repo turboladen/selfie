@@ -29,6 +29,32 @@ fn spec_create_writes_a_package_that_does_not_exist() {
     );
 }
 
+// The first package on a fresh machine: the configured package directory is not
+// there yet. It holds no names, and the save creates it.
+#[test]
+fn spec_create_writes_the_first_package_before_the_package_directory_exists() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::remove_dir(&packages).unwrap();
+
+    let output = sandboxed_command(&temp)
+        .args(["spec", "create", "brandnew"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "stderr:\n{stderr}");
+    assert!(
+        stdout.contains("Package 'brandnew' created at"),
+        "the create must report its answer, stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        packages.join("brandnew.yml").is_file(),
+        "the first package must be written, stderr:\n{stderr}"
+    );
+}
+
 // The name typed on the command line reaches the library's spec-name rule, so
 // the CLI cannot write a spec every later command refuses to load. The
 // interactive prompts build their package the same way and hand it to the same
@@ -158,4 +184,46 @@ fn spec_create_over_an_unloadable_package_reports_a_package() {
     assert!(stderr.contains("'vim' is already a package"), "{stderr}");
     assert!(stderr.contains("could not be loaded"), "{stderr}");
     assert!(!stderr.contains("dotfile spec"), "{stderr}");
+}
+
+// A directory whose name is the decomposed spelling of the spec `spec create` would
+// write. The name lookup does not find it, since names fold case and nothing else,
+// but a normalization-insensitive file system such as APFS resolves the new path
+// onto it. The refusal must be true of a directory: nothing calls it a file or
+// says it would be replaced.
+#[test]
+fn spec_create_refuses_a_directory_stored_under_another_normalization() {
+    const NFC: &str = "na\u{ef}ve";
+    const NFD: &str = "nai\u{308}ve";
+
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    let existing = packages.join(format!("{NFD}.yml"));
+    fs::create_dir(&existing).unwrap();
+    if !packages.join(format!("{NFC}.yml")).is_dir() {
+        eprintln!(
+            "SKIPPED spec_create_refuses_a_directory_stored_under_another_normalization: this \
+             file system tells the two normalizations apart"
+        );
+        return;
+    }
+
+    let output = sandboxed_command(&temp)
+        .args(["spec", "create", NFC])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains(
+            "is already taken by something selfie did not find under that name; selfie will not \
+             write over it"
+        ),
+        "stderr:\n{stderr}"
+    );
+    for wrong in ["replace", " file"] {
+        assert!(!stderr.contains(wrong), "{wrong}: stderr:\n{stderr}");
+    }
+    assert!(existing.is_dir(), "the directory must be left as it was");
 }

@@ -116,9 +116,9 @@ impl Package {
         // it -- which is why the walk covers all of them rather than one
         // environment.
         //
-        // In name order, because `environments` is a `HashMap` whose iteration
-        // order is randomized per process, and both consumers render these in the
-        // order they arrive.
+        // In name order, whatever order the file gives, because both consumers
+        // render these in the order they arrive and name order is what every
+        // environment diagnostic reports in.
         let mut keys = Self::entry_keys_in(&self.dotfiles, None);
 
         for (name, env) in self.environments_sorted() {
@@ -173,9 +173,8 @@ impl Package {
             .or_else(|| self.unchecked_top_level())
     }
 
-    // In name order. `environments` is a `HashMap` and its iteration order is
-    // randomized per process, so an unsorted walk names the environments in a
-    // different order between runs of the same file.
+    // In name order, whatever order the file gives, as every environment
+    // diagnostic reports.
     fn any_unknown_environment_keys(&self) -> Option<SpecRefusal> {
         let offending: Vec<(String, Vec<UnknownKey>)> = self
             .environments_sorted()
@@ -626,10 +625,9 @@ environments: {}
         );
     }
 
-    // Every offending environment is named, in name order, one sentence each:
-    // `environments` is a `HashMap` whose iteration order is randomized per
-    // process, and a file with keys in two environments is fixed in one pass only
-    // if both are named.
+    // Every offending environment is named, in name order whatever order the file
+    // gives, one sentence each: a file with keys in two environments is fixed in
+    // one pass only if both are named.
     #[test]
     fn a_listing_names_every_offending_environment_in_name_order() {
         let yaml = r#"name: myapp

@@ -158,3 +158,47 @@ fn spec_edit_opens_a_spec_stored_under_another_case() {
         "the existing file must not be replaced"
     );
 }
+
+// A file whose name is the decomposed spelling of the one `spec edit` would
+// create. The name lookup does not find it, since names fold case and nothing
+// else, but a normalization-insensitive file system such as APFS resolves the
+// new path onto it. The refusal says what the guard caught, and never blames
+// capitalization, which the lookup would have found.
+#[test]
+fn spec_edit_refusal_for_an_occupied_path_does_not_blame_capitalization() {
+    const NFC: &str = "na\u{ef}ve";
+    const NFD: &str = "nai\u{308}ve";
+
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    let existing = packages.join(format!("{NFD}.yml"));
+    fs::write(&existing, "keep").unwrap();
+    if !packages.join(format!("{NFC}.yml")).exists() {
+        eprintln!(
+            "SKIPPED spec_edit_refusal_for_an_occupied_path_does_not_blame_capitalization: this \
+             file system tells the two normalizations apart"
+        );
+        return;
+    }
+
+    let output = sandboxed_command(&temp)
+        .env("EDITOR", "true")
+        .args(["spec", "edit", NFC])
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains(
+            "is already taken by something selfie did not find under that name; selfie will not \
+             write over it"
+        ),
+        "stderr:\n{stderr}"
+    );
+    // What holds the path may be a directory, which nothing could replace.
+    for wrong in ["capitalization", "replace"] {
+        assert!(!stderr.contains(wrong), "{wrong}: stderr:\n{stderr}");
+    }
+    assert_eq!(fs::read_to_string(&existing).unwrap(), "keep");
+}
