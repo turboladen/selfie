@@ -45,6 +45,20 @@ pub(crate) async fn handle_create(
     // Create repository for name validation (UI flow decisions)
     let repo = common::create_package_repository(config);
 
+    // Asked first, so the name checked below is the one the spec is written
+    // under: the check never sees a name the prompts change afterwards.
+    let asked_name;
+    let package_name = if interactive {
+        display.print_run_note("Creating package interactively...");
+        asked_name = match prompt_package_name(package_name, display) {
+            Ok(name) => name,
+            Err(code) => return code,
+        };
+        asked_name.as_str()
+    } else {
+        package_name
+    };
+
     // Get a valid package name or handle existing package scenarios
     let package_name = match get_valid_package_name(package_name, &repo, config, display) {
         Ok(PackageNameResult::CreateNew(name)) => name,
@@ -265,22 +279,29 @@ fn get_valid_package_name(
                     return Err(Exit::Failed.code());
                 }
 
-                let new_name: String =
-                    match display.prompt(Input::with_theme(&SimpleTheme).with_prompt(format!(
-                        "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
-                    ))) {
-                        Ok(name) => name,
-                        Err(failure) => {
-                            return Err(display
-                                .refuse_prompt(
-                                    &failure,
-                                    "Choosing a different name",
-                                    "Run 'selfie spec create' again with a different name.",
-                                )
-                                .code());
-                        }
-                    };
-                current_name = new_name;
+                current_name = loop {
+                    let name: String =
+                        match display.prompt(Input::with_theme(&SimpleTheme).with_prompt(format!(
+                            "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
+                        ))) {
+                            Ok(name) => name,
+                            Err(failure) => {
+                                return Err(display
+                                    .refuse_prompt(
+                                        &failure,
+                                        "Choosing a different name",
+                                        "Run 'selfie spec create' again with a different name.",
+                                    )
+                                    .code());
+                            }
+                        };
+                    // As the first name prompt does: a name the rule refuses would
+                    // be refused only when the spec is written.
+                    match selfie::package::spec_name_refusal(&name) {
+                        None => break name,
+                        Some(refusal) => display.print_warning(refusal),
+                    }
+                };
                 continue;
             }
             Ok(()) => {
@@ -324,33 +345,43 @@ fn create_package_interactive(
     config: &CliConfig,
     display: &DisplayManager,
 ) -> Result<selfie::package::Package, i32> {
-    display.print_run_note("Creating package interactively...");
-
-    let name = prompt_package_name(package_name, display)?;
     let homepage = prompt_package_homepage(display)?;
     let description = prompt_package_description(display)?;
-    let environments = prompt_environments(&name, config, display)?;
-    let file_name = prompt_file_name(&name, display)?;
+    let environments = prompt_environments(package_name, config, display)?;
 
+    // The file is named for the package, as `create_basic_package` names it:
+    // selfie finds a spec by its file name, so a separate one would be a name
+    // the namespace check never saw.
     Ok(selfie::package::Package::new(
-        name,
+        package_name.to_string(),
         homepage,
         description,
         Vec::new(),
         None,
         environments,
-        config.package_directory().join(format!("{file_name}.yml")),
+        config
+            .package_directory()
+            .join(format!("{package_name}.yml")),
     ))
 }
 
 fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
-    display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("Package name")
-                .default(default_name.to_string()),
-        )
-        .map_err(|failure| refuse_interactive(display, &failure))
+    loop {
+        let name = display
+            .prompt(
+                Input::with_theme(&SimpleTheme)
+                    .with_prompt("Package name")
+                    .default(default_name.to_string()),
+            )
+            .map_err(|failure| refuse_interactive(display, &failure))?;
+
+        // Here, not only when the spec is written: every answer after this one
+        // would be thrown away with it.
+        match selfie::package::spec_name_refusal(&name) {
+            None => return Ok(name),
+            Some(refusal) => display.print_warning(refusal),
+        }
+    }
 }
 
 fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i32> {
@@ -537,16 +568,6 @@ fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, i32>
         .map_err(|failure| refuse_interactive(display, &failure))
 }
 
-fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
-    display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("File name (without .yml extension)")
-                .default(default_name.to_string()),
-        )
-        .map_err(|failure| refuse_interactive(display, &failure))
-}
-
 #[cfg(test)]
 mod tests {
     use selfie::package::port::PackageListError;
@@ -582,6 +603,33 @@ mod tests {
         (temp, packages, config, service)
     }
 
+    // A different name chosen at the "already exists" menu is held to the
+    // spec-name rule as the first one is, and asked for again.
+    #[tokio::test]
+    async fn a_replacement_name_the_rule_refuses_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let (_temp, packages, config, service) = packages_holding(&["tool"]);
+        let display = DisplayManager::new(false).answering(vec![
+            answer(1_usize), // a different name
+            answer("my app".to_string()),
+            answer("fresh".to_string()),
+        ]);
+
+        let code = handle_create(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(code, 0, "{:?}", display.printed());
+        assert!(packages.join("fresh.yml").exists());
+        assert!(
+            display
+                .printed()
+                .iter()
+                .any(|(_, line)| line.contains("'my app': it is not a valid spec name")),
+            "{:?}",
+            display.printed()
+        );
+    }
+
     // Ctrl+C at the "already exists" menu ends the run canceled.
     #[tokio::test]
     async fn ctrl_c_at_the_taken_name_menu_is_canceled() {
@@ -605,6 +653,78 @@ mod tests {
 
         assert_eq!(code, 130);
         assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
+    }
+
+    // The name the interactive prompt gives is the one checked and written: a
+    // name a standalone spec holds is refused there and asked for again, and
+    // the file takes the second answer's name. Nothing asks for a file name.
+    #[tokio::test]
+    async fn the_interactively_named_spec_is_checked_and_written_under_that_name() {
+        use crate::display_manager::answer;
+
+        let (temp, packages, config, service) = packages_holding(&[]);
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir(&dotfiles).unwrap();
+        std::fs::write(
+            dotfiles.join("other.yml"),
+            "name: other\ndotfiles:\n  - source: other\n    target: ~/.other\n",
+        )
+        .unwrap();
+        let display = DisplayManager::new(false).answering(vec![
+            answer("other".to_string()), // package name: a standalone spec has it
+            answer("fresh".to_string()), // a different name
+            answer(String::new()),       // homepage
+            answer(String::new()),       // description
+            answer(test_common::TEST_ENV.to_string()),
+            answer("true".to_string()), // install
+            answer(String::new()),      // check
+            answer(false),              // another environment?
+            answer(false),              // open the editor now?
+        ]);
+
+        let code = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(code, 0, "{:?}", display.printed());
+        let written: Vec<String> = std::fs::read_dir(&packages)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(written, vec!["fresh.yml".to_string()]);
+        let spec = std::fs::read_to_string(packages.join("fresh.yml")).unwrap();
+        assert!(spec.contains("name: fresh"), "{spec}");
+    }
+
+    // A name the spec-name rule refuses is refused at its prompt and asked for
+    // again, before anything else is asked.
+    #[tokio::test]
+    async fn an_interactive_name_the_rule_refuses_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let (_temp, packages, config, service) = packages_holding(&[]);
+        let display = DisplayManager::new(false).answering(vec![
+            answer("my app".to_string()),
+            answer("fresh".to_string()),
+            answer(String::new()), // homepage
+            answer(String::new()), // description
+            answer(test_common::TEST_ENV.to_string()),
+            answer("true".to_string()), // install
+            answer(String::new()),      // check
+            answer(false),              // another environment?
+            answer(false),              // open the editor now?
+        ]);
+
+        let code = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(code, 0, "{:?}", display.printed());
+        assert!(packages.join("fresh.yml").exists());
+        assert!(
+            display
+                .printed()
+                .iter()
+                .any(|(_, line)| line.contains("'my app': it is not a valid spec name")),
+            "{:?}",
+            display.printed()
+        );
     }
 
     // Helper: collect the final `OperationResult` from an event stream.
