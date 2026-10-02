@@ -127,7 +127,7 @@ pub(crate) async fn handle_track(
         }
         // Nothing was tracked, so the run did not do what it was asked.
         TrackChoice::Declined => {
-            display.print_info("Cancelled.");
+            display.print_run_note("Cancelled.");
             Exit::Failed.code()
         }
     }

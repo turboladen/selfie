@@ -68,13 +68,13 @@ pub(crate) fn handle_edit(package_name: &str, config: &CliConfig, display: &Disp
             return 1;
         }
 
-        display.print_info(format!("Package '{package_name}' does not exist."));
+        display.print_run_note(format!("Package '{package_name}' does not exist."));
 
         if let Err(code) = confirm_new_package(package_name, display) {
             return code;
         }
 
-        display.print_info(format!("Creating new package '{package_name}'"));
+        display.print_run_note(format!("Creating new package '{package_name}'"));
         common::create_new_package(package_name, config)
     };
 
@@ -132,7 +132,7 @@ fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(
         Ok(true) => Ok(()),
         // A create that wrote nothing did not do what it was asked.
         Ok(false) => {
-            display.print_info("Package creation cancelled.");
+            display.print_run_note("Package creation cancelled.");
             Err(Exit::Failed.code())
         }
         Err(failure) => Err(display

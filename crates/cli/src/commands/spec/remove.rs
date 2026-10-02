@@ -58,8 +58,8 @@ pub(crate) async fn handle_remove(
         }
     };
 
-    display.print_info(format!("Package '{package_name}' found at:"));
-    display.print_info(format!("  {}", package_blob.file_path().display()));
+    display.print_run_note(format!("Package '{package_name}' found at:"));
+    display.print_run_note(format!("  {}", package_blob.file_path().display()));
 
     // `checked` is what separates "nothing depends on this" from "selfie does not
     // know". Both used to arrive here as an empty list, and the line below then
@@ -86,7 +86,7 @@ pub(crate) async fn handle_remove(
     let complete = checked && unreadable.is_empty();
 
     let (prompt, default_answer) = if dependent_packages.is_empty() && complete {
-        display.print_success(format!(
+        display.print_run_note(format!(
             "Package '{package_name}' is not a dependency of any other packages."
         ));
         (format!("Remove package '{package_name}'?"), false)
@@ -120,7 +120,7 @@ pub(crate) async fn handle_remove(
             Ok(true) => {}
             // A remove that removed nothing did not do what it was asked.
             Ok(false) => {
-                display.print_info("Package removal cancelled.");
+                display.print_run_note("Package removal cancelled.");
                 return Exit::Failed.code();
             }
             Err(failure) => {
@@ -246,6 +246,19 @@ mod tests {
 
         assert_eq!(code, 1);
         assert!(spec.exists());
+        // Everything before the question, and the decline, is about the run;
+        // a run that removed nothing has no answer for stdout.
+        let printed = display.printed();
+        assert!(
+            printed
+                .iter()
+                .all(|(channel, _)| *channel == crate::display_manager::Channel::Stderr),
+            "{printed:?}"
+        );
+        assert!(
+            printed.iter().any(|(_, line)| line.contains("found at")),
+            "{printed:?}"
+        );
     }
 
     #[test]

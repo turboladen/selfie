@@ -59,7 +59,7 @@ pub(crate) async fn handle_create(
         // A create that wrote nothing did not do what it was asked, so a script
         // must not read it as success.
         Ok(PackageNameResult::Cancelled) => {
-            display.print_info("Package creation cancelled.");
+            display.print_run_note("Package creation cancelled.");
             return Exit::Failed.code();
         }
         Err(exit_code) => return exit_code,
@@ -324,7 +324,7 @@ fn create_package_interactive(
     config: &CliConfig,
     display: &DisplayManager,
 ) -> Result<selfie::package::Package, i32> {
-    display.print_info("Creating package interactively...");
+    display.print_run_note("Creating package interactively...");
 
     let name = prompt_package_name(package_name, display)?;
     let homepage = prompt_package_homepage(display)?;
@@ -393,7 +393,7 @@ fn prompt_environments(
     let mut environments = Environments::new();
 
     loop {
-        display.print_info("Adding environment configuration...");
+        display.print_run_note("Adding environment configuration...");
 
         let env_name = prompt_environment_name(&environments, config, display)?;
         let install_cmd = prompt_install_command(display)?;
