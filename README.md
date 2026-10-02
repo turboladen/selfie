@@ -313,6 +313,9 @@ without refusing anything, such as an audit whose command failed, is an error re
 operation an error result with `"status": "cancelled"`. Every result also carries `outcome`:
 `"clean"`, `"found"` or `"failed"`, or `"cancelled"` for a cancelled operation.
 
+An MCP validation issue gives its place in the file as `line` and `column`, both null when it has
+none.
+
 ## Documentation
 
 ### Complete Documentation

@@ -818,7 +818,8 @@ fn issue_json(issue: &selfie::package::event::ValidationIssueData) -> Value {
         "field": &issue.field,
         "message": &issue.message,
         "suggestion": &issue.suggestion,
-        "location": &issue.location,
+        "line": issue.location.map(|at| at.line()),
+        "column": issue.location.map(|at| at.column()),
     })
 }
 
@@ -1297,6 +1298,38 @@ mod tests {
             rows[1]["hidden"],
             serde_json::json!({ "resolved_lines": 1, "current_lines": 12 })
         );
+    }
+
+    // An issue's location reaches an assistant as two numbers, as a skipped
+    // spec's does, and as nulls when the issue has none.
+    #[tokio::test]
+    async fn a_validation_issue_carries_its_location_as_numbers() {
+        let issue = |location| selfie::package::event::ValidationIssueData {
+            category: "RequiredField".to_string(),
+            field: "name".to_string(),
+            message: "m".to_string(),
+            level: selfie::package::event::ValidationLevel::Error,
+            suggestion: None,
+            location,
+        };
+        let events = vec![PackageEvent::ValidationResultCompleted {
+            operation_info: test_op_info(),
+            validation_result: selfie::package::event::ValidationResultData {
+                package_name: "bat".to_string(),
+                environment: "test".to_string(),
+                status: selfie::package::event::ValidationStatus::HasErrors,
+                issues: vec![issue(selfie::yaml::SourceLocation::new(5, 15)), issue(None)],
+            },
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let issues = &result.data["data"][0]["issues"];
+        assert_eq!(issues[0]["line"], 5);
+        assert_eq!(issues[0]["column"], 15);
+        assert_eq!(issues[1]["line"], Value::Null);
+        assert_eq!(issues[1]["column"], Value::Null);
+        assert!(issues[0].get("location").is_none(), "{issues}");
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

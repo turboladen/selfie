@@ -72,7 +72,7 @@ pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueDat
             message: issue.message().to_string(),
             level: level_of(issue),
             suggestion: issue.suggestion().map(std::string::ToString::to_string),
-            location: issue.location().map(str::to_string),
+            location: issue.location(),
         })
         .collect()
 }
