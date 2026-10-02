@@ -28,6 +28,13 @@ pub(crate) async fn handle_check(
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
+            // No check command means no answer: the failure that follows
+            // explains it on stderr, and a card on stdout would offer an answer.
+            PackageEvent::CheckResultCompleted { check_result, .. }
+                if matches!(check_result.result, CheckResult::NoCheckCommand) =>
+            {
+                true
+            }
             PackageEvent::CheckResultCompleted { check_result, .. } => {
                 if verbose {
                     display_check_result_card(check_result, config, display);
@@ -59,7 +66,7 @@ fn display_environment_error(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    display.println("");
+    display.print_note("");
 
     if let OperationFailure::Package(PackageError::EnvironmentNotFound {
         available_environments,
@@ -73,6 +80,21 @@ fn display_environment_error(
             config,
             display,
             "check",
+        );
+    } else if let OperationFailure::Package(PackageError::NoCheckCommand {
+        environment,
+        other_envs_with_check,
+        ..
+    }) = failure
+    {
+        // The environment is there; only its check command is missing, so the
+        // environment advice below would be false.
+        common::display_missing_command(
+            display,
+            "check",
+            package_name,
+            environment,
+            other_envs_with_check,
         );
     } else {
         common::display_generic_environment_suggestion(
@@ -96,8 +118,8 @@ fn display_check_output_only(check_result: &CheckResultData, display: &DisplayMa
             }
         }
         CheckResult::Failed { stdout, stderr, .. } => {
-            // Not installed — use warning (not error) to match verbose mode's
-            // "Not installed" severity and keep output on stdout
+            // Not installed: the check's own output explains the answer, so it
+            // is a warning, on stderr, beside the result line on stdout.
             if !stderr.is_empty() {
                 display.print_warning(format!("Check failed: {}", stderr.trim()));
             } else if !stdout.is_empty() {

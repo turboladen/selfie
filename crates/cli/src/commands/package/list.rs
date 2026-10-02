@@ -3,11 +3,9 @@ use std::borrow::Cow;
 use console::style;
 use selfie::package::{event, service::PackageService};
 
-use crate::{
-    config::CliConfig,
-    display_manager::{DisplayManager, INDENT},
-    status_style,
-};
+use crate::source_paths::base_directory_line;
+use crate::{config::CliConfig, display_manager::DisplayManager, status_style};
+use selfie::package::event::BaseKind;
 
 use crate::commands::common;
 
@@ -18,12 +16,20 @@ enum ListItemResult {
     Warning,
 }
 
+/// One package's row, buffered until the list loads.
+struct ListRow {
+    name: String,
+    result: ListItemResult,
+    status: String,
+    /// The environments cell, filled under `--all`.
+    environments: Option<String>,
+}
+
 /// Mutable state accumulated while processing list events.
 #[derive(Default)]
 struct ListState {
-    /// Buffered (name, formatted_line) pairs for sorted output at the end.
-    buffered_lines: Vec<(String, String)>,
-    max_name_len: usize,
+    /// Rows buffered for sorted output at the end.
+    buffered_rows: Vec<ListRow>,
     total_packages: usize,
     checked_count: usize,
 }
@@ -65,18 +71,15 @@ impl ListCommand<'_> {
     }
 }
 
-/// Extract formatted content and result variant from a list item.
-///
-/// Returns the result variant (for choosing the prefix symbol) and the content
-/// string **without** the prefix — the caller prepends it via `plain_prefix()`.
+/// The row for one checked package: its marker, its status cell and, under
+/// `--all`, its environments cell.
 fn format_list_item(
     package_item: &event::PackageListItem,
     config: &CliConfig,
     use_colors: bool,
     show_all: bool,
-    max_name_len: usize,
-) -> (ListItemResult, String) {
-    let status_text = status_style::format_check_result(package_item.status.as_ref(), use_colors);
+) -> ListRow {
+    let status = status_style::format_check_result(package_item.status.as_ref(), use_colors);
 
     let result = match &package_item.status {
         Some(event::CheckResult::Success { .. }) => ListItemResult::Success,
@@ -86,29 +89,19 @@ fn format_list_item(
         Some(event::CheckResult::NoCheckCommand) | None => ListItemResult::Warning,
     };
 
-    let content = if show_all {
-        let envs = common::format_environment_names(
-            &package_item.environments,
-            config.environment(),
-            config,
-        );
-        format!(
-            "{:<width$}  {status_text}  ({envs})",
-            package_item.name,
-            width = max_name_len
-        )
-    } else {
-        format!(
-            "{:<width$}  {status_text}",
-            package_item.name,
-            width = max_name_len
-        )
-    };
+    let environments = show_all.then(|| {
+        common::format_environment_names(&package_item.environments, config.environment(), config)
+    });
 
-    (result, content)
+    ListRow {
+        name: package_item.name.clone(),
+        result,
+        status,
+        environments,
+    }
 }
 
-/// Build a plain-text prefix for buffered output.
+/// The marker cell for a row.
 fn plain_prefix(result: &ListItemResult, use_colors: bool) -> Cow<'static, str> {
     match result {
         ListItemResult::Success => {
@@ -145,7 +138,6 @@ fn handle_list_event(
 ) -> bool {
     match event {
         event::PackageEvent::PackageListReady { packages, .. } => {
-            state.max_name_len = packages.iter().map(|p| p.name.len()).max().unwrap_or(0);
             state.total_packages = packages.len();
             state.checked_count = 0;
             // Results are buffered and printed sorted once every check is done.
@@ -156,26 +148,50 @@ fn handle_list_event(
 
         event::PackageEvent::PackageListItemCompleted { package_item, .. } => {
             state.checked_count += 1;
-            let (result, content) = format_list_item(
-                package_item,
-                config,
-                use_colors,
-                show_all,
-                state.max_name_len,
-            );
-
-            // Buffer result for sorted output at the end
-            let prefix = plain_prefix(&result, use_colors);
-            let line = format!("{prefix} {content}");
-            state.buffered_lines.push((package_item.name.clone(), line));
+            // Buffered for sorted output once the list loads.
+            state
+                .buffered_rows
+                .push(format_list_item(package_item, config, use_colors, show_all));
             true
         }
 
         event::PackageEvent::PackageListLoaded { package_list, .. } => {
-            // Print buffered lines sorted by name
-            state.buffered_lines.sort_by(|a, b| a.0.cmp(&b.0));
-            for (_, line) in &state.buffered_lines {
-                display.println(line);
+            // One table, the answer: each package's status, and its environments
+            // under `--all`, in their own columns.
+            state.buffered_rows.sort_by(|a, b| a.name.cmp(&b.name));
+            let mut table = common::create_formatted_table();
+            let mut header = vec!["", "Package", "Status"];
+            if show_all {
+                header.push("Environments");
+            }
+            table.set_header(header);
+            let package_dir = std::path::Path::new(&package_list.package_directory);
+            let failed = |text: String| {
+                if use_colors {
+                    style(text).red().to_string()
+                } else {
+                    text
+                }
+            };
+            let mut add =
+                |result: &ListItemResult, name: &str, status: String, envs: Option<String>| {
+                    let mut row = vec![
+                        plain_prefix(result, use_colors).into_owned(),
+                        name.to_string(),
+                        status,
+                    ];
+                    if show_all {
+                        row.push(envs.unwrap_or_else(|| "-".to_string()));
+                    }
+                    table.add_row(row);
+                };
+            for row in &state.buffered_rows {
+                add(
+                    &row.result,
+                    &row.name,
+                    row.status.clone(),
+                    row.environments.clone(),
+                );
             }
 
             // Every invalid package, whatever environment is selected. A spec that
@@ -188,43 +204,38 @@ fn handle_list_event(
                     .file_stem()
                     .and_then(|n| n.to_str())
                     .unwrap_or(&path);
-
-                let prefix = plain_prefix(&ListItemResult::Failure, use_colors);
-                let name_column =
-                    format!("{prefix} {filename:<width$}", width = state.max_name_len);
-
-                let line = if use_colors {
-                    format!("{name_column}  {}", style(invalid).red())
-                } else {
-                    format!("{name_column}  {invalid}")
-                };
-
-                display.println(line);
+                add(
+                    &ListItemResult::Failure,
+                    filename,
+                    failed(format!("unparsable: {invalid}")),
+                    None,
+                );
             }
 
             // Whatever environment is selected, as for an unparsable spec: a refused
-            // file cannot say which environments it declares.
+            // file cannot say which environments it declares. Its path is relative
+            // to the package directory named above the table.
             for refused in &package_list.refused {
-                let prefix = plain_prefix(&ListItemResult::Failure, use_colors);
-                let name_column = format!(
-                    "{prefix} {:<width$}",
-                    refused.package_name,
-                    width = state.max_name_len
+                let path = std::path::Path::new(&refused.path);
+                let shown = path.strip_prefix(package_dir).unwrap_or(path);
+                add(
+                    &ListItemResult::Failure,
+                    &refused.package_name,
+                    failed(format!("refused ({}): {}", shown.display(), refused.reason)),
+                    None,
                 );
-                let text = format!("refused ({}): {}", refused.path, refused.reason);
-                let line = if use_colors {
-                    format!("{name_column}  {}", style(text).red())
-                } else {
-                    format!("{name_column}  {text}")
-                };
-                display.println(line);
             }
 
-            display.println("");
-            display.println(format!(
-                "Package directory: {}",
-                package_list.package_directory
-            ));
+            let rows = state.buffered_rows.len()
+                + package_list.invalid_packages.len()
+                + package_list.refused.len();
+            // Named before the table, whose refused rows give paths relative to
+            // it, so output cut short still says where they are; worded as
+            // `dotfiles list` and apply name the same directory.
+            display.println(base_directory_line(BaseKind::PackageDirectory, package_dir));
+            if rows > 0 {
+                display.println(format!("{table}"));
+            }
 
             let valid = package_list.valid_packages.len();
             let invalid = package_list.invalid_packages.len();
@@ -240,13 +251,9 @@ fn handle_list_event(
                     config.environment()
                 ));
                 display_environment_stats(&package_list.environment_stats, config, display);
-            } else if invalid > 0 || refused > 0 {
-                display.println(selfie::package::event::listing_counts(
-                    valid, invalid, refused, "package",
-                ));
-            } else {
-                display.println(format!("{valid} packages"));
             }
+            // The counts are the summary line's, printed once, by the shared
+            // handler.
             true
         }
 
@@ -299,21 +306,20 @@ fn display_environment_stats(
 
     display.println(format!("{table}"));
 
-    if config.use_colors() {
-        display.print_suggestion(format!(
-            "{} to see packages for a different environment",
-            console::style("--environment <env>").yellow()
-        ));
-        display.println(format!(
-            "{INDENT}or: {} to see all packages regardless of environment",
-            console::style("--all").yellow()
-        ));
+    // Advice about the run, so on stderr, as one suggestion: a second line on
+    // its own would read as an unrelated note.
+    let (environment, all) = if config.use_colors() {
+        (
+            console::style("--environment <env>").yellow().to_string(),
+            console::style("--all").yellow().to_string(),
+        )
     } else {
-        display.print_suggestion("--environment <env> to see packages for a different environment");
-        display.println(format!(
-            "{INDENT}or: --all to see all packages regardless of environment"
-        ));
-    }
+        ("--environment <env>".to_string(), "--all".to_string())
+    };
+    display.print_suggestion(format!(
+        "{environment} to see packages for a different environment, or {all} to see all \
+         packages regardless of environment"
+    ));
 }
 
 #[cfg(test)]
@@ -676,22 +682,22 @@ mod tests {
     fn results_are_buffered_until_the_list_loads() {
         let state = send_buffered_results();
 
-        assert_eq!(state.buffered_lines.len(), 2, "Results should be buffered");
+        assert_eq!(state.buffered_rows.len(), 2, "Results should be buffered");
         // Buffered in arrival order (zebra first, alpha second)
-        assert_eq!(state.buffered_lines[0].0, "zebra");
-        assert_eq!(state.buffered_lines[1].0, "alpha");
+        assert_eq!(state.buffered_rows[0].name, "zebra");
+        assert_eq!(state.buffered_rows[1].name, "alpha");
         assert_eq!(state.checked_count, 2);
     }
 
     #[test]
-    fn test_package_list_loaded_sorts_buffered_lines() {
+    fn test_package_list_loaded_sorts_buffered_rows() {
         // Verify that PackageListLoaded sorts the buffered lines by name.
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let mut state = send_buffered_results();
 
         // Confirm arrival order before PackageListLoaded
-        assert_eq!(state.buffered_lines[0].0, "zebra");
-        assert_eq!(state.buffered_lines[1].0, "alpha");
+        assert_eq!(state.buffered_rows[0].name, "zebra");
+        assert_eq!(state.buffered_rows[1].name, "alpha");
 
         let loaded_event = event::PackageEvent::PackageListLoaded {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
@@ -707,8 +713,8 @@ mod tests {
         test_handle_event_with_state(&loaded_event, &config, &mut state);
 
         // After PackageListLoaded, buffered lines must be sorted alphabetically
-        assert_eq!(state.buffered_lines[0].0, "alpha");
-        assert_eq!(state.buffered_lines[1].0, "zebra");
+        assert_eq!(state.buffered_rows[0].name, "alpha");
+        assert_eq!(state.buffered_rows[1].name, "zebra");
     }
 
     #[test]
@@ -725,7 +731,8 @@ mod tests {
                 stderr: String::new(),
             }),
         };
-        let (result, content) = format_list_item(&success_item, &config, false, false, 10);
+        let row = format_list_item(&success_item, &config, false, false);
+        let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
         assert!(matches!(result, ListItemResult::Success));
         assert!(content.contains("ripgrep"));
         assert!(content.contains("Installed"));
@@ -741,7 +748,8 @@ mod tests {
                 exit_code: Some(1),
             }),
         };
-        let (result, content) = format_list_item(&failure_item, &config, false, false, 12);
+        let row = format_list_item(&failure_item, &config, false, false);
+        let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
         assert!(matches!(result, ListItemResult::Failure));
         assert!(content.contains("missing-pkg"));
         assert!(content.contains("Not installed"));
@@ -753,7 +761,8 @@ mod tests {
             environments: vec![TEST_ENV.to_string()],
             status: Some(event::CheckResult::NoCheckCommand),
         };
-        let (result, content) = format_list_item(&warning_item, &config, false, false, 10);
+        let row = format_list_item(&warning_item, &config, false, false);
+        let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
         assert!(matches!(result, ListItemResult::Warning));
         assert!(content.contains("no-check"));
         assert!(content.contains("No check"));
@@ -765,7 +774,8 @@ mod tests {
             environments: vec![TEST_ENV.to_string()],
             status: None,
         };
-        let (result, _) = format_list_item(&na_item, &config, false, false, 10);
+        let row = format_list_item(&na_item, &config, false, false);
+        let result = &row.result;
         assert!(matches!(result, ListItemResult::Warning));
     }
 

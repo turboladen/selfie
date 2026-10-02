@@ -106,7 +106,8 @@ fn test_package_directory_not_found_error() {
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains("does not exist"))
-        .stdout(predicate::str::contains("mkdir -p --"));
+        .stderr(predicate::str::contains("mkdir -p --"))
+        .stdout(predicate::str::contains("mkdir -p").not());
 }
 
 #[test]
@@ -178,7 +179,9 @@ name: "incomplete-package"
     // The listing says so rather than leaving it out, and still succeeds.
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("incomplete-package  refused"))
+        .stdout(predicate::str::contains(
+            "incomplete-package ┆ refused (incomplete-package.yaml)",
+        ))
         .stdout(predicate::str::contains(
             "At least one environment must be defined",
         ));
@@ -297,8 +300,9 @@ fn test_package_install_missing_environment_error() {
 
     cmd.assert()
         .failure()
-        .stdout(predicate::str::contains("doesn't support environment"))
-        .stdout(predicate::str::contains("Available environments"));
+        .stderr(predicate::str::contains("doesn't support environment"))
+        .stderr(predicate::str::contains("Available environments"))
+        .stdout(predicate::str::is_empty());
 }
 
 // =============================================================================
@@ -367,19 +371,19 @@ fn test_invalid_package_directory_override_error() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["-p", "/dev/null/nonexistent", "package", "list"]);
 
-    // The suggestion goes to stdout and the message to stderr, so asserting one
-    // stream leaves the other unchecked. Both are asserted here, and the
-    // suggestion is also asserted for what it must *not* name: `selfie config`
-    // takes a subcommand, so it cannot set the directory.
+    // The message and its remedy both go to stderr, and nothing to stdout. The
+    // remedy is also asserted for what it must *not* name: `selfie config` takes
+    // a subcommand, so it cannot set the directory.
     cmd.assert()
         .failure()
         .stderr(predicate::str::contains(
             "is below /dev/null, which is not a directory",
         ))
-        .stdout(predicate::str::contains(
+        .stderr(predicate::str::contains(
             "selfie --package-directory <path>",
         ))
-        .stdout(predicate::str::contains("selfie config --package-directory").not());
+        .stderr(predicate::str::contains("selfie config --package-directory").not())
+        .stdout(predicate::str::is_empty());
 }
 
 // =============================================================================

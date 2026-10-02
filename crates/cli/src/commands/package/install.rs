@@ -75,7 +75,7 @@ fn display_environment_error(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    display.println("");
+    display.print_note("");
 
     match failure {
         OperationFailure::Package(PackageError::EnvironmentNotFound {
@@ -96,15 +96,13 @@ fn display_environment_error(
             other_envs_with_install,
             ..
         }) => {
-            display.print_info(format!(
-                "No install command defined for '{package_name}' in environment '{environment}'."
-            ));
-            if !other_envs_with_install.is_empty() {
-                display.println(format!(
-                    "Environments with install commands: {}",
-                    other_envs_with_install.join(", ")
-                ));
-            }
+            common::display_missing_command(
+                display,
+                "install",
+                package_name,
+                environment,
+                other_envs_with_install,
+            );
         }
         _ => {
             common::display_generic_environment_suggestion(

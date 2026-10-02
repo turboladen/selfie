@@ -128,20 +128,7 @@ pub(crate) async fn handle_track(
         TrackChoice::NewStandalone(ref name) => {
             // Validate namespace before creating
             if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
-                // The prefix blames the name, so it belongs only where the name is
-                // the problem. A dotfiles directory that would not read says nothing
-                // about the name, and telling the user they cannot use it sends them
-                // back to the prompt to pick another that fails identically.
-                let message = match &e {
-                    namespace::NamespaceValidationError::DotfilesDirectoryUnreadable(_) => {
-                        e.to_string()
-                    }
-                    namespace::NamespaceValidationError::Conflict(_)
-                    | namespace::NamespaceValidationError::LookupFailed(_) => {
-                        format!("Cannot use name '{name}': {e}")
-                    }
-                };
-                display.print_error(message);
+                display.print_error(common::name_check_message(name, &e));
                 return 1;
             }
             common::handle_track_standalone(name, file, config, display, cancellation_token).await

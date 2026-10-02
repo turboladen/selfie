@@ -103,8 +103,7 @@ pub(crate) fn library_config_notices(ignored: &[IgnoredKey]) -> Vec<ConfigNotice
 }
 
 /// Print every notice once, before the command runs.
-// One warning, so the whole notice goes to stderr. `print_suggestion` writes to
-// stdout, which would put it in redirected command output.
+// One warning, so the notice and its remedy print as one line, on stderr.
 pub(crate) fn report_config_notices(notices: &[ConfigNotice], display: &DisplayManager) {
     for notice in notices {
         display.print_warning(format!("{} {}", notice.message, notice.suggestion));

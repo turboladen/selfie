@@ -75,7 +75,7 @@ fn spec_create_does_not_replace_a_file_stored_under_another_case() {
         // wrote nothing. A check on the message alone would also pass on a run
         // that printed it and then failed for an unrelated reason.
         .code(1)
-        .stdout(predicates::str::contains("already exists"));
+        .stderr(predicates::str::contains("'neovim' is already a package"));
 
     // Listing the directory rather than testing `neovim.yml.exists()`, which is
     // true on a case-insensitive file system whether or not anything was
@@ -136,4 +136,26 @@ fn spec_create_does_not_replace_a_file_stored_under_another_normalization() {
         yaml,
         "the existing spec must survive byte for byte"
     );
+}
+
+// A name a package spec already has is reported as a package, even when that
+// spec cannot be loaded: where the name was found decides the sentence.
+#[test]
+fn spec_create_over_an_unloadable_package_reports_a_package() {
+    let temp_dir = setup_default_test_config();
+    fs::write(
+        temp_dir.path().join("packages").join("vim.yaml"),
+        "name: [unterminated\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["--no-color", "spec", "create", "vim"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("'vim' is already a package"), "{stderr}");
+    assert!(stderr.contains("could not be loaded"), "{stderr}");
+    assert!(!stderr.contains("dotfile spec"), "{stderr}");
 }

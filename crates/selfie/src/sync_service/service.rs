@@ -851,6 +851,7 @@ fn validate_changed_packages(
                 field: "-".to_string(),
                 message: name_collision_message(&names),
                 location: None,
+                suggestion: None,
             }],
         });
     }
@@ -877,6 +878,7 @@ fn validate_changed_packages(
                         field: "-".to_string(),
                         message: format!("failed to read: {e}"),
                         location: None,
+                        suggestion: None,
                     }],
                 });
                 continue;
@@ -902,6 +904,7 @@ fn validate_changed_packages(
                         field: "-".to_string(),
                         message,
                         location,
+                        suggestion: None,
                     }],
                 });
                 continue;
@@ -940,6 +943,7 @@ fn validate_changed_packages(
                 field: i.field().to_string(),
                 message: i.message().to_string(),
                 location: i.location().map(str::to_string),
+                suggestion: i.suggestion().cloned(),
             })
             .collect();
 
@@ -994,6 +998,8 @@ fn apply_refusal_issue(
         field: "-".to_string(),
         message: format!("'selfie apply' would refuse this package: {refusal}"),
         location: None,
+        // A refusal carries its remedy in its message.
+        suggestion: None,
     })
 }
 

@@ -8,6 +8,7 @@ use selfie::{
     sync_service::{ConfirmedCommit, PrepareResult, PushOptions, SyncError, SyncService},
 };
 
+use crate::display_manager::Channel;
 use crate::{
     commands::{
         common::create_sync_service,
@@ -68,12 +69,13 @@ pub(crate) async fn handle_push(
                             field: &i.field,
                             message: &i.message,
                             location: i.location.as_deref(),
+                            suggestion: i.suggestion.as_deref(),
                         })
                         .collect(),
                 })
                 .collect();
 
-            display_validation_groups(&groups, use_colors, display);
+            display_validation_groups(&groups, use_colors, display, Channel::Stderr);
             return 1;
         }
         // Its own arm so the suggestion lands in the suggestion channel, as it

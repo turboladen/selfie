@@ -437,3 +437,64 @@ fn track_without_a_terminal_refuses_rather_than_prompting_forever() {
         "the refusal must name a command that works instead, got:\n{stderr}"
     );
 }
+
+// A second track of one name is refused with the shared fact and a track's
+// remedy for it.
+#[test]
+fn a_second_track_of_a_name_says_the_spec_exists() {
+    let temp_dir = setup_default_test_config();
+    std::fs::create_dir_all(temp_dir.path().join("dotfiles")).unwrap();
+    let first = temp_dir.path().join(".first-rc");
+    let second = temp_dir.path().join(".second-rc");
+    std::fs::write(&first, "a\n").unwrap();
+    std::fs::write(&second, "b\n").unwrap();
+
+    let tracked = sandboxed_command(&temp_dir)
+        .args(["dotfiles", "track", "rc", first.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(tracked.status.success(), "{tracked:?}");
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["dotfiles", "track", "rc", second.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("A dotfile spec named 'rc' already exists"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Remove it first"), "{stderr}");
+    assert!(!stderr.contains("Cannot use name"), "{stderr}");
+}
+
+// Control: a name a package already has gets the package sentence, and the
+// remedy a track has for it.
+#[test]
+fn tracking_under_a_package_name_says_it_is_a_package() {
+    let temp_dir = setup_default_test_config();
+    std::fs::create_dir_all(temp_dir.path().join("dotfiles")).unwrap();
+    std::fs::write(
+        temp_dir.path().join("packages").join("bat.yaml"),
+        format!("name: bat\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+    let file = temp_dir.path().join(".batrc");
+    std::fs::write(&file, "a\n").unwrap();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["dotfiles", "track", "bat", file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("'bat' is already a package"), "{stderr}");
+    assert!(
+        stderr.contains("selfie package track-dotfile bat <file>"),
+        "the remedy is the package's own track command: {stderr}"
+    );
+    assert!(!stderr.contains("dotfile spec named"), "{stderr}");
+}

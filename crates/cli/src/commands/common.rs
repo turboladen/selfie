@@ -183,6 +183,33 @@ pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) ->
     Some(1)
 }
 
+/// The message for a name the namespace check refused, for a command tracking a
+/// dotfile under that name.
+pub(crate) fn name_check_message(
+    name: &str,
+    error: &selfie::namespace::NamespaceValidationError,
+) -> String {
+    use selfie::namespace::NamespaceValidationError as Invalid;
+
+    match error {
+        // The fact, then what a track can do about it.
+        Invalid::Conflict(conflict) => match conflict.found_in {
+            selfie::namespace::NameLocation::Dotfiles => {
+                format!("{conflict} Remove it first or choose a different name.")
+            }
+            selfie::namespace::NameLocation::Packages => format!(
+                "{conflict} To track a file for that package, use 'selfie package track-dotfile \
+                 {name} <file>', or choose a different name."
+            ),
+        },
+        // A dotfiles directory that would not read says nothing about the name,
+        // and telling the user they cannot use it sends them off to pick another
+        // one, which fails in exactly the same way.
+        Invalid::DotfilesDirectoryUnreadable(_) => error.to_string(),
+        Invalid::LookupFailed(_) => format!("Cannot use name '{name}': {error}"),
+    }
+}
+
 /// Track a standalone dotfile via `DotfileServiceImpl::track_standalone`.
 ///
 /// Shared by `selfie dotfiles track` and `selfie track` (interactive).
@@ -291,8 +318,7 @@ pub(crate) fn open_editor(
     success_message: Option<String>,
 ) -> i32 {
     let Ok(editor) = std::env::var("EDITOR") else {
-        display.print_error("EDITOR environment variable is not set.");
-        display.print_info("Please set EDITOR and try again.");
+        report_missing_editor(display);
         return 1;
     };
 
@@ -322,6 +348,12 @@ pub(crate) fn open_editor(
     }
 }
 
+// The error and its remedy, both on stderr.
+fn report_missing_editor(display: &DisplayManager) {
+    display.print_error("EDITOR environment variable is not set.");
+    display.print_suggestion("Please set EDITOR and try again.");
+}
+
 /// Check if EDITOR environment variable is set and provide helpful error messages
 ///
 /// Returns the editor command if available, or reports an error and returns None.
@@ -339,18 +371,18 @@ pub(crate) fn check_editor_available(
 
         if package_exists {
             if let Some(path) = package_path {
-                display.print_info(format!(
+                display.print_suggestion(format!(
                     "Package '{}' exists at {}. Go ahead and open it in your editor of choice!",
                     package_name,
                     path.display()
                 ));
             } else {
-                display.print_info(format!(
+                display.print_suggestion(format!(
                     "Package '{package_name}' exists. Set EDITOR to edit it automatically."
                 ));
             }
         } else {
-            display.print_info(format!(
+            display.print_suggestion(format!(
                 "Package '{package_name}' doesn't exist yet. Set EDITOR and try again to create it."
             ));
         }
@@ -465,12 +497,14 @@ pub(crate) fn display_environment_summary(
             context,
         );
     } else {
-        display.print_suggestion(format!(
+        display.print_error(format!(
             "Package '{package_name}' doesn't support environment '{current_environment}'."
         ));
-        display.println(format!("{INDENT}Available environments for this package:"));
+        display.print_note(format!("{INDENT}Available environments for this package:"));
 
         let mut table = create_formatted_table();
+        // Printed on stderr, so sized to the terminal stderr is on.
+        table.use_stderr();
         table.set_header(vec!["Environment"]);
 
         // Sort environments, highlighting the current one if present
@@ -490,7 +524,7 @@ pub(crate) fn display_environment_summary(
             table.add_row(vec![env_display]);
         }
 
-        display.println(format!("{table}"));
+        display.print_note(format!("{table}"));
 
         if config.use_colors() {
             display.print_suggestion(format!(
@@ -508,6 +542,29 @@ pub(crate) fn display_environment_summary(
     }
 }
 
+/// Report that `package_name` has no `kind` command ("check", "install") in
+/// `environment`, naming the environments that have one (stderr).
+pub(crate) fn display_missing_command(
+    display: &DisplayManager,
+    kind: &str,
+    package_name: &str,
+    environment: &str,
+    others: &[String],
+) {
+    display.print_error(format!(
+        "No {kind} command defined for '{package_name}' in environment '{environment}'."
+    ));
+    if !others.is_empty() {
+        // Sorted, so the line reads the same on every run.
+        let mut others = others.to_vec();
+        others.sort();
+        display.print_note(format!(
+            "Environments with {kind} commands: {}",
+            others.join(", ")
+        ));
+    }
+}
+
 /// Display generic environment suggestion when specific environment info is not available
 pub(crate) fn display_generic_environment_suggestion(
     package_name: &str,
@@ -516,12 +573,12 @@ pub(crate) fn display_generic_environment_suggestion(
     display: &DisplayManager,
     context: &str, // "check" or "install"
 ) {
-    display.print_suggestion(format!(
+    display.print_error(format!(
         "Package '{package_name}' doesn't support environment '{current_environment}'."
     ));
-    display.println(format!("{INDENT}Try one of these options:"));
+    display.print_note(format!("{INDENT}Try one of these options:"));
     if config.use_colors() {
-        display.println(format!(
+        display.print_note(format!(
             "{INDENT}• {} to {} with a different environment",
             console::style(format!(
                 "selfie package {context} --environment <env> <package>"
@@ -529,15 +586,15 @@ pub(crate) fn display_generic_environment_suggestion(
             .yellow(),
             context
         ));
-        display.println(format!(
+        display.print_note(format!(
             "{INDENT}• {} to see which environments this package supports",
             console::style("selfie spec info <package>").yellow()
         ));
     } else {
-        display.println(format!(
+        display.print_note(format!(
             "{INDENT}• selfie package {context} --environment <env> <package> to {context} with a different environment"
         ));
-        display.println(format!(
+        display.print_note(format!(
             "{INDENT}• selfie spec info <package> to see which environments this package supports"
         ));
     }
@@ -548,6 +605,99 @@ mod tests {
     use super::*;
     use selfie::package::port::{MockPackageRepository, PackageRepoError};
     use test_common::test_config_with_dir;
+
+    // The environments that have the command are listed in order, whatever
+    // order the spec's map gave them.
+    #[test]
+    fn a_missing_command_lists_the_others_in_order() {
+        let display = DisplayManager::new(false);
+
+        display_missing_command(
+            &display,
+            "check",
+            "bat",
+            "test",
+            &["macos-work".to_string(), "linux".to_string()],
+        );
+
+        assert_eq!(
+            display.printed().last().map(|(_, line)| line.as_str()),
+            Some("Environments with check commands: linux, macos-work")
+        );
+    }
+
+    // A missing editor and its remedy are both on stderr.
+    #[test]
+    fn a_missing_editor_is_reported_on_stderr() {
+        use crate::display_manager::Channel;
+
+        let display = DisplayManager::new(false);
+        report_missing_editor(&display);
+
+        assert_eq!(
+            display.printed(),
+            vec![
+                (
+                    Channel::Stderr,
+                    "EDITOR environment variable is not set.".to_string()
+                ),
+                (
+                    Channel::Stderr,
+                    "Please set EDITOR and try again.".to_string()
+                ),
+            ]
+        );
+    }
+
+    // An environment the package does not support is a failure, so every line
+    // explaining it, the table and the suggestion included, is on stderr.
+    #[test]
+    fn an_environment_summary_is_all_on_stderr() {
+        use crate::display_manager::Channel;
+
+        let config = CliConfig::wrap_for_test(test_config_with_dir(std::path::Path::new("/p")));
+        let display = DisplayManager::new(false);
+
+        display_environment_summary(
+            "bat",
+            "test",
+            &["macos".to_string(), "linux".to_string()],
+            &config,
+            &display,
+            "check",
+        );
+
+        let printed = display.printed();
+        assert!(printed.len() > 3, "{printed:?}");
+        assert!(
+            printed.iter().all(|(stream, _)| *stream == Channel::Stderr),
+            "{printed:?}"
+        );
+        assert!(
+            printed
+                .iter()
+                .any(|(_, line)| line.contains("doesn't support environment 'test'")),
+            "{printed:?}"
+        );
+    }
+
+    // The generic form, for a package that lists no environments, as well.
+    #[test]
+    fn a_generic_environment_suggestion_is_all_on_stderr() {
+        use crate::display_manager::Channel;
+
+        let config = CliConfig::wrap_for_test(test_config_with_dir(std::path::Path::new("/p")));
+        let display = DisplayManager::new(false);
+
+        display_generic_environment_suggestion("bat", "test", &config, &display, "check");
+
+        let printed = display.printed();
+        assert!(printed.len() > 2, "{printed:?}");
+        assert!(
+            printed.iter().all(|(stream, _)| *stream == Channel::Stderr),
+            "{printed:?}"
+        );
+    }
 
     #[test]
     fn test_create_new_package() {

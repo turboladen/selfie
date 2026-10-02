@@ -14,8 +14,9 @@ use selfie::package::{
     port::{PackageError, PackageParseKind},
 };
 
+use crate::display_manager::Channel;
 use crate::display_manager::{DisplayManager, ErrorDetail};
-use crate::source_paths::{self, Channel};
+use crate::source_paths;
 
 /// How a command's run ended, as the process reports it.
 ///
@@ -775,7 +776,7 @@ mod tests {
     async fn printed_for(
         display: DisplayManager,
         events: Vec<PackageEvent>,
-    ) -> Vec<(crate::display_manager::Stream, String)> {
+    ) -> Vec<(crate::display_manager::Channel, String)> {
         let processor = EventProcessor::new(display.clone());
         processor
             .process_events(Box::pin(stream::iter(events)), |_event| false)
@@ -793,7 +794,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_waiting_step_prints_at_normal_verbosity_on_stderr() {
-        use crate::display_manager::Stream;
+        use crate::display_manager::Channel;
 
         let printed = printed_for(
             DisplayManager::new(false),
@@ -806,7 +807,7 @@ mod tests {
         assert_eq!(
             printed,
             vec![(
-                Stream::Stderr,
+                Channel::Stderr,
                 "Running the check command for bat...".to_string()
             )]
         );
@@ -814,7 +815,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_local_step_is_hidden_unless_verbose() {
-        use crate::display_manager::Stream;
+        use crate::display_manager::Channel;
 
         let normal = printed_for(
             DisplayManager::new(false),
@@ -826,13 +827,13 @@ mod tests {
         let shown = printed_for(verbose(), vec![step(StepKind::Local, "Loading packages")]).await;
         assert_eq!(
             shown,
-            vec![(Stream::Stderr, "Loading packages".to_string())]
+            vec![(Channel::Stderr, "Loading packages".to_string())]
         );
     }
 
     #[tokio::test]
     async fn the_header_prints_only_when_verbose_on_stderr() {
-        use crate::display_manager::Stream;
+        use crate::display_manager::Channel;
 
         let started = || PackageEvent::Started {
             operation_info: make_operation_info("bat"),
@@ -844,7 +845,7 @@ mod tests {
         assert_eq!(
             shown,
             vec![(
-                Stream::Stderr,
+                Channel::Stderr,
                 "Package check package 'bat' in environment 'test'".to_string()
             )]
         );
@@ -875,7 +876,7 @@ mod tests {
     // verbosity: while it ran, its output was hidden.
     #[tokio::test]
     async fn a_failed_command_shows_its_stderr_at_normal_verbosity() {
-        use crate::display_manager::Stream;
+        use crate::display_manager::Channel;
         use selfie::package::event::{CommandFailure, OperationFailure};
 
         let failed = PackageEvent::Completed {
@@ -890,7 +891,7 @@ mod tests {
         };
         let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
         assert!(
-            printed.contains(&(Stream::Stderr, "Error: no bottle".to_string())),
+            printed.contains(&(Channel::Stderr, "Error: no bottle".to_string())),
             "{printed:?}"
         );
     }
@@ -1041,7 +1042,7 @@ mod tests {
     // is not, and stays on stderr.
     #[tokio::test]
     async fn a_found_summary_goes_to_stdout_and_a_failure_to_stderr() {
-        use crate::display_manager::Stream;
+        use crate::display_manager::Channel;
         use selfie::package::event::{CheckVerdict, OperationFailure, OperationSuccess};
 
         let found = PackageEvent::Completed {
@@ -1061,11 +1062,11 @@ mod tests {
         assert!(
             printed
                 .iter()
-                .any(|(stream, line)| *stream == Stream::Stdout && line.contains("'bat'")),
+                .any(|(stream, line)| *stream == Channel::Stdout && line.contains("'bat'")),
             "{printed:?}"
         );
         assert!(
-            printed.iter().all(|(stream, _)| *stream == Stream::Stdout),
+            printed.iter().all(|(stream, _)| *stream == Channel::Stdout),
             "{printed:?}"
         );
 
@@ -1074,7 +1075,7 @@ mod tests {
             result: OperationResult::Failure(OperationFailure::Generic("broken".to_string())),
         };
         let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
-        assert_eq!(printed, vec![(Stream::Stderr, "broken".to_string())]);
+        assert_eq!(printed, vec![(Channel::Stderr, "broken".to_string())]);
     }
 
     fn make_operation_info(package_name: &str) -> selfie::package::event::OperationInfo {

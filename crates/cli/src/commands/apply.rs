@@ -20,9 +20,9 @@ use crate::{
     cli::ApplyArgs,
     commands::common::create_dotfile_service,
     config::CliConfig,
-    display_manager::{DisplayManager, shorten_path},
+    display_manager::{Channel, DisplayManager, shorten_path},
     event_processor::EventProcessor,
-    source_paths::{Channel, force_heading, relative_text},
+    source_paths::{force_heading, relative_text},
 };
 
 /// What [`InteractiveConflictResolver::reveal`] displays.

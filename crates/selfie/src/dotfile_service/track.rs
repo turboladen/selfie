@@ -601,9 +601,13 @@ where
     // Only for a spec this track would create. The other kind was loaded from
     // this path, so something being there is what was expected.
     if matches!(spec.kind, SpecKind::New) && filesystem.path_exists(&spec.spec_path) {
+        // Says what was checked: this one path. A spec under the same name with
+        // another extension is the name checks' to find, not this guard's.
         return OperationResult::Failure(OperationFailure::Generic(format!(
-            "A dotfile spec already exists at {}. Remove it first or choose a different name.",
-            spec.spec_path.display()
+            "Something is already at {}, where the spec for '{}' would be written. Remove it \
+             first or choose a different name.",
+            spec.spec_path.display(),
+            spec.name
         )));
     }
 

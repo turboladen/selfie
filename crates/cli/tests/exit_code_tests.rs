@@ -570,5 +570,5 @@ fn spec_create_exits_one_when_it_declines() {
 
     let (code, output) = run(&temp, &["spec", "create", "tool"]);
     assert_eq!(code, Some(FAILED), "{output}");
-    assert!(output.contains("already exists"), "{output}");
+    assert!(output.contains("'tool' is already a package"), "{output}");
 }

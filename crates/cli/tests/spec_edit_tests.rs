@@ -140,7 +140,7 @@ fn spec_edit_opens_a_spec_stored_under_another_case() {
         .args(["spec", "edit", "neovim"])
         .assert()
         .success()
-        .stdout(predicates::str::contains("Opening existing package"));
+        .stderr(predicates::str::contains("Opening existing package"));
 
     let mut entries: Vec<String> = fs::read_dir(&packages)
         .unwrap()

@@ -79,7 +79,7 @@ fn display_environment_error(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    display.println("");
+    display.print_note("");
 
     if let OperationFailure::Package(PackageError::EnvironmentNotFound {
         available_environments,

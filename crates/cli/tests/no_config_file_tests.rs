@@ -213,6 +213,13 @@ fn the_optional_directories_keep_their_defaults() {
 #[test]
 fn a_tilde_in_a_flag_is_expanded() {
     let temp = sandbox_without_config();
+    // The listing names the directory in `~` form, so the value echoed back
+    // cannot show the expansion. A spec found there can.
+    std::fs::write(
+        temp.path().join("packages").join("tilde-probe.yml"),
+        "name: tilde-probe\nenvironments:\n  test-env:\n    install: \"true\"\n",
+    )
+    .unwrap();
 
     let (ok, combined) = run(
         &temp,
@@ -227,8 +234,8 @@ fn a_tilde_in_a_flag_is_expanded() {
 
     assert!(ok, "~ names the sandbox's home directory, got:\n{combined}");
     assert!(
-        !combined.contains("~/packages"),
-        "the unexpanded value must not be what was read, got:\n{combined}"
+        combined.contains("tilde-probe"),
+        "the spec under the expanded directory must be listed, got:\n{combined}"
     );
 }
 
