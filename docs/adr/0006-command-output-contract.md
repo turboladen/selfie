@@ -4,7 +4,9 @@ Date: 2026-09-28
 
 ## Status
 
-Accepted
+Accepted. Refined by
+[0008](0008-a-dotfile-entry-is-refused-or-failed-and-its-kind-names-the-condition.md), which says
+what a dotfile entry that does not deploy reports.
 
 ## Context
 
