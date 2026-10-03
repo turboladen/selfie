@@ -4,8 +4,11 @@ Date: 2026-09-28
 
 ## Status
 
-Accepted. Refined by [0009](0009-a-status-selfie-cannot-judge-names-why-in-one-type.md), which types
-the reason a status is unknown without changing any verdict or exit code.
+Accepted. Refined by
+[0008](0008-a-dotfile-entry-is-refused-or-failed-and-its-kind-names-the-condition.md), which says
+what a dotfile entry that does not deploy reports, and by
+[0009](0009-a-status-selfie-cannot-judge-names-why-in-one-type.md), which types the reason a status
+is unknown. Neither changes any verdict or exit code.
 
 ## Context
 
