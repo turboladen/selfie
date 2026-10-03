@@ -2697,6 +2697,7 @@ dependencies = [
  "selfie",
  "serde",
  "serde_json",
+ "strum",
  "tempfile",
  "test-common",
  "tokio",

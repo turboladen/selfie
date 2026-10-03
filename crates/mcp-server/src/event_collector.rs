@@ -1,9 +1,9 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, BaseKind, CheckResult, ConflictReport, DotfileSource, DriftType, EventStream,
-    LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
-    RefusalKind, SkipReason, SourceKind, Uncreatable,
+    AuditResult, BaseKind, CheckResult, ConflictReport, DotfileSource, EventStream, LinkAtTarget,
+    NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent, RefusalKind,
+    SkipReason, Uncreatable,
 };
 use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
@@ -79,17 +79,12 @@ fn with_source(mut row: Value, source: &DotfileSource) -> Value {
         BaseKind::PackageDirectory => "packages",
         BaseKind::DotfilesDirectory => "dotfiles",
     });
-    let kind = match source.kind() {
-        SourceKind::File => "file",
-        SourceKind::Template => "template",
-        SourceKind::Command => "command",
-        SourceKind::Recorded => "recorded",
-    };
+    let kind = label(source);
     let full = match source {
         DotfileSource::Recorded(_) => Value::Null,
         _ => source.to_string().into(),
     };
-    map.insert("kind".into(), kind.into());
+    map.insert("kind".into(), kind);
     map.insert("source".into(), full);
     map.insert("base".into(), base.into());
     map.insert("relative_path".into(), relative_path.into());
@@ -298,27 +293,14 @@ fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
         .collect()
 }
 
-/// The `drift_type` field's value.
-fn drift_type_label(drift: &DriftType) -> &'static str {
-    match drift {
-        DriftType::RepoChanged => "repo_changed",
-        DriftType::TargetChanged => "target_changed",
-        DriftType::BothChanged => "both_changed",
-        DriftType::NotTracked => "not_tracked",
-    }
+/// The label the library gives `value`, as a JSON string.
+fn label(value: impl Into<&'static str>) -> Value {
+    Value::from(value.into())
 }
 
 /// `row` with a skip's `reason` label, and for a secret-bearing dry run the
 /// `commands` it would run and the `link` at its target, null otherwise.
 fn skip_reason_fields(mut row: Value, reason: &SkipReason) -> Value {
-    let label = match reason {
-        SkipReason::UpToDate => "up_to_date",
-        SkipReason::InSync => "in_sync",
-        SkipReason::PermissionsTightened => "permissions_tightened",
-        SkipReason::DryRun => "dry_run",
-        SkipReason::SecretDryRun { .. } => "secret_dry_run",
-        SkipReason::Unverifiable => "unverifiable",
-    };
     let (commands, link) = match reason {
         SkipReason::SecretDryRun { commands, link } => (
             Value::from(*commands),
@@ -340,7 +322,7 @@ fn skip_reason_fields(mut row: Value, reason: &SkipReason) -> Value {
         | SkipReason::Unverifiable => (Value::Null, Value::Null),
     };
     let map = row.as_object_mut().expect("constructed as an object");
-    map.insert("reason".into(), label.into());
+    map.insert("reason".into(), label(reason));
     map.insert("commands".into(), commands);
     map.insert("link".into(), link);
     row
@@ -691,7 +673,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         } => Some(serde_json::json!({
             "type": "dotfile_drift_detected",
             "target": target,
-            "drift_type": drift_type_label(drift_type),
+            "drift_type": label(drift_type),
         })),
         PackageEvent::DotfileOrphaned {
             source,
@@ -963,8 +945,9 @@ mod tests {
     use super::*;
     use futures::stream;
     use selfie::package::event::{
-        AuditResultData, CheckResult, CheckResultData, OperationContext, OperationFailure,
-        OperationInfo, OperationSuccess, RepoPath, StepCount, metadata::OperationType,
+        AuditResultData, CheckResult, CheckResultData, DriftType, OperationContext,
+        OperationFailure, OperationInfo, OperationSuccess, RepoPath, StepCount,
+        metadata::OperationType,
     };
     use std::time::Instant;
     use uuid::Uuid;
@@ -1219,9 +1202,37 @@ mod tests {
     // Each skip reason reaches an assistant as its own label, with the command
     // count and the link only for a secret-bearing dry run. The labels differ
     // from the sentences the terminal prints, so a row carrying the sentence
-    // fails here.
+    // fails here. The labels come from the enum, so a rename of a variant is a
+    // contract change this test pins. `pinned` has no wildcard: a new variant does
+    // not compile until it names its label.
     #[tokio::test]
     async fn a_skip_row_carries_its_reason_as_a_label() {
+        use selfie::package::event::SkipReasonDiscriminants;
+        use strum::IntoEnumIterator as _;
+
+        let pinned = |reason: &SkipReason| match reason {
+            SkipReason::UpToDate => "up_to_date",
+            SkipReason::InSync => "in_sync",
+            SkipReason::PermissionsTightened => "permissions_tightened",
+            SkipReason::DryRun => "dry_run",
+            SkipReason::SecretDryRun { .. } => "secret_dry_run",
+            SkipReason::Unverifiable => "unverifiable",
+        };
+        // Every variant, not only those listed below: one value of each kind.
+        for kind in SkipReasonDiscriminants::iter() {
+            let reason = match kind {
+                SkipReasonDiscriminants::UpToDate => SkipReason::UpToDate,
+                SkipReasonDiscriminants::InSync => SkipReason::InSync,
+                SkipReasonDiscriminants::PermissionsTightened => SkipReason::PermissionsTightened,
+                SkipReasonDiscriminants::DryRun => SkipReason::DryRun,
+                SkipReasonDiscriminants::SecretDryRun => SkipReason::SecretDryRun {
+                    commands: 1,
+                    link: LinkAtTarget::NoLink,
+                },
+                SkipReasonDiscriminants::Unverifiable => SkipReason::Unverifiable,
+            };
+            assert_eq!(label(&reason), pinned(&reason), "{reason:?}");
+        }
         let cases = [
             (SkipReason::UpToDate, "up_to_date", Value::Null, Value::Null),
             (SkipReason::InSync, "in_sync", Value::Null, Value::Null),
@@ -1277,21 +1288,28 @@ mod tests {
             let result = collect_events(Box::pin(stream::iter(events))).await;
 
             let row = &result.data["data"][0];
+            assert_eq!(label, pinned(&reason), "{reason:?}");
             assert_eq!(row["reason"], label, "{reason:?}");
             assert_eq!(row["commands"], commands, "{reason:?}");
             assert_eq!(row["link"], link, "{reason:?}");
         }
     }
 
-    // Each drift type reaches an assistant as a label it can match on.
+    // Each drift type reaches an assistant as a label it can match on. Every
+    // variant is run, and `pinned` has no wildcard: a new variant does not compile
+    // until it names its label.
     #[tokio::test]
     async fn a_drift_row_carries_its_type_as_a_label() {
-        for (drift, label) in [
-            (DriftType::RepoChanged, "repo_changed"),
-            (DriftType::TargetChanged, "target_changed"),
-            (DriftType::BothChanged, "both_changed"),
-            (DriftType::NotTracked, "not_tracked"),
-        ] {
+        use strum::IntoEnumIterator as _;
+
+        let pinned = |drift: &DriftType| match drift {
+            DriftType::RepoChanged => "repo_changed",
+            DriftType::TargetChanged => "target_changed",
+            DriftType::BothChanged => "both_changed",
+            DriftType::NotTracked => "not_tracked",
+        };
+        for drift in DriftType::iter() {
+            let label = pinned(&drift);
             let events = vec![PackageEvent::DotfileDriftDetected {
                 operation_info: test_op_info(),
                 target: "/home/u/.batrc".to_string(),
@@ -1305,9 +1323,38 @@ mod tests {
     }
 
     // Every dotfile row says what kind of source it names, as the library
-    // states it, with the labels `selfie_dotfiles_list` uses.
+    // states it, with the labels `selfie_dotfiles_list` uses. `pinned` has no
+    // wildcard: a new variant does not compile until it names its label.
     #[tokio::test]
     async fn a_dotfile_row_names_its_kind_of_source() {
+        use selfie::package::event::DotfileSourceDiscriminants;
+        use strum::IntoEnumIterator as _;
+
+        let pinned = |source: &DotfileSource| match source {
+            DotfileSource::File(_) => "file",
+            DotfileSource::Template { .. } => "template",
+            DotfileSource::Command(_) => "command",
+            DotfileSource::Recorded(_) => "recorded",
+        };
+        // Every variant, not only those listed below: one value of each kind.
+        for kind in DotfileSourceDiscriminants::iter() {
+            let source = match kind {
+                DotfileSourceDiscriminants::File => DotfileSource::File(RepoPath {
+                    base: None,
+                    path: "f".into(),
+                }),
+                DotfileSourceDiscriminants::Template => DotfileSource::Template {
+                    file: RepoPath {
+                        base: None,
+                        path: "t".into(),
+                    },
+                    vars: Vec::new(),
+                },
+                DotfileSourceDiscriminants::Command => DotfileSource::Command("c".to_string()),
+                DotfileSourceDiscriminants::Recorded => DotfileSource::Recorded("r".to_string()),
+            };
+            assert_eq!(label(&source), pinned(&source), "{source:?}");
+        }
         let base = || {
             Some(selfie::package::event::SourceBase {
                 kind: BaseKind::PackageDirectory,
@@ -1338,6 +1385,7 @@ mod tests {
                 "recorded",
             ),
         ] {
+            assert_eq!(kind, pinned(&source), "{source:?}");
             let events = vec![PackageEvent::DotfileDeploying {
                 operation_info: test_op_info(),
                 source,

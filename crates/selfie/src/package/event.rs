@@ -112,7 +112,12 @@ impl RepoPath {
 }
 
 /// Where a dotfile's content comes from, as events report it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Converts to its kind as a label for an adapter: `file`, `template`,
+/// `command` or `recorded`.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr, strum::EnumDiscriminants)]
+#[strum(serialize_all = "snake_case")]
+#[strum_discriminants(derive(strum::EnumIter))]
 pub enum DotfileSource {
     /// A repository file, copied as it is.
     File(RepoPath),
@@ -128,19 +133,6 @@ pub enum DotfileSource {
     /// A source from a deploy record that names no base: the spelling the record
     /// holds, relative to a directory that is not known.
     Recorded(String),
-}
-
-/// What kind of source a [`DotfileSource`] is, without its details.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceKind {
-    /// [`DotfileSource::File`].
-    File,
-    /// [`DotfileSource::Template`].
-    Template,
-    /// [`DotfileSource::Command`].
-    Command,
-    /// [`DotfileSource::Recorded`].
-    Recorded,
 }
 
 impl DotfileSource {
@@ -164,17 +156,6 @@ impl DotfileSource {
     #[must_use]
     pub fn base(&self) -> Option<&SourceBase> {
         self.repo_path().and_then(|file| file.base.as_ref())
-    }
-
-    /// What kind of source this is.
-    #[must_use]
-    pub fn kind(&self) -> SourceKind {
-        match self {
-            Self::File(_) => SourceKind::File,
-            Self::Template { .. } => SourceKind::Template,
-            Self::Command(_) => SourceKind::Command,
-            Self::Recorded(_) => SourceKind::Recorded,
-        }
     }
 }
 
@@ -3228,8 +3209,10 @@ pub struct RefusedPackage {
 /// How a deployed target and its source have moved since selfie last deployed
 /// it.
 ///
-/// [`Display`](fmt::Display) words it for a person: "repo changed".
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`Display`](fmt::Display) words it for a person: "repo changed". It
+/// converts to a label for an adapter: `"repo_changed"`.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub enum DriftType {
     /// The source changed since the last deploy; the target did not.
     RepoChanged,
@@ -3304,8 +3287,11 @@ impl fmt::Display for ConflictReport {
 
 /// Why a dotfile was left as it is.
 ///
-/// [`Display`](fmt::Display) words the reason as a clause for a person.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`Display`](fmt::Display) words the reason as a clause for a person. It
+/// converts to a label for an adapter: `"up_to_date"`.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr, strum::EnumDiscriminants)]
+#[strum(serialize_all = "snake_case")]
+#[strum_discriminants(derive(strum::EnumIter))]
 pub enum SkipReason {
     /// The target holds what selfie last deployed, and the source has not
     /// changed since.
