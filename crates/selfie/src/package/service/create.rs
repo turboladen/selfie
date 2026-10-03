@@ -180,17 +180,14 @@ pub(super) fn creatable_identity(
     config: &SelfieConfig,
 ) -> Result<String, String> {
     // Three checks, in this order. The name first, so a name such as `../x` is
-    // refused as a name. Then the path, because `--interactive` asks for a file
-    // name separately and a stem alone drops every directory component: `../evil`
-    // has the valid stem `evil`. Then the file name, judged as the loader judges it
-    // (`spec_name_of`, then the rule on the stem as spelled), because the stem, not
-    // `name:`, is what every later command finds the spec by.
+    // refused as a name. Then the path, because a caller may give a path that does
+    // not follow from the name, and a stem alone drops every directory component:
+    // `../evil` has the valid stem `evil`. Then the file name, judged as the loader
+    // judges it (`spec_name_of`, then the rule on the stem as spelled), because the
+    // stem, not `name:`, is what every later command finds the spec by.
     let name = package.name();
-    if !crate::package::is_valid_spec_name(name) {
-        return Err(format!(
-            "Refusing to create '{name}': it is not a valid spec name. Rename it: {}.",
-            crate::package::SPEC_NAME_RULE
-        ));
+    if let Some(refusal) = crate::package::spec_name_refusal(name) {
+        return Err(refusal);
     }
 
     let path = package.path();

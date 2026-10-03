@@ -64,3 +64,35 @@ fn apply_yes_refuses_a_secret_target_it_cannot_read_before_running_anything() {
     assert_eq!(mode, 0o200, "the target's mode must be untouched");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
 }
+
+// A secret-bearing conflict with no terminal to ask on is left alone, and the run
+// says only a terminal can accept it: `--yes` does not.
+#[test]
+fn apply_without_a_terminal_says_only_a_terminal_accepts_a_secret_conflict() {
+    let temp = setup_default_test_config();
+    let target = temp.path().join("credentials");
+    std::fs::write(
+        temp.path().join("packages/creds.yaml"),
+        format!(
+            "name: creds\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  \
+             - command: \"echo token\"\n    target: \"{}\"\n",
+            target.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(&target, "EXISTING").unwrap();
+
+    let out = common::run_sandboxed(&temp, &["apply"]);
+
+    assert_eq!(out.code, Some(0), "{}{}", out.stdout, out.stderr);
+    assert!(
+        out.stderr.contains(
+            "1 secret-bearing conflict was left as it is with no terminal to ask on. Only a \
+             terminal can accept one; --yes does not."
+        ),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("Pass --yes"), "{}", out.stderr);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
+}

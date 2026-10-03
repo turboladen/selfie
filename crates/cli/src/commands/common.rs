@@ -12,7 +12,7 @@ use selfie::{
     fs::{filesystem::FileSystem, real::RealFileSystem},
     git::GixGitAdapter,
     package::{
-        GetPackage, SpecOrigin, SpecService,
+        SpecOrigin, SpecService,
         event::PackageEvent,
         git_adapter::GixGitStatusProvider,
         port::{PackageListError, PackageRepository},
@@ -52,6 +52,9 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
 /// The names of the packages that loaded, sorted, along with a warning for every
 /// spec file that did not.
 ///
+/// Each name comes from [`file_name_of`], the name selfie looks the package up
+/// by; a package with no spec file name is left out.
+///
 /// # Errors
 ///
 /// [`PackageListError`] if the package directory itself cannot be listed. The
@@ -71,13 +74,26 @@ pub(crate) fn package_names_and_skipped(
         .map(selfie::package::service::skipped_spec_warning)
         .collect();
 
-    let mut names: Vec<String> = output
-        .valid_packages()
-        .map(|package| package.name().to_string())
-        .collect();
+    // Not the `name:` field: a dependency or a track destination is resolved by
+    // file name, and a field that disagrees with it names nothing selfie finds.
+    let mut names: Vec<String> = output.valid_packages().filter_map(file_name_of).collect();
     names.sort();
+    names.dedup();
 
     Ok((names, skipped))
+}
+
+/// The name `package` is offered and reported under: its spec file's stem as
+/// spelled, which lookup resolves ignoring case. `None` for a package with no
+/// spec file name.
+pub(crate) fn file_name_of(package: &selfie::package::Package) -> Option<String> {
+    // `spec_name` decides whether the file names a spec at all; its answer is
+    // folded to lower case, so the stem is taken as the file spells it.
+    package.spec_name()?;
+    package
+        .path()
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
 }
 
 /// Build the command runner every CLI service uses.
@@ -293,19 +309,6 @@ fn handle_already_tracked(event: &PackageEvent, display: &DisplayManager) -> boo
     }
 }
 
-/// Save a package to the filesystem with consistent error handling
-pub(crate) fn save_package(
-    repo: &impl PackageRepository,
-    package_blob: &GetPackage,
-    display: &DisplayManager,
-) -> Result<(), i32> {
-    if let Err(e) = repo.save_package(package_blob.package(), package_blob.file_path()) {
-        display.print_error(format!("Failed to save package file: {e}"));
-        return Err(1);
-    }
-    Ok(())
-}
-
 /// Open a file in the user's preferred editor
 ///
 /// Handles common editor functionality including:
@@ -389,11 +392,6 @@ pub(crate) fn check_editor_available(
         }
         None
     }
-}
-
-/// Create a new package template
-pub(crate) fn create_new_package(package_name: &str, config: &CliConfig) -> GetPackage {
-    GetPackage::new(package_name, config.package_directory())
 }
 
 /// Create a package service with repository and command runner
@@ -495,21 +493,10 @@ pub(crate) fn display_environment_summary(
         table.use_stderr();
         table.set_header(vec!["Environment"]);
 
-        // Sort environments, highlighting the current one if present
-        let mut sorted_envs = available_environments.to_vec();
-        sorted_envs.sort();
-
-        for env in sorted_envs {
-            let env_display = if config.use_colors() {
-                if env == current_environment {
-                    console::style(&env).green().bold().to_string()
-                } else {
-                    env.clone()
-                }
-            } else {
-                env
-            };
-            table.add_row(vec![env_display]);
+        // The spec file's order, which every other surface lists them in. The
+        // current environment is never among them: its absence is the error.
+        for env in available_environments {
+            table.add_row(vec![env.as_str()]);
         }
 
         display.print_note(format!("{table}"));
@@ -591,7 +578,7 @@ pub(crate) fn display_generic_environment_suggestion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::package::port::{MockPackageRepository, PackageRepoError};
+    use selfie::package::port::MockPackageRepository;
     use test_common::test_config_with_dir;
 
     // The environments that have the command are listed in order, whatever
@@ -687,21 +674,34 @@ mod tests {
         );
     }
 
+    // A picker offers the name selfie looks a package up by, the file's, even
+    // where the `name:` field says otherwise; a package with no spec file name
+    // is not offered at all.
     #[test]
-    fn test_create_new_package() {
-        // Test package creation logic without filesystem operations
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
+    fn pickers_offer_the_name_the_file_gives() {
+        use selfie::package::PackageBuilder;
+        use selfie::package::port::ListPackagesOutput;
 
-        let package_blob = create_new_package("test-package", &config);
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Ok(ListPackagesOutput::from_packages(vec![
+                PackageBuilder::default()
+                    .name("foo")
+                    .path("/packages/bar.yml")
+                    .build(),
+                PackageBuilder::default()
+                    .name("neovim")
+                    .path("/packages/Neovim.yml")
+                    .build(),
+                PackageBuilder::default().name("in-memory").build(),
+            ]))
+        });
 
-        assert!(package_blob.is_new());
-        assert_eq!(package_blob.package().name(), "test-package");
+        let (names, skipped) = package_names_and_skipped(&repo).unwrap();
 
-        assert_eq!(
-            package_blob.file_path(),
-            package_dir.join("test-package.yml")
-        );
+        // As the file spells it: lookup ignores case, and the user sees the file.
+        assert_eq!(names, vec!["Neovim", "bar"]);
+        assert!(skipped.is_empty());
     }
 
     #[test]
@@ -722,45 +722,31 @@ mod tests {
         );
     }
 
+    // The environments a package supports are listed in its file's order, as
+    // everywhere else, not sorted.
     #[test]
-    fn test_save_package_logic() {
-        // Test save package logic without filesystem operations
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
+    fn the_environment_summary_lists_environments_in_file_order() {
+        let config = CliConfig::wrap_for_test(test_config_with_dir("/test/packages"));
+        let display = DisplayManager::new(false);
 
-        let package_blob = create_new_package("save-test", &config);
-
-        // Verify package structure is correct before saving
-        assert!(package_blob.is_new());
-        assert_eq!(package_blob.package().name(), "save-test");
-
-        assert_eq!(package_blob.file_path(), package_dir.join("save-test.yml"));
-
-        // Verify it has default environment (since create_new_package uses GetPackage::new)
-        let environments = package_blob.package().environments();
-        assert!(environments.contains_key("default"));
-    }
-
-    #[test]
-    fn test_create_new_package_structure() {
-        // Test package creation logic without filesystem operations
-        // Note: create_new_package uses GetPackage::new which creates a "default" environment
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        let package_blob = create_new_package("structure-test", &config);
-
-        assert!(package_blob.is_new());
-        assert_eq!(package_blob.package().name(), "structure-test");
-
-        assert_eq!(
-            package_blob.file_path(),
-            package_dir.join("structure-test.yml")
+        display_environment_summary(
+            "tool",
+            "work",
+            &["zeta".to_string(), "alpha".to_string()],
+            &config,
+            &display,
+            "install",
         );
 
-        // create_new_package uses GetPackage::new which creates "default" environment
-        let environments = package_blob.package().environments();
-        assert!(environments.contains_key("default"));
+        let printed: String = display
+            .printed()
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let zeta = printed.find("zeta").expect("zeta listed");
+        let alpha = printed.find("alpha").expect("alpha listed");
+        assert!(zeta < alpha, "{printed}");
     }
 
     #[test]
@@ -827,87 +813,5 @@ mod tests {
         // Test with colors (just ensure no panic)
         let _colored_key = format_field_key("Test Key", true);
         let _colored_value = format_field_value("Test Value", true);
-    }
-
-    #[test]
-    fn test_save_package_with_mock_repository() {
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        // Mock successful save operation
-        mock_repo
-            .expect_save_package()
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        let package_blob = create_new_package("mock-repo-test", &config);
-        let display = DisplayManager::new(false);
-
-        // Test saving using mocked repository - tests CLI logic, not repository implementation
-        let result = save_package(&mock_repo, &package_blob, &display);
-        assert!(result.is_ok());
-
-        // This demonstrates testing CLI logic without repository implementation details
-    }
-
-    #[test]
-    fn test_save_package_repository_error_handling() {
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        // Mock repository error
-        mock_repo.expect_save_package().times(1).returning(|_, _| {
-            Err(PackageRepoError::IoError(std::sync::Arc::new(
-                std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "Simulated repository error",
-                ),
-            )))
-        });
-
-        let package_blob = create_new_package("error-test", &config);
-        let display = DisplayManager::new(false);
-
-        // Test error handling in CLI layer
-        let result = save_package(&mock_repo, &package_blob, &display);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), 1); // Should return error code 1
-
-        // This tests CLI error handling without filesystem dependencies
-    }
-
-    #[test]
-    fn test_package_workflow_with_mock_repository() {
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = std::path::PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        // Mock successful save
-        mock_repo
-            .expect_save_package()
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        // Create package blob
-        let package_blob = create_new_package("workflow-test", &config);
-
-        // Verify package structure before saving
-        assert_eq!(package_blob.package().name(), "workflow-test");
-
-        assert!(
-            package_blob
-                .package()
-                .environments()
-                .contains_key("default")
-        );
-
-        // Test saving through CLI layer
-        let display = DisplayManager::new(false);
-        let result = save_package(&mock_repo, &package_blob, &display);
-        assert!(result.is_ok());
-
-        // This demonstrates testing complete CLI workflows without repository implementation
     }
 }

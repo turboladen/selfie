@@ -83,51 +83,38 @@ async fn dispatch_spec_command(
 ) -> i32 {
     debug!("Handling spec command: {:?}", command);
 
+    let service = create_package_service(config, cancellation_token);
     match command {
-        SpecSubcommands::Edit { package_name } => {
-            // Edit doesn't need a service — it works directly with files
-            spec::edit::handle_edit(package_name, config, &display)
+        SpecSubcommands::Create {
+            package_name,
+            interactive,
+        } => {
+            spec::create::handle_create(&service, package_name, config, &display, *interactive)
+                .await
         }
-        _ => {
-            let service = create_package_service(config, cancellation_token);
-            match command {
-                SpecSubcommands::Create {
-                    package_name,
-                    interactive,
-                } => {
-                    spec::create::handle_create(
-                        &service,
-                        package_name,
-                        config,
-                        &display,
-                        *interactive,
-                    )
-                    .await
-                }
-                SpecSubcommands::Remove { package_name, yes } => {
-                    spec::remove::handle_remove(&service, package_name, config, &display, *yes)
-                        .await
-                }
-                SpecSubcommands::Validate { package_name, all } => {
-                    if *all {
-                        spec::validate::handle_validate_all(&service, config, &display).await
-                    } else {
-                        // clap enforces: package_name is required unless --all
-                        let name = package_name.as_ref().unwrap();
-                        spec::validate::handle_validate(&service, name, config, &display).await
-                    }
-                }
-                SpecSubcommands::List { all } => {
-                    spec::list::handle_list(&service, config, &display, *all).await
-                }
-                SpecSubcommands::Search { pattern } => {
-                    spec::search::handle_search(&service, pattern, config, &display).await
-                }
-                SpecSubcommands::Info { package_name } => {
-                    spec::info::handle_info(&service, package_name, config, &display).await
-                }
-                SpecSubcommands::Edit { .. } => unreachable!(),
+        SpecSubcommands::Remove { package_name, yes } => {
+            spec::remove::handle_remove(&service, package_name, config, &display, *yes).await
+        }
+        SpecSubcommands::Validate { package_name, all } => {
+            if *all {
+                spec::validate::handle_validate_all(&service, config, &display).await
+            } else {
+                // clap enforces: package_name is required unless --all
+                let name = package_name.as_ref().unwrap();
+                spec::validate::handle_validate(&service, name, config, &display).await
             }
+        }
+        SpecSubcommands::List { all } => {
+            spec::list::handle_list(&service, config, &display, *all).await
+        }
+        SpecSubcommands::Search { pattern } => {
+            spec::search::handle_search(&service, pattern, config, &display).await
+        }
+        SpecSubcommands::Info { package_name } => {
+            spec::info::handle_info(&service, package_name, config, &display).await
+        }
+        SpecSubcommands::Edit { package_name } => {
+            spec::edit::handle_edit(&service, package_name, config, &display).await
         }
     }
 }

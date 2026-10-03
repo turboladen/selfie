@@ -5,7 +5,7 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
-use std::{collections::HashSet, io::IsTerminal as _};
+use std::collections::HashSet;
 
 use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
@@ -23,7 +23,8 @@ use tracing::info;
 use crate::{
     commands::common::{self, create_dotfiles_repository, create_package_repository},
     config::CliConfig,
-    display_manager::DisplayManager,
+    display_manager::{DisplayManager, PromptFailure},
+    event_processor::Exit,
 };
 
 /// Sentinel item appended after real package names in the select list.
@@ -38,8 +39,8 @@ enum TrackChoice {
     ExistingPackage(String),
     /// Create a new standalone dotfile with the given name
     NewStandalone(String),
-    /// User cancelled
-    Cancelled,
+    /// The user declined: Esc at the picker, or an empty name.
+    Declined,
 }
 
 /// Handle the `selfie track` interactive command
@@ -64,10 +65,18 @@ pub(crate) async fn handle_track(
     let dotfiles_repo = create_dotfiles_repository(config);
 
     // Check if this file is already tracked anywhere
-    let (existing_tracker, unchecked) = find_existing_tracker(file, config, &dotfiles_repo);
+    let (trackers, unchecked) = find_existing_trackers(file, config, &dotfiles_repo);
 
-    if let Some(tracked) = existing_tracker {
-        return report_existing_tracker(&tracked, display);
+    if !trackers.is_empty() {
+        // A spec selfie could not read may track the file as well, so the count
+        // below may be short; say so first.
+        let mut reported: HashSet<String> = HashSet::new();
+        for warning in unchecked {
+            if reported.insert(warning.clone()) {
+                display.print_warning(warning);
+            }
+        }
+        return report_existing_trackers(&trackers, display);
     }
 
     // Collect available package names for the prompt. Done before anything from
@@ -97,29 +106,20 @@ pub(crate) async fn handle_track(
         }
     }
 
-    // Refused rather than attempted: `FuzzySelect` reads keys in a loop of its own,
-    // and with no terminal that loop never ends, re-rendering the menu until it
-    // floods the output and pins a core. `interact_opt` returns no `Err` to handle.
-    //
-    // **stderr**, not stdin. `FuzzySelect::interact_opt` prompts on `Term::stderr`,
-    // and console's `read_key` answers `Key::Unknown` at once when that terminal is
-    // not attended, while console reads input from `/dev/tty` when stdin is not one.
-    // So `selfie track x 2>log` from a terminal spins with a tty on stdin, and
-    // `selfie track x </dev/null` from a terminal would have worked. A guard on
-    // stdin gets both backwards.
-    if !std::io::stderr().is_terminal() {
-        display.print_error(
-            "Choosing where to track a file needs a terminal. Name the destination instead: \
-             `selfie package track-dotfile <package> <file>` to add it to an existing package, or \
-             `selfie dotfiles track <name> <file>` to make it a standalone dotfile."
-                .to_string(),
-        );
-        // Non-zero, and not treated as a cancellation: nothing was tracked, and
-        // exiting 0 would tell a script the file is handled.
-        return 1;
-    }
-
-    let choice = prompt_track_choice(&package_names, file, display);
+    let choice = match prompt_track_choice(&package_names, file, display) {
+        Ok(choice) => choice,
+        Err(failure) => {
+            return display
+                .refuse_prompt(
+                    &failure,
+                    "Choosing where to track a file",
+                    "Name the destination instead: `selfie package track-dotfile <package> <file>` \
+                     to add it to an existing package, or `selfie dotfiles track <name> <file>` to \
+                     make it a standalone dotfile.",
+                )
+                .code();
+        }
+    };
 
     match choice {
         TrackChoice::ExistingPackage(ref name) => {
@@ -133,17 +133,48 @@ pub(crate) async fn handle_track(
             }
             common::handle_track_standalone(name, file, config, display, cancellation_token).await
         }
-        TrackChoice::Cancelled => {
-            display.print_info("Cancelled.");
-            0
+        // Nothing was tracked, so the run did not do what it was asked.
+        TrackChoice::Declined => {
+            display.print_run_note("Cancelled.");
+            Exit::Failed.code()
         }
     }
 }
 
+/// Report every spec that already tracks a file, and the exit code for them:
+/// the worst of each one's.
+fn report_existing_trackers(trackers: &[ExistingTracker], display: &DisplayManager) -> i32 {
+    let mut warned = HashSet::new();
+    let worst = trackers
+        .iter()
+        .map(|tracked| report_existing_tracker(tracked, display, &mut warned))
+        .max()
+        .unwrap_or(Exit::Clean.code());
+
+    // Two specs deploying one file overwrite each other on every apply, so the
+    // file is not handled, whatever each entry says on its own.
+    if let [_, _, ..] = trackers {
+        let names: Vec<&str> = trackers.iter().map(|t| t.spec_name.as_str()).collect();
+        display.print_error(format!(
+            "{} specs track this file: {}. Keep it in one of them.",
+            trackers.len(),
+            names.join(", ")
+        ));
+        return worst.max(Exit::Failed.code());
+    }
+    worst
+}
+
 /// Report a file some spec already tracks, and the exit code for it.
 ///
-/// Returns 1 for an entry no apply can ever deploy, 0 otherwise.
-fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) -> i32 {
+/// Returns 1 for an entry no apply can ever deploy, 0 otherwise. A warning
+/// about the target is printed once, however many specs track it: `warned`
+/// holds the ones already printed.
+fn report_existing_tracker(
+    tracked: &ExistingTracker,
+    display: &DisplayManager,
+    warned: &mut HashSet<String>,
+) -> i32 {
     let ExistingTracker {
         spec_name,
         spec_path,
@@ -189,7 +220,9 @@ fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) 
     // that is not a regular file would otherwise be reported here as plainly
     // tracked and mentioned by nothing. Shares the library's wording so the two
     // cannot describe one situation differently.
-    if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded) {
+    if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded)
+        && warned.insert(warning.clone())
+    {
         display.print_warning(warning);
     }
 
@@ -198,11 +231,15 @@ fn report_existing_tracker(tracked: &ExistingTracker, display: &DisplayManager) 
 }
 
 /// Present the interactive selection prompt and return the user's choice.
+///
+/// # Errors
+///
+/// [`PromptFailure`] when either prompt got no answer.
 fn prompt_track_choice(
     package_names: &[String],
     file: &str,
     display: &DisplayManager,
-) -> TrackChoice {
+) -> Result<TrackChoice, PromptFailure> {
     // Build the selection list: existing packages + sentinel options
     let mut items: Vec<String> = package_names.to_vec();
     items.push(NEW_STANDALONE.to_string());
@@ -215,60 +252,58 @@ fn prompt_track_choice(
             .default(0),
     );
 
-    let choice = match selection {
-        Ok(Some(idx)) => idx,
-        Ok(None) | Err(_) => return TrackChoice::Cancelled,
+    let Some(choice) = selection? else {
+        return Ok(TrackChoice::Declined);
     };
 
     resolve_choice(&items, choice, file, display)
 }
 
-/// Pure function: given the selection list and the chosen index, determine action.
+/// Given the selection list and the chosen index, determine the action, asking
+/// for a name when the choice needs one.
+///
+/// # Errors
+///
+/// [`PromptFailure`] when the name prompt got no answer.
 fn resolve_choice(
     items: &[String],
     choice: usize,
     file: &str,
     display: &DisplayManager,
-) -> TrackChoice {
+) -> Result<TrackChoice, PromptFailure> {
     let selected = &items[choice];
 
-    if selected == TYPE_A_NAME {
-        match prompt_for_name(display) {
-            Some(name) => TrackChoice::NewStandalone(name),
-            None => TrackChoice::Cancelled,
-        }
+    let default = if selected == TYPE_A_NAME {
+        None
     } else if selected == NEW_STANDALONE {
-        let suggested = suggest_name(file);
-        match prompt_for_name_with_default(&suggested, display) {
-            Some(name) => TrackChoice::NewStandalone(name),
-            None => TrackChoice::Cancelled,
-        }
+        Some(suggest_name(file))
     } else {
-        TrackChoice::ExistingPackage(selected.clone())
+        return Ok(TrackChoice::ExistingPackage(selected.clone()));
+    };
+
+    Ok(match prompt_for_name(default, display)? {
+        Some(name) => TrackChoice::NewStandalone(name),
+        None => TrackChoice::Declined,
+    })
+}
+
+/// Prompt for a name for the new dotfile spec, pre-filled with `default` when
+/// there is one. `None` for an empty answer.
+///
+/// # Errors
+///
+/// [`PromptFailure`] when the prompt got no answer.
+fn prompt_for_name(
+    default: Option<String>,
+    display: &DisplayManager,
+) -> Result<Option<String>, PromptFailure> {
+    let theme = ColorfulTheme::default();
+    let mut input = Input::with_theme(&theme).with_prompt("Name for the new dotfile spec");
+    if let Some(default) = default {
+        input = input.default(default);
     }
-}
-
-/// Prompt the user to type a dotfile name (no default).
-fn prompt_for_name(display: &DisplayManager) -> Option<String> {
-    display
-        .prompt(crate::display_manager::TextLine(
-            Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("Name for the new dotfile spec"),
-        ))
-        .ok()
-        .filter(|s: &String| !s.trim().is_empty())
-}
-
-/// Prompt for a name, pre-filling with a suggested default.
-fn prompt_for_name_with_default(default: &str, display: &DisplayManager) -> Option<String> {
-    display
-        .prompt(crate::display_manager::TextLine(
-            Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("Name for the new dotfile spec")
-                .default(default.to_string()),
-        ))
-        .ok()
-        .filter(|s: &String| !s.trim().is_empty())
+    let name: String = display.prompt(crate::display_manager::TextLine(input))?;
+    Ok(Some(name).filter(|name| !name.trim().is_empty()))
 }
 
 /// Derive a suggested spec name from the file path.
@@ -371,11 +406,11 @@ fn package_listing_warning(error: &PackageListError) -> String {
     )
 }
 
-/// Check if a file is already tracked by any package or standalone dotfile.
+/// Find every package or standalone dotfile spec that already tracks a file.
 ///
 /// Scans both the packages directory and the dotfiles directory for a dotfile
-/// entry whose target matches the given file path. Returns the name of the
-/// package that tracks it and the entry's own target, or `None`, paired with a
+/// entry whose target matches the given file path. Returns each spec that tracks
+/// it, with the entry's own target, in the order scanned, paired with a
 /// warning for every spec it could not read, for a package directory it could not
 /// list, and for a dotfiles directory it could not read or write a new entry into.
 ///
@@ -385,14 +420,18 @@ fn package_listing_warning(error: &PackageListError) -> String {
 ///
 /// The entry's target rather than the argument, because the two differ: the spec
 /// holds `~/…` and the caller may pass an absolute path for the same file.
-fn find_existing_tracker(
+fn find_existing_trackers(
     file: &str,
     config: &CliConfig,
     dotfiles_repo: &YamlPackageRepository<RealFileSystem>,
-) -> (Option<ExistingTracker>, Vec<String>) {
+) -> (Vec<ExistingTracker>, Vec<String>) {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
     let mut skipped = Vec::new();
+    let mut trackers: Vec<ExistingTracker> = Vec::new();
+    // The two directories may be one, or one may link to the other, so a spec
+    // file is counted once however many scans list it.
+    let mut seen = HashSet::new();
 
     let package_repo = YamlPackageRepository::new(
         RealFileSystem,
@@ -427,23 +466,27 @@ fn find_existing_tracker(
             skipped.push(selfie::package::service::skipped_spec_warning(invalid));
         }
 
+        // Every spec, not the first: a file two specs track is one the user
+        // has to hear about twice. One entry per spec is enough to name it.
         for pkg in output.valid_packages() {
-            for (_scope, entry) in pkg.dotfiles_with_scope() {
-                let entry_expanded = selfie::fs::expand_target_path(&fs, entry.target());
-                if entry_expanded == expanded {
-                    return (
-                        Some(ExistingTracker {
-                            spec_name: pkg.name().to_string(),
-                            spec_path: pkg.path().to_path_buf(),
-                            target: entry.target().to_string(),
-                        }),
-                        skipped,
-                    );
-                }
+            if let Some((_scope, entry)) = pkg
+                .dotfiles_with_scope()
+                .into_iter()
+                .find(|(_, entry)| selfie::fs::expand_target_path(&fs, entry.target()) == expanded)
+                && seen.insert(
+                    std::fs::canonicalize(pkg.path()).unwrap_or_else(|_| pkg.path().clone()),
+                )
+            {
+                trackers.push(ExistingTracker {
+                    // The name selfie finds the spec by, which is its file's.
+                    spec_name: common::file_name_of(pkg).unwrap_or_else(|| pkg.name().to_string()),
+                    spec_path: pkg.path().to_path_buf(),
+                    target: entry.target().to_string(),
+                });
             }
         }
     }
-    (None, skipped)
+    (trackers, skipped)
 }
 
 /// Load sorted package names from the repository, along with a warning for every
@@ -497,7 +540,7 @@ mod tests {
     // distinguishable to the caller. Asserted on the returned list because the
     // prompt that follows needs a terminal, which a test cannot give it.
     #[test]
-    fn find_existing_tracker_reports_a_spec_it_could_not_read() {
+    fn find_existing_trackers_reports_a_spec_it_could_not_read() {
         use selfie::config::SelfieConfigBuilder;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -517,9 +560,9 @@ mod tests {
         );
 
         let (found, skipped) =
-            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
-        assert!(found.is_none(), "nothing readable tracks that file");
+        assert!(found.is_empty(), "nothing readable tracks that file");
         assert_eq!(skipped.len(), 1, "the unreadable spec must be reported");
         assert!(skipped[0].contains("brokenpkg.yaml"), "got: {}", skipped[0]);
     }
@@ -527,7 +570,7 @@ mod tests {
     // The control: with every spec readable, a run that finds no tracker has
     // nothing to report, so a `skipped` that is never empty would fail here.
     #[test]
-    fn find_existing_tracker_reports_nothing_for_a_clean_directory() {
+    fn find_existing_trackers_reports_nothing_for_a_clean_directory() {
         use selfie::config::SelfieConfigBuilder;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -551,16 +594,16 @@ mod tests {
         );
 
         let (found, skipped) =
-            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
-        assert!(found.is_none());
+        assert!(found.is_empty());
         assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
     // The package directory is always expected, so one that will not list is a
     // place the scan could not check, and the answer says so.
     #[test]
-    fn find_existing_tracker_warns_about_a_package_directory_that_is_not_there() {
+    fn find_existing_trackers_warns_about_a_package_directory_that_is_not_there() {
         use selfie::config::SelfieConfigBuilder;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -578,9 +621,9 @@ mod tests {
         );
 
         let (found, skipped) =
-            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
-        assert!(found.is_none());
+        assert!(found.is_empty());
         assert_eq!(skipped.len(), 1, "got: {skipped:?}");
         assert!(
             skipped[0].starts_with("The package directory /"),
@@ -597,7 +640,7 @@ mod tests {
     // A dotfiles directory that is not there holds no spec that could track the
     // file, so it is not something the scan failed to check.
     #[test]
-    fn find_existing_tracker_is_silent_about_a_dotfiles_directory_that_is_not_there() {
+    fn find_existing_trackers_is_silent_about_a_dotfiles_directory_that_is_not_there() {
         use selfie::config::SelfieConfigBuilder;
 
         let temp = tempfile::TempDir::new().unwrap();
@@ -617,9 +660,9 @@ mod tests {
         );
 
         let (found, skipped) =
-            find_existing_tracker("~/.config/fish/config.fish", &config, &dotfiles_repo);
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
 
-        assert!(found.is_none());
+        assert!(found.is_empty());
         assert!(skipped.is_empty(), "got: {skipped:?}");
     }
 
@@ -665,7 +708,12 @@ mod tests {
             Ok(ListPackagesOutput::from_packages(
                 ["zsh", "alacritty", "fnm"]
                     .into_iter()
-                    .map(|name| PackageBuilder::default().name(name).build())
+                    .map(|name| {
+                        PackageBuilder::default()
+                            .name(name)
+                            .path(format!("/packages/{name}.yml"))
+                            .build()
+                    })
                     .collect(),
             ))
         });
@@ -685,7 +733,10 @@ mod tests {
         let mut repo = MockPackageRepository::new();
         repo.expect_list_packages().returning(|| {
             Ok(ListPackagesOutput::from_results(vec![
-                Ok(PackageBuilder::default().name("fnm").build()),
+                Ok(PackageBuilder::default()
+                    .name("fnm")
+                    .path("/test/packages/fnm.yml")
+                    .build()),
                 Err(selfie::package::port::PackageParseError::new(
                     "/test/packages/broken.yml",
                     selfie::package::port::PackageParseKind::IrregularFile {
@@ -706,6 +757,70 @@ mod tests {
         );
     }
 
+    // A file in a fresh home with an empty package directory, and a config
+    // naming that directory.
+    fn untracked_file() -> (tempfile::TempDir, String, CliConfig) {
+        let temp = tempfile::tempdir().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir(&packages).unwrap();
+        let file = temp.path().join("x.conf");
+        std::fs::write(&file, "x").unwrap();
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(&packages));
+        (temp, file.to_string_lossy().into_owned(), config)
+    }
+
+    // Esc at the destination picker is a decline: nothing was tracked, so the
+    // run fails.
+    #[tokio::test]
+    async fn esc_at_the_destination_picker_fails() {
+        let (_temp, file, config) = untracked_file();
+        let display = DisplayManager::new(false)
+            .answering(vec![crate::display_manager::answer(None::<usize>)]);
+
+        let code = handle_track(&file, &config, &display, CancellationToken::new()).await;
+
+        assert_eq!(code, 1);
+    }
+
+    // A blank name is a decline too. dialoguer asks again on an empty line, so
+    // only blanks reach the check.
+    #[tokio::test]
+    async fn a_blank_name_fails() {
+        use crate::display_manager::answer;
+
+        // With no packages, index 1 is "Let me type a name".
+        let (_temp, file, config) = untracked_file();
+        let display = DisplayManager::new(false)
+            .answering(vec![answer(Some(1_usize)), answer("  ".to_string())]);
+
+        let code = handle_track(&file, &config, &display, CancellationToken::new()).await;
+
+        assert_eq!(code, 1);
+    }
+
+    // Ctrl+C at the destination picker ends the run canceled.
+    #[test]
+    fn ctrl_c_at_the_destination_picker_is_canceled() {
+        let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
+
+        let failure = prompt_track_choice(&["bat".to_string()], "~/.batrc", &display).unwrap_err();
+
+        assert_eq!(failure.exit(), crate::event_processor::Exit::Cancelled);
+    }
+
+    // Ctrl+C at the name prompt ends the run canceled, not declined.
+    #[test]
+    fn ctrl_c_at_the_name_prompt_is_canceled() {
+        use crate::display_manager::{answer, ctrl_c};
+
+        // Index 1 is the "new standalone dotfile" entry after the one package.
+        let display = DisplayManager::new(false).answering(vec![answer(Some(1_usize)), ctrl_c()]);
+
+        let failure = prompt_track_choice(&["bat".to_string()], "~/.batrc", &display).unwrap_err();
+
+        assert_eq!(failure.exit(), crate::event_processor::Exit::Cancelled);
+    }
+
     #[test]
     fn resolve_choice_selects_existing_package() {
         let items = vec![
@@ -721,7 +836,7 @@ mod tests {
             &DisplayManager::new(false),
         );
         assert_eq!(
-            result,
+            result.unwrap(),
             TrackChoice::ExistingPackage("alacritty".to_string())
         );
     }

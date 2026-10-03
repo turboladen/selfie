@@ -60,11 +60,11 @@ packages named `python3.11`, `node@20` and `g++`. The same rule covers the `name
 file whose name breaks it, such as `my app.yml` or `.hidden.yml`, is not loaded: every command that
 lists specs reports it as a spec that could not be loaded (the MCP server's `kind` is
 `invalid_name`), and it deploys and installs nothing until it is renamed. `selfie spec create` and
-the MCP server's `selfie_spec_create` refuse such a name rather than write the file.
-`selfie spec create --interactive` also asks for a file name, and that file name is what every later
-command finds the spec by, so the create judges it the same way: it refuses a file name the loader
-would not read or one outside the package directory, looks up the name the file name gives, and
-reports the created package under that name.
+the MCP server's `selfie_spec_create` refuse such a name rather than write the file. A create judges
+the file it writes the way every later command finds the spec, by its file name: it refuses a file
+name the loader would not read or one outside the package directory, looks up the name the file name
+gives, and reports the created package under that name. `selfie spec create --interactive` asks for
+the package name before anything else, checks that name, and writes the spec to `<name>.yml`.
 
 Names are compared ignoring case, so `neovim` and `Neovim` are one package: a spec stored as
 `Neovim.yml` answers to either. The extension folds the same way, and does not distinguish one
@@ -720,7 +720,9 @@ side and the repository file on the `+` side:
   Accept (overwrite target; anything it would destroy is copied aside first)
 ```
 
-The prompt appears only in a terminal; a run without one skips the conflict and reports it.
+The prompt appears only in a terminal; a run without one skips the conflict, reports it, and ends by
+saying what would settle it: `--yes` for a repository file, a terminal for a secret-bearing entry,
+which `--yes` never overwrites.
 
 Without `--yes`, conflicts are reported but the target file is left untouched. With `--dry-run` they
 are reported the same way, diff included, and you are not asked to resolve them: nothing would be
@@ -1461,15 +1463,14 @@ anchor inside the entry whose name matches one of the entry's fields, such as `_
   install and check commands are unaffected. A refused entry makes the run
   [exit non-zero](../README.md#a-refusal-is-not-a-success), so a script cannot mistake it for a
   clean deploy.
-- Commands that rewrite the file **refuse to save** it, naming the key: `selfie spec edit`,
-  `selfie package track-dotfile`, and the `selfie_spec_update` MCP tool. A rewrite is produced from
+- Commands that rewrite the file **refuse to save** it, naming the key:
+  `selfie package track-dotfile` and the `selfie_spec_update` MCP tool. A rewrite is produced from
   the fields selfie understands, so saving would delete the unrecognized key and quietly turn an
   entry that was being skipped into one that deploys.
 
-  Correct the key by editing the package file in your editor directly. `selfie spec edit` cannot be
-  used for this: it saves the package before opening your editor, so on an affected file it refuses
-  and exits without opening anything. `selfie spec remove` is unaffected — it deletes the file
-  rather than rewriting it.
+  Correct the key in your editor. `selfie spec edit` opens an existing package file exactly as it is
+  written, without saving it first, so it opens an affected file too. `selfie spec remove` is
+  unaffected — it deletes the file rather than rewriting it.
 
 ## YAML anchors
 
@@ -1497,7 +1498,7 @@ dotfiles:
 
 Any other unrecognized key is an error — see [Unrecognized keys](#unrecognized-keys). Anchors are a
 convenience for writing the file; they are resolved when it is read, and are not preserved if selfie
-rewrites the file (for example via `selfie spec edit`).
+rewrites the file (for example via `selfie package track-dotfile`).
 
 ### An anchor inside an entry may not be named after one of that entry's fields
 

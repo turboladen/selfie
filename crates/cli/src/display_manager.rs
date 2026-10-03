@@ -13,6 +13,8 @@ use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use selfie::package::event::{BaseKind, StepEnding, StepId};
 
+use crate::event_processor::Exit;
+
 /// Shorten a path for display by replacing the home directory with `~`.
 ///
 /// Only a path inside the home directory is shortened; anything else comes back
@@ -51,20 +53,24 @@ pub(crate) const INDENT: &str = "   ";
 /// while the user answers.
 pub(crate) trait Prompt {
     /// What the user's answer is.
-    type Answer;
+    type Answer: Send + 'static;
 
     /// Ask on the terminal and wait for the answer.
     ///
     /// # Errors
     ///
     /// When there is no terminal to ask on, or the terminal fails.
+    #[cfg_attr(test, expect(dead_code, reason = "a test answers from a script"))]
     fn ask(self) -> dialoguer::Result<Self::Answer>;
 }
 
 /// A line of text the user types: printable characters only, with
 /// line-editing keys. For free-form input, prompt with a bare
 /// [`dialoguer::Input`].
-pub(crate) struct TextLine<'a>(pub(crate) dialoguer::Input<'a, String>);
+pub(crate) struct TextLine<'a>(
+    #[cfg_attr(test, expect(dead_code, reason = "a test answers from a script"))]
+    pub(crate)  dialoguer::Input<'a, String>,
+);
 
 // The one place dialoguer's reading calls are allowed; crates/cli/clippy.toml
 // forbids them everywhere else, so a prompt that bypasses `DisplayManager::prompt`
@@ -116,6 +122,41 @@ mod ask {
         type Answer = String;
         fn ask(self) -> dialoguer::Result<String> {
             self.0.interact_text()
+        }
+    }
+}
+
+/// Why a prompt ended without an answer.
+#[derive(Debug)]
+pub(crate) enum PromptFailure {
+    /// stderr is not a terminal, so nothing was asked.
+    NoTerminal,
+    /// The user pressed Ctrl+C.
+    Interrupted,
+    /// The terminal failed while the user answered.
+    Unreadable(std::io::Error),
+}
+
+impl PromptFailure {
+    /// How a command that needed the answer ends.
+    pub(crate) fn exit(&self) -> Exit {
+        match self {
+            Self::NoTerminal => Exit::Usage,
+            Self::Interrupted => Exit::Cancelled,
+            Self::Unreadable(_) => Exit::Failed,
+        }
+    }
+}
+
+impl From<dialoguer::Error> for PromptFailure {
+    // dialoguer refuses a prompt with no terminal as `NotConnected`, and console
+    // reports Ctrl+C at a key read as `Interrupted` after raising SIGINT.
+    fn from(error: dialoguer::Error) -> Self {
+        let dialoguer::Error::IO(error) = error;
+        match error.kind() {
+            std::io::ErrorKind::NotConnected => Self::NoTerminal,
+            std::io::ErrorKind::Interrupted => Self::Interrupted,
+            _ => Self::Unreadable(error),
         }
     }
 }
@@ -269,6 +310,28 @@ pub struct DisplayManager {
     // which a test in this process cannot read back.
     #[cfg(test)]
     printed: Arc<Mutex<Vec<(Channel, String)>>>,
+    // stderr is a terminal, so a prompt can be drawn and answered.
+    #[cfg_attr(test, expect(dead_code, reason = "a test answers from `script`"))]
+    can_prompt: bool,
+    // What the next prompts answer, in a test.
+    #[cfg(test)]
+    script: Arc<Mutex<VecDeque<Scripted>>>,
+}
+
+// One scripted prompt result: an answer, or the error dialoguer would return.
+#[cfg(test)]
+pub(crate) type Scripted = dialoguer::Result<Box<dyn std::any::Any + Send>>;
+
+// A scripted answer.
+#[cfg(test)]
+pub(crate) fn answer<T: std::any::Any + Send>(answer: T) -> Scripted {
+    Ok(Box::new(answer))
+}
+
+// A scripted Ctrl+C, as console reports it at a key read.
+#[cfg(test)]
+pub(crate) fn ctrl_c() -> Scripted {
+    Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "read interrupted").into())
 }
 
 impl DisplayManager {
@@ -303,6 +366,9 @@ impl DisplayManager {
             block: Arc::new(Mutex::new(())),
             #[cfg(test)]
             printed: Arc::new(Mutex::new(Vec::new())),
+            can_prompt: draws_spinner,
+            #[cfg(test)]
+            script: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -833,14 +899,94 @@ impl DisplayManager {
     /// Ask `prompt` on the terminal, with nothing else drawing on it until the
     /// user answers.
     ///
+    /// Without a terminal on stderr nothing is drawn or read.
+    ///
     /// # Errors
     ///
-    /// When there is no terminal to ask on, or the terminal fails.
-    pub(crate) fn prompt<P: Prompt>(&self, prompt: P) -> dialoguer::Result<P::Answer> {
+    /// [`PromptFailure`] when there is no terminal, the user pressed Ctrl+C, or
+    /// the terminal failed. [`PromptFailure::exit`] says how the command ends.
+    pub(crate) fn prompt<P: Prompt>(&self, prompt: P) -> Result<P::Answer, PromptFailure> {
+        // Checked here and not left to dialoguer: `FuzzySelect` makes no check of
+        // its own, and with no terminal it redraws its menu forever.
+        if !self.can_prompt() {
+            return Err(PromptFailure::NoTerminal);
+        }
         // Suspended, not cleared: a spinner would redraw over the question while
         // the user types, but a step still running, or whose end is already on
         // its way, keeps its line and gets its ✓ or ✗ once the prompt returns.
-        self.mp.suspend(|| prompt.ask())
+        self.mp
+            .suspend(|| self.ask(prompt))
+            .map_err(PromptFailure::from)
+    }
+
+    /// Whether a prompt can be asked: stderr, where dialoguer draws and reads
+    /// through, is a terminal.
+    pub(crate) fn can_prompt(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.script.lock().is_ok_and(|script| !script.is_empty())
+        }
+        #[cfg(not(test))]
+        {
+            self.can_prompt
+        }
+    }
+
+    /// Report a prompt that got no answer, and say how the command ends.
+    ///
+    /// `needs` names what needed the answer ("Removing a spec") and
+    /// `without_terminal` is the way to do it without asking, shown as the
+    /// remedy when there is no terminal. Ctrl+C prints nothing.
+    pub(crate) fn refuse_prompt(
+        &self,
+        failure: &PromptFailure,
+        needs: &str,
+        without_terminal: &str,
+    ) -> Exit {
+        match failure {
+            PromptFailure::NoTerminal => {
+                self.print_error(format!("{needs} needs a terminal to ask on."));
+                self.print_suggestion(without_terminal);
+            }
+            PromptFailure::Interrupted => {}
+            PromptFailure::Unreadable(error) => {
+                self.print_error(format!("Could not read the answer: {error}"));
+            }
+        }
+        failure.exit()
+    }
+
+    #[cfg(not(test))]
+    fn ask<P: Prompt>(&self, prompt: P) -> dialoguer::Result<P::Answer> {
+        prompt.ask()
+    }
+
+    // A test never reaches a terminal: it answers from the script, which holds
+    // what `ask` would have returned, errors included, so `prompt` converts a
+    // scripted error exactly as it converts a real one.
+    #[cfg(test)]
+    fn ask<P: Prompt>(&self, _prompt: P) -> dialoguer::Result<P::Answer> {
+        let next = self
+            .script
+            .lock()
+            .ok()
+            .and_then(|mut script| script.pop_front())
+            .expect("can_prompt saw a scripted answer");
+        next.map(|answer| {
+            *answer
+                .downcast::<P::Answer>()
+                .expect("the scripted answer has the prompt's answer type")
+        })
+    }
+
+    // Answer the next prompts from `answers`, in order. A prompt asked after the
+    // last answer finds no terminal.
+    #[cfg(test)]
+    pub(crate) fn answering(self, answers: Vec<Scripted>) -> Self {
+        if let Ok(mut script) = self.script.lock() {
+            script.extend(answers);
+        }
+        self
     }
 
     /// Print a plain line to stdout
@@ -1327,7 +1473,7 @@ mod tests {
         assert_eq!(elapsed(Duration::from_secs(125)), "2m 05s");
     }
 
-    // A prompt that answers without a terminal.
+    // A prompt for the door tests; the script supplies its answer.
     struct Answered;
 
     impl Prompt for Answered {
@@ -1338,14 +1484,84 @@ mod tests {
         }
     }
 
+    fn io_error(kind: std::io::ErrorKind) -> Scripted {
+        Err(std::io::Error::new(kind, "scripted").into())
+    }
+
+    // With no terminal the prompt is refused before anything is drawn, and the
+    // command ends as a usage error.
+    #[test]
+    fn a_prompt_without_a_terminal_is_refused_as_usage() {
+        let failure = DisplayManager::new(false).prompt(Answered).unwrap_err();
+
+        assert!(matches!(failure, PromptFailure::NoTerminal), "{failure:?}");
+        assert_eq!(failure.exit(), Exit::Usage);
+    }
+
+    #[test]
+    fn ctrl_c_at_a_prompt_ends_the_command_canceled() {
+        let dm =
+            DisplayManager::new(false).answering(vec![io_error(std::io::ErrorKind::Interrupted)]);
+
+        let failure = dm.prompt(Answered).unwrap_err();
+
+        assert!(matches!(failure, PromptFailure::Interrupted), "{failure:?}");
+        assert_eq!(failure.exit(), Exit::Cancelled);
+    }
+
+    // dialoguer's own no-terminal refusal reads as no terminal; any other
+    // terminal error is a failure, not a usage error.
+    #[test]
+    fn dialoguer_errors_convert_by_kind() {
+        let dm = DisplayManager::new(false).answering(vec![
+            io_error(std::io::ErrorKind::NotConnected),
+            io_error(std::io::ErrorKind::BrokenPipe),
+        ]);
+
+        let first = dm.prompt(Answered).unwrap_err();
+        let second = dm.prompt(Answered).unwrap_err();
+
+        assert_eq!(first.exit(), Exit::Usage, "{first:?}");
+        assert!(matches!(second, PromptFailure::Unreadable(_)), "{second:?}");
+        assert_eq!(second.exit(), Exit::Failed);
+    }
+
+    // No terminal names what needed one and the way round it, both on stderr;
+    // Ctrl+C adds nothing.
+    #[test]
+    fn refusing_a_prompt_reports_on_stderr_by_kind() {
+        let dm = DisplayManager::new(false);
+
+        let exit = dm.refuse_prompt(&PromptFailure::NoTerminal, "Removing a spec", "Pass --yes.");
+        let canceled = dm.refuse_prompt(
+            &PromptFailure::Interrupted,
+            "Removing a spec",
+            "Pass --yes.",
+        );
+
+        assert_eq!((exit, canceled), (Exit::Usage, Exit::Cancelled));
+        assert_eq!(
+            dm.printed(),
+            vec![
+                (
+                    Channel::Stderr,
+                    "Removing a spec needs a terminal to ask on.".to_string()
+                ),
+                (Channel::Stderr, "Pass --yes.".to_string()),
+            ]
+        );
+    }
+
     // A prompt suspends the spinners and keeps their steps: a step whose end
     // arrives after the prompt still prints its line.
     #[test]
     fn a_step_keeps_its_end_line_across_a_prompt() {
-        let dm = DisplayManager::new(false).drawing_as_a_terminal();
+        let dm = DisplayManager::new(false)
+            .drawing_as_a_terminal()
+            .answering(vec![Ok(Box::new(()))]);
         dm.start_waiting(ONE, "Running the commands that produce ~/.creds");
 
-        let _ = dm.prompt(Answered);
+        dm.prompt(Answered).unwrap();
         assert_eq!(
             dm.waiting_messages(),
             vec!["Running the commands that produce ~/.creds"]

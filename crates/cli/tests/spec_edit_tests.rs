@@ -98,7 +98,7 @@ fn spec_edit_does_not_call_an_unparsable_file_missing() {
         .args(["spec", "edit", "myapp"])
         .assert()
         .failure()
-        .stdout(predicates::str::contains("does not exist").not());
+        .stderr(predicates::str::contains("does not exist").not());
 
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
@@ -117,7 +117,7 @@ fn spec_edit_still_offers_to_create_a_package_with_no_file() {
         .env("EDITOR", "true")
         .args(["spec", "edit", "brandnew"])
         .assert()
-        .stdout(predicates::str::contains("does not exist"));
+        .stderr(predicates::str::contains("does not exist"));
 }
 
 // The name folds, so `spec edit neovim` finds `Neovim.yml` and opens it rather
