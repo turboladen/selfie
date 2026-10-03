@@ -2935,7 +2935,7 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         target: String,
         /// How the target and its source have moved since selfie last deployed
-        /// it. Never [`DriftType::None`]: a target with no drift sends no event.
+        /// it.
         drift_type: DriftType,
     },
 
@@ -3238,9 +3238,6 @@ pub struct RefusedPackage {
 /// [`Display`](fmt::Display) words it for a person: "repo changed".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DriftType {
-    /// The target holds what selfie last deployed, and the source has not
-    /// changed since.
-    None,
     /// The source changed since the last deploy; the target did not.
     RepoChanged,
     /// The target changed since the last deploy; the source did not.
@@ -3254,7 +3251,6 @@ pub enum DriftType {
 impl std::fmt::Display for DriftType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DriftType::None => write!(f, "none"),
             DriftType::RepoChanged => write!(f, "repo changed"),
             DriftType::TargetChanged => write!(f, "target changed"),
             DriftType::BothChanged => write!(f, "both changed"),

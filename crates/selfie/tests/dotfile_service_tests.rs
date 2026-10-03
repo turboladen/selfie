@@ -7291,7 +7291,7 @@ mod symlinked_targets {
     //
     // selfie never wrote it and never will, so an entry claiming it did is a
     // promise the refusal guarantees it can never keep: the entry can never
-    // advance, and `detect_drift` would answer `None` for it forever (selfie-phnh).
+    // advance, and `detect_drift` would report no drift for it forever (selfie-phnh).
     //
     // Two entries, identical but for the link, because the axis under test is the
     // symlink and nothing else — both are already in sync, so both take the same

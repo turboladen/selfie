@@ -300,7 +300,6 @@ fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
 /// The `drift_type` field's value.
 fn drift_type_label(drift: &DriftType) -> &'static str {
     match drift {
-        DriftType::None => "none",
         DriftType::RepoChanged => "repo_changed",
         DriftType::TargetChanged => "target_changed",
         DriftType::BothChanged => "both_changed",

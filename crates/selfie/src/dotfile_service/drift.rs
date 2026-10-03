@@ -13,7 +13,7 @@ use crate::{
     dotfile_service::{deploy::compute_checksum, state::DeployState},
     fs::filesystem::FileSystem,
     package::{
-        event::{DriftType, EventSender, OperationResult, OperationSuccess, StepCount},
+        event::{EventSender, OperationResult, OperationSuccess, StepCount},
         refusal::refuse_up_front,
     },
 };
@@ -177,7 +177,7 @@ where
                 &source_checksum,
                 &target_checksum,
             );
-            if drift != DriftType::None {
+            if let Some(drift) = drift {
                 sender
                     .send_dotfile_drift_detected(repo.target.display(), drift)
                     .await;

@@ -472,8 +472,12 @@ where
                     .loaded()
                     .map_or(&empty, LoadedState::state)
                     .detect_drift(&target_key, &source_checksum, &target_checksum);
-                let decision =
-                    deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
+                let decision = deploy_decision(
+                    drift.as_ref(),
+                    target_exists,
+                    &source_checksum,
+                    &target_checksum,
+                );
 
                 // Every arm that writes names what the target held when it decided, and
                 // the one write below carries it out, so the two ways to reach a write
@@ -481,10 +485,10 @@ where
                 let decided = match decision {
                     DeployDecision::Deploy => Decided::Now(current.as_deref()),
                     DeployDecision::Skip(reason) => {
-                        // Record an untracked but in-sync entry so future runs see
-                        // `DriftType::None`. A symlinked target never reaches here: the
+                        // Record an untracked but in-sync entry so future runs see no
+                        // drift. A symlinked target never reaches here: the
                         // guard above refused it before the read.
-                        if drift == DriftType::NotTracked
+                        if drift == Some(DriftType::NotTracked)
                             && let Ledger::Record(loaded) = &mut ledger
                             && let Some(reason) =
                                 record_and_save(filesystem, loaded, sender, Recorded::InSync, &unit)

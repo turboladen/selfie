@@ -38,14 +38,15 @@ pub enum DeployDecision {
     Conflict,
 }
 
-/// Given the drift type and whether the target file exists, decide what to do.
+/// Given the drift, if any, and whether the target file exists, decide what to do.
 ///
-/// For `NotTracked` entries (no prior deploy state), `source_checksum` and
+/// `None` means the target holds what was last deployed and the source has not
+/// changed, so there is nothing to do. For `NotTracked` entries (no prior deploy state), `source_checksum` and
 /// `target_checksum` are compared directly: if they match, the file is already
 /// in sync and can be recorded without deploying; if they differ, it's a real
 /// conflict that needs user input.
 pub fn deploy_decision(
-    drift: &DriftType,
+    drift: Option<&DriftType>,
     target_exists: bool,
     source_checksum: &str,
     target_checksum: &str,
@@ -54,10 +55,10 @@ pub fn deploy_decision(
         return DeployDecision::Deploy;
     }
     match drift {
-        DriftType::None => DeployDecision::Skip(SkipReason::UpToDate),
-        DriftType::RepoChanged => DeployDecision::Deploy,
-        DriftType::TargetChanged | DriftType::BothChanged => DeployDecision::Conflict,
-        DriftType::NotTracked => {
+        None => DeployDecision::Skip(SkipReason::UpToDate),
+        Some(DriftType::RepoChanged) => DeployDecision::Deploy,
+        Some(DriftType::TargetChanged | DriftType::BothChanged) => DeployDecision::Conflict,
+        Some(DriftType::NotTracked) => {
             if source_checksum == target_checksum {
                 DeployDecision::Skip(SkipReason::InSync)
             } else {
@@ -101,43 +102,43 @@ mod tests {
 
     #[test]
     fn test_deploy_decision_target_does_not_exist() {
-        let decision = deploy_decision(&DriftType::NotTracked, false, "a", "");
+        let decision = deploy_decision(Some(&DriftType::NotTracked), false, "a", "");
         assert_eq!(decision, DeployDecision::Deploy);
     }
 
     #[test]
     fn test_deploy_decision_already_current() {
-        let decision = deploy_decision(&DriftType::None, true, "a", "a");
+        let decision = deploy_decision(None, true, "a", "a");
         assert_eq!(decision, DeployDecision::Skip(SkipReason::UpToDate));
     }
 
     #[test]
     fn test_deploy_decision_repo_changed() {
-        let decision = deploy_decision(&DriftType::RepoChanged, true, "b", "a");
+        let decision = deploy_decision(Some(&DriftType::RepoChanged), true, "b", "a");
         assert_eq!(decision, DeployDecision::Deploy);
     }
 
     #[test]
     fn test_deploy_decision_target_changed() {
-        let decision = deploy_decision(&DriftType::TargetChanged, true, "a", "b");
+        let decision = deploy_decision(Some(&DriftType::TargetChanged), true, "a", "b");
         assert_eq!(decision, DeployDecision::Conflict);
     }
 
     #[test]
     fn test_deploy_decision_both_changed() {
-        let decision = deploy_decision(&DriftType::BothChanged, true, "b", "c");
+        let decision = deploy_decision(Some(&DriftType::BothChanged), true, "b", "c");
         assert_eq!(decision, DeployDecision::Conflict);
     }
 
     #[test]
     fn test_deploy_decision_not_tracked_matching_checksums() {
-        let decision = deploy_decision(&DriftType::NotTracked, true, "same", "same");
+        let decision = deploy_decision(Some(&DriftType::NotTracked), true, "same", "same");
         assert_eq!(decision, DeployDecision::Skip(SkipReason::InSync));
     }
 
     #[test]
     fn test_deploy_decision_not_tracked_different_checksums() {
-        let decision = deploy_decision(&DriftType::NotTracked, true, "source", "target");
+        let decision = deploy_decision(Some(&DriftType::NotTracked), true, "source", "target");
         assert_eq!(decision, DeployDecision::Conflict);
     }
 }
