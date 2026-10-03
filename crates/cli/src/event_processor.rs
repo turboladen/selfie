@@ -24,7 +24,7 @@ use crate::source_paths;
 /// | ---- | ------- |
 /// | 0    | clean |
 /// | 1    | failed, refused part of its work, or could not answer |
-/// | 2    | usage error (set by clap, never here) |
+/// | 2    | usage error: a bad command line, or a prompt with no terminal |
 /// | 3    | found what it was asked to look for |
 /// | 130  | cancelled (128 + SIGINT) |
 // A new code takes the next free value in 3-63, never 64-78 (`sysexits.h`) or
@@ -38,6 +38,8 @@ pub(crate) enum Exit {
     Found,
     /// Failed, refused part of its work, or ended without saying how it went.
     Failed,
+    /// Needed an answer and had no terminal to ask on.
+    Usage,
     /// Interrupted.
     Cancelled,
 }
@@ -48,6 +50,7 @@ impl Exit {
         match self {
             Exit::Clean => 0,
             Exit::Failed => 1,
+            Exit::Usage => 2,
             Exit::Found => 3,
             // 128 + 2 (SIGINT), the Unix convention for Ctrl+C termination.
             Exit::Cancelled => 130,

@@ -7,7 +7,7 @@ use selfie::package::{
 
 use crate::config::CliConfig;
 use crate::display_manager::DisplayManager;
-use crate::event_processor::EventProcessor;
+use crate::event_processor::{EventProcessor, Exit};
 use tracing::info;
 
 use crate::commands::common;
@@ -58,8 +58,8 @@ pub(crate) async fn handle_remove(
         }
     };
 
-    display.print_info(format!("Package '{package_name}' found at:"));
-    display.print_info(format!("  {}", package_blob.file_path().display()));
+    display.print_run_note(format!("Package '{package_name}' found at:"));
+    display.print_run_note(format!("  {}", package_blob.file_path().display()));
 
     // `checked` is what separates "nothing depends on this" from "selfie does not
     // know". Both used to arrive here as an empty list, and the line below then
@@ -86,7 +86,7 @@ pub(crate) async fn handle_remove(
     let complete = checked && unreadable.is_empty();
 
     let (prompt, default_answer) = if dependent_packages.is_empty() && complete {
-        display.print_success(format!(
+        display.print_run_note(format!(
             "Package '{package_name}' is not a dependency of any other packages."
         ));
         (format!("Remove package '{package_name}'?"), false)
@@ -118,13 +118,19 @@ pub(crate) async fn handle_remove(
 
         match confirm_removal {
             Ok(true) => {}
+            // A remove that removed nothing did not do what it was asked.
             Ok(false) => {
-                display.print_info("Package removal cancelled.");
-                return 0;
+                display.print_run_note("Package removal cancelled.");
+                return Exit::Failed.code();
             }
-            Err(_) => {
-                display.print_error("Failed to read user input.");
-                return 1;
+            Err(failure) => {
+                return display
+                    .refuse_prompt(
+                        &failure,
+                        "Confirming the removal",
+                        format!("Pass --yes to remove '{package_name}' without asking.").as_str(),
+                    )
+                    .code();
             }
         }
     }
@@ -181,13 +187,78 @@ pub(crate) async fn handle_remove(
 #[cfg(test)]
 mod tests {
     use selfie::fs::MockFileSystem;
-    use selfie::package::port::MockPackageRepository;
     use std::path::PathBuf;
     use test_common::test_config_with_dir;
 
     use crate::config::CliConfig;
 
     use crate::commands::common;
+
+    // A spec in a fresh package directory, a config naming that directory, and a
+    // service over it.
+    fn one_spec() -> (
+        tempfile::TempDir,
+        PathBuf,
+        CliConfig,
+        impl selfie::package::service::SpecService,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir(&packages).unwrap();
+        let spec = packages.join("tool.yml");
+        std::fs::write(
+            &spec,
+            format!(
+                "name: tool\nenvironments:\n  {}:\n    install: \"true\"\n",
+                test_common::TEST_ENV
+            ),
+        )
+        .unwrap();
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&packages));
+        let service = test_common::create_test_service_with_config(test_config_with_dir(&packages));
+        (temp, spec, config, service)
+    }
+
+    // Ctrl+C at the confirmation ends the run canceled, and removes nothing.
+    #[tokio::test]
+    async fn ctrl_c_at_the_confirmation_is_canceled_and_keeps_the_spec() {
+        use crate::display_manager::{DisplayManager, ctrl_c};
+
+        let (_temp, spec, config, service) = one_spec();
+        let display = DisplayManager::new(false).answering(vec![ctrl_c()]);
+
+        let code = super::handle_remove(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(code, 130);
+        assert!(spec.exists());
+    }
+
+    // No at the confirmation is a decline: the spec stays, and the run fails.
+    #[tokio::test]
+    async fn declining_the_removal_fails_and_keeps_the_spec() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        let (_temp, spec, config, service) = one_spec();
+        let display = DisplayManager::new(false).answering(vec![answer(false)]);
+
+        let code = super::handle_remove(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(code, 1);
+        assert!(spec.exists());
+        // Everything before the question, and the decline, is about the run;
+        // a run that removed nothing has no answer for stdout.
+        let printed = display.printed();
+        assert!(
+            printed
+                .iter()
+                .all(|(channel, _)| *channel == crate::display_manager::Channel::Stderr),
+            "{printed:?}"
+        );
+        assert!(
+            printed.iter().any(|(_, line)| line.contains("found at")),
+            "{printed:?}"
+        );
+    }
 
     #[test]
     fn test_dependency_check_integration() {
@@ -315,33 +386,6 @@ environments:
         let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].name(), "dependent-package");
-    }
-
-    #[test]
-    fn test_save_and_remove_workflow_mock_repo() {
-        use selfie::package::port::PackageRepository;
-
-        let mut mock_repo = MockPackageRepository::new();
-        let package_dir = PathBuf::from("/test/packages");
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-
-        mock_repo
-            .expect_save_package()
-            .times(1)
-            .returning(|_, _| Ok(()));
-
-        mock_repo
-            .expect_remove_package()
-            .with(mockall::predicate::eq("workflow-test"))
-            .times(1)
-            .returning(|_| Ok(()));
-
-        let package_blob = common::create_new_package("workflow-test", &config);
-        let save_result = mock_repo.save_package(package_blob.package(), package_blob.file_path());
-        assert!(save_result.is_ok());
-
-        let remove_result = mock_repo.remove_package("workflow-test");
-        assert!(remove_result.is_ok());
     }
 
     #[test]

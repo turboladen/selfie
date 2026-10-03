@@ -314,7 +314,7 @@ struct TrackSpec {
 pub(super) async fn handle_track_standalone<R, F>(
     name: &str,
     target_path: &str,
-    dotfiles_repo: Option<&R>,
+    dotfiles_repo: &R,
     filesystem: &F,
     sender: &EventSender,
     config: &SelfieConfig,
@@ -323,12 +323,6 @@ where
     R: PackageRepository,
     F: FileSystem,
 {
-    let Some(dotfiles_repo) = dotfiles_repo else {
-        return OperationResult::Failure(OperationFailure::Generic(
-            "No dotfiles directory configured. Set `dotfiles_directory` in config.".to_string(),
-        ));
-    };
-
     // Reject names with path separators or traversal components
     if let Some(failure) = unsafe_name_failure(name) {
         return OperationResult::Failure(failure);

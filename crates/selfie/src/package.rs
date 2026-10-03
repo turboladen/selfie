@@ -293,6 +293,17 @@ pub(crate) fn is_valid_spec_name(name: &str) -> bool {
             .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '+'))
 }
 
+/// Why a spec cannot be created under `name`, or `None` when it can: `name`
+/// breaks the rule every spec's name follows.
+#[must_use]
+pub fn spec_name_refusal(name: &str) -> Option<String> {
+    (!is_valid_spec_name(name)).then(|| {
+        format!(
+            "Refusing to create '{name}': it is not a valid spec name. Rename it: {SPEC_NAME_RULE}."
+        )
+    })
+}
+
 /// The rule [`is_valid_spec_name`] applies, worded as a remedy for a refusal.
 pub(crate) const SPEC_NAME_RULE: &str = "use only letters, digits, '-', '_', '.', '@' and '+', \
      with no dot at the start or end and no '.yml' or '.yaml' ending";
@@ -1687,7 +1698,7 @@ impl Package {
     /// `None` when the file name is not a spec's, as for a package built in
     /// memory with no file behind it.
     #[must_use]
-    pub(crate) fn spec_name(&self) -> Option<String> {
+    pub fn spec_name(&self) -> Option<String> {
         spec_name_of(&self.path)
     }
 }

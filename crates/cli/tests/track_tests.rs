@@ -365,10 +365,8 @@ fn track_without_a_terminal_on_stderr_refuses_rather_than_prompting_forever() {
         .unwrap();
 
     let status = status.expect("the command must end rather than prompt with no terminal");
-    assert!(
-        !status.success(),
-        "nothing was tracked, so exiting 0 would mislead a script"
-    );
+    // 2, a usage error: the question needs a terminal, and nothing was tracked.
+    assert_eq!(status.code(), Some(2), "{stderr}");
     assert!(
         stderr.contains("needs a terminal"),
         "the refusal must say what is missing, got:\n{stderr}"
@@ -424,10 +422,8 @@ fn track_without_a_terminal_refuses_rather_than_prompting_forever() {
         .unwrap();
 
     let status = status.expect("the command must end rather than prompt with no terminal");
-    assert!(
-        !status.success(),
-        "nothing was tracked, so exiting 0 would tell a script the file is handled"
-    );
+    // 2, a usage error: the question needs a terminal, and nothing was tracked.
+    assert_eq!(status.code(), Some(2), "{stderr}");
     assert!(
         stderr.contains("needs a terminal"),
         "the refusal must say what is missing, got:\n{stderr}"
@@ -514,7 +510,7 @@ fn track_before_the_package_directory_exists_gets_to_choosing_a_destination() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
     assert!(
         stderr.contains("Choosing where to track a file needs a terminal"),
         "stderr:\n{stderr}"
@@ -522,5 +518,127 @@ fn track_before_the_package_directory_exists_gets_to_choosing_a_destination() {
     assert!(
         !stderr.contains("Failed to list packages"),
         "a missing package directory must not end the run, stderr:\n{stderr}"
+    );
+}
+
+// A file a package spec and a standalone spec both track is reported against
+// each of them, not only the first one scanned, and the run fails.
+#[test]
+fn track_names_every_spec_that_already_tracks_the_file() {
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    std::fs::write(home.join(".apprc"), "x").unwrap();
+    std::fs::write(
+        home.join("packages/app.yaml"),
+        format!(
+            "name: app\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  \
+             - source: \"app/rc\"\n    target: \"~/.apprc\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.join("dotfiles")).unwrap();
+    std::fs::write(
+        home.join("dotfiles/solo.yaml"),
+        "name: solo\ndotfiles:\n  - source: \"solo/rc\"\n    target: \"~/.apprc\"\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&temp)
+        .env("HOME", &home)
+        .args(["track", "~/.apprc"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Two specs deploying one file is not a handled file.
+    assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");
+    for spec in ["app", "solo"] {
+        assert!(
+            stdout.contains(&format!("Already tracking '~/.apprc' in spec '{spec}'")),
+            "{spec}:\n{stdout}{stderr}"
+        );
+    }
+    assert!(
+        stderr.contains("2 specs track this file: app, solo"),
+        "{stderr}"
+    );
+}
+
+// A tracker is named by its file, the name selfie finds it by, and a spec the
+// scan could not read is reported even when another spec tracks the file.
+#[test]
+fn an_existing_tracker_is_named_by_its_file_beside_a_spec_that_did_not_load() {
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    std::fs::write(home.join(".apprc"), "x").unwrap();
+    std::fs::write(
+        home.join("packages/bar.yaml"),
+        format!(
+            "name: foo\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  \
+             - source: \"bar/rc\"\n    target: \"~/.apprc\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(home.join("packages/broken.yaml"), "{{{\n").unwrap();
+
+    let output = sandboxed_command(&temp)
+        .env("HOME", &home)
+        .args(["track", "~/.apprc"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("Already tracking '~/.apprc' in spec 'bar'"),
+        "{stdout}{stderr}"
+    );
+    assert!(stderr.contains("broken.yaml"), "{stderr}");
+}
+
+// With the dotfiles directory set to the package directory, both scans list the
+// same spec; it is one tracker, not two.
+#[test]
+fn a_spec_both_scans_list_is_one_tracker() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let packages = home.join("packages");
+    std::fs::create_dir_all(home.join(".config/selfie")).unwrap();
+    std::fs::create_dir_all(&packages).unwrap();
+    std::fs::write(
+        home.join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {0}\ndotfiles_directory: {0}\n",
+            packages.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(home.join(".apprc"), "x").unwrap();
+    std::fs::write(
+        packages.join("app.yaml"),
+        format!(
+            "name: app\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  \
+             - source: \"app/rc\"\n    target: \"~/.apprc\"\n"
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&temp)
+        .env("HOME", &home)
+        .args(["track", "~/.apprc"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
+    assert_eq!(
+        stdout
+            .matches("Already tracking '~/.apprc' in spec 'app'")
+            .count(),
+        1,
+        "{stdout}{stderr}"
     );
 }

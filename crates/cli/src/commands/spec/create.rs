@@ -10,9 +10,11 @@ use selfie::{
 use std::path::PathBuf;
 use tracing::info;
 
+use crate::formatters::name_argument;
+
 use crate::{
     config::CliConfig,
-    display_manager::DisplayManager,
+    display_manager::{DisplayManager, PromptFailure},
     event_processor::{EventProcessor, Exit},
 };
 
@@ -35,8 +37,27 @@ pub(crate) async fn handle_create(
 ) -> i32 {
     info!("Creating package: {}", package_name);
 
+    // Refused before the name check, so a run that cannot ask prints only why.
+    if interactive && !display.can_prompt() {
+        return refuse_interactive(display, &PromptFailure::NoTerminal);
+    }
+
     // Create repository for name validation (UI flow decisions)
     let repo = common::create_package_repository(config);
+
+    // Asked first, so the name checked below is the one the spec is written
+    // under: the check never sees a name the prompts change afterwards.
+    let asked_name;
+    let package_name = if interactive {
+        display.print_run_note("Creating package interactively...");
+        asked_name = match prompt_package_name(package_name, display) {
+            Ok(name) => name,
+            Err(code) => return code,
+        };
+        asked_name.as_str()
+    } else {
+        package_name
+    };
 
     // Get a valid package name or handle existing package scenarios
     let package_name = match get_valid_package_name(package_name, &repo, config, display) {
@@ -52,7 +73,7 @@ pub(crate) async fn handle_create(
         // A create that wrote nothing did not do what it was asked, so a script
         // must not read it as success.
         Ok(PackageNameResult::Cancelled) => {
-            display.print_info("Package creation cancelled.");
+            display.print_run_note("Package creation cancelled.");
             return Exit::Failed.code();
         }
         Err(exit_code) => return exit_code,
@@ -68,12 +89,63 @@ pub(crate) async fn handle_create(
         create_basic_package(&package_name, config)
     };
 
-    // Use PackageService::create to persist (hexagonal pattern)
+    let (created_name, file_path) = match write_spec(service, package, display).await {
+        Ok(created) => created,
+        Err(exit_code) => return exit_code,
+    };
+
+    if !interactive {
+        display.print_info("Package created. Use 'selfie spec edit' to customize it.");
+        return Exit::Clean.code();
+    }
+
+    let edit_now = display.prompt(
+        Confirm::with_theme(&SimpleTheme)
+            .with_prompt("Would you like to open the package file for editing now?")
+            .default(true),
+    );
+
+    match edit_now {
+        Ok(true) => {
+            let success_message = format!(
+                "Package '{created_name}' created and saved at {}",
+                file_path.display()
+            );
+            common::open_editor(&file_path, display, Some(success_message))
+        }
+        Ok(false) => {
+            display.print_info("Package created. You can edit it later with 'selfie spec edit'.");
+            Exit::Clean.code()
+        }
+        Err(failure) => display
+            .refuse_prompt(
+                &failure,
+                "Asking whether to open the editor",
+                format!(
+                    "Open it later with `selfie spec edit {}`.",
+                    name_argument(&created_name)
+                )
+                .as_str(),
+            )
+            .code(),
+    }
+}
+
+/// Write `package` through the service, printing what the run reports, and
+/// return the name and path the spec was created under.
+///
+/// # Errors
+///
+/// The exit code when the spec was not created.
+pub(super) async fn write_spec(
+    service: &impl SpecService,
+    package: selfie::package::Package,
+    display: &DisplayManager,
+) -> Result<(String, PathBuf), i32> {
     let event_stream = service.create(package).await;
 
-    // Process the event stream with custom handling for create-specific events
-    // The name and path the library created the spec under. The name is the file's,
-    // which the interactive prompts may have made different from the argument.
+    // The name and path the library created the spec under. The name is the
+    // file's, which the library judges the spec by.
     let mut created: Option<(String, PathBuf)> = None;
     let processor = EventProcessor::new(display.clone());
     let result = processor
@@ -106,45 +178,36 @@ pub(crate) async fn handle_create(
         .await;
 
     if result.exit_code != 0 {
-        return result.exit_code;
+        return Err(result.exit_code);
     }
+    created.ok_or(Exit::Failed.code())
+}
 
-    // Ask if user wants to edit the file (only in interactive mode)
-    if interactive {
-        if let Some((ref created_name, ref file_path)) = created {
-            let edit_now = display.prompt(
-                Confirm::with_theme(&SimpleTheme)
-                    .with_prompt("Would you like to open the package file for editing now?")
-                    .default(true),
-            );
-
-            match edit_now {
-                Ok(true) => {
-                    let success_message = format!(
-                        "Package '{}' created and saved at {}",
-                        created_name,
-                        file_path.display()
-                    );
-                    common::open_editor(file_path, display, Some(success_message))
-                }
-                Ok(false) => {
-                    display.print_info(
-                        "Package created. You can edit it later with 'selfie spec edit'.",
-                    );
-                    Exit::Clean.code()
-                }
-                Err(_) => {
-                    display.print_error("Failed to read user input.");
-                    Exit::Failed.code()
-                }
-            }
-        } else {
-            Exit::Clean.code()
+/// Why a spec cannot be created under `name`, given the namespace check's
+/// refusal.
+pub(super) fn name_check_refusal(name: &str, error: &NamespaceValidationError) -> String {
+    match error {
+        NamespaceValidationError::Conflict(conflict) => {
+            format!("{conflict} Choose a different name.")
         }
-    } else {
-        display.print_info("Package created. Use 'selfie spec edit' to customize it.");
-        Exit::Clean.code()
+        // The directory is the problem, not the name.
+        NamespaceValidationError::PackageDirectoryUnreadable(_)
+        | NamespaceValidationError::DotfilesDirectoryUnreadable(_) => {
+            format!("Cannot create '{name}': {error}")
+        }
     }
+}
+
+/// Report a prompt of `spec create --interactive` that got no answer, and return
+/// the exit code.
+fn refuse_interactive(display: &DisplayManager, failure: &PromptFailure) -> i32 {
+    display
+        .refuse_prompt(
+            failure,
+            "spec create --interactive",
+            "Leave off --interactive to write a template, then edit it with 'selfie spec edit'.",
+        )
+        .code()
 }
 
 fn get_valid_package_name(
@@ -171,7 +234,7 @@ fn get_valid_package_name(
                 error @ (NamespaceValidationError::PackageDirectoryUnreadable(_)
                 | NamespaceValidationError::DotfilesDirectoryUnreadable(_)),
             ) => {
-                display.print_error(format!("Cannot create '{current_name}': {error}"));
+                display.print_error(name_check_refusal(&current_name, &error));
                 return Err(Exit::Failed.code());
             }
             Err(NamespaceValidationError::Conflict(conflict)) => {
@@ -206,7 +269,21 @@ fn get_valid_package_name(
                         Ok(1) => {
                             // Fall through to prompt for new name below
                         }
-                        _ => return Ok(PackageNameResult::Cancelled),
+                        Ok(_) => return Ok(PackageNameResult::Cancelled),
+                        Err(failure) => {
+                            return Err(display
+                                .refuse_prompt(
+                                    &failure,
+                                    "Choosing what to do about an existing package",
+                                    format!(
+                                        "Edit it with `selfie spec edit {}`, or run `selfie spec \
+                                         create` with a different name.",
+                                        name_argument(&current_name)
+                                    )
+                                    .as_str(),
+                                )
+                                .code());
+                        }
                     }
                 } else {
                     // Not a package this command can edit, so a different name is
@@ -229,16 +306,29 @@ fn get_valid_package_name(
                     return Err(Exit::Failed.code());
                 }
 
-                let new_name: String = if let Ok(name) =
-                    display.prompt(Input::with_theme(&SimpleTheme).with_prompt(format!(
-                        "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
-                    ))) {
-                    name
-                } else {
-                    display.print_error("Failed to read package name.");
-                    return Err(Exit::Failed.code());
+                current_name = loop {
+                    let name: String =
+                        match display.prompt(Input::with_theme(&SimpleTheme).with_prompt(format!(
+                            "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
+                        ))) {
+                            Ok(name) => name,
+                            Err(failure) => {
+                                return Err(display
+                                    .refuse_prompt(
+                                        &failure,
+                                        "Choosing a different name",
+                                        "Run 'selfie spec create' again with a different name.",
+                                    )
+                                    .code());
+                            }
+                        };
+                    // As the first name prompt does: a name the rule refuses would
+                    // be refused only when the spec is written.
+                    match selfie::package::spec_name_refusal(&name) {
+                        None => break name,
+                        Some(refusal) => display.print_warning(refusal),
+                    }
                 };
-                current_name = new_name;
                 continue;
             }
             Ok(()) => {
@@ -249,7 +339,12 @@ fn get_valid_package_name(
     }
 }
 
-fn create_basic_package(package_name: &str, config: &CliConfig) -> selfie::package::Package {
+/// The template spec for `package_name`: one environment, the configured one,
+/// with placeholder commands, written to `<name>.yml` in the package directory.
+pub(super) fn create_basic_package(
+    package_name: &str,
+    config: &CliConfig,
+) -> selfie::package::Package {
     let mut environments = Environments::new();
 
     // Use the environment from config (which may be overridden by --environment)
@@ -282,36 +377,43 @@ fn create_package_interactive(
     config: &CliConfig,
     display: &DisplayManager,
 ) -> Result<selfie::package::Package, i32> {
-    display.print_info("Creating package interactively...");
-
-    let name = prompt_package_name(package_name, display)?;
     let homepage = prompt_package_homepage(display)?;
     let description = prompt_package_description(display)?;
-    let environments = prompt_environments(&name, config, display)?;
-    let file_name = prompt_file_name(&name, display)?;
+    let environments = prompt_environments(package_name, config, display)?;
 
+    // The file is named for the package, as `create_basic_package` names it:
+    // selfie finds a spec by its file name, so a separate one would be a name
+    // the namespace check never saw.
     Ok(selfie::package::Package::new(
-        name,
+        package_name.to_string(),
         homepage,
         description,
         Vec::new(),
         None,
         environments,
-        config.package_directory().join(format!("{file_name}.yml")),
+        config
+            .package_directory()
+            .join(format!("{package_name}.yml")),
     ))
 }
 
 fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
-    display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("Package name")
-                .default(default_name.to_string()),
-        )
-        .map_err(|_| {
-            display.print_error("Failed to read package name.");
-            Exit::Failed.code()
-        })
+    loop {
+        let name = display
+            .prompt(
+                Input::with_theme(&SimpleTheme)
+                    .with_prompt("Package name")
+                    .default(default_name.to_string()),
+            )
+            .map_err(|failure| refuse_interactive(display, &failure))?;
+
+        // Here, not only when the spec is written: every answer after this one
+        // would be thrown away with it.
+        match selfie::package::spec_name_refusal(&name) {
+            None => return Ok(name),
+            Some(refusal) => display.print_warning(refusal),
+        }
+    }
 }
 
 fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i32> {
@@ -321,10 +423,7 @@ fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i
                 .with_prompt("Homepage URL (optional)")
                 .allow_empty(true),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read homepage.");
-            Exit::Failed.code()
-        })?;
+        .map_err(|failure| refuse_interactive(display, &failure))?;
 
     Ok(if homepage.trim().is_empty() {
         None
@@ -340,10 +439,7 @@ fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>
                 .with_prompt("Description (optional)")
                 .allow_empty(true),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read description.");
-            Exit::Failed.code()
-        })?;
+        .map_err(|failure| refuse_interactive(display, &failure))?;
 
     Ok(if description.trim().is_empty() {
         None
@@ -360,7 +456,7 @@ fn prompt_environments(
     let mut environments = Environments::new();
 
     loop {
-        display.print_info("Adding environment configuration...");
+        display.print_run_note("Adding environment configuration...");
 
         let env_name = prompt_environment_name(&environments, config, display)?;
         let install_cmd = prompt_install_command(display)?;
@@ -379,37 +475,49 @@ fn prompt_environments(
     Ok(environments)
 }
 
+/// The name to offer for the next environment: the configured one, then
+/// "production", and none once the spec has both.
+fn default_environment_name<'a>(
+    existing_environments: &Environments,
+    config: &'a CliConfig,
+) -> Option<&'a str> {
+    // A default the spec already has could only be refused.
+    [config.environment(), "production"]
+        .into_iter()
+        .find(|name| !existing_environments.contains_key(*name))
+}
+
 fn prompt_environment_name(
     existing_environments: &Environments,
     config: &CliConfig,
     display: &DisplayManager,
 ) -> Result<String, i32> {
-    let default_env = if existing_environments.is_empty() {
-        config.environment().to_string()
-    } else {
-        "production".to_string()
-    };
+    let default_env = default_environment_name(existing_environments, config);
 
-    display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("Environment name")
-                .default(default_env),
-        )
-        .map_err(|_| {
-            display.print_error("Failed to read environment name.");
-            Exit::Failed.code()
-        })
+    loop {
+        let mut input = Input::with_theme(&SimpleTheme).with_prompt("Environment name");
+        if let Some(default_env) = default_env {
+            input = input.default(default_env.to_string());
+        }
+        let name = display
+            .prompt(input)
+            .map_err(|failure| refuse_interactive(display, &failure))?;
+
+        // A second entry under one name would replace the first.
+        if !existing_environments.contains_key(&name) {
+            return Ok(name);
+        }
+        display.print_warning(format!(
+            "Environment '{name}' is already in this spec. Choose a different name."
+        ));
+    }
 }
 
 fn prompt_install_command(display: &DisplayManager) -> Result<String, i32> {
     loop {
         let cmd: String = display
             .prompt(Input::with_theme(&SimpleTheme).with_prompt("Install command (required)"))
-            .map_err(|_| {
-                display.print_error("Failed to read install command.");
-                Exit::Failed.code()
-            })?;
+            .map_err(|failure| refuse_interactive(display, &failure))?;
 
         if !cmd.trim().is_empty() {
             break Ok(cmd);
@@ -431,10 +539,7 @@ fn prompt_check_command(
                 .default(default_check)
                 .allow_empty(true),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read check command.");
-            Exit::Failed.code()
-        })?;
+        .map_err(|failure| refuse_interactive(display, &failure))?;
 
     Ok(if check_cmd.trim().is_empty() {
         None
@@ -478,9 +583,9 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         Exit::Failed.code()
     })?;
 
-    // A dependency is resolved by name, and selfie does not know the name inside
-    // a spec it could not read, so these cannot be offered. Naming them stops
-    // the picker reading as every package the user has.
+    // A spec selfie could not read is not offered: nothing says it would load
+    // when the dependency is resolved. Naming these stops the picker reading as
+    // every package the user has.
     for warning in skipped {
         display.print_warning(warning);
     }
@@ -495,10 +600,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
                 .with_prompt("Dependencies (select with space, confirm with enter)")
                 .items(&available_packages),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read dependencies.");
-            Exit::Failed.code()
-        })?;
+        .map_err(|failure| refuse_interactive(display, &failure))?;
 
     Ok(selected
         .into_iter()
@@ -513,23 +615,7 @@ fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, i32>
                 .with_prompt("Add another environment?")
                 .default(false),
         )
-        .map_err(|_| {
-            display.print_error("Failed to read user input.");
-            Exit::Failed.code()
-        })
-}
-
-fn prompt_file_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
-    display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("File name (without .yml extension)")
-                .default(default_name.to_string()),
-        )
-        .map_err(|_| {
-            display.print_error("Failed to read file name.");
-            Exit::Failed.code()
-        })
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 #[cfg(test)]
@@ -543,6 +629,208 @@ mod tests {
     use selfie::package::port::MockPackageRepository;
     use std::path::PathBuf;
     use test_common::{test_config_with_dir, test_config_with_dir_and_env};
+
+    // A fresh package directory holding `existing` specs, a config naming it,
+    // and a service over it.
+    fn packages_holding(
+        existing: &[&str],
+    ) -> (tempfile::TempDir, PathBuf, CliConfig, impl SpecService) {
+        let temp = tempfile::tempdir().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir(&packages).unwrap();
+        for name in existing {
+            std::fs::write(
+                packages.join(format!("{name}.yml")),
+                format!(
+                    "name: {name}\nenvironments:\n  {}:\n    install: \"true\"\n",
+                    test_common::TEST_ENV
+                ),
+            )
+            .unwrap();
+        }
+        let config = CliConfig::wrap_for_test(test_config_with_dir(&packages));
+        let service = test_common::create_test_service_with_config(test_config_with_dir(&packages));
+        (temp, packages, config, service)
+    }
+
+    // A different name chosen at the "already exists" menu is held to the
+    // spec-name rule as the first one is, and asked for again.
+    #[tokio::test]
+    async fn a_replacement_name_the_rule_refuses_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let (_temp, packages, config, service) = packages_holding(&["tool"]);
+        let display = DisplayManager::new(false).answering(vec![
+            answer(1_usize), // a different name
+            answer("my app".to_string()),
+            answer("fresh".to_string()),
+        ]);
+
+        let code = handle_create(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(code, 0, "{:?}", display.printed());
+        assert!(packages.join("fresh.yml").exists());
+        assert!(
+            display
+                .printed()
+                .iter()
+                .any(|(_, line)| line.contains("'my app': it is not a valid spec name")),
+            "{:?}",
+            display.printed()
+        );
+    }
+
+    // Ctrl+C at the "already exists" menu ends the run canceled.
+    #[tokio::test]
+    async fn ctrl_c_at_the_taken_name_menu_is_canceled() {
+        let (_temp, packages, config, service) = packages_holding(&["tool"]);
+        let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
+
+        let code = handle_create(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(code, 130);
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 1);
+    }
+
+    // Ctrl+C at the first interactive prompt ends the run canceled, writing
+    // nothing.
+    #[tokio::test]
+    async fn ctrl_c_at_an_interactive_prompt_is_canceled() {
+        let (_temp, packages, config, service) = packages_holding(&[]);
+        let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
+
+        let code = handle_create(&service, "fresh", &config, &display, true).await;
+
+        assert_eq!(code, 130);
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
+    }
+
+    // The name the interactive prompt gives is the one checked and written: a
+    // name a standalone spec holds is refused there and asked for again, and
+    // the file takes the second answer's name. Nothing asks for a file name.
+    #[tokio::test]
+    async fn the_interactively_named_spec_is_checked_and_written_under_that_name() {
+        use crate::display_manager::answer;
+
+        let (temp, packages, config, service) = packages_holding(&[]);
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir(&dotfiles).unwrap();
+        std::fs::write(
+            dotfiles.join("other.yml"),
+            "name: other\ndotfiles:\n  - source: other\n    target: ~/.other\n",
+        )
+        .unwrap();
+        let display = DisplayManager::new(false).answering(vec![
+            answer("other".to_string()), // package name: a standalone spec has it
+            answer("fresh".to_string()), // a different name
+            answer(String::new()),       // homepage
+            answer(String::new()),       // description
+            answer(test_common::TEST_ENV.to_string()),
+            answer("true".to_string()), // install
+            answer(String::new()),      // check
+            answer(false),              // another environment?
+            answer(false),              // open the editor now?
+        ]);
+
+        let code = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(code, 0, "{:?}", display.printed());
+        let written: Vec<String> = std::fs::read_dir(&packages)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(written, vec!["fresh.yml".to_string()]);
+        let spec = std::fs::read_to_string(packages.join("fresh.yml")).unwrap();
+        assert!(spec.contains("name: fresh"), "{spec}");
+    }
+
+    // A name the spec-name rule refuses is refused at its prompt and asked for
+    // again, before anything else is asked.
+    #[tokio::test]
+    async fn an_interactive_name_the_rule_refuses_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let (_temp, packages, config, service) = packages_holding(&[]);
+        let display = DisplayManager::new(false).answering(vec![
+            answer("my app".to_string()),
+            answer("fresh".to_string()),
+            answer(String::new()), // homepage
+            answer(String::new()), // description
+            answer(test_common::TEST_ENV.to_string()),
+            answer("true".to_string()), // install
+            answer(String::new()),      // check
+            answer(false),              // another environment?
+            answer(false),              // open the editor now?
+        ]);
+
+        let code = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(code, 0, "{:?}", display.printed());
+        assert!(packages.join("fresh.yml").exists());
+        assert!(
+            display
+                .printed()
+                .iter()
+                .any(|(_, line)| line.contains("'my app': it is not a valid spec name")),
+            "{:?}",
+            display.printed()
+        );
+    }
+
+    // A repeated environment name is refused and asked again, so the first
+    // environment keeps its commands and both are written.
+    #[test]
+    fn a_repeated_environment_name_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let (_temp, _packages, config, _service) = packages_holding(&[]);
+        let display = DisplayManager::new(false).answering(vec![
+            answer("work".to_string()),
+            answer("install-work".to_string()),
+            answer(String::new()), // check
+            answer(true),          // another environment?
+            answer("work".to_string()),
+            answer("home".to_string()),
+            answer("install-home".to_string()),
+            answer(String::new()), // check
+            answer(false),         // another environment?
+        ]);
+
+        let environments = prompt_environments("tool", &config, &display).unwrap();
+
+        let installs: Vec<(&str, &str)> = environments
+            .iter()
+            .map(|(name, env)| (name.as_str(), env.install()))
+            .collect();
+        assert_eq!(
+            installs,
+            vec![("work", "install-work"), ("home", "install-home")]
+        );
+    }
+
+    // The default offered for a further environment is never one the spec
+    // already has.
+    #[test]
+    fn the_environment_default_skips_a_taken_name() {
+        let config = CliConfig::wrap_for_test(test_config_with_dir_and_env("/p", "production"));
+        let env = || EnvironmentConfig::new("true".to_string(), None, None, Vec::new(), Vec::new());
+        let mut existing = Environments::new();
+
+        assert_eq!(
+            default_environment_name(&existing, &config),
+            Some("production")
+        );
+        existing.insert("production".to_string(), env());
+        assert_eq!(default_environment_name(&existing, &config), None);
+
+        let config = CliConfig::wrap_for_test(test_config_with_dir_and_env("/p", "work"));
+        let mut existing = Environments::new();
+        existing.insert("work".to_string(), env());
+        assert_eq!(
+            default_environment_name(&existing, &config),
+            Some("production")
+        );
+    }
 
     // Helper: collect the final `OperationResult` from an event stream.
     async fn collect_result(
@@ -850,6 +1138,7 @@ mod tests {
     fn named(name: &str) -> selfie::package::Package {
         selfie::package::PackageBuilder::default()
             .name(name)
+            .path(format!("/test/packages/{name}.yml"))
             .build()
     }
 
@@ -863,9 +1152,8 @@ mod tests {
         assert!(skipped.is_empty());
     }
 
-    // The picker resolves a dependency by the name inside the spec, which selfie
-    // does not have for a file it could not read, so the caller is handed
-    // something to say about it.
+    // The picker lists a spec selfie could read, and a file it could not read is
+    // left out, so the caller is handed something to say about it.
     #[test]
     fn available_dependency_names_names_the_spec_it_could_not_read() {
         let repo = dependency_repo(vec![
