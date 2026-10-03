@@ -17668,3 +17668,114 @@ mod drift_reports_its_type {
         }
     }
 }
+
+// A conflict says whether a resolver was shown it and declined, for a
+// repository file and a secret-bearing entry alike, so a consumer whose prompt
+// already showed it need not show it again.
+mod a_conflict_says_whether_it_was_declined {
+    use super::*;
+
+    struct Declining;
+
+    impl selfie::dotfile_service::port::ConflictResolver for Declining {
+        fn resolve(
+            &self,
+            _target: &str,
+            _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+        ) -> selfie::dotfile_service::port::ConflictResolution {
+            selfie::dotfile_service::port::ConflictResolution::Skip
+        }
+    }
+
+    fn declining() -> ApplyOptions {
+        ApplyOptions {
+            conflict_resolver: Some(std::sync::Arc::new(Declining)),
+            ..Default::default()
+        }
+    }
+
+    // One repository file and one command entry, each with a target holding
+    // something else, so both conflict.
+    fn conflicting(dirs: &TestDirs) {
+        std::fs::write(dirs.package_dir.join("repo.conf"), "from repo").unwrap();
+        let repo_target = dirs.target_dir.join("repo.conf");
+        let secret_target = dirs.target_dir.join("secret.conf");
+        std::fs::write(&repo_target, "edited").unwrap();
+        std::fs::write(&secret_target, "edited").unwrap();
+        std::fs::write(
+            dirs.package_dir.join("both.yml"),
+            format!(
+                "name: both\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: repo.conf\n    target: \"{}\"\n  \
+                 - command: \"op read x\"\n    target: \"{}\"\n",
+                repo_target.display(),
+                secret_target.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    fn declined_flags(events: &[PackageEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::DotfileConflict { declined, .. } => Some(*declined),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_declined_conflict_says_so() {
+        let dirs = TestDirs::new();
+        conflicting(&dirs);
+        let service =
+            dirs.service_with_runner(FakeCommandRunner::new().succeeding("op read x", b"from op"));
+
+        let events = collect_events(service.apply_all(declining()).await).await;
+
+        assert_eq!(declined_flags(&events), [true, true], "{events:#?}");
+    }
+
+    struct Panicking;
+
+    impl selfie::dotfile_service::port::ConflictResolver for Panicking {
+        fn resolve(
+            &self,
+            _target: &str,
+            _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+        ) -> selfie::dotfile_service::port::ConflictResolution {
+            panic!("the resolver failed before showing anything");
+        }
+    }
+
+    // A resolver that gave no answer may never have shown the conflict, so the
+    // conflict is not marked declined, and a consumer still shows it.
+    #[tokio::test]
+    async fn a_conflict_a_resolver_did_not_answer_is_not_declined() {
+        let dirs = TestDirs::new();
+        conflicting(&dirs);
+        let service =
+            dirs.service_with_runner(FakeCommandRunner::new().succeeding("op read x", b"from op"));
+        let options = ApplyOptions {
+            conflict_resolver: Some(std::sync::Arc::new(Panicking)),
+            ..Default::default()
+        };
+
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(declined_flags(&events), [false, false], "{events:#?}");
+    }
+
+    #[tokio::test]
+    async fn a_conflict_no_resolver_saw_says_so() {
+        let dirs = TestDirs::new();
+        conflicting(&dirs);
+        let service =
+            dirs.service_with_runner(FakeCommandRunner::new().succeeding("op read x", b"from op"));
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(declined_flags(&events), [false, false], "{events:#?}");
+    }
+}

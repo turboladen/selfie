@@ -5,7 +5,6 @@
 //! an event.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -13,7 +12,7 @@ use crate::{
     commands::CommandRunner,
     config::SelfieConfig,
     dotfile_service::{
-        port::{ConflictDetail, ConflictResolution},
+        port::{ConflictDetail, ConflictResolution, put_to_resolver},
         resolve::{ResolvedContent, resolve_content},
     },
     fs::{
@@ -456,19 +455,23 @@ where
         };
         let report = secret_conflict_report(&resolved.bytes, current);
 
-        if self.ask_resolver(target, resolved, current, &report).await {
-            return Ok(());
-        }
+        let declined = match self.ask_resolver(target, resolved, current, &report).await {
+            Some(ConflictResolution::Accept) => return Ok(()),
+            Some(ConflictResolution::Skip) => true,
+            None => false,
+        };
 
         // Only the summary reaches the event. The values went to the resolver
         // and nowhere else.
         self.sender
-            .send_dotfile_conflict(&target.source, target.path.display(), report)
+            .send_dotfile_conflict(&target.source, target.path.display(), report, declined)
             .await;
         Err(SecretOutcome::Conflicted)
     }
 
-    /// Put the conflict to the injected resolver, if there is one.
+    /// Put the conflict to the injected resolver, if there is one, and return
+    /// its answer: `None` when there is no resolver, or when the resolver did
+    /// not return one, as when it panicked.
     ///
     /// The resolver is blocking and needs `'static`, so the values are moved in
     /// as owned buffers and the borrowed `ConflictDetail` is built inside the
@@ -486,21 +489,20 @@ where
         resolved: &ResolvedContent,
         current: &[u8],
         report: &ConflictReport,
-    ) -> bool {
+    ) -> Option<ConflictResolution> {
         let Some(resolver) = &self.options.conflict_resolver else {
-            return false;
+            return None;
         };
         // Rendered only once a resolver will read it.
         let summary = report.to_string();
 
-        let resolver = Arc::clone(resolver);
         let path = target.path.display().to_string();
         let source = target.source.clone();
         let incoming = resolved.bytes.clone();
         let current = current.to_vec();
 
-        tokio::task::spawn_blocking(move || {
-            resolver.resolve(
+        put_to_resolver(resolver, move |r| {
+            r.resolve(
                 &path,
                 ConflictDetail::Secret {
                     source: &source,
@@ -511,8 +513,6 @@ where
             )
         })
         .await
-        .unwrap_or(ConflictResolution::Skip)
-            == ConflictResolution::Accept
     }
 
     /// Write the resolved content and report it.

@@ -66,7 +66,32 @@ pub enum ConflictDetail<'a> {
 /// a fixed answer; the MCP server supplies no resolver at all.
 pub trait ConflictResolver: Send + Sync {
     /// Decide what to do about the conflict at `target`.
+    ///
+    /// [`Accept`](ConflictResolution::Accept) overwrites the target.
+    /// [`Skip`](ConflictResolution::Skip) keeps it, and the conflict is then
+    /// reported with `declined` set, which tells a consumer the conflict was
+    /// already put to whoever decides and need not be shown again. So return
+    /// `Skip` only after presenting the conflict; a person dismissing or
+    /// interrupting the prompt is a `Skip`. A resolver that cannot present
+    /// conflicts should not be supplied. A conflict a resolver gave no answer
+    /// for, as when it panicked, is reported undeclined and skipped.
     fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution;
+}
+
+/// Put a conflict to `resolver` off the async runtime, since a resolver
+/// blocks on whoever decides, and return its answer: `None` when it gave none,
+/// as when it panicked. `ask` builds the detail and calls the resolver.
+pub(crate) async fn put_to_resolver<F>(
+    resolver: &Arc<dyn ConflictResolver>,
+    ask: F,
+) -> Option<ConflictResolution>
+where
+    F: FnOnce(&dyn ConflictResolver) -> ConflictResolution + Send + 'static,
+{
+    let resolver = Arc::clone(resolver);
+    tokio::task::spawn_blocking(move || ask(resolver.as_ref()))
+        .await
+        .ok()
 }
 
 /// Options for dotfile apply operations
@@ -76,8 +101,11 @@ pub struct ApplyOptions {
     pub dry_run: bool,
     /// Auto-accept overwrite for conflicts (--yes flag)
     pub auto_accept: bool,
-    /// Interactive conflict resolver. When set, conflicts call this instead of
-    /// emitting a `DotfileConflict` event and skipping.
+    /// Interactive conflict resolver. When set, a conflict is put to it first.
+    /// A conflict it answers Skip for is reported as a `DotfileConflict` event
+    /// marked `declined`, and skipped; a consumer whose resolver showed it need
+    /// not show it again. A conflict it gives no answer for is reported
+    /// undeclined, and skipped.
     ///
     /// For an ordinary repository-file conflict this is ignored when
     /// `auto_accept` is true. For a secret-bearing entry it is the **only** way
