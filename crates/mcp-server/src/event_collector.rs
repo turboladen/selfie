@@ -67,13 +67,14 @@ fn failure_json(failure: &OperationFailure) -> Value {
 /// - `recorded_source`: for an old record, the source as its spec spelled it.
 fn with_source(mut row: Value, source: &DotfileSource) -> Value {
     let map = row.as_object_mut().expect("constructed as an object");
-    let (path, vars): (Option<&std::path::Path>, &[String]) = match source {
-        DotfileSource::File { path, .. } => (Some(path), &[]),
-        DotfileSource::Template { path, vars, .. } => (Some(path), vars),
-        DotfileSource::Command(_) | DotfileSource::Recorded(_) => (None, &[]),
+    let vars: &[String] = match source {
+        DotfileSource::Template { vars, .. } => vars,
+        DotfileSource::File(_) | DotfileSource::Command(_) | DotfileSource::Recorded(_) => &[],
     };
     let base = source.base();
-    let relative_path = base.and(path).map(|path| path.display().to_string());
+    let relative_path = base
+        .and(source.repo_path())
+        .map(|file| file.path.display().to_string());
     let base = base.map(|base| match base.kind {
         BaseKind::PackageDirectory => "packages",
         BaseKind::DotfilesDirectory => "dotfiles",
@@ -963,20 +964,20 @@ mod tests {
     use futures::stream;
     use selfie::package::event::{
         AuditResultData, CheckResult, CheckResultData, OperationContext, OperationFailure,
-        OperationInfo, OperationSuccess, StepCount, metadata::OperationType,
+        OperationInfo, OperationSuccess, RepoPath, StepCount, metadata::OperationType,
     };
     use std::time::Instant;
     use uuid::Uuid;
 
     // A file under the package directory `/home/u/packages`.
     fn package_file(path: &str) -> DotfileSource {
-        DotfileSource::File {
+        DotfileSource::File(RepoPath {
             base: Some(selfie::package::event::SourceBase {
                 kind: BaseKind::PackageDirectory,
                 directory: "/home/u/packages".into(),
             }),
             path: path.into(),
-        }
+        })
     }
 
     // A dotfile row gives the source in full, so an assistant needs no config to
@@ -1315,16 +1316,18 @@ mod tests {
         };
         for (source, kind) in [
             (
-                DotfileSource::File {
+                DotfileSource::File(RepoPath {
                     base: base(),
                     path: "bat/config".into(),
-                },
+                }),
                 "file",
             ),
             (
                 DotfileSource::Template {
-                    base: base(),
-                    path: "git/config.tmpl".into(),
+                    file: RepoPath {
+                        base: base(),
+                        path: "git/config.tmpl".into(),
+                    },
                     vars: vec!["email".to_string()],
                 },
                 "template",

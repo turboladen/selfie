@@ -17403,9 +17403,9 @@ mod event_sources {
         let bases: Vec<(Option<BaseKind>, String)> = sources
             .iter()
             .map(|source| match source {
-                DotfileSource::File { base, path, .. } => (
-                    base.as_ref().map(|base| base.kind),
-                    path.display().to_string(),
+                DotfileSource::File(file) => (
+                    file.base.as_ref().map(|base| base.kind),
+                    file.path.display().to_string(),
                 ),
                 other => panic!("expected a file, got {other:?}"),
             })
@@ -17439,14 +17439,14 @@ mod event_sources {
         let sources = skipped_sources(&dry_run(&dirs).await);
 
         assert_eq!(sources.len(), 1, "{sources:?}");
-        let DotfileSource::Template { base, path, vars } = &sources[0] else {
+        let DotfileSource::Template { file, vars } = &sources[0] else {
             panic!("expected a template, got {:?}", sources[0]);
         };
         assert_eq!(
-            base.as_ref().map(|b| b.kind),
+            file.base.as_ref().map(|b| b.kind),
             Some(BaseKind::PackageDirectory)
         );
-        assert_eq!(path, &std::path::PathBuf::from("git/config.tmpl"));
+        assert_eq!(file.path, std::path::PathBuf::from("git/config.tmpl"));
         assert_eq!(vars, &vec!["email".to_string()]);
     }
 
@@ -17473,7 +17473,7 @@ mod event_sources {
         let kinds: Vec<Option<BaseKind>> = sources
             .iter()
             .map(|source| match source {
-                DotfileSource::File { base, .. } => base.as_ref().map(|b| b.kind),
+                DotfileSource::File(file) => file.base.as_ref().map(|b| b.kind),
                 _ => None,
             })
             .collect();

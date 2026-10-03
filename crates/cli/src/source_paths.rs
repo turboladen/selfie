@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use selfie::package::event::{BaseKind, DotfileSource};
+use selfie::package::event::{BaseKind, DotfileSource, RepoPath};
 
 use crate::display_manager::{Channel, DisplayManager, shorten_path};
 
@@ -24,10 +24,12 @@ pub(crate) fn base_directory_line(kind: BaseKind, directory: &Path) -> String {
 /// known base is shown in full, and a recorded spelling is marked as one.
 pub(crate) fn relative_text(source: &DotfileSource) -> String {
     match source {
-        DotfileSource::File { base: None, .. } | DotfileSource::Template { base: None, .. } => {
-            shorten_path(&source.relative().to_string())
-        }
-        DotfileSource::File { .. } | DotfileSource::Template { .. } | DotfileSource::Command(_) => {
+        DotfileSource::File(RepoPath { base: None, .. })
+        | DotfileSource::Template {
+            file: RepoPath { base: None, .. },
+            ..
+        } => shorten_path(&source.relative().to_string()),
+        DotfileSource::File(_) | DotfileSource::Template { .. } | DotfileSource::Command(_) => {
             source.relative().to_string()
         }
         // No base is known, so the line says so: under a heading printed for an
@@ -81,13 +83,13 @@ mod tests {
     use super::*;
 
     fn file(kind: BaseKind, directory: &str, path: &str) -> DotfileSource {
-        DotfileSource::File {
+        DotfileSource::File(RepoPath {
             base: Some(SourceBase {
                 kind,
                 directory: PathBuf::from(directory),
             }),
             path: PathBuf::from(path),
-        }
+        })
     }
 
     fn headings(display: &DisplayManager) -> Vec<String> {
@@ -214,11 +216,13 @@ mod tests {
     #[test]
     fn a_template_keeps_its_var_names() {
         let source = DotfileSource::Template {
-            base: Some(SourceBase {
-                kind: BaseKind::PackageDirectory,
-                directory: PathBuf::from("/r/p"),
-            }),
-            path: PathBuf::from("git/config.tmpl"),
+            file: RepoPath {
+                base: Some(SourceBase {
+                    kind: BaseKind::PackageDirectory,
+                    directory: PathBuf::from("/r/p"),
+                }),
+                path: PathBuf::from("git/config.tmpl"),
+            },
             vars: vec!["email".to_string()],
         };
         assert_eq!(relative_text(&source), "git/config.tmpl (vars: email)");
@@ -226,10 +230,10 @@ mod tests {
 
     #[test]
     fn a_file_under_no_base_is_shown_in_full() {
-        let source = DotfileSource::File {
+        let source = DotfileSource::File(RepoPath {
             base: None,
             path: PathBuf::from("/elsewhere/x"),
-        };
+        });
         assert_eq!(relative_text(&source), "/elsewhere/x");
     }
 }

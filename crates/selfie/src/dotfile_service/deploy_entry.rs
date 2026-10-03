@@ -13,7 +13,7 @@ use crate::{
         filesystem::{FileSystem, FileSystemError},
         target::TargetPath,
     },
-    package::event::{DotfileSource, EventSender},
+    package::event::{DotfileSource, EventSender, RepoPath},
 };
 
 use super::refusal::{guard_refusal, read_target_state, readable_or_refusal, refusal_warning};
@@ -324,12 +324,12 @@ pub(super) async fn record_and_save<F: FileSystem>(
     // With a base, the record holds the path relative to it, which is what the
     // base means; the spec's spelling is relative to the spec file instead.
     let (source, base) = match unit.event_source {
-        DotfileSource::File {
+        DotfileSource::File(RepoPath {
             base: Some(base),
             path,
-        } => (path.to_string_lossy(), Some(base.kind)),
+        }) => (path.to_string_lossy(), Some(base.kind)),
         // A template is never recorded; it takes the secret-bearing path.
-        DotfileSource::File { base: None, .. }
+        DotfileSource::File(RepoPath { base: None, .. })
         | DotfileSource::Template { .. }
         | DotfileSource::Command(_)
         | DotfileSource::Recorded(_) => (std::borrow::Cow::Borrowed(unit.source), None),

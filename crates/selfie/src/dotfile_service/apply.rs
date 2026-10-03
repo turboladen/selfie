@@ -500,10 +500,12 @@ where
                         // it later becomes can be shown against it. Only in memory:
                         // the run saves once at its end, and a failure to save it
                         // costs nothing but the location, so it never stops the run.
-                        if let crate::package::event::DotfileSource::File {
-                            base: Some(base),
-                            path,
-                        } = &event_source
+                        if let crate::package::event::DotfileSource::File(
+                            crate::package::event::RepoPath {
+                                base: Some(base),
+                                path,
+                            },
+                        ) = &event_source
                             && let Ledger::Record(loaded) = &mut ledger
                             && loaded
                                 .state()

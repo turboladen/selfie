@@ -1098,19 +1098,19 @@ mod tests {
     // cannot print between the prompt's heading and its line.
     #[tokio::test]
     async fn a_source_line_waits_for_the_prompts_block() {
-        use selfie::package::event::{BaseKind, DotfileSource, SourceBase};
+        use selfie::package::event::{BaseKind, DotfileSource, RepoPath, SourceBase};
 
         let display = DisplayManager::new(false);
         let processor = EventProcessor::new(display.clone());
         let skipped = PackageEvent::DotfileSkipped {
             operation_info: make_operation_info("bat"),
-            source: DotfileSource::File {
+            source: DotfileSource::File(RepoPath {
                 base: Some(SourceBase {
                     kind: BaseKind::PackageDirectory,
                     directory: "/r/p".into(),
                 }),
                 path: "bat/config".into(),
-            },
+            }),
             target: "/h/.config/bat/config".to_string(),
             reason: selfie::package::event::SkipReason::DryRun,
         };
