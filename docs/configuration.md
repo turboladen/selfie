@@ -250,6 +250,16 @@ A directory selfie cannot open is refused too, because a deploy state it cannot 
 not overwrite. That refusal names the **state file**, not the directory: selfie stats the path,
 finds a directory, and the read that follows fails with a permission error.
 
+So is a deploy state selfie cannot write, as soon as a run would write anything. `selfie apply`
+writes the state back just before its first write of any kind: a secret-bearing file, a backup, a
+deployed file or a record. `selfie dotfiles track` and `selfie track` do the same just before they
+copy the file. If that write fails, the run stops with nothing written, so it never deploys a file
+it then cannot record. A run that writes nothing never writes the state and is not stopped by it,
+except to tidy records of files that are gone, which only warns when it fails. A write can still
+fail later, on a full disk for example; apply then stops after the one file it could not record and
+names it. `apply --dry-run` writes nothing, so it checks the directory's permissions instead and
+warns when a real run would stop.
+
 If you name a directory that is not there, selfie creates it and says so. The two ways to reach that
 are a first run and a typo in the setting, and they look identical in the output otherwise: a
 mistyped `state_directory` reports every dotfile you have deployed as untracked, and
@@ -564,11 +574,14 @@ warning, that it is not there yet, since selfie creates it on first use, and tha
 typo; it does not stop the file validating. Anything else in its way, a path selfie could not check,
 a state file it cannot read (such as one inside a mode `000` directory), and a state file that is
 empty or does not parse are errors, because every command that records a deploy refuses to run over
-them.
+them. A directory selfie cannot write into or create is a warning: a run that writes anything stops
+over it, and one that writes nothing does not. The note that selfie creates a missing directory is
+given only when it can.
 
 When `dotfiles_directory` or `state_directory` is not set, the default the commands use is checked
 the same way. Nothing at an unset default is not reported, since that is the ordinary state of a
-setup with no standalone dotfiles, or of a first run.
+setup with no standalone dotfiles, or of a first run, unless the default state directory could not
+be created there, which is a warning as it is for a configured one.
 
 ## Troubleshooting
 

@@ -9,7 +9,9 @@ use std::{
 
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
-use super::filesystem::{AbsentReason, DirectoryState, FileSystem, FileSystemError, TargetRead};
+use super::filesystem::{
+    AbsentReason, DirectoryState, FileSystem, FileSystemError, TargetRead, parent_dir,
+};
 use super::target::TargetPath;
 
 /// Real file system implementation
@@ -70,17 +72,6 @@ fn irregular_kind(path: &Path) -> Option<&'static str> {
     // `IoError` for the writers. A read names a directory as one instead
     // (`TargetRead::Directory`), and every command refuses it by name.
     None
-}
-
-/// The directory `path` lives in, as one the filesystem will actually open.
-///
-/// `Path::parent` gives `Some("")` for a bare name like `config.toml`, and
-/// `File::open("")` is `ENOENT`. `create_dir_all` and `tempfile_in` both cope
-/// with the empty path; the directory fsync does not.
-fn parent_dir(path: &Path) -> &Path {
-    path.parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
 }
 
 /// [`FileSystemError::IrregularTarget`] for anything `irregular_kind` names.
@@ -493,6 +484,19 @@ impl FileSystem for RealFileSystem {
         open_no_follow(path.path())
             .err()
             .map(|e| FileSystemError::IoError(Arc::new(e)))
+    }
+
+    // `access` answers for the real uid, which differs from the effective one only
+    // in a setuid binary, and selfie is not installed as one. W and X are what
+    // `create_dir_all` and `tempfile_in` need of the directory they create in.
+    fn access_refusal(&self, directory: &Path) -> Option<FileSystemError> {
+        let wanted = nix::unistd::AccessFlags::W_OK | nix::unistd::AccessFlags::X_OK;
+        nix::unistd::access(directory, wanted)
+            .err()
+            .map(|errno| FileSystemError::CannotCreateIn {
+                path: directory.to_path_buf(),
+                source: Arc::new(io::Error::from(errno)),
+            })
     }
 
     // A non-following stat, like `symlink_refusal`'s: a link put at the target after
@@ -2481,6 +2485,95 @@ mod directory_state_tests {
             }
             DirectoryState::Unlistable(_) => "unlistable".to_string(),
             DirectoryState::Unknown(_) => "unknown".to_string(),
+        }
+    }
+
+    // The directory `file_creation_refusal` blamed, or `None` when it allowed one.
+    fn blamed(directory: &Path) -> Option<PathBuf> {
+        match RealFileSystem.file_creation_refusal(directory) {
+            None => None,
+            Some(FileSystemError::CannotCreateIn { path, .. }) => Some(path),
+            Some(other) => panic!("not a creation refusal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_writable_directory_allows_a_new_file() {
+        let dir = tempdir().unwrap();
+        assert_eq!(blamed(dir.path()), None);
+    }
+
+    // The first run: nothing is there, and the parent takes it.
+    #[test]
+    fn a_missing_directory_under_a_writable_one_allows_a_new_file() {
+        let dir = tempdir().unwrap();
+        assert_eq!(blamed(&dir.path().join("state").join("deeper")), None);
+    }
+
+    #[test]
+    fn a_directory_that_refuses_writes_is_blamed() {
+        let dir = tempdir().unwrap();
+        let locked = test_common::LockedDir::create(&dir.path().join("locked"), 0o500);
+        if !locked.refuses_new_files() {
+            eprintln!("SKIP: this user can write into a 0o500 directory");
+            return;
+        }
+        assert_eq!(blamed(locked.path()), Some(locked.path().to_path_buf()));
+    }
+
+    // A missing directory is judged by the nearest ancestor that exists, which is
+    // where creating it would start, and the refusal names that ancestor.
+    #[test]
+    fn a_missing_directory_is_judged_by_its_nearest_existing_ancestor() {
+        let dir = tempdir().unwrap();
+        let locked = test_common::LockedDir::create(&dir.path().join("locked"), 0o500);
+        if !locked.refuses_new_files() {
+            eprintln!("SKIP: this user can write into a 0o500 directory");
+            return;
+        }
+        assert_eq!(
+            blamed(&locked.path().join("state")),
+            Some(locked.path().to_path_buf())
+        );
+    }
+
+    // A dangling symlink where the directory would go makes `create_dir_all` fail
+    // with EEXIST, so it is refused, and so is a path below it.
+    #[test]
+    fn a_dangling_symlink_in_the_way_is_refused() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("gone"), &link).unwrap();
+
+        assert_eq!(blamed(&link), Some(link.clone()));
+        assert_eq!(blamed(&link.join("state")), Some(link));
+    }
+
+    // A relative path is created under the working directory, which the test
+    // process can write to.
+    #[test]
+    fn a_missing_relative_directory_is_judged_by_the_working_directory() {
+        assert_eq!(blamed(Path::new("no-such-dir-xyz/state")), None);
+    }
+
+    // A file where a directory would have to be created passes the permission
+    // check on its own mode, so it is refused for what it is.
+    #[test]
+    fn a_file_in_the_way_is_refused_whatever_its_mode() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The file is refused whether it sits at the path itself or above it.
+        for directory in [file.clone(), file.join("state")] {
+            let refusal = RealFileSystem.file_creation_refusal(&directory);
+
+            let Some(FileSystemError::CannotCreateIn { path, source }) = refusal else {
+                panic!("a file in the way must be refused: {refusal:?}");
+            };
+            assert_eq!(path, file);
+            assert_eq!(source.kind(), io::ErrorKind::NotADirectory);
         }
     }
 }
