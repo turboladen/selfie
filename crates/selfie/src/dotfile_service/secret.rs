@@ -103,6 +103,10 @@ pub(super) enum SecretOutcome {
     /// The caller's write-back before the write failed, so nothing was written.
     /// Carries why, already worded.
     StateNotWritable(String),
+    /// The run was canceled while the entry's commands ran. Neither refused nor
+    /// failed, and nothing was reported: the entry was not finished, and the run
+    /// ends canceled.
+    Canceled,
 }
 
 /// What [`SecretApply::apply`] calls before it writes a target or asks about a
@@ -391,26 +395,33 @@ where
             .as_ref()
             .err()
             .and_then(|e| e.as_refusal(target.entry.target()));
+        // Asked once, so the step's ending and the entry's outcome cannot disagree
+        // about a cancel that lands between them. A refusal is checked ahead of
+        // it: the resolve refuses before any binding runs, so a cancel cannot
+        // have caused one.
+        let cancelled = self.token.is_cancelled();
         let ending = match &resolved {
             Ok(_) => StepEnding::Succeeded,
-            Err(_) if self.token.is_cancelled() => StepEnding::Cancelled,
             Err(_) if refusal.is_some() => StepEnding::NotRun,
+            Err(_) if cancelled => StepEnding::Cancelled,
             Err(_) => StepEnding::Failed,
         };
         self.sender.send_step_ended(step, ending).await;
         match resolved {
             Ok(resolved) => Ok(resolved),
+            // A template that escapes or cannot be read is a condition of the
+            // entry's files, and is refused as classify refuses it. The resolve
+            // reads the template before any binding runs, so no command ran.
+            Err(_) if let Some(refusal) = refusal => {
+                Err(self.refuse(target.entry.target(), refusal).await)
+            }
+            // A command killed by the cancel failed only because the user asked
+            // to stop, so the entry is reported as neither refused nor failed.
+            Err(_) if cancelled => Err(SecretOutcome::Canceled),
             Err(e) => {
                 // Safe to surface: `ResolveError`'s Display names commands, var
                 // names, and — on failure only — truncated stderr. It never
                 // carries resolved content.
-                //
-                // A template that escapes or cannot be read is a condition of the
-                // entry's files, and is refused as classify refuses it. The resolve
-                // reads the template before any binding runs, so no command ran.
-                if let Some(refusal) = refusal {
-                    return Err(self.refuse(target.entry.target(), refusal).await);
-                }
                 let failure = Failure::new(
                     EntryOperation::Resolve,
                     format_args!("Failed to resolve '{}'", target.entry.target()),

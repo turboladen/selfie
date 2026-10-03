@@ -443,6 +443,20 @@ impl TestDirs {
         F: selfie::fs::FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
         CR: selfie::commands::CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
     {
+        self.service_with_fs_and_token(fs, runner, CancellationToken::new())
+    }
+
+    // As `service_with_fs`, with a caller-supplied cancellation token.
+    fn service_with_fs_and_token<F, CR>(
+        &self,
+        fs: F,
+        runner: CR,
+        token: CancellationToken,
+    ) -> DotfileServiceImpl<YamlPackageRepository<RealFileSystem>, F, CR, RunningAs>
+    where
+        F: selfie::fs::FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
+        CR: selfie::commands::CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    {
         let config = SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(&self.package_dir)
@@ -466,7 +480,7 @@ impl TestDirs {
             fs,
             runner,
             config,
-            CancellationToken::new(),
+            token,
             self.sudo_policy,
         )
     }
@@ -763,6 +777,7 @@ struct RecordsTargetReads {
     reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
     staged_read: Option<(PathBuf, selfie::fs::TargetRead)>,
     repository_gone_after: Option<(PathBuf, std::sync::Arc<std::sync::atomic::AtomicUsize>)>,
+    cancel_when_gone: Option<CancellationToken>,
     blind_to_directory_at: Option<PathBuf>,
     blind_to_open_refusals: bool,
     blind_to_symlinks: bool,
@@ -787,6 +802,7 @@ impl RecordsTargetReads {
             reads: std::sync::Arc::default(),
             staged_read: None,
             repository_gone_after: None,
+            cancel_when_gone: None,
             blind_to_directory_at: None,
             blind_to_open_refusals: false,
             blind_to_symlinks: false,
@@ -858,6 +874,13 @@ impl RecordsTargetReads {
         self
     }
 
+    // `token` is canceled by the read that finds the repository file gone: a
+    // Ctrl+C landing while the resolve reads the template.
+    fn cancelling_when_gone(mut self, token: &CancellationToken) -> Self {
+        self.cancel_when_gone = Some(token.clone());
+        self
+    }
+
     // `open_for_read_refusal` answers `None` everywhere: a target that became
     // unreadable after the secret path's pre-command check, while its command ran.
     fn blind_to_open_refusals(mut self) -> Self {
@@ -920,6 +943,9 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
             && gone == path
             && reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
         {
+            if let Some(token) = &self.cancel_when_gone {
+                token.cancel();
+            }
             return Err(selfie::fs::RepositoryRead::Absent(std::sync::Arc::new(
                 std::io::Error::from(std::io::ErrorKind::NotFound),
             )));
@@ -4399,6 +4425,45 @@ mod secret_bearing {
         );
     }
 
+    // A cancel that lands during a resolve that refused still leaves the entry
+    // refused. The refusal ran no command, so the cancel cannot have caused it.
+    #[tokio::test]
+    async fn a_template_refused_at_the_resolve_stays_refused_when_canceled() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\n",
+            &[("api_key", "op read x")],
+        );
+        let template = dirs.package_dir.join("creds/credentials.tpl");
+        let token = CancellationToken::new();
+        let fs = RecordsTargetReads::new()
+            .repository_gone_after_first_read(&template)
+            .cancelling_when_gone(&token);
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"KEY");
+
+        let events = collect_events(
+            dirs.service_with_fs_and_token(fs, runner.clone(), token.clone())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(token.is_cancelled(), "the cancel must land: {events:?}");
+        assert_eq!(runner.call_count(), 0, "no binding ran");
+        assert_eq!(
+            endings(&events),
+            vec![selfie::package::event::StepEnding::NotRun]
+        );
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Absent, Location::Template)],
+            "{events:?}"
+        );
+    }
+
     // A provider command that fails ends its step as failed, before the warning
     // that reports it, so no consumer can show it as done.
     #[tokio::test]
@@ -7184,6 +7249,17 @@ mod secret_bearing {
             assert!(
                 !rendered.contains("stop_on_error"),
                 "cancellation must not be attributed to stop_on_error, got: {rendered}"
+            );
+            // A canceled run is neither refused nor failed: the entry was not
+            // finished, so nothing reports it as either, or as a warning.
+            assert!(
+                !events.iter().any(|e| matches!(
+                    e,
+                    PackageEvent::DotfileFailed { .. }
+                        | PackageEvent::DotfileRefused { .. }
+                        | PackageEvent::Warning { .. }
+                )),
+                "the canceled entry must not be reported: {events:?}"
             );
         }
 
