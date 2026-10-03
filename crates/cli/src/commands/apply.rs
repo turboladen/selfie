@@ -4,7 +4,6 @@
 //! dotfiles defined in package YAML files to their target
 //! locations on the system.
 
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use selfie::package::event::DotfileSource;
@@ -69,9 +68,6 @@ fn reveal_body(incoming: &[u8], current: &[u8], target: &str) -> RevealBody {
 /// each side's shape — so it additionally offers to reveal the two values.
 struct InteractiveConflictResolver {
     display: DisplayManager,
-    // The targets whose conflict this has shown, so the conflict event the
-    // library sends after a declined prompt is not shown a second time.
-    shown: Arc<Mutex<HashSet<String>>>,
     // The run's token, canceled when the user presses Ctrl+C at a prompt.
     token: CancellationToken,
     // The conflicts skipped because there was no terminal to ask on.
@@ -258,9 +254,6 @@ impl InteractiveConflictResolver {
 impl ConflictResolver for InteractiveConflictResolver {
     fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution {
         let short_target = shorten_path(target);
-        if let Ok(mut shown) = self.shown.lock() {
-            shown.insert(target.to_string());
-        }
 
         // Blank line for breathing room before the conflict block
         self.display.println("");
@@ -342,14 +335,12 @@ pub(crate) async fn handle_apply(
     display: &DisplayManager,
     cancellation_token: CancellationToken,
 ) -> i32 {
-    let shown = Arc::new(Mutex::new(HashSet::new()));
     let unasked = Arc::new(Mutex::new(Unasked::default()));
     let options = ApplyOptions {
         dry_run: args.dry_run,
         auto_accept: args.yes,
         conflict_resolver: Some(Arc::new(InteractiveConflictResolver {
             display: display.clone(),
-            shown: Arc::clone(&shown),
             token: cancellation_token.clone(),
             unasked: Arc::clone(&unasked),
         })),
@@ -371,11 +362,8 @@ pub(crate) async fn handle_apply(
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
-            // A declined conflict comes back as an event; the prompt already
-            // showed it.
-            selfie::package::event::PackageEvent::DotfileConflict { target, .. } => shown
-                .lock()
-                .is_ok_and(|shown| shown.contains(target.as_str())),
+            // The prompt already showed a conflict the resolver declined.
+            selfie::package::event::PackageEvent::DotfileConflict { declined, .. } => *declined,
 
             // Suppress per-file progress lines — the summary is sufficient.
             //
@@ -452,7 +440,6 @@ mod tests {
         let display = DisplayManager::new(false);
         let resolver = InteractiveConflictResolver {
             display: display.clone(),
-            shown: Arc::default(),
             token: CancellationToken::new(),
             unasked: Arc::default(),
         };
@@ -489,7 +476,6 @@ mod tests {
         let display = DisplayManager::new(false);
         let resolver = InteractiveConflictResolver {
             display: display.clone(),
-            shown: Arc::default(),
             token: CancellationToken::new(),
             unasked: Arc::default(),
         };
@@ -523,7 +509,6 @@ mod tests {
         let token = CancellationToken::new();
         let resolver = InteractiveConflictResolver {
             display: display.clone(),
-            shown: Arc::default(),
             token: token.clone(),
             unasked: Arc::default(),
         };

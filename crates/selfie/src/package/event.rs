@@ -808,6 +808,7 @@ impl EventSender {
         source: &DotfileSource,
         target: impl fmt::Display,
         detail: ConflictReport,
+        declined: bool,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileConflict {
@@ -815,6 +816,7 @@ impl EventSender {
             source: source.clone(),
             target: target.to_string(),
             detail,
+            declined,
         })
         .await;
     }
@@ -2849,6 +2851,11 @@ pub enum PackageEvent {
         target: String,
         /// How the two sides differ, as far as selfie may show it.
         detail: ConflictReport,
+        /// Whether the [`ConflictResolver`](crate::dotfile_service::port::ConflictResolver)
+        /// answered [`Skip`](crate::dotfile_service::port::ConflictResolution::Skip).
+        /// By that trait's contract the resolver had presented the conflict, so
+        /// a consumer whose resolver it was need not show it again.
+        declined: bool,
     },
 
     /// A target selfie deployed that no entry deploys to any more, whose file is

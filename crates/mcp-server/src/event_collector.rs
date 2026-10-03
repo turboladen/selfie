@@ -653,6 +653,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             source,
             target,
             detail,
+            declined,
             ..
         } => {
             let (diff, hidden) = match detail {
@@ -674,6 +675,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                     "target": target,
                     "diff": diff,
                     "hidden": hidden,
+                    "declined": declined,
                 }),
                 source,
             ))
@@ -1276,6 +1278,7 @@ mod tests {
             source: package_file("bat/config"),
             target: "/home/u/.batrc".to_string(),
             detail,
+            declined: false,
         };
         let events = vec![
             conflict(ConflictReport::Diff("-old\n+new\n".to_string())),
