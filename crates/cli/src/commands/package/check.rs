@@ -212,6 +212,15 @@ fn display_check_result_card(
                 error
             )
         }
+        CheckResult::TimedOut(timed_out) => {
+            format!(
+                "{}{}\n{}{}",
+                format_key_fn("Status"),
+                status_style::format_status_error(use_colors),
+                format_key_fn("Details"),
+                timed_out
+            )
+        }
     };
 
     display.println(status_line);

@@ -80,6 +80,7 @@ pub(super) fn handle_missing_environment<T>(
             .cloned()
             .collect(),
         package_file: package_blob.package.path().clone(),
+        required_by: None,
     };
     Err(Box::new(OperationResult::Failure(err.into())))
 }

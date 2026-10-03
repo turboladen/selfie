@@ -202,10 +202,11 @@ pub(crate) fn create_environment_table(
     }
 
     // Add environment detail rows
-    env_table.add_row(vec![
-        format_env_key("Install"),
-        format_env_value(&env_status.install_command),
-    ]);
+    // A blank install still gets its row, so the user sees why install refuses.
+    let install = env_status.install_command.as_deref().unwrap_or(
+        "none (blank: `package install` refuses it unless the check says it is installed)",
+    );
+    env_table.add_row(vec![format_env_key("Install"), format_env_value(install)]);
 
     if let Some(check) = &env_status.check_command {
         env_table.add_row(vec![format_env_key("Check"), format_env_value(check)]);

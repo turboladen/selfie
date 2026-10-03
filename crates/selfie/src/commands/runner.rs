@@ -386,6 +386,59 @@ impl std::fmt::Display for OutputStream {
     }
 }
 
+/// A command selfie stopped because it ran past `command_timeout`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimedOut {
+    command: String,
+    timeout: Duration,
+}
+
+impl TimedOut {
+    /// Records that `command` was stopped after `timeout`.
+    #[must_use]
+    pub fn new(command: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            command: command.into(),
+            timeout,
+        }
+    }
+
+    /// The command that was stopped.
+    #[must_use]
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// How long it ran before it was stopped.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&timed_out_sentence(&self.command, self.timeout))
+    }
+}
+
+// The one place this sentence is written: `TimedOut` and `CommandError::Timeout`
+// both render it, so every path a timeout reaches the user by says the same.
+// Every runner selfie builds takes its timeout from `command_timeout`.
+fn timed_out_sentence(command: &str, timeout: Duration) -> String {
+    // `command_timeout` is whole seconds, so only a test builds anything else.
+    let (amount, unit) = if timeout.subsec_nanos() == 0 {
+        (timeout.as_secs(), "second")
+    } else {
+        (
+            u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+            "millisecond",
+        )
+    };
+    let plural = if amount == 1 { "" } else { "s" };
+    format!("`{command}` timed out after {amount} {unit}{plural}, the limit `command_timeout` sets")
+}
+
 /// Errors that can occur during command execution
 ///
 /// Represents all possible failure modes when executing system commands,
@@ -393,7 +446,7 @@ impl std::fmt::Display for OutputStream {
 #[derive(Error, Debug, Clone)]
 pub enum CommandError {
     /// Command execution exceeded the specified timeout
-    #[error("Command timed out after {timeout:?}: {command}")]
+    #[error("{}", timed_out_sentence(command, *timeout))]
     Timeout {
         command: String,
         timeout: Duration,

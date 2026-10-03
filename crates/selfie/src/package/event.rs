@@ -187,6 +187,8 @@ use std::{
 };
 
 use futures::Stream;
+
+use crate::commands::runner::TimedOut;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -1223,10 +1225,8 @@ pub enum CommandFailure {
         exit_code: Option<i32>,
         stderr: crate::commands::BoundedText,
     },
-    InvalidCommand {
-        command: String,
-        reason: String,
-    },
+    /// A command ran past its timeout and was stopped.
+    TimedOut(TimedOut),
 }
 
 /// Dependency resolution failure details
@@ -1329,9 +1329,7 @@ impl std::fmt::Display for CommandFailure {
                     write!(f, "Command `{command}` failed")
                 }
             }
-            CommandFailure::InvalidCommand { command, reason } => {
-                write!(f, "Invalid command `{command}`: {reason}")
-            }
+            CommandFailure::TimedOut(timed_out) => write!(f, "{timed_out}"),
         }
     }
 }
@@ -1715,12 +1713,11 @@ impl From<crate::package::port::PackageError> for OperationFailure {
 impl From<crate::commands::runner::CommandError> for OperationFailure {
     fn from(err: crate::commands::runner::CommandError) -> Self {
         match err {
-            crate::commands::runner::CommandError::Timeout { command, .. } => {
-                OperationFailure::CommandError(CommandFailure::InvalidCommand {
-                    command,
-                    reason: "Command timed out".to_string(),
-                })
-            }
+            crate::commands::runner::CommandError::Timeout {
+                command, timeout, ..
+            } => OperationFailure::CommandError(CommandFailure::TimedOut(TimedOut::new(
+                command, timeout,
+            ))),
             // Listed rather than matched with `_`, so adding a `CommandError`
             // variant fails to build here. This arm renders the error with
             // `Display`, and a variant whose `Display` carried command output
@@ -2348,12 +2345,14 @@ impl OperationFailure {
         environment: String,
         available_environments: Vec<String>,
         package_file: std::path::PathBuf,
+        required_by: Option<String>,
     ) -> Self {
         OperationFailure::Package(crate::package::port::PackageError::EnvironmentNotFound {
             package_name,
             environment,
             available_environments,
             package_file,
+            required_by,
         })
     }
 
@@ -2380,12 +2379,14 @@ impl OperationFailure {
         environment: String,
         package_file: std::path::PathBuf,
         other_envs_with_install: Vec<String>,
+        required_by: Option<String>,
     ) -> Self {
         OperationFailure::Package(crate::package::port::PackageError::NoInstallCommand {
             package_name,
             environment,
             package_file,
             other_envs_with_install,
+            required_by,
         })
     }
 
@@ -2919,7 +2920,9 @@ pub struct ScopedDotfile {
 pub struct EnvironmentStatusData {
     pub environment_name: String,
     pub is_current: bool,
-    pub install_command: String,
+    /// The install command, or `None` when it is blank, as `check_command` is `None`
+    /// when there is no check.
+    pub install_command: Option<String>,
     pub check_command: Option<String>,
     pub dependencies: Vec<String>,
     pub dependency_statuses: Vec<DependencyStatus>,
@@ -3136,6 +3139,8 @@ pub enum CheckResult {
     NoCheckCommand,
     #[strum(to_string = "with errors")]
     Error(String),
+    #[strum(to_string = "but timed out")]
+    TimedOut(TimedOut),
 }
 
 /// What a check that ran found.
@@ -3302,6 +3307,38 @@ pub struct AddEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The one sentence for a timeout: it says the command timed out, how long it
+    // had in whole units, and which setting to raise.
+    #[test]
+    fn a_timeout_names_its_duration_and_the_setting() {
+        let render = |timeout| {
+            TimedOut::new("sleep 5", std::time::Duration::from_millis(timeout)).to_string()
+        };
+
+        assert_eq!(
+            render(1000),
+            "`sleep 5` timed out after 1 second, the limit `command_timeout` sets"
+        );
+        assert!(
+            render(2000).contains("after 2 seconds,"),
+            "{}",
+            render(2000)
+        );
+        assert!(
+            render(100).contains("after 100 milliseconds,"),
+            "{}",
+            render(100)
+        );
+        assert!(
+            !OperationFailure::CommandError(CommandFailure::TimedOut(TimedOut::new(
+                "sleep 5",
+                std::time::Duration::from_secs(1),
+            )))
+            .to_string()
+            .contains("Invalid command")
+        );
+    }
 
     #[test]
     fn test_step_count_usize_usage() {

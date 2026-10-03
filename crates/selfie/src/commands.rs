@@ -36,7 +36,7 @@ mod tests {
         // Test error message content
         let error_message = error.to_string();
         assert!(error_message.contains("sleep 10"));
-        assert!(error_message.contains("5s"));
+        assert!(error_message.contains("after 5 seconds"));
 
         // Test that context fields are accessible
         match error {

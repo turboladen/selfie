@@ -1254,6 +1254,31 @@ pub struct EnvironmentConfig {
     pub(crate) unknown_keys: Vec<UnknownKey>,
 }
 
+/// Whether `command` runs nothing: it holds no words once whitespace and
+/// comments are set aside, such as `""`, `"  "` or `"# TODO"`.
+///
+/// install, check and audit treat a blank command as no command at all.
+#[must_use]
+pub fn is_blank_command(command: &str) -> bool {
+    // Every shell selfie runs commands through treats `#` as a comment, so a
+    // comment-only command is blank in any of them. One `shlex` cannot split (an
+    // open quote) has words a non-POSIX shell may still run, so it is not blank,
+    // and validation warns about it separately. Only the first word is read.
+    let mut words = shlex::Shlex::new(command);
+    words.next().is_none() && !words.had_error
+}
+
+/// The refusal for a blank install command a caller gave, as opposed to one a
+/// spec already holds.
+pub const BLANK_INSTALL_GIVEN: &str = "The install command given is blank: it is empty, \
+     whitespace or only a comment, so it would run nothing. Give a command that installs the \
+     package";
+
+/// Returns `command`, or `None` when it is blank.
+fn runnable(command: &str) -> Option<&str> {
+    (!is_blank_command(command)).then_some(command)
+}
+
 impl<'de> Deserialize<'de> for EnvironmentConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -1357,22 +1382,28 @@ impl EnvironmentConfig {
         &self.unknown_keys
     }
 
-    /// Get the install command for this environment
+    /// The install command for this environment, or `None` when it is blank.
+    ///
+    /// A blank command is one with no words once whitespace and comments are set
+    /// aside, such as `""` or `# TODO`: it runs nothing, so it counts as no
+    /// command.
     #[must_use]
-    pub fn install(&self) -> &str {
-        &self.install
+    pub fn install(&self) -> Option<&str> {
+        runnable(&self.install)
     }
 
-    /// Get the optional check command for this environment
+    /// The check command for this environment, or `None` when there is none or
+    /// it is blank, as [`install`](Self::install) defines blank.
     #[must_use]
     pub fn check(&self) -> Option<&str> {
-        self.check.as_deref()
+        self.check.as_deref().and_then(runnable)
     }
 
-    /// Get the optional audit command for this environment
+    /// The audit command for this environment, or `None` when there is none or
+    /// it is blank, as [`install`](Self::install) defines blank.
     #[must_use]
     pub fn audit(&self) -> Option<&str> {
-        self.audit.as_deref()
+        self.audit.as_deref().and_then(runnable)
     }
 
     /// Get the list of dependencies for this environment
@@ -1733,6 +1764,34 @@ mod package_tests {
         assert_eq!(round_tripped, entry);
     }
 
+    // A command with no words runs nothing, so the accessors call it absent. One
+    // with words keeps them, a trailing comment and an open quote included.
+    #[test]
+    fn a_blank_command_is_no_command() {
+        for (command, runs) in [
+            ("", false),
+            ("   ", false),
+            ("\t\n", false),
+            ("# TODO: x", false),
+            ("true", true),
+            ("true # note", true),
+            ("echo 'open", true),
+            ("'open", true),
+        ] {
+            let env = EnvironmentConfig::new(
+                command.to_string(),
+                Some(command.to_string()),
+                Some(command.to_string()),
+                Vec::new(),
+                Vec::new(),
+            );
+            let expected = runs.then_some(command);
+            assert_eq!(env.install(), expected, "install {command:?}");
+            assert_eq!(env.check(), expected, "check {command:?}");
+            assert_eq!(env.audit(), expected, "audit {command:?}");
+        }
+    }
+
     // An entry built in memory has no file to point at, and must say so rather
     // than claiming line 0 is a real position.
     #[test]
@@ -1750,7 +1809,7 @@ mod package_tests {
             crate::yaml::parse("install: \"echo i\"\naudt: \"echo a\"\n").unwrap();
 
         assert_eq!(key_names(env.unknown_keys()), ["audt"]);
-        assert_eq!(env.install(), "echo i");
+        assert_eq!(env.install(), Some("echo i"));
     }
 
     // An anchor is legal here, as at the top level. Only a name colliding with a
@@ -2642,6 +2701,7 @@ environments:
             environment: "freebsd".to_string(),
             available_environments: available_environments.clone(),
             package_file: PathBuf::from("/packages/test-package.yml"),
+            required_by: None,
         };
 
         // Test error message content
@@ -2656,6 +2716,7 @@ environments:
                 environment,
                 available_environments: envs,
                 package_file,
+                ..
             } => {
                 assert_eq!(package_name, "test-package");
                 assert_eq!(environment, "freebsd");

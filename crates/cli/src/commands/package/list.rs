@@ -85,7 +85,9 @@ fn format_list_item(
         Some(event::CheckResult::Success { .. }) => ListItemResult::Success,
         Some(event::CheckResult::Failed { .. })
         | Some(event::CheckResult::CommandNotFound)
-        | Some(event::CheckResult::Error(_)) => ListItemResult::Failure,
+        | Some(event::CheckResult::Error(_) | event::CheckResult::TimedOut(_)) => {
+            ListItemResult::Failure
+        }
         Some(event::CheckResult::NoCheckCommand) | None => ListItemResult::Warning,
     };
 

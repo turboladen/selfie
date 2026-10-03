@@ -322,6 +322,70 @@ fn audit_exits_one_for_a_package_not_declared_here() {
     assert_eq!(code, Some(FAILED), "{output}");
 }
 
+// ── package install ─────────────────────────────────────────────────────────
+
+// A blank install runs nothing, so it is refused as no install command rather
+// than reported as installed.
+#[test]
+fn install_exits_one_for_a_blank_install_command() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "tool",
+        &format!("name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: \"\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["package", "install", "tool"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+    assert!(output.contains("No install command defined"), "{output}");
+    assert!(!output.contains("completed successfully"), "{output}");
+}
+
+// A fresh spec from `spec create` holds `# TODO` placeholders, which run nothing,
+// so installing it is refused rather than reported as already installed.
+#[test]
+fn install_exits_one_for_a_fresh_spec_create_template() {
+    let temp = sandbox();
+    let (code, output) = run(&temp, &["spec", "create", "tool"]);
+    assert_eq!(code, Some(CLEAN), "{output}");
+
+    let (code, output) = run(&temp, &["package", "install", "tool"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+    assert!(
+        output.contains("No install command defined for 'tool'"),
+        "{output}"
+    );
+    assert!(!output.contains("already installed"), "{output}");
+}
+
+// The refusal names the dependency it is about and the package that requires
+// it, not the package named on the command line.
+#[test]
+fn install_names_the_dependency_that_cannot_be_installed() {
+    let temp = sandbox();
+    write_spec(
+        &temp,
+        "app",
+        &format!(
+            "name: app\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    dependencies: [dep]\n"
+        ),
+    );
+    write_spec(
+        &temp,
+        "dep",
+        &format!("name: dep\nenvironments:\n  {SELFIE_ENV}:\n    install: \"# TODO\"\n"),
+    );
+
+    let (code, output) = run(&temp, &["package", "install", "app"]);
+    assert_eq!(code, Some(FAILED), "{output}");
+    assert!(
+        output.contains("No install command defined for 'dep'"),
+        "{output}"
+    );
+    assert!(output.contains("'app' requires it"), "{output}");
+    assert!(!output.contains("defined for 'app'"), "{output}");
+}
+
 // ── package check ───────────────────────────────────────────────────────────
 
 fn write_checked_package(temp: &tempfile::TempDir, check: &str) {

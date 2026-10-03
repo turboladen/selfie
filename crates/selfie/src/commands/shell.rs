@@ -1294,7 +1294,7 @@ mod tests {
         assert!(
             timeout_error
                 .to_string()
-                .contains("Command timed out after 100ms")
+                .contains("timed out after 100 milliseconds, the limit `command_timeout` sets")
         );
         assert!(timeout_error.to_string().contains("test-command"));
 

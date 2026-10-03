@@ -845,12 +845,16 @@ mod tests {
                         );
                         // 'Z' appears only in the oversized command string, so
                         // the count measures surviving input and nothing else.
-                        // The rendered prefix eats into the head's share of the
-                        // budget, which is why this is not simply the bound.
-                        const PREFIX: &str = "Command timed out after 5s: ";
+                        // The sentence around the command eats into the budget,
+                        // which is why this is not simply the bound.
+                        let around = crate::commands::runner::TimedOut::new(
+                            "",
+                            std::time::Duration::from_secs(5),
+                        )
+                        .to_string();
                         assert_eq!(
                             message.chars().filter(|c| *c == 'Z').count(),
-                            MAX_BOUNDED_BYTES - PREFIX.len(),
+                            MAX_BOUNDED_BYTES - around.len(),
                             "the head and tail together should come to the bound"
                         );
                     }

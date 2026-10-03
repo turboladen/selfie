@@ -8,8 +8,8 @@ use crate::{
     package::{
         EnvironmentConfig,
         event::{
-            CheckResult, CheckResultData, EventSender, OperationFailure, OperationResult,
-            OperationSuccess,
+            CheckResult, CheckResultData, CommandFailure, EventSender, OperationFailure,
+            OperationResult, OperationSuccess,
         },
         port::PackageRepository,
         service::{InstallOptions, ProgressTracker},
@@ -18,7 +18,13 @@ use crate::{
 
 use tokio_util::sync::CancellationToken;
 
-use super::{check, deps, steps};
+use std::collections::HashMap;
+
+use super::{
+    check,
+    deps::{self, Installability},
+    steps,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_install<PR, CR>(
@@ -51,6 +57,20 @@ where
     let total_steps = 1 + (7 * num_packages);
     progress.set_total_steps(total_steps);
 
+    let mut confirmed = match confirm_installable(
+        &dep_graph,
+        config,
+        command_runner,
+        sender,
+        progress,
+        token,
+    )
+    .await
+    {
+        Ok(confirmed) => confirmed,
+        Err(failure) => return OperationResult::Failure(*failure),
+    };
+
     // Install each package in dependency order.
     // The last package is always the root (the one the user requested).
     let mut last_result = None;
@@ -68,6 +88,7 @@ where
             sender,
             progress,
             token,
+            confirmed.remove(pkg_name),
         )
         .await;
 
@@ -104,7 +125,82 @@ where
     })
 }
 
+/// Refuse a package in `graph` that cannot be installed here, before any install
+/// command runs, and run the check of each package that can be installed only by
+/// already being installed.
+///
+/// Returns those checks' results, by package, so each package's turn reports it
+/// installed without running its check again.
+///
+/// # Errors
+///
+/// The first refusal in install order, or the refusal of a package whose check
+/// does not say it is installed, naming that package.
+async fn confirm_installable<CR: CommandRunner>(
+    graph: &deps::DependencyGraph,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+    token: &CancellationToken,
+) -> Result<HashMap<String, CheckResultData>, Box<OperationFailure>> {
+    let verdict = |name: &String| graph.installability.get(name);
+    if let Some(Installability::Refused(failure)) = graph
+        .install_order
+        .iter()
+        .filter_map(verdict)
+        .find(|verdict| matches!(verdict, Installability::Refused(_)))
+    {
+        return Err(failure.clone());
+    }
+
+    // The check is the step the package's own turn would take first, taken
+    // earlier rather than added, so the step count is unchanged.
+    let mut confirmed = HashMap::new();
+    for name in &graph.install_order {
+        let Some(Installability::CheckFirst(check, otherwise)) = verdict(name) else {
+            continue;
+        };
+        let result = check::execute_check_command(
+            name,
+            config.environment(),
+            Some(check),
+            config.package_directory(),
+            command_runner,
+            sender,
+            progress,
+            &format!("Checking whether {name} is already installed"),
+            token,
+        )
+        .await
+        .map_err(|err| Box::new(OperationFailure::from(err)))?;
+        // A check that ran and said "not installed" leaves no way to install the
+        // package. One that could not answer says why, so the user is not sent to
+        // write an install command when the fix is elsewhere.
+        match &result.result {
+            CheckResult::Success { .. } => {}
+            CheckResult::TimedOut(timed_out) => {
+                return Err(Box::new(OperationFailure::CommandError(
+                    CommandFailure::TimedOut(timed_out.clone()),
+                )));
+            }
+            CheckResult::Error(error) => {
+                return Err(Box::new(OperationFailure::Generic(error.clone())));
+            }
+            CheckResult::Failed { .. }
+            | CheckResult::NoCheckCommand
+            | CheckResult::CommandNotFound => return Err(otherwise.clone()),
+        }
+        confirmed.insert(name.clone(), result);
+    }
+    Ok(confirmed)
+}
+
 /// Install a single package (without dependency resolution).
+///
+/// `pre_checked` is the result of the package's check when it already ran, in
+/// which case it is not run again.
+#[allow(clippy::too_many_arguments)]
 async fn install_single_package<PR, CR>(
     package_name: &str,
     repo: &PR,
@@ -113,6 +209,7 @@ async fn install_single_package<PR, CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
+    pre_checked: Option<CheckResultData>,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -144,21 +241,24 @@ where
     // because nothing can start in the package directory or the operation was
     // cancelled, ends the install here, rather than as a warning followed by
     // the same failure from the install.
-    let pre_install_check = match check::execute_check_command(
-        package_name,
-        config.environment(),
-        env_config.check.as_deref(),
-        config.package_directory(),
-        command_runner,
-        sender,
-        progress,
-        &format!("Checking whether {package_name} is already installed"),
-        token,
-    )
-    .await
-    {
-        Ok(check) => check,
-        Err(err) => return OperationResult::Failure(err.into()),
+    let pre_install_check = match pre_checked {
+        Some(check) => check,
+        None => match check::execute_check_command(
+            package_name,
+            config.environment(),
+            env_config.check(),
+            config.package_directory(),
+            command_runner,
+            sender,
+            progress,
+            &format!("Checking whether {package_name} is already installed"),
+            token,
+        )
+        .await
+        {
+            Ok(check) => check,
+            Err(err) => return OperationResult::Failure(err.into()),
+        },
     };
 
     // If package is already installed, exit early
@@ -183,36 +283,20 @@ where
     let Ok(install_cmd) = steps::get_command(
         env_config,
         "install",
-        |ec| Some(ec.install()),
+        EnvironmentConfig::install,
         sender,
         progress,
     )
     .await
     else {
-        let other_envs_with_install = package_blob
-            .package
-            .environments()
-            .keys()
-            .filter_map(|env_name| {
-                if package_blob
-                    .package
-                    .environments()
-                    .get(env_name)?
-                    .install()
-                    .is_empty()
-                {
-                    None
-                } else {
-                    Some(env_name.clone())
-                }
-            })
-            .collect();
-
+        // Resolution refuses a blank install before any package installs, so this
+        // is reached only if the spec changed in between.
         return OperationResult::Failure(OperationFailure::no_install_command(
             package_name.to_string(),
             config.environment().to_string(),
             package_blob.package.path().clone(),
-            other_envs_with_install,
+            Vec::new(),
+            None,
         ));
     };
 
@@ -344,7 +428,7 @@ async fn log_proceeding_with_installation(
                 .send_debug("No check command defined, proceeding with installation")
                 .await;
         }
-        CheckResult::Error(_) | CheckResult::CommandNotFound => {
+        CheckResult::Error(_) | CheckResult::TimedOut(_) | CheckResult::CommandNotFound => {
             sender
                 .send_warning("Check command failed, but proceeding with installation anyway")
                 .await;
@@ -492,7 +576,7 @@ where
         let post_install_check = check::execute_check_command(
             context.package_name,
             context.config.environment(),
-            context.env_config.check.as_deref(),
+            context.env_config.check(),
             context.config.package_directory(),
             command_runner,
             sender,
@@ -519,7 +603,7 @@ where
                     ))
                     .await;
             }
-            CheckResult::Error(_) | CheckResult::CommandNotFound => {
+            CheckResult::Error(_) | CheckResult::TimedOut(_) | CheckResult::CommandNotFound => {
                 sender
                     .send_warning(
                         "Post-installation check failed, but installation command completed",
@@ -689,6 +773,12 @@ where
     let dep_graph = deps::resolve_dependencies(recommend_name, repo, config.environment(), sender)
         .await
         .map_err(|f| RecommendError::Failed(f.to_string()))?;
+    // A recommend that cannot be installed is refused before its dependencies
+    // install, exactly as the package that recommends it would be.
+    let mut confirmed =
+        confirm_installable(&dep_graph, config, command_runner, sender, progress, token)
+            .await
+            .map_err(|f| RecommendError::Failed(f.to_string()))?;
 
     // Install each package in dependency order
     for pkg_name in &dep_graph.install_order {
@@ -704,6 +794,7 @@ where
             sender,
             progress,
             token,
+            confirmed.remove(pkg_name),
         )
         .await;
 
