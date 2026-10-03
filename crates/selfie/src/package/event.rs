@@ -92,14 +92,22 @@ pub struct SourceBase {
 /// Where a dotfile's content comes from, as events report it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DotfileSource {
-    /// A repository file, or a template rendered from one.
+    /// A repository file, copied as it is.
     File {
         /// The directory `path` is relative to, or `None` when the file lies under
         /// neither configured directory, and `path` is then the full path.
         base: Option<SourceBase>,
         /// The file, relative to `base`.
         path: std::path::PathBuf,
-        /// A template's var names; empty for a plain file.
+    },
+    /// A repository file rendered by substituting named values.
+    Template {
+        /// The directory `path` is relative to, or `None` when the template lies
+        /// under neither configured directory, and `path` is then the full path.
+        base: Option<SourceBase>,
+        /// The template, relative to `base`.
+        path: std::path::PathBuf,
+        /// The names of the values it substitutes.
         vars: Vec<String>,
     },
     /// A command whose output is the content.
@@ -109,20 +117,59 @@ pub enum DotfileSource {
     Recorded(String),
 }
 
+/// What kind of source a [`DotfileSource`] is, without its details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// [`DotfileSource::File`].
+    File,
+    /// [`DotfileSource::Template`].
+    Template,
+    /// [`DotfileSource::Command`].
+    Command,
+    /// [`DotfileSource::Recorded`].
+    Recorded,
+}
+
 impl DotfileSource {
-    /// The file's full path, when the source is a file.
+    /// The file's full path, when the source is a file or a template.
     #[must_use]
     pub fn absolute(&self) -> Option<std::path::PathBuf> {
         match self {
             Self::File {
                 base: Some(base),
                 path,
+            }
+            | Self::Template {
+                base: Some(base),
+                path,
                 ..
             } => Some(base.directory.join(path)),
-            Self::File {
+            Self::File { base: None, path }
+            | Self::Template {
                 base: None, path, ..
             } => Some(path.clone()),
             Self::Command(_) | Self::Recorded(_) => None,
+        }
+    }
+
+    /// The directory a file or template is read from, when it lies under a
+    /// configured one.
+    #[must_use]
+    pub fn base(&self) -> Option<&SourceBase> {
+        match self {
+            Self::File { base, .. } | Self::Template { base, .. } => base.as_ref(),
+            Self::Command(_) | Self::Recorded(_) => None,
+        }
+    }
+
+    /// What kind of source this is.
+    #[must_use]
+    pub fn kind(&self) -> SourceKind {
+        match self {
+            Self::File { .. } => SourceKind::File,
+            Self::Template { .. } => SourceKind::Template,
+            Self::Command(_) => SourceKind::Command,
+            Self::Recorded(_) => SourceKind::Recorded,
         }
     }
 }
@@ -148,9 +195,16 @@ impl DotfileSource {
                     DotfileSource::File {
                         base: Some(_),
                         path,
+                    }
+                    | DotfileSource::Template {
+                        base: Some(_),
+                        path,
                         ..
                     } => Some(path.clone()),
-                    _ => source.absolute(),
+                    DotfileSource::File { base: None, .. }
+                    | DotfileSource::Template { base: None, .. }
+                    | DotfileSource::Command(_)
+                    | DotfileSource::Recorded(_) => source.absolute(),
                 })
             }
         }
@@ -163,7 +217,11 @@ impl DotfileSource {
         path_of: impl Fn(&Self) -> Option<std::path::PathBuf>,
     ) -> fmt::Result {
         match self {
-            Self::File { vars, .. } => {
+            Self::File { .. } => {
+                let path = path_of(self).unwrap_or_default();
+                crate::package::write_file_source(f, &path.display(), &[])
+            }
+            Self::Template { vars, .. } => {
                 let path = path_of(self).unwrap_or_default();
                 let vars: Vec<&str> = vars.iter().map(String::as_str).collect();
                 crate::package::write_file_source(f, &path.display(), &vars)
@@ -747,14 +805,14 @@ impl EventSender {
         &self,
         source: &DotfileSource,
         target: impl fmt::Display,
-        diff: impl fmt::Display,
+        detail: ConflictReport,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileConflict {
             operation_info,
             source: source.clone(),
             target: target.to_string(),
-            diff: diff.to_string(),
+            detail,
         })
         .await;
     }
@@ -2788,7 +2846,8 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         source: DotfileSource,
         target: String,
-        diff: String,
+        /// How the two sides differ, as far as selfie may show it.
+        detail: ConflictReport,
     },
 
     /// A target selfie deployed that no entry deploys to any more, whose file is
@@ -3097,6 +3156,56 @@ impl std::fmt::Display for DriftType {
             DriftType::TargetChanged => write!(f, "target changed"),
             DriftType::BothChanged => write!(f, "both changed"),
             DriftType::NotTracked => write!(f, "not tracked"),
+        }
+    }
+}
+
+/// How a dotfile's target differs from what selfie would write.
+///
+/// [`Display`](fmt::Display) renders it for a person: the diff, or the
+/// summary of a secret-bearing conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictReport {
+    /// A unified diff from the target to the repository file. Empty when the
+    /// two sides decode to the same text, which two different binary files can.
+    Diff(String),
+    /// A secret-bearing entry's conflict, which shows no content: only how many
+    /// lines each side holds.
+    Hidden {
+        /// Lines in the content a deploy would write.
+        resolved_lines: usize,
+        /// Lines in the target as it is.
+        current_lines: usize,
+    },
+}
+
+impl fmt::Display for ConflictReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Diff(diff) => f.write_str(diff),
+            // Says that nothing is kept, because every other overwrite selfie
+            // performs does keep a copy. A user who has seen that line elsewhere
+            // would otherwise assume this overwrite is recoverable too, and
+            // accepting is the only way past a secret conflict. It does not name
+            // the entry's source: every consumer is handed that separately.
+            Self::Hidden {
+                resolved_lines,
+                current_lines,
+            } => {
+                // One closure for both sides, so they cannot pluralize differently.
+                // It is the only information a user gets before deciding whether to
+                // overwrite a credential nothing recorded, so it should not read as
+                // though selfie cannot count.
+                let count = |n: usize| format!("{n} {}", crate::pluralize(n, "line", "lines"));
+                write!(
+                    f,
+                    "  target exists and differs from resolved output\n\n  \
+                     resolved output : {}\n  current target  : {}\n  (content hidden)\n  \
+                     no copy of the current target is kept",
+                    count(*resolved_lines),
+                    count(*current_lines),
+                )
+            }
         }
     }
 }

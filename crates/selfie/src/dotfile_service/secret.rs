@@ -22,7 +22,7 @@ use crate::{
     },
     package::{
         DotfileEntry,
-        event::{EventSender, LinkAtTarget, SkipReason, StepEnding},
+        event::{ConflictReport, EventSender, LinkAtTarget, SkipReason, StepEnding},
     },
 };
 
@@ -61,41 +61,22 @@ pub(super) fn programs_of(entry: &DotfileEntry) -> Vec<String> {
     }
 }
 
-/// A conflict summary describing shape without revealing content.
+/// A conflict report describing shape without revealing content.
 ///
 /// Line counts distinguish a rotated value (1 line vs 1 line) from a hand-edited
 /// file (1 line vs 12 lines), which is the distinction a user needs in order to
 /// choose between overwrite and skip. They are the most this can say: anything
 /// derived from the bytes themselves is content.
-fn secret_conflict_summary(incoming: &[u8], current: &[u8]) -> String {
+fn secret_conflict_report(incoming: &[u8], current: &[u8]) -> ConflictReport {
     // Each piece `split_inclusive` yields is one line with its newline, so a
     // trailing newline ends a line rather than starting one, as `wc -l` counts. An
     // unterminated last line is a piece too, which `wc -l` would drop: "0 lines" for
     // content that is not empty would read as an empty file.
-    //
-    // Both sides count through this one closure, so they cannot pluralize
-    // differently. It is the only information a user gets before deciding whether
-    // to overwrite a credential nothing recorded, so it should not read as though
-    // selfie cannot count.
-    let count = |b: &[u8]| {
-        let n = b.split_inclusive(|&c| c == b'\n').count();
-        format!("{n} {}", crate::pluralize(n, "line", "lines"))
-    };
-
-    // Says that nothing is kept, because every other overwrite selfie performs
-    // does keep a copy. A user who has seen that line elsewhere would otherwise
-    // assume this overwrite is recoverable too, and accepting is the only way
-    // past a secret conflict.
-    //
-    // It does not name the entry's source: every consumer is handed that
-    // separately, and renders it the way its own surface shows sources.
-    format!(
-        "  target exists and differs from resolved output\n\n  \
-         resolved output : {}\n  current target  : {}\n  (content hidden)\n  \
-         no copy of the current target is kept",
-        count(incoming),
-        count(current),
-    )
+    let count = |b: &[u8]| b.split_inclusive(|&c| c == b'\n').count();
+    ConflictReport::Hidden {
+        resolved_lines: count(incoming),
+        current_lines: count(current),
+    }
 }
 
 /// Outcome of handling one secret-bearing entry.
@@ -473,16 +454,16 @@ where
         let Some(current) = current else {
             return Ok(());
         };
-        let summary = secret_conflict_summary(&resolved.bytes, current);
+        let report = secret_conflict_report(&resolved.bytes, current);
 
-        if self.ask_resolver(target, resolved, current, &summary).await {
+        if self.ask_resolver(target, resolved, current, &report).await {
             return Ok(());
         }
 
         // Only the summary reaches the event. The values went to the resolver
         // and nowhere else.
         self.sender
-            .send_dotfile_conflict(&target.source, target.path.display(), &summary)
+            .send_dotfile_conflict(&target.source, target.path.display(), report)
             .await;
         Err(SecretOutcome::Conflicted)
     }
@@ -504,18 +485,19 @@ where
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
         current: &[u8],
-        summary: &str,
+        report: &ConflictReport,
     ) -> bool {
         let Some(resolver) = &self.options.conflict_resolver else {
             return false;
         };
+        // Rendered only once a resolver will read it.
+        let summary = report.to_string();
 
         let resolver = Arc::clone(resolver);
         let path = target.path.display().to_string();
         let source = target.source.clone();
         let incoming = resolved.bytes.clone();
         let current = current.to_vec();
-        let summary = summary.to_string();
 
         tokio::task::spawn_blocking(move || {
             resolver.resolve(
@@ -609,7 +591,7 @@ mod tests {
         let one: &[u8] = b"token";
         let two: &[u8] = b"token\nsecond";
 
-        let summary = secret_conflict_summary(one, two);
+        let summary = secret_conflict_report(one, two).to_string();
         // The trailing newline is part of the assertion: "1 line" is a prefix of
         // "1 lines", so a match without it would hold for the bug.
         assert!(
@@ -621,7 +603,7 @@ mod tests {
             "the current side is not plural: {summary}"
         );
 
-        let swapped = secret_conflict_summary(two, one);
+        let swapped = secret_conflict_report(two, one).to_string();
         assert!(
             swapped.contains("resolved output : 2 lines\n"),
             "the resolved side is not plural: {swapped}"
@@ -643,12 +625,12 @@ mod tests {
             (&b""[..], "0 lines\n"),
         ] {
             let other: &[u8] = b"x";
-            let resolved = secret_conflict_summary(content, other);
+            let resolved = secret_conflict_report(content, other).to_string();
             assert!(
                 resolved.contains(&format!("resolved output : {expected}")),
                 "{content:?}: {resolved}"
             );
-            let current = secret_conflict_summary(other, content);
+            let current = secret_conflict_report(other, content).to_string();
             assert!(
                 current.contains(&format!("current target  : {expected}")),
                 "{content:?}: {current}"

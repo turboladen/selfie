@@ -27,8 +27,8 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         event::{
-            LinkAtTarget, OperationFailure, OperationResult, OperationSuccess, PackageEvent,
-            SkipReason,
+            ConflictReport, LinkAtTarget, OperationFailure, OperationResult, OperationSuccess,
+            PackageEvent, SkipReason,
         },
         repository::YamlPackageRepository,
     },
@@ -1681,7 +1681,10 @@ async fn a_dry_run_reports_a_conflict_even_when_yes_would_accept_it() {
     let conflict = events
         .iter()
         .find_map(|e| match e {
-            PackageEvent::DotfileConflict { diff, .. } => Some(diff.clone()),
+            PackageEvent::DotfileConflict {
+                detail: ConflictReport::Diff(diff),
+                ..
+            } => Some(diff.clone()),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no conflict was reported: {events:?}"));
@@ -5807,14 +5810,18 @@ mod secret_bearing {
         let (source, conflict) = events
             .iter()
             .find_map(|e| match e {
-                PackageEvent::DotfileConflict { source, diff, .. } => Some((source, diff)),
+                PackageEvent::DotfileConflict {
+                    source,
+                    detail: detail @ ConflictReport::Hidden { .. },
+                    ..
+                } => Some((source, detail.to_string())),
                 _ => None,
             })
             .expect("expected a conflict event");
 
         assert!(conflict.contains("lines"), "got: {conflict}");
         assert!(conflict.contains("content hidden"), "got: {conflict}");
-        test_common::assert_secret_free(conflict, SECRET, "the conflict diff");
+        test_common::assert_secret_free(&conflict, SECRET, "the conflict diff");
         // The command is a reference, not a credential, so the event names it, as
         // its source.
         assert_eq!(
@@ -5841,7 +5848,7 @@ mod secret_bearing {
         let summary = events
             .iter()
             .find_map(|event| match event {
-                PackageEvent::DotfileConflict { diff, .. } => Some(diff),
+                PackageEvent::DotfileConflict { detail, .. } => Some(detail.to_string()),
                 _ => None,
             })
             .expect("a conflict must be reported");
@@ -5854,7 +5861,7 @@ mod secret_bearing {
             !summary.contains("copied aside"),
             "nothing is copied aside here: {summary}"
         );
-        test_common::assert_secret_free(summary, SECRET, "the conflict summary");
+        test_common::assert_secret_free(&summary, SECRET, "the conflict summary");
     }
 
     #[tokio::test]
@@ -11264,7 +11271,10 @@ mod unreadable_targets {
         let diff = events
             .iter()
             .find_map(|e| match e {
-                PackageEvent::DotfileConflict { diff, .. } => Some(diff.as_str()),
+                PackageEvent::DotfileConflict {
+                    detail: ConflictReport::Diff(diff),
+                    ..
+                } => Some(diff.as_str()),
                 _ => None,
             })
             .expect("a conflict event");
@@ -12120,7 +12130,10 @@ mod dry_run_conflicts {
         let conflicts: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                PackageEvent::DotfileConflict { diff, .. } => Some(diff.as_str()),
+                PackageEvent::DotfileConflict {
+                    detail: ConflictReport::Diff(diff),
+                    ..
+                } => Some(diff.as_str()),
                 _ => None,
             })
             .collect();
@@ -17406,7 +17419,8 @@ mod event_sources {
         );
     }
 
-    // A template carries its var names beside the path, not inside it.
+    // A template is reported as a template, carrying its var names beside the
+    // path, not inside it.
     #[tokio::test]
     async fn a_template_names_its_vars_apart_from_its_path() {
         let dirs = TestDirs::new();
@@ -17425,8 +17439,8 @@ mod event_sources {
         let sources = skipped_sources(&dry_run(&dirs).await);
 
         assert_eq!(sources.len(), 1, "{sources:?}");
-        let DotfileSource::File { base, path, vars } = &sources[0] else {
-            panic!("expected a file, got {:?}", sources[0]);
+        let DotfileSource::Template { base, path, vars } = &sources[0] else {
+            panic!("expected a template, got {:?}", sources[0]);
         };
         assert_eq!(
             base.as_ref().map(|b| b.kind),

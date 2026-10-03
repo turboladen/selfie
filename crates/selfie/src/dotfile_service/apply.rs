@@ -500,7 +500,6 @@ where
                         if let crate::package::event::DotfileSource::File {
                             base: Some(base),
                             path,
-                            ..
                         } = &event_source
                             && let Ledger::Record(loaded) = &mut ledger
                             && loaded
@@ -589,7 +588,9 @@ where
                                 .send_dotfile_conflict(
                                     &event_source,
                                     target_path.display(),
-                                    rendered.get_or_insert_with(&render),
+                                    crate::package::event::ConflictReport::Diff(
+                                        rendered.take().unwrap_or_else(render),
+                                    ),
                                 )
                                 .await;
                             break 'entry EntryOutcome::Conflicted;
