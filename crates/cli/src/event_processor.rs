@@ -231,9 +231,12 @@ impl EventProcessor {
                 // Warnings don't set failure exit code by default
             }
 
-            // The run's result counts it, so the exit code comes from there.
+            // The run's result counts each, so the exit code comes from there.
             PackageEvent::DotfileRefused { refusal, .. } => {
                 self.display.print_warning(refusal.message);
+            }
+            PackageEvent::DotfileFailed { failure, .. } => {
+                self.display.print_warning(failure.message);
             }
 
             PackageEvent::Completed {
@@ -1154,6 +1157,7 @@ mod tests {
                     skipped_count: 0,
                     conflict_count: 0,
                     refused_count: 1,
+                    failed_count: 0,
                     orphan_count: 0,
                     environment: "test".to_string(),
                     steps_completed: (1, 1).into(),
@@ -1172,11 +1176,11 @@ mod tests {
         assert!(!lines.iter().any(|l| l.starts_with('✓')), "{lines:?}");
     }
 
-    // A refused entry prints the library's sentence on stderr.
+    // A refused or failed entry prints the library's sentence on stderr.
     #[tokio::test]
-    async fn a_refused_entry_prints_its_sentence_on_stderr() {
+    async fn a_refused_or_failed_entry_prints_its_sentence_on_stderr() {
         use crate::display_manager::Channel;
-        use selfie::package::event::{Condition, Location, Refusal};
+        use selfie::package::event::{Condition, EntryOperation, Failure, Location, Refusal};
 
         let refused = PackageEvent::DotfileRefused {
             operation_info: make_operation_info("bat"),
@@ -1188,15 +1192,29 @@ mod tests {
                 message: "Skipping 'bat/config': a symlink is there".to_string(),
             },
         };
-        let printed = printed_for(DisplayManager::new(false), vec![refused]).await;
+        let failed = PackageEvent::DotfileFailed {
+            operation_info: make_operation_info("bat"),
+            package: "bat".to_string(),
+            spec_target: "~/.creds".to_string(),
+            failure: Failure {
+                operation: EntryOperation::Resolve,
+                error: "no session".to_string(),
+                message: "Failed to resolve '~/.creds': no session".to_string(),
+            },
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![refused, failed]).await;
 
-        assert!(
-            printed
-                .iter()
-                .any(|(stream, line)| *stream == Channel::Stderr
-                    && line.contains("Skipping 'bat/config': a symlink is there")),
-            "{printed:?}"
-        );
+        for sentence in [
+            "Skipping 'bat/config': a symlink is there",
+            "Failed to resolve '~/.creds': no session",
+        ] {
+            assert!(
+                printed
+                    .iter()
+                    .any(|(stream, line)| *stream == Channel::Stderr && line.contains(sentence)),
+                "{sentence}: {printed:?}"
+            );
+        }
     }
 
     // A summary is the answer at every outcome, so it goes to stdout; an error
@@ -1544,6 +1562,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 1,
+                failed_count: 0,
                 orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
@@ -1579,6 +1598,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 0,
+                failed_count: 0,
                 orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),

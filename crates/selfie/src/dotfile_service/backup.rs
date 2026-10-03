@@ -10,6 +10,7 @@ use crate::fs::{
     filesystem::{FileSystem, FileSystemError},
     target::repository_path,
 };
+use crate::package::event::{EntryOperation, Failure};
 
 /// How many characters of the target's own file name the directory carries.
 const READABLE_LEN: usize = 40;
@@ -123,18 +124,21 @@ fn keep_at<F: FileSystem>(
     Ok(Kept { path, directory })
 }
 
-/// Why an entry was not overwritten, for the apply loop's `Skipping` line.
-///
-/// Names the target; `error` names the path under the state directory that
-/// failed, which is the backups directory when it could not be created and the
-/// copy itself otherwise.
-pub(super) fn refusal(source: &str, target: &Path, error: &FileSystemError) -> String {
-    format!(
-        "Skipping '{source}': cannot keep a copy of '{}' before overwriting it: {error}. \
-         The target is unchanged. Free space under the state directory, or point \
-         --state-directory somewhere writable, then run apply again.",
-        target.display()
-    )
+/// The failure of an entry whose target could not be copied before it was
+/// overwritten. The sentence names the target; `error` names the path under the
+/// state directory that failed, which is the backups directory when it could not
+/// be created and the copy itself otherwise.
+pub(super) fn failure(target: &Path, error: &FileSystemError) -> Failure {
+    Failure {
+        operation: EntryOperation::Backup,
+        error: error.to_string(),
+        message: format!(
+            "Failed to keep a copy of '{}' before overwriting it: {error}. The target is \
+             unchanged. Free space under the state directory, or point --state-directory \
+             somewhere writable, then run apply again.",
+            target.display()
+        ),
+    }
 }
 
 // The directory holding one target's copy.
@@ -458,19 +462,17 @@ mod tests {
         );
     }
 
-    // The refusal has to send the user somewhere they can act, and must not read
+    // The failure has to send the user somewhere they can act, and must not read
     // as the target write having failed -- the target is untouched.
     #[test]
-    fn the_refusal_names_the_target_and_an_escape() {
+    fn the_failure_names_the_target_and_an_escape() {
         let error = FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(
             "/state/backups: No space left on device",
         )));
-        let message = refusal(
-            "app/config.toml",
-            Path::new("/home/u/.config/app.toml"),
-            &error,
-        );
+        let failure = failure(Path::new("/home/u/.config/app.toml"), &error);
+        let message = &failure.message;
 
+        assert_eq!(failure.operation, EntryOperation::Backup);
         assert!(
             message.contains("/home/u/.config/app.toml")
                 && message.contains("--state-directory")

@@ -9,8 +9,11 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     dotfile_service::backup,
-    fs::{filesystem::FileSystem, target::TargetPath},
-    package::event::{DotfileSource, EventSender, Refusal, RepoPath},
+    fs::{
+        filesystem::{FileSystem, FileSystemError},
+        target::TargetPath,
+    },
+    package::event::{DotfileSource, EntryOperation, EventSender, Failure, Refusal, RepoPath},
 };
 
 use super::refusal::{
@@ -61,9 +64,10 @@ pub(super) enum DeployOutcome {
     Deployed,
     /// A dry run: reported as what it would do, and nothing written.
     Previewed,
-    /// Refused or failed, and already reported as whichever it was. Nothing was
-    /// written or recorded.
+    /// Refused, and already reported. Nothing was written or recorded.
     Refused,
+    /// An operation failed, and was already reported. Nothing was recorded.
+    Failed,
     /// Written, and the deploy state could not record it. Carries why the run
     /// stops.
     Unrecorded(String),
@@ -126,14 +130,17 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
             }
         }
         Wrote::Refused => DeployOutcome::Refused,
+        Wrote::Failed => DeployOutcome::Failed,
     }
 }
 
 /// What a write did, before anything is recorded.
 enum Wrote {
     Written,
-    /// Refused or failed, and already reported as whichever it was.
+    /// Refused, and already reported.
     Refused,
+    /// The copy or the write failed, and was already reported.
+    Failed,
 }
 
 /// Deploy a single config file to its target path and emit events. Records
@@ -171,18 +178,19 @@ async fn perform_deploy<F: FileSystem>(
                 backed_up.insert(unit.target_key.to_string(), path.clone());
                 (path, kept)
             }
-            Err(not_kept) => {
-                match not_kept {
-                    NotKept::Refused(refusal) => {
-                        sender
-                            .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
-                            .await;
-                    }
-                    NotKept::Failed(warning) => sender.send_warning(warning).await,
-                }
-                // Left out of `backed_up`, so a refused entry does not mark the
-                // target as settled for a later one.
+            // Left out of `backed_up`, so an entry that kept no copy does not mark
+            // the target as settled for a later one.
+            Err(NotKept::Refused(refusal)) => {
+                sender
+                    .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
+                    .await;
                 return Wrote::Refused;
+            }
+            Err(NotKept::Failed(failure)) => {
+                sender
+                    .send_dotfile_failed(unit.package_name, unit.entry_target, failure)
+                    .await;
+                return Wrote::Failed;
             }
         },
     };
@@ -193,26 +201,29 @@ async fn perform_deploy<F: FileSystem>(
     if let Err(e) =
         filesystem.write_file_no_follow(unit.target_path, unit.source_content.as_bytes())
     {
-        // A refusal is not a failure. "Failed to write" would read as something
-        // going wrong rather than as selfie declining. The error names the target
-        // in both arms, so neither repeats it.
-        //
-        // Reaching the refusal arm here means what refused the write appeared
-        // between `classify_entry`'s checks and this write.
-        match classify_write(unit.source, unit.target_path, &e) {
+        // Either way nothing is recorded as deployed that was not. An entry already
+        // in the state keeps its previous checksum and is stale rather than
+        // untracked, which is the honest record: a refusal writes nothing, and a
+        // failed write leaves the target as it was, so the previous checksum still
+        // describes it. The error names the target in both arms, so neither
+        // repeats it.
+        return match classify_write(unit.source, unit.target_path, &e) {
+            // A refusal is not a failure: "Failed to write" would read as something
+            // going wrong rather than as selfie declining. Reaching this arm means
+            // what refused the write appeared after `classify_entry`'s checks.
             Some(refusal) => {
                 sender
                     .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
                     .await;
+                Wrote::Refused
             }
-            None => sender.send_warning(format!("Failed to write: {e}")).await,
-        }
-        // `Refused` has the caller count this as refused and record nothing, so
-        // nothing is recorded as deployed that was not. An entry already in the
-        // state keeps its previous checksum and is stale rather than untracked,
-        // which is the honest record: a refusal writes nothing, and a failed write
-        // leaves the target as it was, so the previous checksum still describes it.
-        return Wrote::Refused;
+            None => {
+                sender
+                    .send_dotfile_failed(unit.package_name, unit.entry_target, write_failure(&e))
+                    .await;
+                Wrote::Failed
+            }
+        };
     }
 
     // Only now that the overwrite has landed is an earlier copy redundant. Before
@@ -291,7 +302,7 @@ fn keep_current<F: FileSystem>(
 
     backup::keep(filesystem, root, unit.target_key, &current)
         .map(Some)
-        .map_err(|e| NotKept::Failed(backup::refusal(unit.source, unit.target_path.path(), &e)))
+        .map_err(|e| NotKept::Failed(backup::failure(unit.target_path.path(), &e)))
 }
 
 /// Why [`keep_current`] kept no copy.
@@ -299,7 +310,18 @@ enum NotKept {
     /// What is at the target bars the entry.
     Refused(Refusal),
     /// The copy could not be written.
-    Failed(String),
+    Failed(Failure),
+}
+
+/// The failure of a write to a target, named by `error`.
+pub(super) fn write_failure(error: &FileSystemError) -> Failure {
+    Failure {
+        operation: EntryOperation::Write,
+        error: error.to_string(),
+        // The error already names the target; naming it here too would print the
+        // path twice.
+        message: format!("Failed to write: {error}"),
+    }
 }
 
 /// What an apply just recorded about a target.

@@ -27,8 +27,8 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         event::{
-            Condition, ConflictReport, LinkAtTarget, Location, OperationFailure, OperationResult,
-            OperationSuccess, PackageEvent, SkipReason,
+            Condition, ConflictReport, EntryOperation, LinkAtTarget, Location, OperationFailure,
+            OperationResult, OperationSuccess, PackageEvent, SkipReason,
         },
         repository::YamlPackageRepository,
     },
@@ -133,7 +133,7 @@ fn counting_resolver(asked: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> 
     }
 }
 
-// Every warning a run emitted, every refused entry's sentence, and one line per
+// Every warning a run emitted, every refused or failed entry's sentence, and one line per
 // package it refused whole, reading "refused package '<name>': <reason>" from the
 // event's own fields. Every test reading warnings goes through here, so an
 // assertion that a sentence is absent also covers a refusal that travels as its
@@ -144,6 +144,7 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
         .flat_map(|event| match event {
             PackageEvent::Warning { message, .. } => vec![message.clone()],
             PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.clone()],
+            PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.clone()],
             PackageEvent::PackagesRefused {
                 reason, packages, ..
             } => packages
@@ -164,6 +165,27 @@ fn refusals(events: &[PackageEvent]) -> Vec<(Condition, Location)> {
             _ => None,
         })
         .collect()
+}
+
+// Which operation failed for each failed entry, in the order they failed.
+fn failures(events: &[PackageEvent]) -> Vec<EntryOperation> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::DotfileFailed { failure, .. } => Some(failure.operation),
+            _ => None,
+        })
+        .collect()
+}
+
+// Entries an apply tried to deploy where an operation failed.
+fn failed_count(events: &[PackageEvent]) -> usize {
+    match get_operation_result(events).expect("no Completed event") {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { failed_count, .. }) => {
+            *failed_count
+        }
+        other => panic!("expected DotfilesApplied, got {other:?}"),
+    }
 }
 
 // The warnings that mention the dotfiles directory, ignoring case.
@@ -4371,7 +4393,7 @@ mod secret_bearing {
             .unwrap();
         let warned = events
             .iter()
-            .position(|e| matches!(e, PackageEvent::Warning { .. }))
+            .position(|e| matches!(e, PackageEvent::DotfileFailed { .. }))
             .unwrap();
         assert!(ended < warned, "{events:#?}");
     }
@@ -4458,7 +4480,11 @@ mod secret_bearing {
             0,
             "a failed read was compared"
         );
-        assert_eq!(refused_count(&events), 1, "the failed read was not refused");
+        assert_eq!(
+            failures(&events),
+            vec![EntryOperation::Resolve],
+            "the failed read did not fail"
+        );
         let warnings = warning_messages(&events);
         assert!(
             warnings.iter().any(|w| w.contains("pipe died mid-read")),
@@ -4552,7 +4578,11 @@ mod secret_bearing {
             0,
             "a failed read was compared"
         );
-        assert_eq!(refused_count(&events), 1, "the failed read was not refused");
+        assert_eq!(
+            failures(&events),
+            vec![EntryOperation::Resolve],
+            "the failed read did not fail"
+        );
         let warnings = warning_messages(&events);
         assert!(
             warnings.iter().any(|w| w.contains("pipe died mid-read")),
@@ -5684,11 +5714,7 @@ mod secret_bearing {
             0,
             "an empty output was compared against the target"
         );
-        assert_eq!(
-            refused_count(&events),
-            1,
-            "the empty output was not refused"
-        );
+        assert_eq!(failed_count(&events), 1, "the empty output did not fail");
     }
 
     // A template whose binding prints nothing must leave the target intact too. This
@@ -5731,11 +5757,7 @@ mod secret_bearing {
             0,
             "an empty binding was compared against the target"
         );
-        assert_eq!(
-            refused_count(&events),
-            1,
-            "the empty binding was not refused"
-        );
+        assert_eq!(failed_count(&events), 1, "the empty binding did not fail");
     }
 
     #[tokio::test]
@@ -9244,7 +9266,7 @@ dotfiles:
     // settles it; and the in-place write then fails with `EACCES`. An unreadable
     // target would not do, because it is refused before the decision.
     #[tokio::test]
-    async fn a_write_that_fails_after_an_accepted_conflict_is_refused() {
+    async fn a_write_that_fails_after_an_accepted_conflict_is_a_failure() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dirs = TestDirs::new();
@@ -9268,7 +9290,7 @@ dotfiles:
             || std::fs::File::create(dirs.target_dir.join("probe")).is_ok()
         {
             eprintln!(
-                "SKIP a_write_that_fails_after_an_accepted_conflict_is_refused: running as root"
+                "SKIP a_write_that_fails_after_an_accepted_conflict_is_a_failure: running as root"
             );
             return;
         }
@@ -9287,9 +9309,14 @@ dotfiles:
 
         assert_eq!(
             counts(&events),
-            (0, 0, 0, 1),
-            "an accepted conflict that could not be written is a refusal, not a skip"
+            (0, 0, 0, 0),
+            "an accepted conflict that could not be written is not a skip"
         );
+        // The target exists and differs, and the writer's error is a plain IO error,
+        // which says nothing about what is at the target: a failed write, not a
+        // refusal.
+        assert_eq!(failures(&events), vec![EntryOperation::Write]);
+        assert_eq!(failed_count(&events), 1);
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
             "TARGET",
@@ -9345,6 +9372,83 @@ dotfiles:
             steps(&events),
             (3, 3),
             "three entries were processed, so three steps happened"
+        );
+    }
+
+    // A failed entry is an outcome too, so it is a step: one deployed, one in sync
+    // and one whose write failed is (3/3), with the failure counted apart from the
+    // refusals.
+    #[tokio::test]
+    async fn failed_entries_still_count_toward_the_step_total() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        for name in ["deployed.toml", "insync.toml", "locked.toml"] {
+            std::fs::write(dirs.package_dir.join("myapp").join(name), "SAME").unwrap();
+        }
+        let in_sync = dirs.target_dir.join("insync.toml");
+        std::fs::write(&in_sync, "SAME").unwrap();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[
+                (
+                    "myapp/deployed.toml",
+                    dirs.target_dir.join("deployed.toml").to_str().unwrap(),
+                ),
+                ("myapp/insync.toml", in_sync.to_str().unwrap()),
+                (
+                    "myapp/locked.toml",
+                    locked.join("config.toml").to_str().unwrap(),
+                ),
+            ],
+        );
+        let Some(_restore) = made_unwritable(&locked) else {
+            eprintln!(
+                "SKIP failed_entries_still_count_toward_the_step_total: mode bits do not bite"
+            );
+            return;
+        };
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(counts(&events), (1, 1, 0, 0));
+        assert_eq!(failed_count(&events), 1, "{events:?}");
+        assert_eq!(steps(&events), (3, 3), "three entries, three steps");
+    }
+
+    // `stop_on_error` stops on a failed entry as it does on a refused one, so a
+    // second entry that would deploy does not.
+    #[tokio::test]
+    async fn stop_on_error_stops_on_a_failed_entry() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/a.toml"), "A").unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/b.toml"), "B").unwrap();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let later = dirs.target_dir.join("b.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[
+                ("myapp/a.toml", locked.join("a.toml").to_str().unwrap()),
+                ("myapp/b.toml", later.to_str().unwrap()),
+            ],
+        );
+        let Some(_restore) = made_unwritable(&locked) else {
+            eprintln!("SKIP stop_on_error_stops_on_a_failed_entry: mode bits do not bite");
+            return;
+        };
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(failures(&events), vec![EntryOperation::Write]);
+        assert!(!later.exists(), "the run must stop before the second entry");
+        assert!(
+            failure_message(&events).contains("Stopped after failing to apply dotfile"),
+            "{events:?}"
         );
     }
 
@@ -10247,7 +10351,8 @@ mod write_failure_warnings {
             "the target is not named exactly once: {failure}"
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "OLD");
-        assert_eq!(refused_count(&events), 1);
+        assert_eq!((refused_count(&events), failed_count(&events)), (0, 1));
+        assert_eq!(failures(&events), vec![EntryOperation::Write]);
     }
 }
 
@@ -13398,7 +13503,7 @@ mod backups_before_overwrite {
         // Fails rather than passes vacuously if the write did not fail -- running
         // as root, where the mode above is not enforced.
         assert_eq!(
-            refused_count(&events),
+            failed_count(&events),
             1,
             "the target write had to fail for this test to mean anything: {events:?}"
         );
@@ -13590,7 +13695,7 @@ mod backups_before_overwrite {
     // backups directory has to go is the failure: `create_dir_all` cannot pass
     // it, and unlike a permission fixture it also fails for root.
     #[tokio::test]
-    async fn a_backup_that_cannot_be_written_refuses_the_overwrite() {
+    async fn a_backup_that_cannot_be_written_fails_the_overwrite() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         one_entry(&dirs, "myapp", "from-repo", &target, Some("hand-edited"));
@@ -13603,7 +13708,8 @@ mod backups_before_overwrite {
             "hand-edited",
             "the target must be left exactly as it was"
         );
-        assert_eq!(refused_count(&events), 1);
+        assert_eq!((refused_count(&events), failed_count(&events)), (0, 1));
+        assert_eq!(failures(&events), vec![EntryOperation::Backup]);
         assert!(
             !events
                 .iter()
@@ -13612,8 +13718,8 @@ mod backups_before_overwrite {
         );
         let warning = warning_messages(&events)
             .into_iter()
-            .find(|message| message.contains("cannot keep a copy"))
-            .expect("the refusal must be reported");
+            .find(|message| message.contains("Failed to keep a copy"))
+            .expect("the failure must be reported");
         assert!(
             warning.contains(target.to_str().unwrap())
                 && warning.contains("--state-directory")
@@ -14786,7 +14892,12 @@ mod stop_on_error_governs_every_failure {
             "{:?}",
             after.events
         );
-        assert_eq!(refused_count(&after.events), 2, "{:?}", after.events);
+        assert_eq!(
+            (refused_count(&after.events), failed_count(&after.events)),
+            (1, 1),
+            "{:?}",
+            after.events
+        );
     }
 
     // A template's binding is a command like any other: its failure holds back
@@ -14854,7 +14965,11 @@ mod stop_on_error_governs_every_failure {
                 ))),
             "{events:?}"
         );
-        assert_eq!(refused_count(&events), 2, "{events:?}");
+        assert_eq!(
+            (refused_count(&events), failed_count(&events)),
+            (1, 1),
+            "the failed command fails, and the entry it holds back is refused: {events:?}"
+        );
     }
 
     // The control: a command that succeeded with nothing to deploy did not fail,
@@ -18261,5 +18376,115 @@ mod entry_conditions {
             "{events:?}"
         );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "PLAIN");
+    }
+}
+
+// An entry selfie tried to deploy, where an operation it ran failed, is reported
+// as failed and names the operation, never as a refusal of what is at the target.
+mod entry_failures {
+    use super::secret_bearing::provider_package;
+    use super::*;
+
+    // A new file in a directory selfie cannot write to: the write fails, and what
+    // is at the target afterwards is nothing, which is no condition to refuse.
+    #[tokio::test]
+    async fn a_new_file_in_an_unwritable_directory_is_a_failed_write() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let target = locked.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+        let Some(_restore) = made_unwritable(&locked) else {
+            eprintln!("SKIP a_new_file_in_an_unwritable_directory_is_a_failed_write: root");
+            return;
+        };
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(failures(&events), vec![EntryOperation::Write]);
+        assert!(refusals(&events).is_empty(), "{:?}", refusals(&events));
+        assert_eq!((refused_count(&events), failed_count(&events)), (0, 1));
+        assert!(!target.exists());
+    }
+
+    // The secret writer replaces a link, so a write over a link to a directory that
+    // fails on its parent's permissions failed: the directory is the link's
+    // destination, which the write never touched, and refusing it as a directory
+    // would send the user to remove the wrong thing.
+    #[tokio::test]
+    async fn a_write_over_a_link_to_a_directory_is_a_failed_write() {
+        let dirs = TestDirs::new();
+        let destination = dirs.target_dir.join("a-directory");
+        std::fs::create_dir(&destination).unwrap();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let target = locked.join("creds");
+        std::os::unix::fs::symlink(&destination, &target).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"TOKEN");
+        let Some(_restore) = made_unwritable(&locked) else {
+            eprintln!("SKIP a_write_over_a_link_to_a_directory_is_a_failed_write: root");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(failures(&events), vec![EntryOperation::Write], "{events:?}");
+        assert!(refusals(&events).is_empty(), "{:?}", refusals(&events));
+        assert!(target.is_symlink(), "the link is left in place");
+        assert!(destination.is_dir(), "the destination is left alone");
+    }
+
+    // A secret target that already holds the right content but is readable by
+    // others is rewritten owner-only. When that rewrite fails, the failure is the
+    // permission fix, not a write of new content: the content was already right.
+    #[tokio::test]
+    async fn a_failed_permission_fix_is_named_as_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let locked = dirs.target_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let target = locked.join("creds");
+        std::fs::write(&target, "TOKEN").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"TOKEN");
+        let Some(_restore) = made_unwritable(&locked) else {
+            eprintln!("SKIP a_failed_permission_fix_is_named_as_one: root");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(failures(&events), vec![EntryOperation::PermissionFix]);
+        let messages = warning_messages(&events);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.starts_with("Failed to tighten permissions")),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().all(|m| !m.starts_with("Failed to write")),
+            "the content was already right, so no write of it failed: {messages:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "TOKEN");
     }
 }

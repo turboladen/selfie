@@ -850,9 +850,10 @@ Copies are keyed by target path, so retargeting an entry leaves the old target's
 copy behind for good — nothing prunes a path selfie is no longer asked to deploy to. Over a long
 life the directory holds one copy per target _ever_ deployed, not per target currently deployed.
 
-If selfie cannot write the copy it **refuses the overwrite** rather than proceeding without it. The
-target is left exactly as it was, the entry counts as refused, and the run exits `1`. Free up space
-under the state directory, or point `--state-directory` somewhere writable, and run apply again.
+If selfie cannot write the copy it **does not overwrite** the target rather than proceeding without
+it. The target is left exactly as it was, the entry counts as failed ("Failed to keep a copy of …"),
+and the run exits `1`. Free up space under the state directory, or point `--state-directory`
+somewhere writable, and run apply again.
 
 Recovering is a `cp` — nothing reads these files and no command manages them:
 
@@ -1183,13 +1184,13 @@ it bounds what selfie compares and writes, **not** what the command produces. Th
 output is buffered before the check can run — as it already is for every install and check command —
 so this is not a memory bound against a genuinely unbounded provider.
 
-A failing command counts as a refusal. `stop_on_error`, which defaults to false, decides whether it
-also ends the apply; if it does, no later entry is reached. If it does not, every later entry whose
-command or template binding runs the same program is refused with "an earlier `op` command failed;
-no command was run", naming the program, and none of its commands runs: the cause of one failure,
-such as a locked vault, usually fails that program's other commands too. Entries running another
-program, and repository files, still deploy. When a binding fails, the error names that binding and
-the remaining bindings for that entry are not run.
+A failing command counts as a failed entry. `stop_on_error`, which defaults to false, decides
+whether it also ends the apply; if it does, no later entry is reached. If it does not, every later
+entry whose command or template binding runs the same program is refused with "an earlier `op`
+command failed; no command was run", naming the program, and none of its commands runs: the cause of
+one failure, such as a locked vault, usually fails that program's other commands too. Entries
+running another program, and repository files, still deploy. When a binding fails, the error names
+that binding and the remaining bindings for that entry are not run.
 
 Ctrl+C during `selfie apply` cancels a provider command that is still running, as it does during
 `install` and `check` — so a command waiting on a biometric or password prompt can be escaped

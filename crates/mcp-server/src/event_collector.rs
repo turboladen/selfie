@@ -173,6 +173,16 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     if let Some(result) = &final_result {
         result_data["outcome"] = outcome_label(result.outcome()).into();
     }
+    // An apply result that completed carries both counts whatever its status, so a
+    // caller never reads a missing field as zero. A run that stopped or was
+    // cancelled has no counts to give. `refused` wins the status when both are set:
+    // a refusal names a condition the user can act on.
+    if let Some(OperationResult::Success(s)) = &final_result
+        && let (Some(refused), Some(failed)) = (s.refused_count(), s.failed_count())
+    {
+        result_data["refused"] = refused.into();
+        result_data["failed"] = failed.into();
+    }
     // A structured field for the same reason `refused` is one: an assistant should
     // not have to parse a count out of `message`. Informational, so it leaves
     // `status` alone.
@@ -612,6 +622,19 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "location": label(refusal.at),
             "message": refusal.message,
         })),
+        PackageEvent::DotfileFailed {
+            package,
+            spec_target,
+            failure,
+            ..
+        } => Some(serde_json::json!({
+            "type": "dotfile_failed",
+            "package": package,
+            "spec_target": spec_target,
+            "operation": label(failure.operation),
+            "error": failure.error,
+            "message": failure.message,
+        })),
         PackageEvent::DotfileDeploying { source, target, .. } => Some(with_source(
             serde_json::json!({
                 "type": "dotfile_deploying",
@@ -1040,6 +1063,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 0,
+                failed_count: 0,
                 orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(2, 3),
@@ -1128,6 +1152,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 1,
+                failed_count: 0,
                 orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
@@ -1149,6 +1174,86 @@ mod tests {
             "the count belongs in the message an assistant reads: {:?}",
             result.data["result"]["message"]
         );
+    }
+
+    // Every completed apply result carries both counts, whatever its status, so an assistant
+    // never reads a missing field as zero. `refused` wins the status when both are
+    // set; a run that only failed is "failed".
+    #[tokio::test]
+    async fn an_apply_result_carries_both_counts_and_its_status() {
+        use selfie::package::event::{OperationSuccess, StepCount};
+
+        let applied = |refused_count, failed_count| PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::DotfilesApplied {
+                deployed_count: 1,
+                skipped_count: 0,
+                conflict_count: 0,
+                refused_count,
+                failed_count,
+                orphan_count: 0,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(3, 3),
+            }),
+        };
+        for (refused, failed, status, success) in [
+            (0, 0, "success", true),
+            (1, 0, "refused", false),
+            (0, 1, "failed", false),
+            (1, 1, "refused", false),
+        ] {
+            let result =
+                collect_events(Box::pin(stream::iter(vec![applied(refused, failed)]))).await;
+            let row = &result.data["result"];
+
+            assert_eq!(row["status"], status, "{row}");
+            assert_eq!(result.success, success, "{row}");
+            assert_eq!(row["refused"], refused, "{row}");
+            assert_eq!(row["failed"], failed, "{row}");
+        }
+    }
+
+    // A failed entry is its own row, with the operation as a label and the error
+    // and sentence as prose. Every operation is run, and `pinned` has no wildcard:
+    // a new variant does not compile until it names its label.
+    #[tokio::test]
+    async fn a_failed_entry_carries_its_operation_as_a_label() {
+        use selfie::package::event::{EntryOperation, Failure};
+        use strum::IntoEnumIterator as _;
+
+        let pinned = |operation: EntryOperation| match operation {
+            EntryOperation::Resolve => "resolve",
+            EntryOperation::Backup => "backup",
+            EntryOperation::Write => "write",
+            EntryOperation::PermissionFix => "permission_fix",
+        };
+        for operation in EntryOperation::iter() {
+            let label = pinned(operation);
+            let events = vec![PackageEvent::DotfileFailed {
+                operation_info: test_op_info(),
+                package: "bat".to_string(),
+                spec_target: "~/.batrc".to_string(),
+                failure: Failure {
+                    operation,
+                    error: "Permission denied".to_string(),
+                    message: "Failed to write: Permission denied".to_string(),
+                },
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            assert_eq!(
+                result.data["data"][0],
+                serde_json::json!({
+                    "type": "dotfile_failed",
+                    "package": "bat",
+                    "spec_target": "~/.batrc",
+                    "operation": label,
+                    "error": "Permission denied",
+                    "message": "Failed to write: Permission denied",
+                })
+            );
+        }
     }
 
     // A drift that refused a target it could not examine -- a symlink, a fifo --
@@ -1688,6 +1793,7 @@ mod tests {
                     skipped_count: 1,
                     conflict_count: 0,
                     refused_count: 0,
+                    failed_count: 0,
                     orphan_count: 1,
                     environment: "test".to_string(),
                     steps_completed: StepCount::new(1, 1),
@@ -1720,6 +1826,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 0,
+                failed_count: 0,
                 orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),

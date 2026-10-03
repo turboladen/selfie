@@ -259,6 +259,12 @@ or that it cannot read. Each refusal is named in the output, and the summary lin
 Dotfiles applied in environment 'macos': 2 deployed, 1 skipped, 0 conflict(s), 1 refused
 ```
 
+An entry whose deploy selfie started and could not finish fails rather than being refused: the
+commands that produce a secret-bearing entry failed, the copy of the old target could not be kept,
+the write failed, or narrowing an in-sync secret's permissions failed. Each failure names what it
+was doing, and the summary counts failures after refusals, only when there are some
+(`1 refused, 1 failed`). A failure also exits `1`.
+
 Whole packages are refused too, when the problem is in the file rather than in one entry: any
 unrecognized key at the top level or in the environment being used, a package file selfie could not
 re-read to check for one, or a package-directory spec that declares no environment. See

@@ -804,6 +804,32 @@ impl EventSender {
         .await;
     }
 
+    /// Report a dotfile entry in `package`, whose target the package file spells
+    /// `spec_target`, where an operation selfie ran failed.
+    pub(crate) async fn send_dotfile_failed(
+        &self,
+        package: &str,
+        spec_target: &str,
+        failure: Failure,
+    ) {
+        let operation_info = self.touch_operation_info();
+        tracing::warn!(
+            operation_type = operation_info.operation_type.to_string(),
+            environment = &operation_info.environment,
+            package,
+            spec_target,
+            operation = ?failure.operation,
+            message = &failure.message,
+        );
+        self.send(PackageEvent::DotfileFailed {
+            operation_info,
+            package: package.to_string(),
+            spec_target: spec_target.to_string(),
+            failure,
+        })
+        .await;
+    }
+
     /// Send a dotfile-conflict event
     pub(crate) async fn send_dotfile_conflict(
         &self,
@@ -1104,8 +1130,8 @@ pub enum OperationSuccess {
         /// which is not the same as one selfie declined to touch.
         skipped_count: usize,
         conflict_count: usize,
-        /// What selfie was asked to deploy and did not — refusals and failures
-        /// alike.
+        /// What selfie was asked to deploy and declined to, for a condition it
+        /// found. A failed operation is counted in `failed_count` instead.
         ///
         /// Usually an entry, but **not always one**: a package refused whole for
         /// a top-level key that hides a real field contributes 1 here and no
@@ -1115,10 +1141,13 @@ pub enum OperationSuccess {
         /// `steps_completed`, and does not equal a number of dotfile entries.
         ///
         /// Non-zero makes [`outcome`](OperationSuccess::outcome) Failed: the run
-        /// did not do what was asked. Named for the common case: most of what lands here was
-        /// *declined* by selfie rather than failing, and `perform_deploy` is
-        /// explicit that a refusal is not a failure.
+        /// did not do what was asked.
         refused_count: usize,
+        /// Entries selfie tried to deploy where an operation it ran failed: the
+        /// resolve, the backup, the write or the permission fix.
+        ///
+        /// Non-zero makes [`outcome`](OperationSuccess::outcome) Failed too.
+        failed_count: usize,
         /// Recorded targets no entry deploys to any more whose files are still
         /// there. Reported, never removed, and not a refusal.
         orphan_count: usize,
@@ -1729,14 +1758,22 @@ impl std::fmt::Display for OperationSuccess {
                 skipped_count,
                 conflict_count,
                 refused_count,
+                failed_count,
                 orphan_count,
                 environment,
                 ..
             } => {
+                // The summary names failed entries only when there are some.
+                let failed = if *failed_count == 0 {
+                    String::new()
+                } else {
+                    format!(", {failed_count} failed")
+                };
                 write!(
                     f,
                     "Dotfiles applied in environment '{environment}': {deployed_count} deployed, \
-                     {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} refused{}",
+                     {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} \
+                     refused{failed}{}",
                     orphaned_clause(*orphan_count)
                 )
             }
@@ -2160,6 +2197,48 @@ impl OperationSuccess {
         self.refused_count().is_some_and(|count| count > 0)
     }
 
+    /// Whether an operation this success ran on part of its work failed.
+    ///
+    /// Like [`had_refusals`](Self::had_refusals), it makes
+    /// [`outcome`](Self::outcome) Failed. True only for the variants
+    /// [`failed_count`](Self::failed_count) answers for.
+    #[must_use]
+    pub fn had_failures(&self) -> bool {
+        self.failed_count().is_some_and(|count| count > 0)
+    }
+
+    /// How many parts of its work this success tried and failed, for operations
+    /// that count them apart from refusals. `None` where the question does not
+    /// apply; only [`DotfilesApplied`](Self::DotfilesApplied) answers it.
+    #[must_use]
+    pub fn failed_count(&self) -> Option<usize> {
+        // Every variant listed, as in `refused_count`, so an operation that gains
+        // failures has to say so here rather than reach an adapter reporting none.
+        match self {
+            OperationSuccess::DotfilesApplied { failed_count, .. } => Some(*failed_count),
+            OperationSuccess::DotfileDriftChecked { .. }
+            | OperationSuccess::PackagesAudited { .. }
+            | OperationSuccess::PackageChecked { .. }
+            | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackageInstalled { .. }
+            | OperationSuccess::PackageValidated { .. }
+            | OperationSuccess::PackageRemoved { .. }
+            | OperationSuccess::PackageCreated { .. }
+            | OperationSuccess::SpecInfoRetrieved { .. }
+            | OperationSuccess::PackageStatusChecked { .. }
+            | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::PackageUpdated { .. }
+            | OperationSuccess::DotfileTracked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_)
+            | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::SpecListGenerated { .. } => None,
+        }
+    }
+
     /// How many refusals this success carries, for operations that count them.
     ///
     /// `None` where the question does not apply. Three variants answer it:
@@ -2278,8 +2357,9 @@ impl OperationSuccess {
     /// complete answer, whatever else it found.
     #[must_use]
     pub fn outcome(&self) -> Outcome {
-        // Refusals are answered once, by `had_refusals`, for every variant.
-        if self.had_refusals() {
+        // Refusals and failures are answered once, by `had_refusals` and
+        // `had_failures`, for every variant.
+        if self.had_refusals() || self.had_failures() {
             return Outcome::Failed;
         }
         // Every variant listed, as in `refused_count`, so a variant added later has
@@ -2920,6 +3000,17 @@ pub enum PackageEvent {
         refusal: Refusal,
     },
 
+    /// A dotfile entry selfie tried to deploy, where an operation it ran failed.
+    DotfileFailed {
+        operation_info: OperationInfo,
+        /// The package the entry belongs to.
+        package: String,
+        /// The entry's target as the package file spells it, before `~` is
+        /// expanded.
+        spec_target: String,
+        failure: Failure,
+    },
+
     /// A conflict was detected between repo and deployed version
     DotfileConflict {
         operation_info: OperationInfo,
@@ -3417,6 +3508,34 @@ pub enum Condition {
     /// An earlier command of the same program failed in this run, so this
     /// entry's commands were not run.
     EarlierProgramFailed,
+}
+
+/// An operation selfie ran on a dotfile entry that failed: what it was, the
+/// error, and the sentence that says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// What selfie was doing.
+    pub operation: EntryOperation,
+    /// The error the operation returned, as a sentence fragment.
+    pub error: String,
+    /// The failure as a sentence for a person, naming the operation.
+    pub message: String,
+}
+
+/// An operation selfie runs on a dotfile entry, which can fail.
+///
+/// Converts to a label for an adapter: `"permission_fix"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum EntryOperation {
+    /// Running the commands that produce a secret-bearing entry's content.
+    Resolve,
+    /// Keeping a copy of the target before overwriting it.
+    Backup,
+    /// Writing the target.
+    Write,
+    /// Narrowing an in-sync secret-bearing target's permissions to owner-only.
+    PermissionFix,
 }
 
 /// Where selfie found a [`Condition`].
@@ -3983,6 +4102,7 @@ mod tests {
                     skipped_count: 2,
                     conflict_count: 3,
                     refused_count: 4,
+                    failed_count: 0,
                     orphan_count: 5,
                     environment: env(),
                     steps_completed: steps,
@@ -4113,6 +4233,7 @@ mod tests {
             skipped_count: 0,
             conflict_count: conflict,
             refused_count: refused,
+            failed_count: 0,
             orphan_count: orphan,
             environment: "test".to_string(),
             steps_completed: StepCount::new(1, 1),
@@ -4439,5 +4560,39 @@ mod tests {
         assert_eq!(groups.len(), 2, "{groups:?}");
         assert_eq!(groups[0].0, RefusalKind::UnknownTopLevelKeys);
         assert_eq!(groups[1].0, RefusalKind::NoEnvironments);
+    }
+
+    fn applied_with(refused_count: usize, failed_count: usize) -> OperationSuccess {
+        OperationSuccess::DotfilesApplied {
+            deployed_count: 1,
+            skipped_count: 0,
+            conflict_count: 0,
+            refused_count,
+            failed_count,
+            orphan_count: 0,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(2, 2),
+        }
+    }
+
+    // A failure alone makes an apply Failed, as a refusal alone does, and neither
+    // makes a clean run anything but Clean.
+    #[test]
+    fn a_failed_entry_alone_makes_an_apply_failed() {
+        assert_eq!(applied_with(0, 1).outcome(), Outcome::Failed);
+        assert_eq!(applied_with(1, 0).outcome(), Outcome::Failed);
+        assert_eq!(applied_with(0, 0).outcome(), Outcome::Clean);
+        assert!(applied_with(0, 1).had_failures() && !applied_with(0, 1).had_refusals());
+    }
+
+    // The summary names failed entries only when there are some.
+    #[test]
+    fn the_apply_summary_names_failures_only_when_there_are_some() {
+        let none = applied_with(1, 0).to_string();
+        let one = applied_with(0, 1).to_string();
+
+        assert!(!none.contains("failed"), "{none}");
+        assert!(none.ends_with("1 refused"), "{none}");
+        assert!(one.contains("0 refused, 1 failed"), "{one}");
     }
 }

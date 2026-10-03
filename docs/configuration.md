@@ -359,15 +359,16 @@ command_timeout: 600 # 10 minutes
 Whether `selfie apply` stops at its first failure. Off by default, so one run reports every failure
 and the next run is not needed to find the second one.
 
-A failure is anything the run counts as refused: an entry selfie refused or could not carry out (a
-source it could not read, a target it will not write to or could not classify, a write that failed,
-a provider command that failed), a package refused whole, a package file it could not load, a name
-several package files claim, or a dotfiles directory it could not read. A conflict is not a failure
-and never stops a run, and neither is a warning. A run that carries on counts every failure in its
-summary and exits `1`. A run that stops reports the refused entry's warning and the sentence naming
-what stopped it, with no summary counts, and exits `1`. Packages refused whole, package files that
-could not be loaded, names several files claim and an unreadable dotfiles directory are all known
-before anything is deployed, so any of them stops the run before it deploys anything.
+A failure is anything the run counts as refused or failed: an entry selfie refused (a source it
+could not read, a target it will not write to or could not classify), an entry where an operation
+failed (a write, a copy of the old target, a permission fix, a provider command), a package refused
+whole, a package file it could not load, a name several package files claim, or a dotfiles directory
+it could not read. A conflict is not a failure and never stops a run, and neither is a warning. A
+run that carries on counts every refusal and failure in its summary and exits `1`. A run that stops
+reports the entry's refusal or failure and the sentence naming what stopped it, with no summary
+counts, and exits `1`. Packages refused whole, package files that could not be loaded, names several
+files claim and an unreadable dotfiles directory are all known before anything is deployed, so any
+of them stops the run before it deploys anything.
 
 With this set, a failed provider command stops the run there, so no later entry is reached. With it
 off, once a provider command fails, later entries whose command, or any of whose template bindings,

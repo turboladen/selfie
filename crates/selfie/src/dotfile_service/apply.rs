@@ -117,8 +117,10 @@ enum EntryOutcome {
     /// In sync, or only previewed by a dry run.
     Skipped,
     Conflicted,
-    /// Refused or failed, and already reported as whichever it was.
+    /// Refused, and already reported.
     Refused,
+    /// An operation on it failed, and was already reported.
+    Failed,
     /// Written, and the deploy state could not record it. Carries why the run
     /// stops.
     Unrecorded(String),
@@ -132,27 +134,41 @@ struct ApplyTally {
     /// previewed.
     skipped: usize,
     conflicts: usize,
-    /// Entries, packages and directories this run was asked to deploy and did
-    /// not.
+    /// Entries, packages and directories this run was asked to deploy and
+    /// declined to.
     refused: usize,
+    /// Entries where an operation this run tried failed.
+    failed: usize,
     /// Orphaned targets whose files are still there. Not an outcome of any entry,
     /// so no part of the step count.
     orphaned: usize,
 }
 
+/// How an entry, package or directory the run did not finish ended.
+#[derive(Clone, Copy)]
+enum Unfinished {
+    Refused,
+    Failed,
+}
+
 impl ApplyTally {
-    /// Count one refusal, and return the stop it calls for, if any: a cancelled
-    /// run stops, and otherwise `stop_on_error` decides.
-    // Cancellation is asked first. Ctrl+C kills a provider command, which then
-    // fails, and blaming `stop_on_error` for that sends the user looking for a
-    // problem in the package file that is not there.
-    fn refuse(
+    /// Count one refusal or failure, and return the stop it calls for, if any: a
+    /// cancelled run stops, and otherwise `stop_on_error` decides.
+    // One method for both kinds, so a failure cannot get past `stop_on_error` by a
+    // path of its own. Cancellation is asked first. Ctrl+C kills a provider
+    // command, which then fails, and blaming `stop_on_error` for that sends the
+    // user looking for a problem in the package file that is not there.
+    fn unfinished(
         &mut self,
+        kind: Unfinished,
         config: &SelfieConfig,
         token: &CancellationToken,
         cause: Stop,
     ) -> Option<Stop> {
-        self.refused += 1;
+        match kind {
+            Unfinished::Refused => self.refused += 1,
+            Unfinished::Failed => self.failed += 1,
+        }
         if token.is_cancelled() {
             Some(Stop::Cancelled)
         } else if config.stop_on_error() {
@@ -163,20 +179,21 @@ impl ApplyTally {
     }
 
     fn into_success(self, environment: &str) -> OperationSuccess {
-        // `refused` belongs in the total: leaving it out would shrink the step
-        // count by exactly the number of refusals, so a run that refused two of
+        // `refused` and `failed` belong in the total: leaving either out would
+        // shrink the step count by exactly that many, so a run that refused two of
         // three entries would report (1/1) and the two refusals would vanish from
         // the summary as well as from the counters.
         //
         // That makes this "outcomes recorded" rather than "entries seen": a package
         // refused whole for a top-level unknown key contributes one outcome and no
         // entries.
-        let total = self.deployed + self.skipped + self.conflicts + self.refused;
+        let total = self.deployed + self.skipped + self.conflicts + self.refused + self.failed;
         OperationSuccess::DotfilesApplied {
             deployed_count: self.deployed,
             skipped_count: self.skipped,
             conflict_count: self.conflicts,
             refused_count: self.refused,
+            failed_count: self.failed,
             orphan_count: self.orphaned,
             environment: environment.to_string(),
             steps_completed: StepCount::new(total, total),
@@ -276,8 +293,8 @@ where
     // Set when the run stops early. Held rather than returned so every stop
     // reports through the one failure below.
     //
-    // Every refusal goes through `ApplyTally::refuse`, which decides whether it
-    // stops the run. A failed state record stops the run whatever
+    // Every refusal and failure goes through `ApplyTally::unfinished`, which
+    // decides whether it stops the run. A failed state record stops the run whatever
     // `stop_on_error` says, because the next entry would fail the same way.
     let mut stopped: Option<Stop> = None;
 
@@ -289,7 +306,12 @@ where
         Scope::Named(_) => &[],
     };
     for refusal in refusals {
-        stopped = tally.refuse(config, token, Stop::Collection(refusal.clone()));
+        stopped = tally.unfinished(
+            Unfinished::Refused,
+            config,
+            token,
+            Stop::Collection(refusal.clone()),
+        );
         if stopped.is_some() {
             break;
         }
@@ -306,7 +328,12 @@ where
     } else {
         let (packages, refused) = refuse_up_front(packages, config.environment(), sender).await;
         for package in &refused {
-            stopped = tally.refuse(config, token, Stop::Package(package.name().to_string()));
+            stopped = tally.unfinished(
+                Unfinished::Refused,
+                config,
+                token,
+                Stop::Package(package.name().to_string()),
+            );
             if stopped.is_some() {
                 break;
             }
@@ -376,7 +403,7 @@ where
             let entry = scoped.entry;
             // Between entries: refuse to start another entry's commands once the
             // user has asked to stop. The *mid-command* case cannot be caught
-            // here: a killed command fails, and `ApplyTally::refuse` reports the
+            // here: a killed command fails, and `ApplyTally::unfinished` reports the
             // cancellation when that failure is counted.
             if token.is_cancelled() {
                 stopped = Some(Stop::Cancelled);
@@ -433,10 +460,11 @@ where
                             SecretOutcome::Deployed => EntryOutcome::Deployed,
                             SecretOutcome::Skipped => EntryOutcome::Skipped,
                             SecretOutcome::Conflicted => EntryOutcome::Conflicted,
-                            SecretOutcome::Failed => EntryOutcome::Refused,
+                            SecretOutcome::Refused => EntryOutcome::Refused,
+                            SecretOutcome::Failed => EntryOutcome::Failed,
                             SecretOutcome::CommandFailed(program) => {
                                 failed_programs.insert(program);
-                                EntryOutcome::Refused
+                                EntryOutcome::Failed
                             }
                         };
                     }
@@ -629,9 +657,8 @@ where
                 {
                     DeployOutcome::Deployed => EntryOutcome::Deployed,
                     DeployOutcome::Previewed => EntryOutcome::Skipped,
-                    // A refusal or a write failure, already reported as whichever it
-                    // was. Here they are the same thing: asked to deploy, did not.
                     DeployOutcome::Refused => EntryOutcome::Refused,
+                    DeployOutcome::Failed => EntryOutcome::Failed,
                     DeployOutcome::Unrecorded(reason) => EntryOutcome::Unrecorded(reason),
                 }
             };
@@ -641,7 +668,17 @@ where
                 EntryOutcome::Skipped => tally.skipped += 1,
                 EntryOutcome::Conflicted => tally.conflicts += 1,
                 EntryOutcome::Refused => {
-                    if let Some(stop) = tally.refuse(config, token, failed()) {
+                    if let Some(stop) =
+                        tally.unfinished(Unfinished::Refused, config, token, failed())
+                    {
+                        stopped = Some(stop);
+                        break 'packages;
+                    }
+                }
+                EntryOutcome::Failed => {
+                    if let Some(stop) =
+                        tally.unfinished(Unfinished::Failed, config, token, failed())
+                    {
                         stopped = Some(stop);
                         break 'packages;
                     }
