@@ -126,23 +126,25 @@ impl DeployState {
         self.deployed.remove(target).is_some()
     }
 
+    /// How `target` and its source have moved since the recorded deploy, or `None`
+    /// when the target holds what was deployed and the source has not changed.
     pub fn detect_drift(
         &self,
         target: &str,
         current_source_checksum: &str,
         current_target_checksum: &str,
-    ) -> DriftType {
+    ) -> Option<DriftType> {
         let Some(entry) = self.deployed.get(target) else {
-            return DriftType::NotTracked;
+            return Some(DriftType::NotTracked);
         };
         match (
             entry.checksum != current_source_checksum,
             entry.checksum != current_target_checksum,
         ) {
-            (false, false) => DriftType::None,
-            (true, false) => DriftType::RepoChanged,
-            (false, true) => DriftType::TargetChanged,
-            (true, true) => DriftType::BothChanged,
+            (false, false) => None,
+            (true, false) => Some(DriftType::RepoChanged),
+            (false, true) => Some(DriftType::TargetChanged),
+            (true, true) => Some(DriftType::BothChanged),
         }
     }
 }
@@ -374,10 +376,7 @@ mod tests {
     fn test_detect_drift_no_change() {
         let mut state = DeployState::empty();
         state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None, None);
-        assert_eq!(
-            state.detect_drift("/t/b.txt", "hash1", "hash1"),
-            DriftType::None
-        );
+        assert_eq!(state.detect_drift("/t/b.txt", "hash1", "hash1"), None);
     }
 
     #[test]
@@ -386,7 +385,7 @@ mod tests {
         state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None, None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash2", "hash1"),
-            DriftType::RepoChanged
+            Some(DriftType::RepoChanged)
         );
     }
 
@@ -396,7 +395,7 @@ mod tests {
         state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None, None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash1", "hash_different"),
-            DriftType::TargetChanged
+            Some(DriftType::TargetChanged)
         );
     }
 
@@ -406,7 +405,7 @@ mod tests {
         state.record_deployment("/t/b.txt", "a/b.txt", "hash1", None, None);
         assert_eq!(
             state.detect_drift("/t/b.txt", "hash2", "hash3"),
-            DriftType::BothChanged
+            Some(DriftType::BothChanged)
         );
     }
 
@@ -415,7 +414,7 @@ mod tests {
         let state = DeployState::empty();
         assert_eq!(
             state.detect_drift("/t/unknown.txt", "hash1", "hash2"),
-            DriftType::NotTracked
+            Some(DriftType::NotTracked)
         );
     }
 
