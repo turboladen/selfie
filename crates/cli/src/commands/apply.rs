@@ -247,10 +247,7 @@ impl InteractiveConflictResolver {
     // before it, each under its own heading.
     fn print_source(&self, source: &DotfileSource, short_target: &str) {
         let _block = self.display.hold_block();
-        if let DotfileSource::File {
-            base: Some(base), ..
-        } = source
-        {
+        if let Some(base) = source.base() {
             force_heading(&self.display, Channel::Stdout, base.kind, &base.directory);
         }
         self.display
@@ -465,7 +462,6 @@ mod tests {
                 directory: "/r/packages".into(),
             }),
             path: "bat/config".into(),
-            vars: Vec::new(),
         };
 
         resolver.print_source(&source, "~/.config/bat/config");
@@ -503,7 +499,6 @@ mod tests {
                 directory: "/r/dotfiles".into(),
             }),
             path: "zshrc".into(),
-            vars: Vec::new(),
         };
 
         let held = display.hold_block();
@@ -520,7 +515,6 @@ mod tests {
         DotfileSource::File {
             base: None,
             path: "creds.tpl".into(),
-            vars: Vec::new(),
         }
     }
 

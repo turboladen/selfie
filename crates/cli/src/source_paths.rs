@@ -24,8 +24,12 @@ pub(crate) fn base_directory_line(kind: BaseKind, directory: &Path) -> String {
 /// known base is shown in full, and a recorded spelling is marked as one.
 pub(crate) fn relative_text(source: &DotfileSource) -> String {
     match source {
-        DotfileSource::File { base: None, .. } => shorten_path(&source.relative().to_string()),
-        DotfileSource::File { .. } | DotfileSource::Command(_) => source.relative().to_string(),
+        DotfileSource::File { base: None, .. } | DotfileSource::Template { base: None, .. } => {
+            shorten_path(&source.relative().to_string())
+        }
+        DotfileSource::File { .. } | DotfileSource::Template { .. } | DotfileSource::Command(_) => {
+            source.relative().to_string()
+        }
         // No base is known, so the line says so: under a heading printed for an
         // earlier line, a bare spelling would read as relative to it.
         DotfileSource::Recorded(spelling) => format!("{spelling} (as recorded, directory unknown)"),
@@ -40,9 +44,7 @@ pub(crate) fn relative_text(source: &DotfileSource) -> String {
 // standalone one, so each heading prints once; were that order to change, a
 // heading would print again instead of a path showing under the wrong one.
 pub(crate) fn label(display: &DisplayManager, channel: Channel, source: &DotfileSource) -> String {
-    if let DotfileSource::File {
-        base: Some(base), ..
-    } = source
+    if let Some(base) = source.base()
         && display.swap_heading(channel, base.kind)
     {
         print_heading(display, channel, base.kind, &base.directory);
@@ -85,7 +87,6 @@ mod tests {
                 directory: PathBuf::from(directory),
             }),
             path: PathBuf::from(path),
-            vars: Vec::new(),
         }
     }
 
@@ -212,7 +213,7 @@ mod tests {
 
     #[test]
     fn a_template_keeps_its_var_names() {
-        let source = DotfileSource::File {
+        let source = DotfileSource::Template {
             base: Some(SourceBase {
                 kind: BaseKind::PackageDirectory,
                 directory: PathBuf::from("/r/p"),
@@ -228,7 +229,6 @@ mod tests {
         let source = DotfileSource::File {
             base: None,
             path: PathBuf::from("/elsewhere/x"),
-            vars: Vec::new(),
         };
         assert_eq!(relative_text(&source), "/elsewhere/x");
     }

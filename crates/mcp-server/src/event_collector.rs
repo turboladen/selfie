@@ -1,9 +1,9 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, BaseKind, CheckResult, DotfileSource, DriftType, EventStream, LinkAtTarget,
-    NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent, RefusalKind,
-    SkipReason,
+    AuditResult, BaseKind, CheckResult, ConflictReport, DotfileSource, DriftType, EventStream,
+    LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
+    RefusalKind, SkipReason, SourceKind,
 };
 use serde_json::Value;
 
@@ -44,6 +44,7 @@ fn failure_json(failure: &OperationFailure) -> Value {
 }
 
 /// `row` with the fields naming where a dotfile's content comes from:
+/// - `kind`: "file", "template", "command" or "recorded";
 /// - `source`: the file's full path with any var names, or the command; null for
 ///   a source recorded before records named their base;
 /// - `base`: "packages" or "dotfiles", the directory the file was read from, or
@@ -53,21 +54,28 @@ fn failure_json(failure: &OperationFailure) -> Value {
 /// - `recorded_source`: for an old record, the source as its spec spelled it.
 fn with_source(mut row: Value, source: &DotfileSource) -> Value {
     let map = row.as_object_mut().expect("constructed as an object");
-    let (base, relative_path, vars) = match source {
-        DotfileSource::File { base, path, vars } => (
-            base.as_ref().map(|base| match base.kind {
-                BaseKind::PackageDirectory => "packages",
-                BaseKind::DotfilesDirectory => "dotfiles",
-            }),
-            base.as_ref().map(|_| path.display().to_string()),
-            vars.clone(),
-        ),
-        DotfileSource::Command(_) | DotfileSource::Recorded(_) => (None, None, Vec::new()),
+    let (path, vars): (Option<&std::path::Path>, &[String]) = match source {
+        DotfileSource::File { path, .. } => (Some(path), &[]),
+        DotfileSource::Template { path, vars, .. } => (Some(path), vars),
+        DotfileSource::Command(_) | DotfileSource::Recorded(_) => (None, &[]),
+    };
+    let base = source.base();
+    let relative_path = base.and(path).map(|path| path.display().to_string());
+    let base = base.map(|base| match base.kind {
+        BaseKind::PackageDirectory => "packages",
+        BaseKind::DotfilesDirectory => "dotfiles",
+    });
+    let kind = match source.kind() {
+        SourceKind::File => "file",
+        SourceKind::Template => "template",
+        SourceKind::Command => "command",
+        SourceKind::Recorded => "recorded",
     };
     let full = match source {
         DotfileSource::Recorded(_) => Value::Null,
         _ => source.to_string().into(),
     };
+    map.insert("kind".into(), kind.into());
     map.insert("source".into(), full);
     map.insert("base".into(), base.into());
     map.insert("relative_path".into(), relative_path.into());
@@ -639,19 +647,37 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             ),
             source,
         )),
+        // A repository file's conflict carries its diff; a secret-bearing one
+        // carries only its line counts, in `hidden`. Each is null in the other.
         PackageEvent::DotfileConflict {
             source,
             target,
-            diff,
+            detail,
             ..
-        } => Some(with_source(
-            serde_json::json!({
-                "type": "dotfile_conflict",
-                "target": target,
-                "diff": diff,
-            }),
-            source,
-        )),
+        } => {
+            let (diff, hidden) = match detail {
+                ConflictReport::Diff(diff) => (Value::from(diff.as_str()), Value::Null),
+                ConflictReport::Hidden {
+                    resolved_lines,
+                    current_lines,
+                } => (
+                    Value::Null,
+                    serde_json::json!({
+                        "resolved_lines": resolved_lines,
+                        "current_lines": current_lines,
+                    }),
+                ),
+            };
+            Some(with_source(
+                serde_json::json!({
+                    "type": "dotfile_conflict",
+                    "target": target,
+                    "diff": diff,
+                    "hidden": hidden,
+                }),
+                source,
+            ))
+        }
         // `drift_type` stays the bare classification an assistant can match on.
         PackageEvent::DotfileDriftDetected {
             target, drift_type, ..
@@ -870,7 +896,6 @@ mod tests {
                 directory: "/home/u/packages".into(),
             }),
             path: path.into(),
-            vars: Vec::new(),
         }
     }
 
@@ -1196,6 +1221,80 @@ mod tests {
 
             assert_eq!(result.data["data"][0]["drift_type"], label, "{drift:?}");
         }
+    }
+
+    // Every dotfile row says what kind of source it names, as the library
+    // states it, with the labels `selfie_dotfiles_list` uses.
+    #[tokio::test]
+    async fn a_dotfile_row_names_its_kind_of_source() {
+        let base = || {
+            Some(selfie::package::event::SourceBase {
+                kind: BaseKind::PackageDirectory,
+                directory: "/home/u/packages".into(),
+            })
+        };
+        for (source, kind) in [
+            (
+                DotfileSource::File {
+                    base: base(),
+                    path: "bat/config".into(),
+                },
+                "file",
+            ),
+            (
+                DotfileSource::Template {
+                    base: base(),
+                    path: "git/config.tmpl".into(),
+                    vars: vec!["email".to_string()],
+                },
+                "template",
+            ),
+            (DotfileSource::Command("op read x".to_string()), "command"),
+            (
+                DotfileSource::Recorded("bat/config".to_string()),
+                "recorded",
+            ),
+        ] {
+            let events = vec![PackageEvent::DotfileDeploying {
+                operation_info: test_op_info(),
+                source,
+                target: "/home/u/.batrc".to_string(),
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            assert_eq!(result.data["data"][0]["kind"], kind);
+        }
+    }
+
+    // A secret-bearing conflict carries its line counts and no diff; a
+    // repository file's carries its diff and no counts.
+    #[tokio::test]
+    async fn a_conflict_row_carries_a_diff_or_hidden_counts() {
+        let conflict = |detail: ConflictReport| PackageEvent::DotfileConflict {
+            operation_info: test_op_info(),
+            source: package_file("bat/config"),
+            target: "/home/u/.batrc".to_string(),
+            detail,
+        };
+        let events = vec![
+            conflict(ConflictReport::Diff("-old\n+new\n".to_string())),
+            conflict(ConflictReport::Hidden {
+                resolved_lines: 1,
+                current_lines: 12,
+            }),
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = &result.data["data"];
+        assert_eq!(rows[0]["diff"], "-old\n+new\n");
+        assert_eq!(rows[0]["hidden"], Value::Null);
+        assert_eq!(rows[1]["diff"], Value::Null);
+        assert_eq!(
+            rows[1]["hidden"],
+            serde_json::json!({ "resolved_lines": 1, "current_lines": 12 })
+        );
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

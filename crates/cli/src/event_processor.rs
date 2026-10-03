@@ -493,7 +493,7 @@ impl EventProcessor {
             PackageEvent::DotfileConflict {
                 source,
                 target,
-                diff,
+                detail,
                 ..
             } => {
                 let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
@@ -503,7 +503,7 @@ impl EventProcessor {
                     .print_warning(format!("  Conflict: {short_target}"));
                 self.display
                     .println(format!("  {short_source} → {short_target}"));
-                self.display.print_diff(&diff);
+                self.display.print_diff(&detail.to_string());
             }
 
             PackageEvent::DotfileDriftDetected {
@@ -1113,7 +1113,6 @@ mod tests {
                     directory: "/r/p".into(),
                 }),
                 path: "bat/config".into(),
-                vars: Vec::new(),
             },
             target: "/h/.config/bat/config".to_string(),
             reason: selfie::package::event::SkipReason::DryRun,

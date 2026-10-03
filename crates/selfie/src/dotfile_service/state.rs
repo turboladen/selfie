@@ -183,7 +183,6 @@ impl DeployEntry {
                     },
                 }),
                 path: self.source.clone().into(),
-                vars: Vec::new(),
             },
             None => DotfileSource::Recorded(self.source.clone()),
         }
