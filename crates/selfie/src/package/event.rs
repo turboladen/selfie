@@ -89,24 +89,37 @@ pub struct SourceBase {
     pub directory: std::path::PathBuf,
 }
 
+/// A file in the user's repository, placed under the configured directory it
+/// lies in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoPath {
+    /// The directory `path` is relative to, or `None` when the file lies under
+    /// neither configured directory, and `path` is then the full path.
+    pub base: Option<SourceBase>,
+    /// The file, relative to `base`.
+    pub path: std::path::PathBuf,
+}
+
+impl RepoPath {
+    /// The file's full path.
+    #[must_use]
+    pub fn absolute(&self) -> std::path::PathBuf {
+        match &self.base {
+            Some(base) => base.directory.join(&self.path),
+            None => self.path.clone(),
+        }
+    }
+}
+
 /// Where a dotfile's content comes from, as events report it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DotfileSource {
     /// A repository file, copied as it is.
-    File {
-        /// The directory `path` is relative to, or `None` when the file lies under
-        /// neither configured directory, and `path` is then the full path.
-        base: Option<SourceBase>,
-        /// The file, relative to `base`.
-        path: std::path::PathBuf,
-    },
+    File(RepoPath),
     /// A repository file rendered by substituting named values.
     Template {
-        /// The directory `path` is relative to, or `None` when the template lies
-        /// under neither configured directory, and `path` is then the full path.
-        base: Option<SourceBase>,
-        /// The template, relative to `base`.
-        path: std::path::PathBuf,
+        /// The template.
+        file: RepoPath,
         /// The names of the values it substitutes.
         vars: Vec<String>,
     },
@@ -131,42 +144,33 @@ pub enum SourceKind {
 }
 
 impl DotfileSource {
+    /// The repository file, when the source is a file or a template.
+    #[must_use]
+    pub fn repo_path(&self) -> Option<&RepoPath> {
+        match self {
+            Self::File(file) | Self::Template { file, .. } => Some(file),
+            Self::Command(_) | Self::Recorded(_) => None,
+        }
+    }
+
     /// The file's full path, when the source is a file or a template.
     #[must_use]
     pub fn absolute(&self) -> Option<std::path::PathBuf> {
-        match self {
-            Self::File {
-                base: Some(base),
-                path,
-            }
-            | Self::Template {
-                base: Some(base),
-                path,
-                ..
-            } => Some(base.directory.join(path)),
-            Self::File { base: None, path }
-            | Self::Template {
-                base: None, path, ..
-            } => Some(path.clone()),
-            Self::Command(_) | Self::Recorded(_) => None,
-        }
+        self.repo_path().map(RepoPath::absolute)
     }
 
     /// The directory a file or template is read from, when it lies under a
     /// configured one.
     #[must_use]
     pub fn base(&self) -> Option<&SourceBase> {
-        match self {
-            Self::File { base, .. } | Self::Template { base, .. } => base.as_ref(),
-            Self::Command(_) | Self::Recorded(_) => None,
-        }
+        self.repo_path().and_then(|file| file.base.as_ref())
     }
 
     /// What kind of source this is.
     #[must_use]
     pub fn kind(&self) -> SourceKind {
         match self {
-            Self::File { .. } => SourceKind::File,
+            Self::File(_) => SourceKind::File,
             Self::Template { .. } => SourceKind::Template,
             Self::Command(_) => SourceKind::Command,
             Self::Recorded(_) => SourceKind::Recorded,
@@ -191,21 +195,10 @@ impl DotfileSource {
         struct Relative<'a>(&'a DotfileSource);
         impl fmt::Display for Relative<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.write(f, |source| match source {
-                    DotfileSource::File {
-                        base: Some(_),
-                        path,
-                    }
-                    | DotfileSource::Template {
-                        base: Some(_),
-                        path,
-                        ..
-                    } => Some(path.clone()),
-                    DotfileSource::File { base: None, .. }
-                    | DotfileSource::Template { base: None, .. }
-                    | DotfileSource::Command(_)
-                    | DotfileSource::Recorded(_) => source.absolute(),
-                })
+                // A file with no base already holds its full path, so `path` is
+                // right whether or not there is one.
+                self.0
+                    .write(f, |source| source.repo_path().map(|file| file.path.clone()))
             }
         }
         Relative(self)
@@ -217,7 +210,7 @@ impl DotfileSource {
         path_of: impl Fn(&Self) -> Option<std::path::PathBuf>,
     ) -> fmt::Result {
         match self {
-            Self::File { .. } => {
+            Self::File(_) => {
                 let path = path_of(self).unwrap_or_default();
                 crate::package::write_file_source(f, &path.display(), &[])
             }

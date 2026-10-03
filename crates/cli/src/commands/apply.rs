@@ -435,7 +435,7 @@ mod tests {
     // block, since it cannot rely on a heading the event processor printed.
     #[test]
     fn the_prompt_names_the_base_directory_inside_its_block() {
-        use selfie::package::event::{BaseKind, SourceBase};
+        use selfie::package::event::{BaseKind, RepoPath, SourceBase};
 
         let display = DisplayManager::new(false);
         let resolver = InteractiveConflictResolver {
@@ -443,13 +443,13 @@ mod tests {
             token: CancellationToken::new(),
             unasked: Arc::default(),
         };
-        let source = DotfileSource::File {
+        let source = DotfileSource::File(RepoPath {
             base: Some(SourceBase {
                 kind: BaseKind::PackageDirectory,
                 directory: "/r/packages".into(),
             }),
             path: "bat/config".into(),
-        };
+        });
 
         resolver.print_source(&source, "~/.config/bat/config");
 
@@ -471,7 +471,7 @@ mod tests {
     // holds, so neither can land inside it.
     #[test]
     fn the_prompt_prints_its_source_as_one_block() {
-        use selfie::package::event::{BaseKind, SourceBase};
+        use selfie::package::event::{BaseKind, RepoPath, SourceBase};
 
         let display = DisplayManager::new(false);
         let resolver = InteractiveConflictResolver {
@@ -479,13 +479,13 @@ mod tests {
             token: CancellationToken::new(),
             unasked: Arc::default(),
         };
-        let source = DotfileSource::File {
+        let source = DotfileSource::File(RepoPath {
             base: Some(SourceBase {
                 kind: BaseKind::DotfilesDirectory,
                 directory: "/r/dotfiles".into(),
             }),
             path: "zshrc".into(),
-        };
+        });
 
         let held = display.hold_block();
         let printer = std::thread::spawn(move || resolver.print_source(&source, "~/.zshrc"));
@@ -498,10 +498,10 @@ mod tests {
     }
 
     fn source() -> DotfileSource {
-        DotfileSource::File {
+        DotfileSource::File(selfie::package::event::RepoPath {
             base: None,
             path: "creds.tpl".into(),
-        }
+        })
     }
 
     // A resolver over `display`, with a token of its own to read back.

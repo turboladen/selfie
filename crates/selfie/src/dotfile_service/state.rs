@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::SelfieConfig,
-    package::event::{BaseKind, DotfileSource, DriftType, SourceBase},
+    package::event::{BaseKind, DotfileSource, DriftType, RepoPath, SourceBase},
 };
 use std::collections::HashMap;
 
@@ -176,7 +176,7 @@ impl DeployEntry {
     /// record names, or the recorded spelling when it names none.
     pub fn event_source(&self, config: &SelfieConfig) -> DotfileSource {
         match self.base {
-            Some(kind) => DotfileSource::File {
+            Some(kind) => DotfileSource::File(RepoPath {
                 base: Some(SourceBase {
                     kind,
                     directory: match kind {
@@ -185,7 +185,7 @@ impl DeployEntry {
                     },
                 }),
                 path: self.source.clone().into(),
-            },
+            }),
             None => DotfileSource::Recorded(self.source.clone()),
         }
     }

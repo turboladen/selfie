@@ -19,7 +19,7 @@ use crate::{
     },
     package::{
         ContentSource, DotfileEntry, Package, ScopedEntry, SpecOrigin, TargetCollision,
-        event::{BaseKind, DotfileSource, EventSender, SourceBase},
+        event::{BaseKind, DotfileSource, EventSender, RepoPath, SourceBase},
     },
     paths::is_within,
 };
@@ -260,7 +260,7 @@ pub(super) fn source_base(config: &SelfieConfig, package: &Package) -> Option<So
 /// lies inside it, and in full otherwise.
 pub(super) fn file_source(base: Option<&SourceBase>, path: &Path) -> DotfileSource {
     let (base, path) = relative_to(base, path);
-    DotfileSource::File { base, path }
+    DotfileSource::File(RepoPath { base, path })
 }
 
 /// How events name the template at `path`, which substitutes `vars`, placed as
@@ -271,7 +271,10 @@ pub(super) fn template_source(
     vars: Vec<String>,
 ) -> DotfileSource {
     let (base, path) = relative_to(base, path);
-    DotfileSource::Template { base, path, vars }
+    DotfileSource::Template {
+        file: RepoPath { base, path },
+        vars,
+    }
 }
 
 // `path` relative to `base` with the base, when it lies inside it, else in
