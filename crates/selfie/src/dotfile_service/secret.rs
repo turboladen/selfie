@@ -100,6 +100,10 @@ pub(super) enum SecretOutcome {
     /// failed command's program so the caller can hold back that program's later
     /// commands in this run.
     CommandFailed(String),
+    /// The run was canceled while the entry's commands ran. Neither refused nor
+    /// failed, and nothing was reported: the entry was not finished, and the run
+    /// ends canceled.
+    Canceled,
 }
 
 /// A phase either lets the apply continue, or ends it with an outcome.
@@ -368,15 +372,21 @@ where
             .as_ref()
             .err()
             .and_then(|e| e.as_refusal(target.entry.target()));
+        // Asked once, so the step's ending and the entry's outcome cannot disagree
+        // about a cancel that lands between them.
+        let cancelled = self.token.is_cancelled();
         let ending = match &resolved {
             Ok(_) => StepEnding::Succeeded,
-            Err(_) if self.token.is_cancelled() => StepEnding::Cancelled,
+            Err(_) if cancelled => StepEnding::Cancelled,
             Err(_) if refusal.is_some() => StepEnding::NotRun,
             Err(_) => StepEnding::Failed,
         };
         self.sender.send_step_ended(step, ending).await;
         match resolved {
             Ok(resolved) => Ok(resolved),
+            // A command killed by the cancel failed only because the user asked
+            // to stop, so the entry is reported as neither refused nor failed.
+            Err(_) if cancelled => Err(SecretOutcome::Canceled),
             Err(e) => {
                 // Safe to surface: `ResolveError`'s Display names commands, var
                 // names, and — on failure only — truncated stderr. It never

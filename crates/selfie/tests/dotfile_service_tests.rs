@@ -7156,6 +7156,17 @@ mod secret_bearing {
                 !rendered.contains("stop_on_error"),
                 "cancellation must not be attributed to stop_on_error, got: {rendered}"
             );
+            // A canceled run is neither refused nor failed: the entry was not
+            // finished, so nothing reports it as either, or as a warning.
+            assert!(
+                !events.iter().any(|e| matches!(
+                    e,
+                    PackageEvent::DotfileFailed { .. }
+                        | PackageEvent::DotfileRefused { .. }
+                        | PackageEvent::Warning { .. }
+                )),
+                "the canceled entry must not be reported: {events:?}"
+            );
         }
 
         // The fourth window: cancellation arriving once the last entry has

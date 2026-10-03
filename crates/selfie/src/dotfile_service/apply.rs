@@ -121,6 +121,8 @@ enum EntryOutcome {
     Refused,
     /// An operation on it failed, and was already reported.
     Failed,
+    /// The run was canceled before the entry finished. Counted as nothing.
+    Canceled,
     /// Written, and the deploy state could not record it. Carries why the run
     /// stops.
     Unrecorded(String),
@@ -403,8 +405,8 @@ where
             let entry = scoped.entry;
             // Between entries: refuse to start another entry's commands once the
             // user has asked to stop. The *mid-command* case cannot be caught
-            // here: a killed command fails, and `ApplyTally::unfinished` reports the
-            // cancellation when that failure is counted.
+            // here: the resolve of a command the cancel killed returns
+            // `SecretOutcome::Canceled`, which stops the run without counting the entry.
             if token.is_cancelled() {
                 stopped = Some(Stop::Cancelled);
                 break 'packages;
@@ -466,6 +468,7 @@ where
                                 failed_programs.insert(program);
                                 EntryOutcome::Failed
                             }
+                            SecretOutcome::Canceled => EntryOutcome::Canceled,
                         };
                     }
                 };
@@ -685,6 +688,10 @@ where
                 }
                 EntryOutcome::Unrecorded(reason) => {
                     stopped = Some(Stop::Unrecorded(reason));
+                    break 'packages;
+                }
+                EntryOutcome::Canceled => {
+                    stopped = Some(Stop::Cancelled);
                     break 'packages;
                 }
             }
