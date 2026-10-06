@@ -430,13 +430,31 @@ impl Package {
 
         // Validate each environment's required fields
         for (env_name, env_config) in self.environments_sorted() {
-            if env_config.install.is_empty() {
-                issues.push(ValidationIssue::error(
+            // A warning, not an error: the spec loads, and `package install`
+            // refuses this environment for having no install command. spec
+            // create's template writes a comment-only install, and must save.
+            if env_config.install().is_none() {
+                issues.push(ValidationIssue::warning(
                     ValidationErrorCategory::RequiredField,
                     &environment_field(env_name, "install"),
-                    "Install command is required",
-                    Some("Add an install command like 'brew install package-name'."),
+                    "The install command is blank, so `package install` refuses this environment unless its check says the package is already installed",
+                    Some("Give it a command, such as 'brew install package-name'."),
                 ));
+            }
+            for (field, written, runnable) in [
+                ("check", env_config.check.as_deref(), env_config.check()),
+                ("audit", env_config.audit.as_deref(), env_config.audit()),
+            ] {
+                // A note, not a warning: a blank optional command means no
+                // command, which is a valid spec.
+                if written.is_some() && runnable.is_none() {
+                    issues.push(ValidationIssue::info(
+                        ValidationErrorCategory::InvalidValue,
+                        &environment_field(env_name, field),
+                        &format!("The {field} command is blank, so selfie treats it as absent"),
+                        Some(&format!("Remove the `{field}` key, or give it a command.")),
+                    ));
+                }
             }
 
             // Validate dependencies (check for empty names)
@@ -1016,7 +1034,7 @@ mod tests {
         assert_eq!(package.dotfiles.len(), 2, "the good entry must survive");
         assert_eq!(
             package.environments.value["test"].install(),
-            "echo i",
+            Some("echo i"),
             "the rest of the package must survive"
         );
 
@@ -2015,8 +2033,68 @@ dotfiles:
 
         let issues = package.validate_environments_contents("test-env");
         assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].level(), ValidationLevel::Error);
-        assert!(issues[0].message.contains("required"));
+        assert_eq!(issues[0].level(), ValidationLevel::Warning);
+        assert!(issues[0].message.contains("install command is blank"));
+    }
+
+    // Every blank spelling of a command is reported, never as an error: the spec
+    // still loads, and spec create's comment-only template has to save. A blank
+    // install is a warning, since install refuses it; a blank check or audit is a
+    // note, since it means no command, which is valid.
+    #[test]
+    fn a_blank_command_is_reported_in_any_spelling() {
+        for blank in ["", "   ", "\t\n", "# TODO: Add install command for x"] {
+            let package = PackageBuilder::default()
+                .name("test-package")
+                .environment("test-env", |b| {
+                    b.install(blank).check_some(blank).audit_some(blank)
+                })
+                .build();
+
+            let issues = package.validate_environments_contents("test-env");
+
+            let fields: Vec<&str> = issues.iter().map(|i| i.field.as_str()).collect();
+            assert_eq!(
+                fields,
+                [
+                    "environments.test-env.install",
+                    "environments.test-env.check",
+                    "environments.test-env.audit"
+                ],
+                "{blank:?}: {issues:?}"
+            );
+            let levels: Vec<ValidationLevel> = issues.iter().map(ValidationIssue::level).collect();
+            assert_eq!(
+                levels,
+                [
+                    ValidationLevel::Warning,
+                    ValidationLevel::Info,
+                    ValidationLevel::Info
+                ],
+                "{blank:?}: {issues:?}"
+            );
+        }
+    }
+
+    // The control: a command with words, a trailing comment included, draws none.
+    #[test]
+    fn a_command_with_words_is_not_blank() {
+        let package = PackageBuilder::default()
+            .name("test-package")
+            .environment("test-env", |b| {
+                b.install("true # note")
+                    .check_some("true")
+                    .audit_some("echo 'open")
+            })
+            .build();
+
+        assert!(
+            package
+                .validate_environments_contents("test-env")
+                .is_empty(),
+            "{:?}",
+            package.validate_environments_contents("test-env")
+        );
     }
 
     // The command-syntax issues a single install command draws, as (level, message).

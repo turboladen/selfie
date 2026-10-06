@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use test_common::{collect_events, create_service_test_service};
 
 use selfie::package::{
-    event::{PackageEvent, StepEnding, StepKind},
+    event::{EnvironmentStatus, PackageEvent, StepEnding, StepKind},
     service::{InstallOptions, PackageService},
 };
 
@@ -180,6 +180,87 @@ async fn a_status_with_nothing_to_check_does_not_wait() {
     let events = collect_events(service.status("bat").await).await;
 
     assert!(waiting(&events).is_empty(), "{events:#?}");
+}
+
+// Control: dependencies and recommends, none with a check command, so nothing
+// runs however much the package depends on.
+#[tokio::test]
+async fn a_status_whose_dependencies_have_no_check_does_not_wait() {
+    let dir = TempDir::new().unwrap();
+    write_spec(
+        &dir,
+        "top",
+        "    install: \"true\"\n    dependencies: [nocheck]\n    recommends: [nocheck2]\n",
+    );
+    write_spec(&dir, "nocheck", "    install: \"true\"\n");
+    write_spec(&dir, "nocheck2", "    install: \"true\"\n");
+    let service = create_service_test_service(&dir);
+
+    let events = collect_events(service.status("top").await).await;
+
+    assert!(waiting(&events).is_empty(), "{events:#?}");
+}
+
+// The step names exactly the packages whose check runs, and the statuses keep
+// the order the spec lists the dependencies in.
+#[tokio::test]
+async fn a_status_names_only_the_checks_it_runs() {
+    let dir = TempDir::new().unwrap();
+    write_spec(
+        &dir,
+        "mixed",
+        "    install: \"true\"\n    check: \"true\"\n    dependencies: [nocheck, withcheck, alsocheck]\n",
+    );
+    write_spec(&dir, "nocheck", "    install: \"true\"\n");
+    write_spec(
+        &dir,
+        "withcheck",
+        "    install: \"true\"\n    check: \"false\"\n",
+    );
+    write_spec(
+        &dir,
+        "alsocheck",
+        "    install: \"true\"\n    check: \"true\"\n",
+    );
+    let service = create_service_test_service(&dir);
+
+    let events = collect_events(service.status("mixed").await).await;
+
+    assert_eq!(
+        waiting(&events),
+        vec!["Running the check commands for mixed, withcheck, alsocheck".to_string()]
+    );
+    // Each status beside its own name: the two checks answer differently, so a
+    // status put back against the wrong dependency shows.
+    let statuses: Vec<(&str, &EnvironmentStatus)> = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } => Some(
+                environment_status
+                    .dependency_statuses
+                    .iter()
+                    .map(|d| (d.name.as_str(), &d.status))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("a status");
+    let names: Vec<&str> = statuses.iter().map(|(name, _)| *name).collect();
+    assert_eq!(names, ["nocheck", "withcheck", "alsocheck"]);
+    assert!(
+        matches!(statuses[0].1, EnvironmentStatus::Unknown(_)),
+        "{statuses:?}"
+    );
+    assert!(
+        matches!(statuses[1].1, EnvironmentStatus::NotInstalled),
+        "{statuses:?}"
+    );
+    assert!(
+        matches!(statuses[2].1, EnvironmentStatus::Installed),
+        "{statuses:?}"
+    );
 }
 
 #[tokio::test]

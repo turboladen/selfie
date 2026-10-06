@@ -54,14 +54,38 @@ pub fn create_test_service_with_config(
     ShellCommandRunner,
     GixGitStatusProvider,
 > {
-    let fs = RealFileSystem;
+    let runner =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
+    service_with_runner(config, runner)
+}
+
+/// Creates a service over the package directory in `temp_dir`, in the "test"
+/// environment, that runs its commands through `runner`.
+#[must_use]
+pub fn create_service_test_service_with_runner<CR>(
+    temp_dir: &TempDir,
+    runner: CR,
+) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, CR, GixGitStatusProvider>
+where
+    CR: selfie::commands::runner::CommandRunner + Clone + Send + Sync + 'static,
+{
+    service_with_runner(service_test_config_with_dir(temp_dir.path()), runner)
+}
+
+// The wiring every helper here shares: repositories over `config`'s directories,
+// and `runner` for commands.
+fn service_with_runner<CR>(
+    config: SelfieConfig,
+    runner: CR,
+) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, CR, GixGitStatusProvider>
+where
+    CR: selfie::commands::runner::CommandRunner + Clone + Send + Sync + 'static,
+{
     let repo = YamlPackageRepository::new(
-        fs,
+        RealFileSystem,
         config.package_directory().clone(),
         SpecOrigin::PackageDirectory,
     );
-    let runner =
-        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
     let dotfiles_repo = test_dotfiles_repository(&config);
     PackageServiceImpl::new(
         repo,

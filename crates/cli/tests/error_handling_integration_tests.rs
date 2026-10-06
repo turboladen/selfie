@@ -275,10 +275,14 @@ fn test_package_check_command_timeout() {
     cmd.args(["package", "check", "timeout-package"]);
 
     // A check that never finished could not answer, so it is a failure, not a
-    // finding.
-    cmd.assert().code(1).stderr(predicate::str::contains(
-        "Command timed out after 1s: sleep 5",
-    ));
+    // finding. It says it timed out, names the setting, and does not call a
+    // command that ran too long an invalid one.
+    cmd.assert()
+        .code(1)
+        .stderr(predicate::str::contains(
+            "`sleep 5` timed out after 1 second, the limit `command_timeout` sets",
+        ))
+        .stderr(predicate::str::contains("Invalid command").not());
 }
 
 #[test]

@@ -37,8 +37,8 @@ pub use runner::FakeCommandRunner;
 pub use scripts::{two_marking_lines, write_executable};
 pub use secrets::assert_secret_free;
 pub use service::{
-    create_cli_service, create_service_test_service, create_test_service,
-    create_test_service_for_env, create_test_service_with_config,
+    create_cli_service, create_service_test_service, create_service_test_service_with_runner,
+    create_test_service, create_test_service_for_env, create_test_service_with_config,
 };
 
 // Re-export commonly used external dependencies for convenience

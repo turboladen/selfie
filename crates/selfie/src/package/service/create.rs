@@ -333,7 +333,8 @@ mod tests {
         let mut progress = ProgressTracker::new(2);
         let package = PackageBuilder::default()
             .name("myapp")
-            .environment("test", |b| b.install(""))
+            .homepage("not a url")
+            .environment("test", |b| b.install("true"))
             .path(temp.path().join("myapp.yml"))
             .build();
 
@@ -352,8 +353,8 @@ mod tests {
             issues
                 .iter()
                 .any(|issue| matches!(issue.level, ValidationLevel::Error)
-                    && issue.field == "environments.test.install"
-                    && issue.message.contains("Install command is required")),
+                    && issue.field == "homepage"
+                    && issue.message.contains("Invalid URL format")),
             "got: {issues:?}"
         );
     }

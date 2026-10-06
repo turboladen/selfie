@@ -290,12 +290,24 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate would before it is written: with errors nothing is written, the call fails, and the result carries every issue under issues; warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way."
+        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate would before it is written: with errors nothing is written, the call fails, and the result carries every issue under issues; warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way."
     )]
     async fn spec_create(
         &self,
         Parameters(params): Parameters<CreateParam>,
     ) -> Result<CallToolResult, McpError> {
+        // The caller named this install command, so a blank one is a mistake to
+        // refuse, not a placeholder to warn about as validation does.
+        if selfie::package::is_blank_command(&params.install) {
+            let payload = event_collector::failure_payload(
+                &selfie::package::event::OperationFailure::Generic(
+                    selfie::package::BLANK_INSTALL_GIVEN.to_string(),
+                ),
+            );
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                serde_json::to_string_pretty(&payload).unwrap_or_default(),
+            )]));
+        }
         let mut environments = selfie::package::Environments::new();
         environments.insert(
             params.environment,
@@ -348,7 +360,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update",
-        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter."
+        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved."
     )]
     async fn spec_update(
         &self,
@@ -523,7 +535,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_check",
-        description = "Check if a package is installed in the current environment by running its configured check command. A check command that exits non-zero for any reason, a kill included, means the package is not installed: a successful call with status 'found'. No check command, selfie's own timeout, or a command that could not be started comes back as an ERROR result. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
+        description = "Check if a package is installed in the current environment by running its configured check command. A check command that exits non-zero for any reason, a kill included, means the package is not installed: a successful call with status 'found'. No check command, selfie's own timeout, or a command that could not be started comes back as an ERROR result. A blank check command (empty, whitespace, or only a comment) counts as no check command. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
     )]
     async fn package_check(
         &self,
@@ -536,7 +548,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_audit",
-        description = "Audit a package's installation sources and detect conflicts (e.g., installed via both npm and homebrew). A conflict, or a package nothing provides, is a successful call with status 'found'. An audit command that fails, or a package with no audit command, comes back as an ERROR result with status 'failed'. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
+        description = "Audit a package's installation sources and detect conflicts (e.g., installed via both npm and homebrew). A conflict, or a package nothing provides, is a successful call with status 'found'. An audit command that fails, or a package with no audit command, comes back as an ERROR result with status 'failed'; a blank audit command (empty, whitespace, or only a comment) counts as none. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
     )]
     async fn package_audit(
         &self,
@@ -559,7 +571,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_install",
-        description = "Install a package using its configured method for the current environment. Its recommended packages install after it: one that fails is reported in a `recommend_failed` row and does not fail the call."
+        description = "Install a package using its configured method for the current environment. Its recommended packages install after it: one that fails is reported in a `recommend_failed` row and does not fail the call. Before anything installs, the package, each dependency and each recommend is judged installable here: one with an install command is; one whose install command is blank (empty, whitespace, or only a comment, such as the `# TODO` placeholder of a spec the CLI's `selfie spec create` wrote) is only if its check command says it is already installed, and that check runs first; one with neither, or with no entry for this environment, is refused with an ERROR result naming it and the package that requires it, and nothing installs."
     )]
     async fn package_install(
         &self,
@@ -1177,8 +1189,9 @@ mod tests {
         let server = server_over(&packages, None);
         let params: CreateParam = serde_json::from_value(serde_json::json!({
             "package": "broken",
-            "install": "",
+            "install": "true",
             "environment": "test",
+            "homepage": "not a url",
         }))
         .unwrap();
 
@@ -1192,8 +1205,34 @@ mod tests {
         assert!(
             issues
                 .iter()
-                .any(|issue| issue["field"] == "environments.test.install"
-                    && issue["level"] == "error"),
+                .any(|issue| issue["field"] == "homepage" && issue["level"] == "error"),
+            "got {json}"
+        );
+    }
+
+    // An install command the caller gave that is blank is refused, and nothing is
+    // written, though validation alone only warns about one.
+    #[tokio::test]
+    async fn spec_create_refuses_a_blank_install_it_was_given() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        let server = server_over(&packages, None);
+        let params: CreateParam = serde_json::from_value(serde_json::json!({
+            "package": "blank",
+            "install": "# TODO",
+            "environment": "test",
+        }))
+        .unwrap();
+
+        let json = tool_json(&server.spec_create(Parameters(params)).await.unwrap());
+
+        assert!(!packages.join("blank.yml").exists(), "got {json}");
+        assert_eq!(json["result"]["status"], "failure", "got {json}");
+        assert!(
+            json["result"]["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("blank")),
             "got {json}"
         );
     }

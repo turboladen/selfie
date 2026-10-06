@@ -47,6 +47,13 @@ where
         package.homepage = Some(unspanned(homepage));
     }
 
+    // Kept for the blank-install check below, since applying the fields moves them.
+    let fields_install = fields.install.clone();
+    let added_install = fields
+        .add_environment
+        .as_ref()
+        .map(|env| env.install.clone());
+
     // Check if environment-scoped fields are present without an environment target
     let has_env_scoped_fields = fields.install.is_some()
         || fields.check.is_some()
@@ -127,6 +134,19 @@ where
         return OperationResult::Failure(
             format!("Environment '{remove_env}' not found in package '{package_name}'").into(),
         );
+    }
+
+    // A blank install the caller gave would be saved over a working command and
+    // refused by every later install, so it is refused here, where it was given,
+    // after the environment it names is known to exist. Validation only warns
+    // about a blank install, because the spec create template writes one on
+    // purpose.
+    let mut given_install = fields_install
+        .iter()
+        .chain(added_install.iter())
+        .map(String::as_str);
+    if given_install.any(crate::package::is_blank_command) {
+        return OperationResult::Failure(crate::package::BLANK_INSTALL_GIVEN.into());
     }
 
     // Step 3: Validate and save
@@ -288,7 +308,7 @@ mod tests {
 
         mock_repo.expect_save_package().returning(|pkg, _| {
             let env = pkg.environments().get("test-env").unwrap();
-            assert_eq!(env.install(), "npm install test");
+            assert_eq!(env.install(), Some("npm install test"));
             assert_eq!(env.check(), None);
             assert_eq!(env.audit(), Some("npm audit test"));
             Ok(())
@@ -333,7 +353,7 @@ mod tests {
         mock_repo.expect_save_package().returning(|pkg, _| {
             assert!(pkg.environments().contains_key("new-env"));
             let env = pkg.environments().get("new-env").unwrap();
-            assert_eq!(env.install(), "apt install test");
+            assert_eq!(env.install(), Some("apt install test"));
             assert_eq!(env.check(), Some("dpkg -l test"));
             Ok(())
         });
@@ -549,7 +569,7 @@ mod tests {
 
         mock_repo.expect_save_package().returning(|pkg, _| {
             let env = pkg.environments().get("test-env").unwrap();
-            assert_eq!(env.install(), "echo fixed");
+            assert_eq!(env.install(), Some("echo fixed"));
             Ok(())
         });
 
@@ -573,5 +593,70 @@ mod tests {
             matches!(result, OperationResult::Success(_)),
             "Fixing test-env should succeed even though other-env still has errors"
         );
+    }
+
+    // A blank install given to update would replace a working command with one
+    // that runs nothing, so it is refused and nothing is saved. The mock expects
+    // no save, so a save fails the test.
+    #[tokio::test]
+    async fn a_blank_install_given_to_update_is_refused() {
+        let blank_set = PackageUpdateFields {
+            environment: Some("test-env".to_string()),
+            install: Some("   ".to_string()),
+            ..Default::default()
+        };
+        // A real install set alongside a blank one added: the blank one is still
+        // caught.
+        let blank_added_beside_a_real_one = PackageUpdateFields {
+            environment: Some("test-env".to_string()),
+            install: Some("brew install real".to_string()),
+            add_environment: Some(AddEnvironment {
+                name: "linux".to_string(),
+                install: String::new(),
+                check: None,
+                audit: None,
+                dependencies: vec![],
+                recommends: vec![],
+            }),
+            ..Default::default()
+        };
+        let blank_added = PackageUpdateFields {
+            add_environment: Some(AddEnvironment {
+                name: "new-env".to_string(),
+                install: "# TODO".to_string(),
+                check: None,
+                audit: None,
+                dependencies: vec![],
+                recommends: vec![],
+            }),
+            ..Default::default()
+        };
+        for fields in [blank_set, blank_added, blank_added_beside_a_real_one] {
+            let mut mock_repo = MockPackageRepository::new();
+            let get_package = GetPackage::from_existing(
+                create_test_package("test-pkg"),
+                PathBuf::from("/test/packages/test-pkg.yml"),
+            );
+            mock_repo
+                .expect_get_package()
+                .return_once(move |_| Ok(get_package));
+            let (sender, _rx) = test_sender();
+            let mut progress = ProgressTracker::new(3);
+
+            let result = handle_update(
+                "test-pkg",
+                fields,
+                &mock_repo,
+                &test_config(),
+                &sender,
+                &mut progress,
+            )
+            .await;
+
+            let OperationResult::Failure(failure) = result else {
+                panic!("a blank install must be refused, got {result:?}");
+            };
+            assert!(failure.to_string().contains("blank"), "{failure}");
+        }
     }
 }
