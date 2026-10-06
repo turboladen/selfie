@@ -8,7 +8,7 @@ use crate::{
         Package, SpecOrigin,
         event::{
             EventSender, OperationFailure, OperationResult, OperationSuccess, Outcome,
-            ValidationResultData, ValidationStatus,
+            ValidationResultData,
         },
         port::{PackageRepoError, PackageRepository},
         service::{
@@ -121,23 +121,19 @@ where
     let issues = all_issues(&package, repo, config.environment());
     // Scored as `spec validate` scores it; only a clean spec with nothing at all to
     // say sends no result.
-    let status = match issues.outcome() {
-        Outcome::Failed => {
-            return OperationResult::Failure(OperationFailure::InvalidSpec {
-                package_name,
-                issues: issue_payload(&issues),
-            });
-        }
-        Outcome::Found => Some(ValidationStatus::HasWarnings),
-        Outcome::Clean if issues.all_issues().is_empty() => None,
-        Outcome::Clean => Some(ValidationStatus::Valid),
-    };
-    if let Some(status) = status {
+    let outcome = issues.outcome();
+    if outcome == Outcome::Failed {
+        return OperationResult::Failure(OperationFailure::InvalidSpec {
+            package_name,
+            issues: issue_payload(&issues),
+        });
+    }
+    if !issues.all_issues().is_empty() {
         sender
             .send_validation_result(ValidationResultData {
                 package_name: package_name.clone(),
                 environment: config.environment().to_string(),
-                status,
+                outcome,
                 issues: issue_payload(&issues),
             })
             .await;
@@ -218,14 +214,12 @@ pub(super) fn creatable_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validation::ValidationLevel;
     use crate::{
         config::SelfieConfigBuilder,
         package::{
             PackageBuilder,
-            event::{
-                OperationContext, OperationFailure, PackageEvent, ValidationLevel,
-                metadata::OperationType,
-            },
+            event::{OperationContext, OperationFailure, PackageEvent, metadata::OperationType},
             port::{
                 MockPackageRepository, PackageError, PackageListError, PackageParseError,
                 PackageRepoError,
@@ -516,7 +510,7 @@ mod tests {
             "got: {results:?}"
         );
         assert!(
-            matches!(results[0].status, ValidationStatus::Valid),
+            results[0].outcome == Outcome::Clean,
             "a notice is not a warning, got: {results:?}"
         );
     }

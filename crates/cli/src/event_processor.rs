@@ -1215,10 +1215,11 @@ mod tests {
     #[tokio::test]
     async fn invalid_spec_prints_each_issue_on_stderr() {
         use crate::display_manager::Channel;
-        use selfie::package::event::{OperationFailure, ValidationIssueData, ValidationLevel};
+        use selfie::package::event::{OperationFailure, ValidationIssueData};
+        use selfie::validation::ValidationLevel;
 
         let issue = |level, field: &str| ValidationIssueData {
-            category: "CommandSyntax".to_string(),
+            category: selfie::validation::ValidationErrorCategory::CommandSyntax,
             field: field.to_string(),
             message: "Unmatched double quote in command".to_string(),
             level,

@@ -5,6 +5,7 @@ use selfie::package::event::{
     LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
     RefusalKind, SkipReason, SourceKind,
 };
+use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
 
 pub struct EventCollectorResult {
@@ -487,7 +488,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         } => {
             let issues: Vec<Value> = validation_result.issues.iter().map(issue_json).collect();
             Some(
-                serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "status": format!("{}", validation_result.status), "issues": issues }),
+                serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "outcome": outcome_label(validation_result.outcome), "issues": issues }),
             )
         }
         PackageEvent::RemovalDependencyInfo {
@@ -812,23 +813,97 @@ fn git_status_label(status: Option<&selfie::package::git::GitFileStatus>) -> Val
 /// One validation issue as JSON, for a validation result and for a spec refused
 /// as invalid alike.
 fn issue_json(issue: &selfie::package::event::ValidationIssueData) -> Value {
+    issue_row(
+        &issue.level,
+        validation_category_label(issue.category),
+        &issue.field,
+        &issue.message,
+        issue.suggestion.as_deref(),
+        issue.location,
+    )
+}
+
+/// Renders one validation issue as `level`, `category`, `field`, `message`,
+/// `suggestion`, and `line` and `column`, which are null when the issue has no
+/// place in the file.
+fn issue_row(
+    level: &selfie::validation::ValidationLevel,
+    category: &str,
+    field: &str,
+    message: &str,
+    suggestion: Option<&str>,
+    location: Option<selfie::yaml::SourceLocation>,
+) -> Value {
     serde_json::json!({
-        "level": validation_level_label(&issue.level),
-        "category": &issue.category,
-        "field": &issue.field,
-        "message": &issue.message,
-        "suggestion": &issue.suggestion,
-        "location": &issue.location,
+        "level": validation_level_label(level),
+        "category": category,
+        "field": field,
+        "message": message,
+        "suggestion": suggestion,
+        "line": location.map(|at| at.line()),
+        "column": location.map(|at| at.column()),
     })
 }
 
-/// Label a validation issue's severity for an assistant reading the JSON.
-///
-/// Without this the three levels are indistinguishable, and an informational
-/// notice — which never makes a package invalid — reads as a defect alongside a
-/// `status` that says the package validated successfully.
-fn validation_level_label(level: &selfie::package::event::ValidationLevel) -> &'static str {
-    use selfie::package::event::ValidationLevel;
+/// Renders each changed spec `sync push` refused as its `path` and its
+/// `issues`, each issue with the fields [`issue_row`] gives it.
+pub(crate) fn push_failures_json(
+    failures: &[selfie::sync_service::PackageValidationFailure],
+) -> Vec<Value> {
+    failures
+        .iter()
+        .map(|failure| {
+            let issues: Vec<Value> = failure
+                .issues
+                .iter()
+                .map(|issue| {
+                    issue_row(
+                        &issue.level,
+                        push_category_label(issue.category),
+                        &issue.field,
+                        &issue.message,
+                        issue.suggestion.as_deref(),
+                        issue.location,
+                    )
+                })
+                .collect();
+            serde_json::json!({ "path": &failure.path, "issues": issues })
+        })
+        .collect()
+}
+
+/// Labels the category of an issue `selfie sync push` reports.
+fn push_category_label(category: selfie::sync_service::PushIssueCategory) -> &'static str {
+    use selfie::sync_service::PushIssueCategory;
+
+    match category {
+        PushIssueCategory::Validation(category) => validation_category_label(category),
+        PushIssueCategory::NameCollision => "name_collision",
+        PushIssueCategory::FileError => "file_error",
+        PushIssueCategory::ParseError => "parse_error",
+        PushIssueCategory::ApplyRefusal => "apply_refusal",
+    }
+}
+
+/// Labels the category of an issue `selfie spec validate` reports.
+fn validation_category_label(category: ValidationErrorCategory) -> &'static str {
+    match category {
+        ValidationErrorCategory::RequiredField => "required_field",
+        ValidationErrorCategory::InvalidValue => "invalid_value",
+        ValidationErrorCategory::Environment => "environment",
+        ValidationErrorCategory::CommandSyntax => "command_syntax",
+        ValidationErrorCategory::UrlFormat => "url_format",
+        ValidationErrorCategory::PathFormat => "path_format",
+        ValidationErrorCategory::Advisory => "advisory",
+    }
+}
+
+/// Label a validation issue's severity.
+fn validation_level_label(level: &selfie::validation::ValidationLevel) -> &'static str {
+    // Without a label for the level, an assistant cannot tell the three levels
+    // apart, and an informational notice, which never makes a package invalid,
+    // reads as a defect beside a clean `outcome`.
+    use selfie::validation::ValidationLevel;
 
     match level {
         ValidationLevel::Error => "error",
@@ -841,7 +916,6 @@ fn check_status_label(result: &CheckResult) -> &'static str {
     match result {
         CheckResult::Success { .. } => "installed",
         CheckResult::Failed { .. } => "not installed",
-        CheckResult::CommandNotFound => "check command not found",
         CheckResult::NoCheckCommand => "no check command defined",
         CheckResult::Error(_) => "error",
         CheckResult::TimedOut(_) => "timed out",
@@ -1298,6 +1372,137 @@ mod tests {
             rows[1]["hidden"],
             serde_json::json!({ "resolved_lines": 1, "current_lines": 12 })
         );
+    }
+
+    // An issue's location reaches an assistant as two numbers, as a skipped
+    // spec's does, and as nulls when the issue has none.
+    #[tokio::test]
+    async fn a_validation_issue_carries_its_location_as_numbers() {
+        let issue = |location| selfie::package::event::ValidationIssueData {
+            category: ValidationErrorCategory::RequiredField,
+            field: "name".to_string(),
+            message: "m".to_string(),
+            level: selfie::validation::ValidationLevel::Error,
+            suggestion: None,
+            location,
+        };
+        let events = vec![PackageEvent::ValidationResultCompleted {
+            operation_info: test_op_info(),
+            validation_result: selfie::package::event::ValidationResultData {
+                package_name: "bat".to_string(),
+                environment: "test".to_string(),
+                outcome: Outcome::Failed,
+                issues: vec![issue(selfie::yaml::SourceLocation::new(5, 15)), issue(None)],
+            },
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let issues = &result.data["data"][0]["issues"];
+        assert_eq!(issues[0]["line"], 5);
+        assert_eq!(issues[0]["column"], 15);
+        assert_eq!(issues[1]["line"], Value::Null);
+        assert_eq!(issues[1]["column"], Value::Null);
+        assert!(issues[0].get("location").is_none(), "{issues}");
+    }
+
+    // A validation issue's category reaches an assistant as a label, apart from
+    // the words the terminal shows.
+    #[test]
+    fn a_category_is_a_snake_case_label() {
+        use selfie::sync_service::PushIssueCategory;
+
+        // The label set is the MCP contract, so each label is pinned.
+        let validation = [
+            (ValidationErrorCategory::RequiredField, "required_field"),
+            (ValidationErrorCategory::InvalidValue, "invalid_value"),
+            (ValidationErrorCategory::Environment, "environment"),
+            (ValidationErrorCategory::CommandSyntax, "command_syntax"),
+            (ValidationErrorCategory::UrlFormat, "url_format"),
+            (ValidationErrorCategory::PathFormat, "path_format"),
+            (ValidationErrorCategory::Advisory, "advisory"),
+        ];
+        for (category, label) in validation {
+            assert_eq!(validation_category_label(category), label, "{category:?}");
+            assert_eq!(
+                push_category_label(PushIssueCategory::Validation(category)),
+                label
+            );
+        }
+        let push = [
+            (PushIssueCategory::NameCollision, "name_collision"),
+            (PushIssueCategory::FileError, "file_error"),
+            (PushIssueCategory::ParseError, "parse_error"),
+            (PushIssueCategory::ApplyRefusal, "apply_refusal"),
+        ];
+        for (category, label) in push {
+            assert_eq!(push_category_label(category), label, "{category:?}");
+        }
+    }
+
+    // A refused push names each file and each issue as fields.
+    #[test]
+    fn a_push_failure_names_its_file_and_issues() {
+        use selfie::sync_service::{
+            PackageValidationFailure, PackageValidationIssue, PushIssueCategory,
+        };
+
+        let failures = vec![PackageValidationFailure {
+            path: "packages/bat.yml".to_string(),
+            issues: vec![PackageValidationIssue {
+                level: selfie::validation::ValidationLevel::Error,
+                category: PushIssueCategory::ParseError,
+                field: "-".to_string(),
+                message: "unclosed bracket".to_string(),
+                location: selfie::yaml::SourceLocation::new(2, 1),
+                suggestion: None,
+            }],
+        }];
+
+        let json = push_failures_json(&failures);
+
+        assert_eq!(
+            json,
+            vec![serde_json::json!({
+                "path": "packages/bat.yml",
+                "issues": [{
+                    "level": "error",
+                    "category": "parse_error",
+                    "field": "-",
+                    "message": "unclosed bracket",
+                    "suggestion": null,
+                    "line": 2,
+                    "column": 1,
+                }],
+            })]
+        );
+    }
+
+    // Each spec's row carries its own verdict, so a run over several keeps a
+    // per-spec answer beside the run's aggregate.
+    #[tokio::test]
+    async fn a_validation_row_carries_its_own_outcome() {
+        let row = |name: &str, outcome| PackageEvent::ValidationResultCompleted {
+            operation_info: test_op_info(),
+            validation_result: selfie::package::event::ValidationResultData {
+                package_name: name.to_string(),
+                environment: "test".to_string(),
+                outcome,
+                issues: Vec::new(),
+            },
+        };
+        let events = vec![
+            row("a", Outcome::Clean),
+            row("b", Outcome::Found),
+            row("c", Outcome::Failed),
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = result.data["data"].as_array().expect("data is an array");
+        let outcomes: Vec<&Value> = rows.iter().map(|r| &r["outcome"]).collect();
+        assert_eq!(outcomes, ["clean", "found", "failed"]);
+        assert!(rows.iter().all(|r| r.get("status").is_none()), "{rows:?}");
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

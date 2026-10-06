@@ -1010,8 +1010,10 @@ pub enum OperationSuccess {
     PackageValidated {
         package_name: String,
         environment: String,
-        status: ValidationStatus,
-        /// Errors found; nonzero exactly when `status` is `HasErrors`.
+        /// How the validation scored: failed with errors, found warnings, or
+        /// clean.
+        outcome: Outcome,
+        /// Errors found; nonzero exactly when `outcome` is `Failed`.
         error_count: usize,
         warning_count: Option<usize>,
         steps_completed: StepCount,
@@ -1343,7 +1345,7 @@ impl std::fmt::Display for OperationFailure {
             } => {
                 let errors = issues
                     .iter()
-                    .filter(|issue| matches!(issue.level, ValidationLevel::Error))
+                    .filter(|issue| issue.level == crate::validation::ValidationLevel::Error)
                     .count();
                 write!(
                     f,
@@ -1540,24 +1542,24 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::PackageValidated {
                 package_name,
                 environment,
-                status,
+                outcome,
                 error_count,
                 warning_count,
                 ..
-            } => match status {
-                ValidationStatus::HasErrors => write!(
+            } => match outcome {
+                Outcome::Failed => write!(
                     f,
                     "Package '{package_name}' validation failed with {error_count} error(s) and {} warning(s) in environment '{environment}'",
                     warning_count.unwrap_or(0)
                 ),
-                ValidationStatus::HasWarnings => write!(
+                Outcome::Found => write!(
                     f,
                     "Package '{package_name}' validation completed with {} warning(s) in environment '{environment}'",
                     warning_count.unwrap_or(0)
                 ),
-                ValidationStatus::Valid => write!(
+                Outcome::Clean => write!(
                     f,
-                    "Package '{package_name}' validation completed {status} in environment '{environment}'"
+                    "Package '{package_name}' validation completed successfully in environment '{environment}'"
                 ),
             },
             OperationSuccess::SpecInfoRetrieved { package_name, .. } => write!(
@@ -1862,7 +1864,7 @@ impl OperationSuccess {
     pub fn package_validated(
         package_name: String,
         environment: String,
-        status: ValidationStatus,
+        outcome: Outcome,
         error_count: usize,
         warning_count: Option<usize>,
         steps_completed: StepCount,
@@ -1870,7 +1872,7 @@ impl OperationSuccess {
         OperationSuccess::PackageValidated {
             package_name,
             environment,
-            status,
+            outcome,
             error_count,
             warning_count,
             steps_completed,
@@ -2264,7 +2266,7 @@ impl OperationSuccess {
                 CheckVerdict::Installed => Outcome::Clean,
                 CheckVerdict::NotInstalled { .. } => Outcome::Found,
             },
-            OperationSuccess::PackageValidated { status, .. } => status.outcome(),
+            OperationSuccess::PackageValidated { outcome, .. } => *outcome,
             // A spec that could not be read, or a name several files claim, is an
             // error like a spec with errors: the run could not validate it.
             OperationSuccess::SpecsValidated {
@@ -3354,8 +3356,6 @@ pub enum CheckResult {
         stderr: String,
         exit_code: Option<i32>,
     },
-    #[strum(to_string = "but command not found")]
-    CommandNotFound,
     #[strum(to_string = "but no check command defined")]
     NoCheckCommand,
     #[strum(to_string = "with errors")]
@@ -3425,51 +3425,22 @@ pub enum AuditResult {
 pub struct ValidationResultData {
     pub package_name: String,
     pub environment: String,
-    pub status: ValidationStatus,
+    /// How this spec's validation scored: failed with errors, found warnings,
+    /// or clean. A notice alone leaves it clean.
+    pub outcome: Outcome,
     pub issues: Vec<ValidationIssueData>,
-}
-
-/// Overall validation status
-#[derive(Debug, Clone, strum::Display)]
-pub enum ValidationStatus {
-    #[strum(to_string = "successfully")]
-    Valid,
-    #[strum(to_string = "with warnings")]
-    HasWarnings,
-    #[strum(to_string = "with errors")]
-    HasErrors,
-}
-
-impl ValidationStatus {
-    /// How a validation with this status scores; see [`Outcome`].
-    #[must_use]
-    pub fn outcome(&self) -> Outcome {
-        match self {
-            ValidationStatus::Valid => Outcome::Clean,
-            ValidationStatus::HasWarnings => Outcome::Found,
-            ValidationStatus::HasErrors => Outcome::Failed,
-        }
-    }
 }
 
 /// Individual validation issue
 #[derive(Debug, Clone)]
 pub struct ValidationIssueData {
-    pub category: String,
+    pub category: crate::validation::ValidationErrorCategory,
     pub field: String,
     pub message: String,
-    pub level: ValidationLevel,
+    pub level: crate::validation::ValidationLevel,
     pub suggestion: Option<String>,
-    /// Source location (e.g., `"line 17 column 1"`) when available from parse errors.
-    pub location: Option<String>,
-}
-
-/// Validation issue level
-#[derive(Debug, Clone)]
-pub enum ValidationLevel {
-    Error,
-    Warning,
-    Info,
+    /// Where in the file the issue is, when the file says.
+    pub location: Option<crate::yaml::SourceLocation>,
 }
 
 /// Log levels for the `EventSender` log method
@@ -3647,10 +3618,6 @@ mod tests {
             "with failures"
         );
         assert_eq!(
-            format!("{}", CheckResult::CommandNotFound),
-            "but command not found"
-        );
-        assert_eq!(
             format!("{}", CheckResult::NoCheckCommand),
             "but no check command defined"
         );
@@ -3658,16 +3625,6 @@ mod tests {
             format!("{}", CheckResult::Error("test".to_string())),
             "with errors"
         );
-    }
-
-    #[test]
-    fn test_validation_status_display() {
-        assert_eq!(format!("{}", ValidationStatus::Valid), "successfully");
-        assert_eq!(
-            format!("{}", ValidationStatus::HasWarnings),
-            "with warnings"
-        );
-        assert_eq!(format!("{}", ValidationStatus::HasErrors), "with errors");
     }
 
     #[test]
@@ -3761,7 +3718,7 @@ mod tests {
                 OperationSuccess::PackageValidated {
                     package_name: name(),
                     environment: env(),
-                    status: ValidationStatus::HasErrors,
+                    outcome: Outcome::Failed,
                     error_count: 2,
                     warning_count: Some(1),
                     steps_completed: steps,
@@ -3773,7 +3730,7 @@ mod tests {
                 OperationSuccess::PackageValidated {
                     package_name: name(),
                     environment: env(),
-                    status: ValidationStatus::HasWarnings,
+                    outcome: Outcome::Found,
                     error_count: 0,
                     warning_count: Some(1),
                     steps_completed: steps,
@@ -3784,7 +3741,7 @@ mod tests {
                 OperationSuccess::PackageValidated {
                     package_name: name(),
                     environment: env(),
-                    status: ValidationStatus::Valid,
+                    outcome: Outcome::Clean,
                     error_count: 0,
                     warning_count: None,
                     steps_completed: steps,
@@ -4018,11 +3975,11 @@ mod tests {
         }
     }
 
-    fn validated(status: ValidationStatus) -> OperationSuccess {
+    fn validated(outcome: Outcome) -> OperationSuccess {
         OperationSuccess::PackageValidated {
             package_name: "p".to_string(),
             environment: "test".to_string(),
-            status,
+            outcome,
             error_count: 0,
             warning_count: None,
             steps_completed: StepCount::new(1, 1),
@@ -4127,19 +4084,15 @@ mod tests {
                 audited(AuditResult::NoAuditCommand),
                 Outcome::Failed,
             ),
-            (
-                "validated",
-                validated(ValidationStatus::Valid),
-                Outcome::Clean,
-            ),
+            ("validated", validated(Outcome::Clean), Outcome::Clean),
             (
                 "validated with warnings",
-                validated(ValidationStatus::HasWarnings),
+                validated(Outcome::Found),
                 Outcome::Found,
             ),
             (
                 "validated with errors",
-                validated(ValidationStatus::HasErrors),
+                validated(Outcome::Failed),
                 Outcome::Failed,
             ),
             ("all validated", specs_validated(0, 0), Outcome::Clean),

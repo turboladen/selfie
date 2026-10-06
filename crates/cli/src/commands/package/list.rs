@@ -84,7 +84,6 @@ fn format_list_item(
     let result = match &package_item.status {
         Some(event::CheckResult::Success { .. }) => ListItemResult::Success,
         Some(event::CheckResult::Failed { .. })
-        | Some(event::CheckResult::CommandNotFound)
         | Some(event::CheckResult::Error(_) | event::CheckResult::TimedOut(_)) => {
             ListItemResult::Failure
         }
@@ -401,13 +400,6 @@ mod tests {
         let result =
             status_style::format_check_result(Some(&event::CheckResult::NoCheckCommand), false);
         assert_eq!(result, "No check");
-    }
-
-    #[test]
-    fn test_format_check_status_cmd_not_found() {
-        let result =
-            status_style::format_check_result(Some(&event::CheckResult::CommandNotFound), false);
-        assert_eq!(result, "Cmd not found");
     }
 
     #[test]

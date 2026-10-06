@@ -8,7 +8,7 @@ use crate::{
         Package,
         event::{
             EventSender, OperationResult, OperationSuccess, Outcome, ValidationIssueData,
-            ValidationLevel, ValidationResultData, ValidationStatus,
+            ValidationResultData,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -51,28 +51,25 @@ where
 
 /// Convert issues into the event payload, errors first, then warnings, then
 /// informational notices.
-///
-/// Shared with `validate_all`: one conversion, so a newly added level cannot be
-/// wired into one command and forgotten in the other.
 pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueData> {
-    let level_of = |issue: &ValidationIssue| match issue.level() {
-        crate::validation::ValidationLevel::Error => ValidationLevel::Error,
-        crate::validation::ValidationLevel::Warning => ValidationLevel::Warning,
-        crate::validation::ValidationLevel::Info => ValidationLevel::Info,
-    };
-
-    issues
-        .errors()
+    // Ranked by an exhaustive match, so a level added later fails the build here
+    // rather than dropping out of every command's payload. The sort is stable,
+    // so issues of one level keep their order.
+    let mut ordered: Vec<_> = issues.all_issues().iter().collect();
+    ordered.sort_by_key(|issue| match issue.level() {
+        crate::validation::ValidationLevel::Error => 0,
+        crate::validation::ValidationLevel::Warning => 1,
+        crate::validation::ValidationLevel::Info => 2,
+    });
+    ordered
         .into_iter()
-        .chain(issues.warnings())
-        .chain(issues.infos())
         .map(|issue| ValidationIssueData {
-            category: format!("{:?}", issue.category()),
+            category: issue.category(),
             field: issue.field().to_string(),
             message: issue.message().to_string(),
-            level: level_of(issue),
+            level: issue.level(),
             suggestion: issue.suggestion().map(std::string::ToString::to_string),
-            location: issue.location().map(str::to_string),
+            location: issue.location(),
         })
         .collect()
 }
@@ -128,26 +125,22 @@ where
     // Convert validation issues to structured data
     let validation_issues = issue_payload(issues);
 
-    // Determine overall validation status
-    let status = match issues.outcome() {
-        Outcome::Failed => ValidationStatus::HasErrors,
-        Outcome::Found => ValidationStatus::HasWarnings,
-        Outcome::Clean => ValidationStatus::Valid,
-    };
+    // Scored once, here, from the issues; every consumer reads this value.
+    let outcome = issues.outcome();
 
     // Send structured validation result
     let validation_result = ValidationResultData {
         package_name: package_name.to_string(),
         environment: config.environment().to_string(),
-        status: status.clone(),
+        outcome,
         issues: validation_issues,
     };
 
     sender.send_validation_result(validation_result).await;
 
     // Return appropriate operation result
-    match status {
-        ValidationStatus::Valid => {
+    match outcome {
+        Outcome::Clean => {
             sender
                 .send_debug("Package definition is valid for the current environment")
                 .await;
@@ -155,18 +148,18 @@ where
             OperationResult::Success(OperationSuccess::package_validated(
                 package_name.to_string(),
                 config.environment().to_string(),
-                ValidationStatus::Valid,
+                Outcome::Clean,
                 0,
                 None,
                 (progress.current_step(), progress.total_steps()).into(),
             ))
         }
-        ValidationStatus::HasWarnings => {
+        Outcome::Found => {
             let warning_count = issues.warnings().len();
             OperationResult::Success(OperationSuccess::package_validated(
                 package_name.to_string(),
                 config.environment().to_string(),
-                ValidationStatus::HasWarnings,
+                Outcome::Found,
                 0,
                 Some(warning_count),
                 (progress.current_step(), progress.total_steps()).into(),
@@ -174,15 +167,43 @@ where
         }
         // A spec with errors is still a validation that answered: its outcome,
         // Failed, is what makes the run fail.
-        ValidationStatus::HasErrors => {
-            OperationResult::Success(OperationSuccess::package_validated(
-                package_name.to_string(),
-                config.environment().to_string(),
-                ValidationStatus::HasErrors,
-                issues.errors().len(),
-                Some(issues.warnings().len()),
-                (progress.current_step(), progress.total_steps()).into(),
-            ))
-        }
+        Outcome::Failed => OperationResult::Success(OperationSuccess::package_validated(
+            package_name.to_string(),
+            config.environment().to_string(),
+            Outcome::Failed,
+            issues.errors().len(),
+            Some(issues.warnings().len()),
+            (progress.current_step(), progress.total_steps()).into(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::validation::{ValidationErrorCategory, ValidationIssue};
+
+    // The payload lists errors, then warnings, then notices, and keeps the order
+    // issues of one level arrived in.
+    #[test]
+    fn issues_go_out_by_level_keeping_their_order() {
+        type Make = fn(ValidationErrorCategory, &str, &str, Option<&str>) -> ValidationIssue;
+        let issue =
+            |make: Make, field| make(ValidationErrorCategory::InvalidValue, field, "m", None);
+        let issues: ValidationIssues = vec![
+            issue(ValidationIssue::info, "i1"),
+            issue(ValidationIssue::warning, "w1"),
+            issue(ValidationIssue::error, "e1"),
+            issue(ValidationIssue::warning, "w2"),
+            issue(ValidationIssue::error, "e2"),
+        ]
+        .into();
+
+        let fields: Vec<String> = issue_payload(&issues)
+            .into_iter()
+            .map(|issue| issue.field)
+            .collect();
+
+        assert_eq!(fields, ["e1", "e2", "w1", "w2", "i1"]);
     }
 }
