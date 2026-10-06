@@ -798,13 +798,16 @@ mod tests {
 
         let environments = prompt_environments("tool", &config, &display).unwrap();
 
-        let installs: Vec<(&str, &str)> = environments
+        let installs: Vec<(&str, Option<&str>)> = environments
             .iter()
             .map(|(name, env)| (name.as_str(), env.install()))
             .collect();
         assert_eq!(
             installs,
-            vec![("work", "install-work"), ("home", "install-home")]
+            vec![
+                ("work", Some("install-work")),
+                ("home", Some("install-home"))
+            ]
         );
     }
 
