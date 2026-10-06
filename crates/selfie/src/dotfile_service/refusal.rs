@@ -165,7 +165,9 @@ pub(super) enum TargetState {
 pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetState {
     match filesystem.read_file_no_follow(target) {
         Ok(TargetRead::Bytes(bytes)) => TargetState::Readable(bytes),
-        Ok(TargetRead::Absent) => TargetState::Absent,
+        // Not yet told apart from nothing at the target: a write there fails, as
+        // a write to a target with nothing above it does not.
+        Ok(TargetRead::Absent | TargetRead::BelowNonDirectory { .. }) => TargetState::Absent,
         Ok(TargetRead::Directory) => TargetState::Directory,
         Ok(TargetRead::Link { points_to }) => TargetState::Link(Link {
             path: target.path().to_path_buf(),
@@ -176,6 +178,9 @@ pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPa
                 path: target.path().to_path_buf(),
                 kind,
             })
+        }
+        Ok(TargetRead::Unreadable(error)) => {
+            TargetState::Unreadable(FileSystemError::IoError(error))
         }
         Err(error) => TargetState::Unreadable(error),
     }
@@ -246,7 +251,7 @@ pub(super) fn refusal_warning(source: &str, refusal: &FileSystemError) -> String
 pub(super) fn unreadable_target_refusal(
     source: &str,
     target: &TargetPath,
-    error: &FileSystemError,
+    error: &dyn std::fmt::Display,
 ) -> String {
     format!(
         "Skipping '{source}': target '{}' could not be read: {error}",
