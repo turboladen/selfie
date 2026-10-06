@@ -21,13 +21,16 @@ use crate::{
     },
     package::{
         DotfileEntry,
-        event::{ConflictReport, EventSender, LinkAtTarget, SkipReason, StepEnding},
+        event::{ConflictReport, EventSender, LinkAtTarget, Refusal, SkipReason, StepEnding},
     },
 };
 
 use super::classify::{SecretEntry, secret_target_link};
 use super::port::ApplyOptions;
-use super::refusal::{Link, TargetState, classify_link, read_target_state, readable_or_refusal};
+use super::refusal::{
+    Link, TargetState, classify_link, classify_write, read_target_state, readable_or_refusal,
+    refusal_for,
+};
 
 /// The program a command runs: its first word after any leading `NAME=value`
 /// assignments, as the shell reads it, or `None` for a command the shell would
@@ -112,7 +115,7 @@ enum Found {
 ///
 /// Worded as what happened, and sent only after the write succeeds, so it can
 /// never precede a refusal or a failed write.
-// Deliberately not `refusal_warning`: nothing was refused. The entry deployed, and
+// Deliberately not `refusal_for`: nothing was refused. The entry deployed, and
 // wording it as a refusal would have the user looking for a failure that is not
 // there.
 //
@@ -143,6 +146,8 @@ pub(super) struct SecretApply<'a, F, CR> {
     /// The package file's directory. Repository sources resolve against it and
     /// provider commands run in it.
     pub(super) base_dir: &'a Path,
+    /// The name of the package the entries belong to, for a refusal to name.
+    pub(super) package: &'a str,
     pub(super) filesystem: &'a F,
     pub(super) runner: &'a CR,
     pub(super) config: &'a SelfieConfig,
@@ -244,7 +249,7 @@ where
         match readable_or_refusal(source, &target.path, state) {
             Ok(current) => Ok(Found::Current(current)),
             Err(refusal) => {
-                self.sender.send_warning(refusal).await;
+                self.refuse(source, refusal).await;
                 Err(SecretOutcome::Failed)
             }
         }
@@ -257,10 +262,18 @@ where
         match secret_target_link(self.filesystem, source, path) {
             Ok(link) => Ok(link),
             Err(refusal) => {
-                self.sender.send_warning(refusal).await;
+                self.refuse(source, refusal).await;
                 Err(SecretOutcome::Failed)
             }
         }
+    }
+
+    /// Report `refusal` of the entry whose target the package file spells
+    /// `entry_target`.
+    async fn refuse(&self, entry_target: &str, refusal: Refusal) {
+        self.sender
+            .send_dotfile_refused(self.package, entry_target, refusal)
+            .await;
     }
 
     /// End a dry run here, before anything is resolved.
@@ -322,9 +335,16 @@ where
             self.token,
         )
         .await;
+        // A template that escapes or cannot be read is refused before any binding
+        // runs, so the step ran nothing.
+        let refusal = resolved
+            .as_ref()
+            .err()
+            .and_then(|e| e.as_refusal(target.entry.target()));
         let ending = match &resolved {
             Ok(_) => StepEnding::Succeeded,
             Err(_) if self.token.is_cancelled() => StepEnding::Cancelled,
+            Err(_) if refusal.is_some() => StepEnding::NotRun,
             Err(_) => StepEnding::Failed,
         };
         self.sender.send_step_ended(step, ending).await;
@@ -334,12 +354,21 @@ where
                 // Safe to surface: `ResolveError`'s Display names commands, var
                 // names, and — on failure only — truncated stderr. It never
                 // carries resolved content.
-                self.sender
-                    .send_warning(format!(
-                        "Failed to resolve '{}': {e}",
-                        target.entry.target()
-                    ))
-                    .await;
+                //
+                // A template that escapes or cannot be read is a condition of the
+                // entry's files, and is refused as classify refuses it. The resolve
+                // reads the template before any binding runs, so no command ran.
+                match refusal {
+                    Some(refusal) => self.refuse(target.entry.target(), refusal).await,
+                    None => {
+                        self.sender
+                            .send_warning(format!(
+                                "Failed to resolve '{}': {e}",
+                                target.entry.target()
+                            ))
+                            .await;
+                    }
+                }
                 Err(match e.failed_command(target.entry).and_then(program_of) {
                     Some(program) => SecretOutcome::CommandFailed(program),
                     None => SecretOutcome::Failed,
@@ -397,11 +426,27 @@ where
                     return Err(outcome);
                 }
             }
-            Ok(true) | Err(_) => {
+            // The content read above succeeded, so a mode that cannot be read is
+            // close to unreachable, and is not a reason to rewrite on a guess. Neither
+            // error says anything about what is at the target.
+            Ok(true) | Err(FileSystemError::IoError(_) | FileSystemError::HomeDirNotFound) => {
                 self.sender
                     .send_dotfile_skipped(&target.source, target.path.display(), SkipReason::InSync)
                     .await;
                 return Err(SecretOutcome::Skipped);
+            }
+            // What is at the target bars the write, as a guard would have found.
+            Err(
+                refusal @ (FileSystemError::IrregularTarget { .. }
+                | FileSystemError::BelowNonDirectory { .. }
+                | FileSystemError::DirectoryTarget { .. }),
+            ) => {
+                self.refuse(
+                    target.entry.target(),
+                    refusal_for(target.entry.target(), &refusal),
+                )
+                .await;
+                return Err(SecretOutcome::Failed);
             }
             Ok(false) => {}
         }
@@ -411,11 +456,16 @@ where
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
         {
-            // The error already names the target; naming it here too would print
-            // the path twice.
-            self.sender
-                .send_warning(format!("Failed to tighten permissions: {e}"))
-                .await;
+            match classify_write(target.entry.target(), &target.path, &e) {
+                Some(refusal) => self.refuse(target.entry.target(), refusal).await,
+                // The error already names the target; naming it here too would
+                // print the path twice.
+                None => {
+                    self.sender
+                        .send_warning(format!("Failed to tighten permissions: {e}"))
+                        .await;
+                }
+            }
             return Err(SecretOutcome::Failed);
         }
 
@@ -524,11 +574,16 @@ where
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
         {
-            // The error already names the target; naming it here too would print
-            // the path twice.
-            self.sender
-                .send_warning(format!("Failed to write: {e}"))
-                .await;
+            match classify_write(target.entry.target(), &target.path, &e) {
+                Some(refusal) => self.refuse(target.entry.target(), refusal).await,
+                // The error already names the target; naming it here too would
+                // print the path twice.
+                None => {
+                    self.sender
+                        .send_warning(format!("Failed to write: {e}"))
+                        .await;
+                }
+            }
             return SecretOutcome::Failed;
         }
 

@@ -190,8 +190,8 @@ where
             let drift_stream = dotfile_service.check_drift().await;
             let summary = collect_drift_summary(drift_stream).await;
 
-            // What drift warned about, the packages it refused and the specs it
-            // skipped limit what its summary covers, so they are sent ahead of it,
+            // What drift warned about, the packages and entries it refused and the
+            // specs it skipped limit what its summary covers, so they are sent ahead of it,
             // in the order drift reported them: a skipped spec comes before the
             // warning it explains.
             for relayed in summary.relayed {
@@ -206,6 +206,15 @@ where
                         packages,
                     } => {
                         sender.send_refused_group(kind, reason, packages).await;
+                    }
+                    RelayedDriftEvent::DotfileRefused {
+                        package,
+                        spec_target,
+                        refusal,
+                    } => {
+                        sender
+                            .send_dotfile_refused(&package, &spec_target, refusal)
+                            .await;
                     }
                 }
             }
@@ -1340,6 +1349,11 @@ enum RelayedDriftEvent {
         reason: String,
         packages: Vec<crate::package::event::RefusedPackage>,
     },
+    DotfileRefused {
+        package: String,
+        spec_target: String,
+        refusal: crate::package::event::Refusal,
+    },
 }
 
 /// What `sync status` takes from a drift check.
@@ -1365,8 +1379,8 @@ struct DriftSummary {
     /// Distinct from `error`: a cancelled check did not fail, it did not finish, and
     /// its counts describe only what it reached.
     cancelled: Option<String>,
-    /// Warnings, refused packages and skipped specs, in the order drift
-    /// reported them.
+    /// Warnings, refused packages and entries, and skipped specs, in the order
+    /// drift reported them.
     relayed: Vec<RelayedDriftEvent>,
 }
 
@@ -1410,6 +1424,20 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                     kind,
                     reason,
                     packages,
+                });
+            }
+            // A refused entry counts as one warning, as a refused package does.
+            PackageEvent::DotfileRefused {
+                package,
+                spec_target,
+                refusal,
+                ..
+            } => {
+                summary.warned += 1;
+                summary.relayed.push(RelayedDriftEvent::DotfileRefused {
+                    package,
+                    spec_target,
+                    refusal,
                 });
             }
             PackageEvent::Completed {
@@ -2235,6 +2263,42 @@ mod tests {
         );
         assert!(
             matches!(&summary.relayed[2], RelayedDriftEvent::Warning(m) if m == "second warning"),
+            "{summary:?}"
+        );
+    }
+
+    // A refused entry is relayed in its place and counts as one warning, as a
+    // refused package does.
+    #[tokio::test]
+    async fn collect_drift_summary_relays_a_refused_entry() {
+        use crate::package::event::{Condition, Location, Refusal};
+
+        let events = vec![
+            PackageEvent::Warning {
+                operation_info: test_operation_info(),
+                message: "first warning".to_string(),
+            },
+            PackageEvent::DotfileRefused {
+                operation_info: test_operation_info(),
+                package: "bat".to_string(),
+                spec_target: "~/.batrc".to_string(),
+                refusal: Refusal {
+                    condition: Condition::Symlink,
+                    at: Location::Target,
+                    message: "Skipping 'bat/config': a symlink".to_string(),
+                },
+            },
+        ];
+
+        let summary = collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(summary.warned, 2, "{summary:?}");
+        assert!(
+            matches!(
+                &summary.relayed[1],
+                RelayedDriftEvent::DotfileRefused { spec_target, refusal, .. }
+                    if spec_target == "~/.batrc" && refusal.condition == Condition::Symlink
+            ),
             "{summary:?}"
         );
     }

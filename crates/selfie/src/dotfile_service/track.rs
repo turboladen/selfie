@@ -545,7 +545,7 @@ where
                 )));
             }
         },
-        TargetState::Absent => {
+        TargetState::Absent | TargetState::BelowNonDirectory { .. } => {
             return OperationResult::Failure(OperationFailure::Generic(format!(
                 "Target file does not exist: {}",
                 expanded_target.display()
@@ -569,6 +569,12 @@ where
             )));
         }
         TargetState::Unreadable(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Cannot read target file: {}",
+                FileSystemError::IoError(e)
+            )));
+        }
+        TargetState::Undetermined(e) => {
             return OperationResult::Failure(OperationFailure::Generic(format!(
                 "Cannot read target file: {e}"
             )));

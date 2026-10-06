@@ -27,8 +27,8 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         event::{
-            ConflictReport, LinkAtTarget, OperationFailure, OperationResult, OperationSuccess,
-            PackageEvent, SkipReason,
+            Condition, ConflictReport, LinkAtTarget, Location, OperationFailure, OperationResult,
+            OperationSuccess, PackageEvent, SkipReason,
         },
         repository::YamlPackageRepository,
     },
@@ -133,15 +133,17 @@ fn counting_resolver(asked: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> 
     }
 }
 
-// Every warning a run emitted, plus one line per package it refused whole,
-// reading "refused package '<name>': <reason>" from the event's own fields.
-// Every test reading warnings goes through here, so an assertion that a
-// sentence is absent also covers a refusal that travels as its own event.
+// Every warning a run emitted, every refused entry's sentence, and one line per
+// package it refused whole, reading "refused package '<name>': <reason>" from the
+// event's own fields. Every test reading warnings goes through here, so an
+// assertion that a sentence is absent also covers a refusal that travels as its
+// own event.
 fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
     events
         .iter()
         .flat_map(|event| match event {
             PackageEvent::Warning { message, .. } => vec![message.clone()],
+            PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.clone()],
             PackageEvent::PackagesRefused {
                 reason, packages, ..
             } => packages
@@ -149,6 +151,17 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
                 .map(|package| format!("refused package '{}': {reason}", package.name))
                 .collect(),
             _ => Vec::new(),
+        })
+        .collect()
+}
+
+// What each refused entry was refused for, and where, in the order refused.
+fn refusals(events: &[PackageEvent]) -> Vec<(Condition, Location)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::DotfileRefused { refusal, .. } => Some((refusal.condition, refusal.at)),
+            _ => None,
         })
         .collect()
 }
@@ -723,6 +736,7 @@ struct RecordsTargetReads {
     inner: RealFileSystem,
     reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
     staged_read: Option<(PathBuf, selfie::fs::TargetRead)>,
+    repository_gone_after: Option<(PathBuf, std::sync::Arc<std::sync::atomic::AtomicUsize>)>,
     blind_to_directory_at: Option<PathBuf>,
     blind_to_open_refusals: bool,
     blind_to_symlinks: bool,
@@ -746,6 +760,7 @@ impl RecordsTargetReads {
             inner: RealFileSystem,
             reads: std::sync::Arc::default(),
             staged_read: None,
+            repository_gone_after: None,
             blind_to_directory_at: None,
             blind_to_open_refusals: false,
             blind_to_symlinks: false,
@@ -810,6 +825,13 @@ impl RecordsTargetReads {
         self
     }
 
+    // The first repository read of `path` sees the disk, and every later one finds
+    // nothing: a template removed between classify and the resolve.
+    fn repository_gone_after_first_read(mut self, path: &std::path::Path) -> Self {
+        self.repository_gone_after = Some((path.to_path_buf(), std::sync::Arc::default()));
+        self
+    }
+
     // `open_for_read_refusal` answers `None` everywhere: a target that became
     // unreadable after the secret path's pre-command check, while its command ran.
     fn blind_to_open_refusals(mut self) -> Self {
@@ -864,6 +886,14 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         &self,
         path: &std::path::Path,
     ) -> Result<String, selfie::fs::RepositoryRead> {
+        if let Some((gone, reads)) = &self.repository_gone_after
+            && gone == path
+            && reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0
+        {
+            return Err(selfie::fs::RepositoryRead::Absent(std::sync::Arc::new(
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+            )));
+        }
         self.inner.read_repository_file(path)
     }
 
@@ -2226,16 +2256,15 @@ async fn test_check_drift_missing_source_emits_warning() {
     // Delete the source file
     std::fs::remove_file(source_dir.join("config.toml")).unwrap();
 
-    // Check drift — should emit a warning about missing source, not panic
+    // Check drift — should refuse the entry for its missing source, not panic
     let stream = service.check_drift().await;
     let events = collect_events(stream).await;
 
-    let has_warning = events
-        .iter()
-        .any(|e| matches!(e, PackageEvent::Warning { .. }));
-    assert!(
-        has_warning,
-        "Should emit a warning when source file is missing during drift check"
+    assert_eq!(
+        refusals(&events),
+        vec![(Condition::Absent, Location::Source)],
+        "{:?}",
+        warning_messages(&events)
     );
 
     // Should still complete successfully
@@ -2299,13 +2328,18 @@ async fn test_apply_rejects_path_traversal() {
     let stream = service.apply_all(ApplyOptions::default()).await;
     let events = collect_events(stream).await;
 
-    // Should get a warning specifically about path traversal
-    let has_traversal_warning = events.iter().any(|e| {
-        matches!(e, PackageEvent::Warning { message, .. } if message.contains("escapes YAML base directory"))
+    // Should be refused specifically for path traversal
+    let has_traversal_refusal = events.iter().any(|e| {
+        matches!(e, PackageEvent::DotfileRefused { refusal, .. }
+            if refusal.message.contains("escapes YAML base directory"))
     });
     assert!(
-        has_traversal_warning,
-        "Should emit a warning about path escaping YAML base directory"
+        has_traversal_refusal,
+        "Should refuse the entry for its path escaping the YAML base directory"
+    );
+    assert_eq!(
+        refusals(&events),
+        vec![(Condition::Escapes, Location::Source)]
     );
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
@@ -2343,10 +2377,13 @@ async fn test_apply_missing_source_warns_and_skips() {
     let stream = service.apply_all(ApplyOptions::default()).await;
     let events = collect_events(stream).await;
 
-    let has_warning = events
-        .iter()
-        .any(|e| matches!(e, PackageEvent::Warning { .. }));
-    assert!(has_warning, "Should emit a warning about missing source");
+    // Missing, so `Absent`: `Unreadable` is for a file that is there.
+    assert_eq!(
+        refusals(&events),
+        vec![(Condition::Absent, Location::Source)],
+        "{:?}",
+        warning_messages(&events)
+    );
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
     match result {
@@ -2958,12 +2995,11 @@ async fn test_apply_target_parent_dir_is_file() {
     let stream = service.apply_all(ApplyOptions::default()).await;
     let events = collect_events(stream).await;
 
-    let has_warning = events
-        .iter()
-        .any(|e| matches!(e, PackageEvent::Warning { .. }));
-    assert!(
-        has_warning,
-        "Should emit a warning about write failure when parent path is a file"
+    assert_eq!(
+        refusals(&events),
+        vec![(Condition::NotADirectory, Location::AboveTarget)],
+        "{:?}",
+        warning_messages(&events)
     );
 
     let result = get_operation_result(&events).expect("Should have a Completed event");
@@ -4274,6 +4310,42 @@ mod secret_bearing {
                 _ => None,
             })
             .collect()
+    }
+
+    // A template gone by the time the resolve reads it is refused, and nothing ran,
+    // so its step ends as having run nothing rather than as failed.
+    #[tokio::test]
+    async fn a_template_refused_at_the_resolve_ends_its_step_as_not_run() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        template_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "key: {{ api_key }}\n",
+            &[("api_key", "op read x")],
+        );
+        let template = dirs.package_dir.join("creds/credentials.tpl");
+        let fs = RecordsTargetReads::new().repository_gone_after_first_read(&template);
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"KEY");
+
+        let events = collect_events(
+            dirs.service_with_fs(fs, runner.clone())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(runner.call_count(), 0, "no binding ran");
+        assert_eq!(
+            endings(&events),
+            vec![selfie::package::event::StepEnding::NotRun]
+        );
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Absent, Location::Template)],
+            "{:?}",
+            warning_messages(&events)
+        );
     }
 
     // A provider command that fails ends its step as failed, before the warning
@@ -7438,6 +7510,10 @@ mod symlinked_targets {
             "the refusal must name where the link points: {warnings:?}"
         );
         assert_eq!(
+            refusals(&events),
+            vec![(Condition::Symlink, Location::Target)]
+        );
+        assert_eq!(
             deploy_counts(&events),
             (0, 0, 0, 1),
             "a refusal is counted as refused, not as a deploy"
@@ -7798,6 +7874,11 @@ mod symlinked_targets {
             warnings.iter().any(|w| w.contains("is a symlink")),
             "the writer's own refusal must still be reported: {warnings:?}"
         );
+        // Refused as the link it is, the condition the guard would have named.
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Symlink, Location::Target)]
+        );
         assert_eq!(deploy_counts(&events), (0, 0, 0, 1));
     }
 
@@ -8029,6 +8110,10 @@ mod symlink_consistency {
             "the refusal must name both the target and where the link points: {named:?}"
         );
         assert_eq!(
+            refusals(&events),
+            vec![(Condition::Symlink, Location::Target)]
+        );
+        assert_eq!(
             drift_summary(&events),
             (0, 0, 1),
             "(drifted, total, refused)"
@@ -8134,7 +8219,7 @@ mod symlink_consistency {
     }
 
     // D4. Drift and apply describe the same refusal with the same sentence, because
-    // they call the same `refusal_warning`. A user who runs one then the other must
+    // they call the same `refusal_for`. A user who runs one then the other must
     // not have to work out whether two different messages mean the same thing.
     #[tokio::test]
     async fn drift_and_apply_word_the_refusal_identically() {
@@ -11070,6 +11155,12 @@ mod unreadable_targets {
         );
         the_unreadable_warning(&events, &target);
         assert_eq!(refused_count(&events), 1);
+        // A file is there, so the condition is that it could not be read, not that
+        // what is there is unknown.
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Unreadable, Location::Target)]
+        );
 
         drop(guard);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
@@ -11462,11 +11553,12 @@ mod target_classification {
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "FROM REPO");
     }
 
-    // Below a regular file nothing can be, so the target is absent as it always was:
-    // apply's write fails and says so, and drift calls it untracked. It is not
+    // Below a regular file nothing can be written, which is the one condition
+    // whichever path meets it: apply refuses it before any write, as the secret
+    // path does, and drift refuses it rather than calling it untracked. It is not
     // "could not be read", which would claim something is there.
     #[tokio::test]
-    async fn a_target_below_a_regular_file_is_absent() {
+    async fn a_target_below_a_regular_file_is_refused_before_any_write() {
         let dirs = TestDirs::new();
         let file = dirs.target_dir.join("a-file");
         std::fs::write(&file, "PLAIN").unwrap();
@@ -11476,16 +11568,33 @@ mod target_classification {
         let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
         let drift = collect_events(dirs.service().check_drift().await).await;
 
-        assert_eq!(refused_count(&apply), 1, "the write cannot succeed");
+        let below = vec![(Condition::NotADirectory, Location::AboveTarget)];
+        assert_eq!(refusals(&apply), below, "{:?}", warning_messages(&apply));
+        assert_eq!(refused_count(&apply), 1);
+        // Refused before the write, not by it: the writer's own refusal of the
+        // same state comes after `dotfile_deploying`.
+        assert!(
+            !apply
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeploying { .. })),
+            "refused before any write: {apply:?}"
+        );
         let warnings = warning_messages(&apply);
         assert!(
             warnings.iter().all(|w| !w.contains("could not be read")),
             "nothing is there to fail a read: {warnings:?}"
         );
-        assert_eq!(drift_types(&drift), vec!["not tracked"]);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("which is not a directory") && !w.contains("Failed")),
+            "named as what is there, not as a failed write: {warnings:?}"
+        );
+        assert_eq!(refusals(&drift), below);
+        assert!(drift_types(&drift).is_empty(), "{:?}", drift_types(&drift));
         assert_eq!(
             drift_summary(&drift),
-            (1, 1, 0),
+            (0, 0, 1),
             "(drifted, total, refused)"
         );
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "PLAIN");
@@ -11891,6 +12000,11 @@ mod target_reads_never_follow {
             warnings.iter().any(|w| w.contains("named pipe (fifo)")),
             "the refusal must name the fifo: {warnings:?}"
         );
+        // A refusal of what is there, not a failed write: nothing was written.
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Irregular, Location::Target)]
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "OLD");
     }
 
@@ -11921,6 +12035,11 @@ mod target_reads_never_follow {
                 .iter()
                 .any(|w| w.contains("is a symlink") && !w.contains("could not be read")),
             "the read's refusal must be worded as the link: {warnings:?}"
+        );
+        // The read names the same condition the guard would have.
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Symlink, Location::Target)]
         );
     }
 
@@ -13378,6 +13497,11 @@ mod backups_before_overwrite {
         let events = collect_events(dirs.service().apply_all(options).await).await;
 
         assert_eq!(refused_count(&events), 1, "{events:?}");
+        // Refused at the copy's read of the target, for what is there now.
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Directory, Location::Target)]
+        );
         assert!(
             !events
                 .iter()
@@ -14955,10 +15079,17 @@ mod drift_refuses_secret_entries_as_apply_does {
                     .any(|w| w.contains("escapes the package directory")),
             "drift must still name both refusals: {drifted:?}"
         );
+        // Nothing ran for either, so neither says it failed to resolve.
         assert!(
             applied.iter().any(|w| w.contains("No command was run"))
-                && applied.iter().any(|w| w.starts_with("Failed to resolve")),
+                && applied
+                    .iter()
+                    .any(|w| w.starts_with("Skipping") && w.contains("escapes the package")),
             "apply keeps its own wording: {applied:?}"
+        );
+        assert!(
+            applied.iter().all(|w| !w.contains("Failed to resolve")),
+            "{applied:?}"
         );
     }
 
@@ -14991,7 +15122,10 @@ mod drift_refuses_secret_entries_as_apply_does {
 
     // A template entry whose template no command needs to find wrong: drift, a dry
     // run and the deploy refuse it alike, and none runs a binding.
-    async fn a_bad_template_is_refused_by_every_command(setup: impl Fn(&std::path::Path)) {
+    async fn a_bad_template_is_refused_by_every_command(
+        setup: impl Fn(&std::path::Path),
+        condition: Condition,
+    ) {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("creds");
         let yaml = format!(
@@ -15028,24 +15162,31 @@ mod drift_refuses_secret_entries_as_apply_does {
         );
         assert_eq!(refused_count(&applied), 1, "{applied:?}");
         assert_eq!(runner.call_count(), 0, "no binding may run");
-        assert!(
-            warning_messages(&drifted)
-                .iter()
-                .all(|w| !w.contains("Failed to resolve")),
-            "{drifted:?}"
-        );
+        // One condition, named the same by every command.
+        for events in [&drifted, &previewed, &applied] {
+            assert_eq!(refusals(events), vec![(condition, Location::Template)]);
+            assert!(
+                warning_messages(events)
+                    .iter()
+                    .all(|w| !w.contains("Failed to resolve")),
+                "nothing ran, so nothing failed to resolve: {events:?}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn a_missing_template_is_refused_by_every_command() {
-        a_bad_template_is_refused_by_every_command(|_| {}).await;
+        a_bad_template_is_refused_by_every_command(|_| {}, Condition::Absent).await;
     }
 
     #[tokio::test]
     async fn a_fifo_template_is_refused_by_every_command() {
-        a_bad_template_is_refused_by_every_command(|path| {
-            nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
-        })
+        a_bad_template_is_refused_by_every_command(
+            |path| {
+                nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+            },
+            Condition::Irregular,
+        )
         .await;
     }
 
@@ -15057,10 +15198,13 @@ mod drift_refuses_secret_entries_as_apply_does {
             eprintln!("SKIP an_unreadable_template_is_refused_by_every_command: running as root");
             return;
         }
-        a_bad_template_is_refused_by_every_command(|path| {
-            std::fs::write(path, "X: {{ v }}\n").unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
-        })
+        a_bad_template_is_refused_by_every_command(
+            |path| {
+                std::fs::write(path, "X: {{ v }}\n").unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            },
+            Condition::Unreadable,
+        )
         .await;
     }
 }
@@ -17836,5 +17980,286 @@ mod a_conflict_says_whether_it_was_declined {
         let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
 
         assert_eq!(declined_flags(&events), [false, false], "{events:#?}");
+    }
+}
+
+// One state on disk is one condition, wherever selfie meets it: as a source, a
+// template or a target, and whichever check finds it.
+mod entry_conditions {
+    use super::*;
+
+    fn write_package(dirs: &TestDirs, yaml: &str) {
+        std::fs::write(dirs.package_dir.join("myapp.yml"), yaml).unwrap();
+    }
+
+    fn make_fifo(path: &std::path::Path) {
+        nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+    }
+
+    // A fifo is `irregular` as a source and as a template: the role changes only the
+    // location. Each fixture is a fifo, so a template's could not be called
+    // unreadable and a source's irregular, or the reverse, and still pass.
+    #[tokio::test]
+    async fn a_fifo_is_irregular_as_a_source_and_as_a_template() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        make_fifo(&dirs.package_dir.join("myapp/source.toml"));
+        make_fifo(&dirs.package_dir.join("myapp/creds.tpl"));
+        let file_target = dirs.target_dir.join("file.toml");
+        let template_target = dirs.target_dir.join("creds");
+        write_package(
+            &dirs,
+            &format!(
+                "name: myapp\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: \"myapp/source.toml\"\n    target: \"{}\"\n  \
+                 - source: \"myapp/creds.tpl\"\n    target: \"{}\"\n    vars:\n      \
+                 v: \"op read x\"\n",
+                file_target.display(),
+                template_target.display()
+            ),
+        );
+        let service = dirs.service_with_runner(FakeCommandRunner::new());
+
+        let events = within_deadline(std::time::Duration::from_secs(20), move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
+        })
+        .expect("no fifo may be opened");
+
+        assert_eq!(
+            refusals(&events),
+            vec![
+                (Condition::Irregular, Location::Source),
+                (Condition::Irregular, Location::Template),
+            ]
+        );
+    }
+
+    // An escaping source and an escaping template differ only in where.
+    #[tokio::test]
+    async fn an_escaping_source_and_template_differ_only_in_location() {
+        let dirs = TestDirs::new();
+        let file_target = dirs.target_dir.join("file.toml");
+        let template_target = dirs.target_dir.join("creds");
+        write_package(
+            &dirs,
+            &format!(
+                "name: myapp\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: \"../outside.toml\"\n    target: \"{}\"\n  \
+                 - source: \"../outside.tpl\"\n    target: \"{}\"\n    vars:\n      \
+                 v: \"op read x\"\n",
+                file_target.display(),
+                template_target.display()
+            ),
+        );
+
+        for events in [
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await,
+            collect_events(dirs.service().check_drift().await).await,
+        ] {
+            assert_eq!(
+                refusals(&events),
+                vec![
+                    (Condition::Escapes, Location::Source),
+                    (Condition::Escapes, Location::Template),
+                ]
+            );
+        }
+    }
+
+    // A directory given as a source is the condition a directory at the target is,
+    // found at the source. The guard skips directories, so it is the read that
+    // meets it, and the read's error alone would say only that it failed.
+    #[tokio::test]
+    async fn a_directory_given_as_a_source_is_a_directory() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp/config.toml")).unwrap();
+        let target = dirs.target_dir.join("config.toml");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let applied = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drifted = collect_events(dirs.service().check_drift().await).await;
+
+        for events in [&applied, &drifted] {
+            assert_eq!(
+                refusals(events),
+                vec![(Condition::Directory, Location::Source)],
+                "{:?}",
+                warning_messages(events)
+            );
+        }
+        assert!(!target.exists());
+    }
+
+    // A secret-bearing entry replaces a link at its target, but not one to a fifo,
+    // which the writer refuses: that is the fifo's condition, not the link's.
+    #[tokio::test]
+    async fn a_secret_target_linked_to_a_fifo_is_irregular() {
+        let dirs = TestDirs::new();
+        let fifo = dirs.target_dir.join("pipe");
+        make_fifo(&fifo);
+        let target = dirs.target_dir.join("creds");
+        std::os::unix::fs::symlink(&fifo, &target).unwrap();
+        write_package(
+            &dirs,
+            &format!(
+                "name: myapp\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - command: \"op read x\"\n    target: \"{}\"\n",
+                target.display()
+            ),
+        );
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"TOKEN");
+        let service = dirs.service_with_runner(runner.clone());
+
+        let events = within_deadline(std::time::Duration::from_secs(20), move || async move {
+            collect_events(service.apply_all(ApplyOptions::default()).await).await
+        })
+        .expect("the fifo must not be opened");
+
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Irregular, Location::Target)]
+        );
+        assert_eq!(runner.call_count(), 0, "refused before any command");
+        assert!(target.is_symlink(), "the link is left in place");
+    }
+
+    // A symlink whose destination is gone, above a repository-file target, is in the
+    // way as a file there is: nothing can be written below it. Apply refuses the
+    // entry before any write and drift refuses it rather than calling it untracked,
+    // as both do for a secret entry, and both name the link.
+    #[tokio::test]
+    async fn a_target_below_a_dangling_link_is_refused_before_any_write() {
+        let dirs = TestDirs::new();
+        let link = dirs.target_dir.join("d");
+        std::os::unix::fs::symlink(dirs.target_dir.join("nowhere"), &link).unwrap();
+        let target = link.join("config.toml");
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let apply = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(dirs.service().check_drift().await).await;
+
+        let below = vec![(Condition::NotADirectory, Location::AboveTarget)];
+        assert_eq!(refusals(&apply), below, "{:?}", warning_messages(&apply));
+        assert!(
+            !apply
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeploying { .. })),
+            "refused before any write: {apply:?}"
+        );
+        assert!(
+            warning_messages(&apply)
+                .iter()
+                .any(|w| w.contains(&*link.to_string_lossy())),
+            "the refusal names the link: {:?}",
+            warning_messages(&apply)
+        );
+        assert_eq!(refusals(&drift), below, "{:?}", warning_messages(&drift));
+        assert_eq!(
+            drift_summary(&drift),
+            (0, 0, 1),
+            "(drifted, total, refused)"
+        );
+        assert!(!dirs.target_dir.join("nowhere").exists());
+    }
+
+    // A directory that takes the target's place after the checks is refused by the
+    // writer as a directory, the condition the checks would have named. The read is
+    // staged to find nothing, so only the writer's own error can name it.
+    #[tokio::test]
+    async fn the_writer_names_a_directory_at_the_target() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("inner"), "kept").unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let fs = RecordsTargetReads::new().staged_read(&target, selfie::fs::TargetRead::Absent);
+        let events = collect_events(
+            dirs.service_with_fs(fs, FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        // Control: the entry reached the writer, so the refusal is the writer's.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeploying { .. })),
+            "the writer was not reached: {events:?}"
+        );
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Directory, Location::Target)],
+            "{:?}",
+            warning_messages(&events)
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("inner")).unwrap(),
+            "kept"
+        );
+    }
+
+    // A parent that stops being a directory after the checks is refused by the
+    // writer as the same condition the checks would have named. The read is staged
+    // to find nothing, so only the writer's own error can name it.
+    #[tokio::test]
+    async fn the_writer_names_a_parent_that_is_not_a_directory() {
+        let dirs = TestDirs::new();
+        let file = dirs.target_dir.join("a-file");
+        std::fs::write(&file, "PLAIN").unwrap();
+        let target = file.join("config.toml");
+        std::fs::create_dir_all(dirs.package_dir.join("myapp")).unwrap();
+        std::fs::write(dirs.package_dir.join("myapp/config.toml"), "REPO").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+
+        let fs = RecordsTargetReads::new().staged_read(&target, selfie::fs::TargetRead::Absent);
+        let events = collect_events(
+            dirs.service_with_fs(fs, FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        // Control: the entry reached the writer, so the refusal is the writer's.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeploying { .. })),
+            "the writer was not reached: {events:?}"
+        );
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::NotADirectory, Location::AboveTarget)],
+            "{:?}",
+            warning_messages(&events)
+        );
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .all(|w| !w.starts_with("Failed to write")),
+            "{events:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "PLAIN");
     }
 }

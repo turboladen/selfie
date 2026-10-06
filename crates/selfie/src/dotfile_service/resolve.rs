@@ -14,11 +14,15 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+use super::refusal::{guarded, located, repository_condition};
 use super::template;
 use crate::commands::{BoundedText, CommandError, CommandRunner};
 use crate::fs::filesystem::{FileSystem, repository_read_refusal};
 use crate::fs::target::repository_path;
-use crate::package::{ContentSource, DotfileEntry, InvalidEntry};
+use crate::package::{
+    ContentSource, DotfileEntry, InvalidEntry,
+    event::{Condition, Location, Refusal},
+};
 
 /// Upper bound on resolved content.
 ///
@@ -72,10 +76,8 @@ pub(crate) enum ResolveError {
     UnseparableBinding { name: String },
     #[error("dotfile content exceeds {MAX_CONTENT_BYTES} bytes")]
     TooLarge,
-    // The field is `template` rather than `source` because thiserror treats a
-    // field of that name as the error's `source()`.
-    #[error("dotfile template '{template}' cannot be read: {message}")]
-    TemplateUnreadable { template: String, message: String },
+    #[error(transparent)]
+    TemplateUnreadable(#[from] UnreadableTemplate),
     #[error("dotfile for '{target}' has no content to resolve")]
     NotSecretBearing { target: String },
     #[error("dotfile template '{template}' escapes the package directory")]
@@ -98,10 +100,60 @@ impl ResolveError {
             Self::EmptyOutput { .. }
             | Self::EmptyBinding { .. }
             | Self::TooLarge
-            | Self::TemplateUnreadable { .. }
+            | Self::TemplateUnreadable(_)
             | Self::NotSecretBearing { .. }
             | Self::TemplateEscapesPackage { .. } => None,
         }
+    }
+}
+
+impl ResolveError {
+    /// The refusal this error is, for an error that is a condition of the
+    /// entry's files: a template that escapes the package or cannot be read.
+    /// `None` for a failure of the resolve itself. `entry_target` is the target
+    /// as the package file spells it.
+    pub(crate) fn as_refusal(&self, entry_target: &str) -> Option<Refusal> {
+        let condition = match self {
+            Self::TemplateUnreadable(unreadable) => return Some(unreadable.refusal(entry_target)),
+            Self::TemplateEscapesPackage { .. } => Condition::Escapes,
+            Self::CommandFailed { .. }
+            | Self::BindingFailed { .. }
+            | Self::EmptyOutput { .. }
+            | Self::EmptyBinding { .. }
+            | Self::UnseparableOutput { .. }
+            | Self::UnseparableBinding { .. }
+            | Self::TooLarge
+            | Self::NotSecretBearing { .. } => return None,
+        };
+        Some(Refusal {
+            condition,
+            at: Location::Template,
+            message: format!("Skipping '{entry_target}': {self}"),
+        })
+    }
+}
+
+/// A template [`read_template`] would not or could not read.
+#[derive(Debug, Error)]
+#[error("dotfile template '{template}' cannot be read: {message}")]
+pub(crate) struct UnreadableTemplate {
+    // `template` rather than `source`, because thiserror treats a field of that
+    // name as the error's `source()`.
+    template: String,
+    message: String,
+    /// What is at the template, and where, as the classifier names them.
+    condition: Condition,
+    at: Location,
+}
+
+impl UnreadableTemplate {
+    /// The refusal of the entry whose target the package file spells
+    /// `entry_target`.
+    pub(crate) fn refusal(&self, entry_target: &str) -> Refusal {
+        Refusal::found(
+            (self.condition, self.at),
+            format!("Skipping '{entry_target}': {self}"),
+        )
     }
 }
 
@@ -133,29 +185,33 @@ fn template_path(source: &str, base_dir: &Path) -> Result<PathBuf, ResolveError>
 ///
 /// # Errors
 ///
-/// [`ResolveError::TemplateUnreadable`] for a file that is not regular or could not
-/// be read.
+/// [`UnreadableTemplate`] for a file that is not regular or could not be read.
 pub(crate) fn read_template<F: FileSystem>(
     filesystem: &F,
     source: &str,
     path: &Path,
-) -> Result<String, ResolveError> {
+) -> Result<String, UnreadableTemplate> {
     // Before the read, which would block on a fifo. Nothing secret exists in scope:
     // this reports a path and a file type, and no command has run.
     if let Some(refusal) = filesystem.irregular_target_refusal(&repository_path(path)) {
-        return Err(ResolveError::TemplateUnreadable {
+        let (condition, at) = located(guarded(&refusal), Location::Template);
+        return Err(UnreadableTemplate {
             template: source.to_string(),
             message: format!(
                 "{}. Replace it with a regular file.",
                 repository_read_refusal(&refusal)
             ),
+            condition,
+            at,
         });
     }
     filesystem
-        .read_file(path)
-        .map_err(|e| ResolveError::TemplateUnreadable {
+        .read_repository_file(path)
+        .map_err(|e| UnreadableTemplate {
             template: source.to_string(),
             message: e.to_string(),
+            condition: repository_condition(&e),
+            at: Location::Template,
         })
 }
 
@@ -590,7 +646,7 @@ mod tests {
         // because a mock with no expectation panics instead of answering, and
         // because these tests are about resolution rather than about the guard.
         fs.mock_no_irregular_files();
-        fs.expect_read_file()
+        fs.expect_read_repository_file()
             .returning(move |_| Ok(body.to_string()));
         fs
     }
@@ -955,8 +1011,8 @@ mod tests {
         // Absent, not irregular: the guard passes and the *read* is what fails,
         // which is the distinction this test is about.
         fs.mock_no_irregular_files();
-        fs.expect_read_file().returning(|_| {
-            Err(crate::fs::filesystem::FileSystemError::IoError(
+        fs.expect_read_repository_file().returning(|_| {
+            Err(crate::fs::filesystem::RepositoryRead::Absent(
                 std::sync::Arc::new(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "no such file",

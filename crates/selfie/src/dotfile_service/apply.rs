@@ -23,7 +23,8 @@ use crate::{
     package::{
         Package,
         event::{
-            DriftType, EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount,
+            Condition, DriftType, EventSender, Location, OperationFailure, OperationResult,
+            OperationSuccess, Refusal, StepCount,
         },
         refusal::refuse_up_front,
     },
@@ -362,6 +363,7 @@ where
 
         let secret_apply = SecretApply {
             base_dir: &base_dir,
+            package: package.name(),
             filesystem,
             runner,
             config,
@@ -396,8 +398,10 @@ where
                     Purpose::Deploy,
                 ) {
                     Ok(classified) => classified,
-                    Err(refused) => {
-                        refused.send(sender).await;
+                    Err(refusal) => {
+                        sender
+                            .send_dotfile_refused(package.name(), entry.target(), refusal)
+                            .await;
                         break 'entry EntryOutcome::Refused;
                     }
                 };
@@ -411,12 +415,17 @@ where
                             .into_iter()
                             .find(|program| failed_programs.contains(program))
                         {
-                            sender
-                                .send_warning(format!(
+                            let refusal = Refusal {
+                                condition: Condition::EarlierProgramFailed,
+                                at: Location::Entry,
+                                message: format!(
                                     "Skipping '{}': an earlier `{program}` command failed; no \
                                      command was run",
                                     entry.target()
-                                ))
+                                ),
+                            };
+                            sender
+                                .send_dotfile_refused(package.name(), entry.target(), refusal)
                                 .await;
                             break 'entry EntryOutcome::Refused;
                         }
@@ -438,8 +447,10 @@ where
                     current,
                 } = match read_repo_file(filesystem, &repo) {
                     Ok(read) => read,
-                    Err(refused) => {
-                        refused.send(sender).await;
+                    Err(refusal) => {
+                        sender
+                            .send_dotfile_refused(package.name(), entry.target(), refusal)
+                            .await;
                         break 'entry EntryOutcome::Refused;
                     }
                 };
@@ -465,6 +476,8 @@ where
                     source_checksum: &source_checksum,
                     source,
                     package: package_name.as_deref(),
+                    package_name: package.name(),
+                    entry_target: entry.target(),
                     backups: backups_root.as_deref(),
                 };
 

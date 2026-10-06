@@ -151,8 +151,10 @@ where
                     tally.unverified += 1;
                     continue;
                 }
-                Err(refused) => {
-                    refused.send(sender).await;
+                Err(refusal) => {
+                    sender
+                        .send_dotfile_refused(package.name(), scoped.entry.target(), refusal)
+                        .await;
                     tally.refused += 1;
                     continue;
                 }
@@ -162,8 +164,10 @@ where
                 current,
             } = match read_repo_file(filesystem, &repo) {
                 Ok(read) => read,
-                Err(refused) => {
-                    refused.send(sender).await;
+                Err(refusal) => {
+                    sender
+                        .send_dotfile_refused(package.name(), scoped.entry.target(), refusal)
+                        .await;
                     tally.refused += 1;
                     continue;
                 }

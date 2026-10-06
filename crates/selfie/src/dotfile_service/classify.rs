@@ -12,34 +12,21 @@ use crate::{
     config::SelfieConfig,
     dotfile_service::{deploy::resolve_source_path, resolve::read_template},
     fs::{
-        filesystem::{
-            AbsentReason, DirectoryState, FileSystem, FileSystemError, repository_read_refusal,
-        },
+        filesystem::{FileSystem, FileSystemError, repository_read_refusal},
         target::{HomeDir, TargetPath, deploy_target, repository_path},
     },
     package::{
         ContentSource, DotfileEntry, Package, ScopedEntry, SpecOrigin, TargetCollision,
-        event::{BaseKind, DotfileSource, EventSender, RepoPath, SourceBase},
+        event::{BaseKind, Condition, DotfileSource, Location, Refusal, RepoPath, SourceBase},
     },
     paths::is_within,
 };
 
 use super::refusal::{
-    Link, TargetGuard, below_non_directory_refusal, directory_target_refusal, guard_refusal,
-    guard_target, link_at, readable_target, refusal_warning, target_refusal,
+    Link, TargetGuard, Unrun, guard_refusal, guard_target, guarded, link_at, located,
+    path_state_refusal, readable_target, refusal_for, repository_condition, target_refusal,
     unreadable_target_refusal,
 };
-
-/// An entry refused before it was deployed or compared, with the warning that
-/// says why.
-pub(super) struct Refused(String);
-
-impl Refused {
-    /// Send the warning naming the refusal.
-    pub(super) async fn send(self, sender: &EventSender) {
-        sender.send_warning(self.0).await;
-    }
-}
 
 /// An entry that passed every check decidable before its content is read or
 /// resolved.
@@ -135,7 +122,7 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
     scoped: ScopedEntry<'e>,
     collisions: &PackageCollisions<'_>,
     purpose: Purpose,
-) -> Result<Classified<'e>, Refused> {
+) -> Result<Classified<'e>, Refusal> {
     let entry = scoped.entry;
 
     // First, so every entry sharing the target is refused with the same reason
@@ -148,34 +135,44 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
             Purpose::Deploy => "so none of them is applied",
             Purpose::Check => "so drift cannot compare them",
         };
-        return Err(Refused(format!(
-            "Skipping '{}' in package '{}': {}, {consequence}. {}",
-            entry.target(),
-            collisions.package,
-            collision.describe(),
-            collision.remedy()
-        )));
+        return Err(Refusal {
+            condition: Condition::Collision,
+            at: Location::Entry,
+            message: format!(
+                "Skipping '{}' in package '{}': {}, {consequence}. {}",
+                entry.target(),
+                collisions.package,
+                collision.describe(),
+                collision.remedy()
+            ),
+        });
     }
 
     // Refused before anything runs. For a template that means the binding
     // commands -- real credential fetches, which can raise a biometric prompt --
     // never execute for a file that provably cannot be rendered.
-    let content = entry
-        .content_source()
-        .map_err(|invalid| Refused(format!("Skipping '{}': {invalid}", entry.target())))?;
+    let content = entry.content_source().map_err(|invalid| Refusal {
+        condition: Condition::InvalidEntry,
+        at: Location::Entry,
+        message: format!("Skipping '{}': {invalid}", entry.target()),
+    })?;
 
     // The one target rule. A relative target would write relative to CWD, which is
     // surprising and potentially dangerous; a `~user/…` one names a home directory
     // selfie does not resolve.
     let target = deploy_target(filesystem, entry.target())
-        .map_err(|rejection| Refused(target_refusal(entry.target(), rejection)))?;
+        .map_err(|rejection| target_refusal(entry.target(), rejection))?;
 
     match content {
         ContentSource::RepoFile(source) => {
             let Some(source_path) = within_package(base_dir, source) else {
-                return Err(Refused(format!(
-                    "Skipping '{source}': source path escapes YAML base directory"
-                )));
+                return Err(Refusal {
+                    condition: Condition::Escapes,
+                    at: Location::Source,
+                    message: format!(
+                        "Skipping '{source}': source path escapes YAML base directory"
+                    ),
+                });
             };
 
             // Ahead of every read of the target, not merely ahead of the write.
@@ -186,7 +183,7 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
             // manage, and a repository-file entry never writes through a link, so
             // there is no outcome the read could change.
             if let Some(refusal) = guard_refusal(filesystem, &target) {
-                return Err(Refused(refusal_warning(source, &refusal)));
+                return Err(refusal_for(source, &refusal));
             }
 
             Ok(Classified::RepoFile(RepoFile {
@@ -205,19 +202,21 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
             // dry run exactly where the deploy would refuse it.
             let event_source = match secret {
                 ContentSource::Template { source, vars } => {
-                    // A check resolves nothing, so it does not say it failed to.
-                    let frame = match purpose {
-                        Purpose::Deploy => "Failed to resolve",
-                        Purpose::Check => "Skipping",
-                    };
+                    // Refused, under either purpose: nothing has run, so nothing
+                    // failed to resolve.
                     let Some(path) = within_package(base_dir, source) else {
-                        return Err(Refused(format!(
-                            "{frame} '{}': dotfile template '{source}' escapes the package directory",
-                            entry.target()
-                        )));
+                        return Err(Refusal {
+                            condition: Condition::Escapes,
+                            at: Location::Template,
+                            message: format!(
+                                "Skipping '{}': dotfile template '{source}' escapes the package \
+                                 directory",
+                                entry.target()
+                            ),
+                        });
                     };
                     if let Err(e) = read_template(filesystem, source, &path) {
-                        return Err(Refused(format!("{frame} '{}': {e}", entry.target())));
+                        return Err(e.refusal(entry.target()));
                     }
                     template_source(source_base, &path, vars.keys().cloned().collect())
                 }
@@ -302,12 +301,12 @@ fn deployable_secret_target<F: FileSystem>(
     filesystem: &F,
     source: &str,
     target: &TargetPath,
-) -> Result<Option<Link>, Refused> {
+) -> Result<Option<Link>, Refusal> {
     // Both questions, before any command runs: what a link or a fifo at the target
     // means is decided here, not by the read after the fetch, which could only
     // refuse either. A link is replaced whatever it points at, unless it resolves
     // to a fifo, socket or device node, which the writer refuses.
-    let link = secret_target_link(filesystem, source, target).map_err(Refused)?;
+    let link = secret_target_link(filesystem, source, target)?;
 
     // The case the guard does not cover: it excludes directories, because opening
     // one never blocks. Nothing may run for a target that provably cannot be
@@ -319,7 +318,7 @@ fn deployable_secret_target<F: FileSystem>(
     if link.is_none()
         && let Some(refusal) = pre_command_refusal(filesystem, source, target, Purpose::Deploy)
     {
-        return Err(Refused(refusal));
+        return Err(refusal);
     }
     Ok(link)
 }
@@ -337,18 +336,18 @@ fn checkable_secret_target<F: FileSystem>(
     filesystem: &F,
     source: &str,
     target: &TargetPath,
-) -> Result<Option<Link>, Refused> {
+) -> Result<Option<Link>, Refusal> {
     match link_at(filesystem, target) {
-        Err(unrecognized) => return Err(Refused(refusal_warning(source, &unrecognized))),
+        Err(unrecognized) => return Err(refusal_for(source, &unrecognized)),
         Ok(Some(link)) => return Ok(Some(link)),
         Ok(None) => {}
     }
     // A plain target on a hung mount still blocks here, as apply's stat of it does.
     if let Some(refusal) = filesystem.irregular_target_refusal(target) {
-        return Err(Refused(refusal_warning(source, &refusal)));
+        return Err(refusal_for(source, &refusal));
     }
     match pre_command_refusal(filesystem, source, target, Purpose::Check) {
-        Some(refusal) => Err(Refused(refusal)),
+        Some(refusal) => Err(refusal),
         None => Ok(None),
     }
 }
@@ -358,14 +357,14 @@ fn checkable_secret_target<F: FileSystem>(
 ///
 /// # Errors
 ///
-/// The warning refusing the entry, for a fifo, socket or device node at the
+/// The refusal of the entry, for a fifo, socket or device node at the
 /// target or behind a link, since the writer refuses both. `source` is the target
 /// as the package file spells it.
 pub(super) fn secret_target_link<F: FileSystem>(
     filesystem: &F,
     source: &str,
     path: &TargetPath,
-) -> Result<Option<Link>, String> {
+) -> Result<Option<Link>, Refusal> {
     match guard_target(filesystem, path) {
         TargetGuard::Clear => Ok(None),
         TargetGuard::Link { link, behind: None } => Ok(Some(link)),
@@ -373,7 +372,7 @@ pub(super) fn secret_target_link<F: FileSystem>(
             behind: Some(refusal),
             ..
         }
-        | TargetGuard::Refused(refusal) => Err(refusal_warning(source, &refusal)),
+        | TargetGuard::Refused(refusal) => Err(refusal_for(source, &refusal)),
     }
 }
 
@@ -398,42 +397,33 @@ fn pre_command_refusal<F: FileSystem>(
     source: &str,
     path: &TargetPath,
     purpose: Purpose,
-) -> Option<String> {
+) -> Option<Refusal> {
     // Only a deploy would have run a command or written a credential, so only it
     // says it did not.
-    let (unwritten, unrun) = match purpose {
-        Purpose::Deploy => (
-            ", so selfie will not write a credential there",
-            " No command was run.",
-        ),
-        Purpose::Check => ("", ""),
+    let extra = match purpose {
+        Purpose::Deploy => Unrun {
+            unwritten: ", so selfie will not write a credential there",
+            unrun: " No command was run.",
+        },
+        Purpose::Check => Unrun::NOTHING,
     };
     // One question, so a directory that appears between two stats cannot be missed.
     // Its absent reasons tell an empty path from one below a regular file or a
     // dangling link, where nothing can be and no write can land.
-    match filesystem.directory_state(path.path()) {
-        DirectoryState::Directory | DirectoryState::Unlistable(_) => {
-            Some(format!("{}{unrun}", directory_target_refusal(source, path)))
-        }
-        DirectoryState::Absent(reason @ AbsentReason::ParentNotADirectory { .. }) => Some(format!(
-            "{}{unwritten}.{unrun}",
-            below_non_directory_refusal(source, path, &reason)
-        )),
-        DirectoryState::Absent(_) => filesystem.open_for_read_refusal(path).map(|error| {
-            let refusal = unreadable_target_refusal(source, path, &error);
-            // The error ends its sentence without a period, so one goes before
-            // the next sentence.
-            if unrun.is_empty() {
-                refusal
-            } else {
-                format!("{refusal}.{unrun}")
-            }
-        }),
-        DirectoryState::Unknown(error) => Some(format!(
-            "Skipping '{source}': selfie could not determine what is at the target{unwritten}.{unrun} The check failed with: {}",
-            FileSystemError::IoError(error)
-        )),
+    let state = filesystem.directory_state(path.path());
+    if let Some(refusal) = path_state_refusal(source, path, &state, extra) {
+        return Some(refusal);
     }
+    filesystem.open_for_read_refusal(path).map(|error| {
+        let mut refusal = unreadable_target_refusal(source, path, &error);
+        // The error ends its sentence without a period, so one goes before
+        // the next sentence.
+        if !extra.unrun.is_empty() {
+            refusal.message.push('.');
+            refusal.message.push_str(extra.unrun);
+        }
+        refusal
+    })
 }
 
 /// What a repository-file entry's source and target hold, read for a decision.
@@ -445,11 +435,11 @@ pub(super) struct RepoRead {
 }
 
 /// Read a classified repository-file entry's source and target, or refuse the
-/// entry with the warning apply and drift both give.
+/// entry with the refusal apply and drift both give.
 pub(super) fn read_repo_file<F: FileSystem>(
     filesystem: &F,
     entry: &RepoFile<'_>,
-) -> Result<RepoRead, Refused> {
+) -> Result<RepoRead, Refusal> {
     let RepoFile {
         source,
         source_path,
@@ -460,24 +450,27 @@ pub(super) fn read_repo_file<F: FileSystem>(
     // Immediately ahead of the read, which is what this guards: a fifo source
     // blocks `read_file` until a writer arrives and hangs the command.
     if let Some(refusal) = filesystem.irregular_target_refusal(&repository_path(source_path)) {
-        return Err(Refused(format!(
-            "Skipping '{source}': {}. Replace it with a regular file.",
-            repository_read_refusal(&refusal)
-        )));
+        return Err(Refusal::found(
+            located(guarded(&refusal), Location::Source),
+            format!(
+                "Skipping '{source}': {}. Replace it with a regular file.",
+                repository_read_refusal(&refusal)
+            ),
+        ));
     }
 
-    let source_content = filesystem.read_file(source_path).map_err(|e| {
-        Refused(format!(
-            "Cannot read source '{}': {e}",
-            source_path.display()
-        ))
+    let source_content = filesystem.read_repository_file(source_path).map_err(|e| {
+        Refusal::found(
+            (repository_condition(&e), Location::Source),
+            format!("Cannot read source '{}': {e}", source_path.display()),
+        )
     })?;
 
     // Ahead of the decision, like the fifo refusal, so it holds under
     // `auto_accept`, under an interactive resolver, and in a dry run. The bytes
     // read here are also what the conflict diff shows, so the checksum and the diff
     // cannot disagree about the target.
-    let current = readable_target(filesystem, source, target).map_err(Refused)?;
+    let current = readable_target(filesystem, source, target)?;
 
     Ok(RepoRead {
         source_content,

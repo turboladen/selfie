@@ -231,6 +231,11 @@ impl EventProcessor {
                 // Warnings don't set failure exit code by default
             }
 
+            // The run's result counts it, so the exit code comes from there.
+            PackageEvent::DotfileRefused { refusal, .. } => {
+                self.display.print_warning(refusal.message);
+            }
+
             PackageEvent::Completed {
                 operation_info,
                 result: op_result,
@@ -1165,6 +1170,33 @@ mod tests {
             "{lines:?}"
         );
         assert!(!lines.iter().any(|l| l.starts_with('✓')), "{lines:?}");
+    }
+
+    // A refused entry prints the library's sentence on stderr.
+    #[tokio::test]
+    async fn a_refused_entry_prints_its_sentence_on_stderr() {
+        use crate::display_manager::Channel;
+        use selfie::package::event::{Condition, Location, Refusal};
+
+        let refused = PackageEvent::DotfileRefused {
+            operation_info: make_operation_info("bat"),
+            package: "bat".to_string(),
+            spec_target: "~/.batrc".to_string(),
+            refusal: Refusal {
+                condition: Condition::Symlink,
+                at: Location::Target,
+                message: "Skipping 'bat/config': a symlink is there".to_string(),
+            },
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![refused]).await;
+
+        assert!(
+            printed
+                .iter()
+                .any(|(stream, line)| *stream == Channel::Stderr
+                    && line.contains("Skipping 'bat/config': a symlink is there")),
+            "{printed:?}"
+        );
     }
 
     // A summary is the answer at every outcome, so it goes to stdout; an error

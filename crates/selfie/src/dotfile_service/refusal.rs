@@ -4,11 +4,21 @@
 //! and classify a target through here and refuse it in the same words, so none of
 //! them can describe one refusal differently from the others.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use crate::fs::{
-    filesystem::{AbsentReason, FileSystem, FileSystemError, TargetRead},
-    target::{TargetPath, TargetRejection},
+use crate::{
+    fs::{
+        filesystem::{
+            AbsentReason, DirectoryState, FileSystem, FileSystemError, OpenRefusal, RepositoryRead,
+            TargetRead,
+        },
+        target::{TargetPath, TargetRejection},
+    },
+    package::event::{Condition, Location, Refusal},
 };
 
 /// A symlink at a target's final component.
@@ -134,9 +144,13 @@ pub(super) fn classify_link(
 /// unreadable" call for opposite handling: the first is safe to write, the second
 /// must never be written over as though nothing were there.
 pub(super) enum TargetState {
-    /// Nothing is there: the path does not exist, or a component of it is not a
-    /// directory, where nothing can be and a write fails on its own.
+    /// Nothing is at the path.
     Absent,
+    /// A component above the target is not a directory, so nothing is there and
+    /// nothing can be written there. `parent` is the first such component.
+    BelowNonDirectory {
+        parent: Option<PathBuf>,
+    },
     Readable(Vec<u8>),
     /// A directory, which a file cannot replace.
     Directory,
@@ -145,8 +159,10 @@ pub(super) enum TargetState {
     /// A fifo, socket or device node, found by the read after every look missed it.
     /// Carries the refusal a writer gives for it.
     Irregular(FileSystemError),
-    /// Something is there, or may be, and it could not be read.
-    Unreadable(FileSystemError),
+    /// A regular file is there, and it could not be read.
+    Unreadable(Arc<io::Error>),
+    /// What is there could not be found out.
+    Undetermined(FileSystemError),
 }
 
 /// What is at `target`, from one read of it.
@@ -158,16 +174,14 @@ pub(super) enum TargetState {
 /// [`guard_target`] on the secret path, which replaces one.
 // One read rather than an existence probe and then a read, so a file deleted
 // between the two deploys instead of refusing, and a directory is named rather than
-// reported as a read failure. The port says what is there; an error leaves it
-// unknown -- a parent that denies access, a loop above the target -- and an unknown
-// target is never written over: apply refuses it on both paths, and drift refuses it
-// too.
+// reported as a read failure. The port says what is there, including why a read
+// failed, so nothing here looks at the path again. A target that cannot be told is
+// never written over: apply refuses it on both paths, and drift refuses it too.
 pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetState {
     match filesystem.read_file_no_follow(target) {
         Ok(TargetRead::Bytes(bytes)) => TargetState::Readable(bytes),
-        // Not yet told apart from nothing at the target: a write there fails, as
-        // a write to a target with nothing above it does not.
-        Ok(TargetRead::Absent | TargetRead::BelowNonDirectory { .. }) => TargetState::Absent,
+        Ok(TargetRead::Absent) => TargetState::Absent,
+        Ok(TargetRead::BelowNonDirectory { parent }) => TargetState::BelowNonDirectory { parent },
         Ok(TargetRead::Directory) => TargetState::Directory,
         Ok(TargetRead::Link { points_to }) => TargetState::Link(Link {
             path: target.path().to_path_buf(),
@@ -179,15 +193,114 @@ pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPa
                 kind,
             })
         }
-        Ok(TargetRead::Unreadable(error)) => {
-            TargetState::Unreadable(FileSystemError::IoError(error))
+        Ok(TargetRead::Unreadable(error)) => TargetState::Unreadable(error),
+        Err(error) => TargetState::Undetermined(error),
+    }
+}
+
+// The mappings below decide every condition a check of a path names, so one state
+// on disk is one condition whichever check meets it. Each lists every variant of a
+// type selfie owns, with no `_` arm, so a variant added to the port has to be
+// placed before anything compiles. An `io::Error`'s kind is never matched here:
+// its enum is non-exhaustive, and the port already says what an errno means.
+
+/// The condition a guard's or a writer's error names.
+pub(super) fn guarded(error: &FileSystemError) -> Condition {
+    match error {
+        FileSystemError::SymlinkedTarget { .. } => Condition::Symlink,
+        FileSystemError::IrregularTarget { .. } => Condition::Irregular,
+        FileSystemError::BelowNonDirectory { .. } => Condition::NotADirectory,
+        FileSystemError::DirectoryTarget { .. } => Condition::Directory,
+        FileSystemError::IoError(_) | FileSystemError::HomeDirNotFound => Condition::Undetermined,
+    }
+}
+
+/// The condition a failed read of a repository file names. A path only read
+/// cannot be below a non-directory, since nothing can be there: that is `Absent`.
+pub(super) fn repository_condition(read: &RepositoryRead) -> Condition {
+    match read {
+        RepositoryRead::Absent(_) => Condition::Absent,
+        RepositoryRead::Directory(_) => Condition::Directory,
+        RepositoryRead::Unreadable(_) => Condition::Unreadable,
+        RepositoryRead::Undetermined(_) => Condition::Undetermined,
+    }
+}
+
+/// Where `condition`, found on the path at `at`, lies: a component that is not a
+/// directory lies above the target, not at it.
+pub(super) fn located(condition: Condition, at: Location) -> (Condition, Location) {
+    match (condition, at) {
+        (Condition::NotADirectory, Location::Target) => (condition, Location::AboveTarget),
+        (condition, at) => (condition, at),
+    }
+}
+
+// What stands in the way of a file at a target, as `directory_state` reports it.
+enum InTheWay<'a> {
+    Directory,
+    /// A component above the target is not a directory.
+    NotADirectory(&'a AbsentReason),
+    /// The check itself failed.
+    Undetermined(&'a Arc<io::Error>),
+}
+
+impl InTheWay<'_> {
+    fn condition(&self) -> Condition {
+        match self {
+            Self::Directory => Condition::Directory,
+            Self::NotADirectory(_) => Condition::NotADirectory,
+            Self::Undetermined(_) => Condition::Undetermined,
         }
-        Err(error) => TargetState::Unreadable(error),
+    }
+}
+
+// An unlistable directory is still a directory: no file can replace it.
+fn in_the_way(state: &DirectoryState) -> Option<InTheWay<'_>> {
+    match state {
+        DirectoryState::Directory | DirectoryState::Unlistable(_) => Some(InTheWay::Directory),
+        DirectoryState::Absent(reason @ AbsentReason::ParentNotADirectory { .. }) => {
+            Some(InTheWay::NotADirectory(reason))
+        }
+        DirectoryState::Absent(
+            AbsentReason::Empty
+            | AbsentReason::Occupied { .. }
+            | AbsentReason::DanglingSymlink { .. },
+        ) => None,
+        DirectoryState::Unknown(error) => Some(InTheWay::Undetermined(error)),
+    }
+}
+
+/// The refusal a failed write to `target` amounts to, or `None` when the write
+/// failed. `source` is how the refusal names the entry.
+///
+/// A refusal is a condition the checks before the write refuse too: a symlink the
+/// writer would not write through, a fifo, socket or device node, a component
+/// above the target that is not a directory, or a directory at the target.
+/// Anything else is a failure of the write.
+pub(super) fn classify_write(
+    source: &str,
+    target: &TargetPath,
+    error: &FileSystemError,
+) -> Option<Refusal> {
+    match error {
+        FileSystemError::SymlinkedTarget { .. } | FileSystemError::IrregularTarget { .. } => {
+            Some(refusal_for(source, error))
+        }
+        FileSystemError::BelowNonDirectory { parent, .. } => Some(below_non_directory_refusal(
+            source,
+            target,
+            parent.as_deref(),
+        )),
+        FileSystemError::DirectoryTarget { .. } => Some(Refusal::found(
+            located(guarded(error), Location::Target),
+            directory_message(source, target),
+        )),
+        FileSystemError::IoError(_) | FileSystemError::HomeDirNotFound => None,
     }
 }
 
 /// The bytes at a target an entry may go on to compare (`None` for nothing there),
-/// or the warning refusing the entry for what the read found instead.
+/// or the refusal of the entry for what the read found instead.
 ///
 /// A link or fifo the read found is worded as the guard words one, since the
 /// user's remedy is the same whichever check found it.
@@ -195,15 +308,35 @@ pub(super) fn readable_or_refusal(
     source: &str,
     target: &TargetPath,
     state: TargetState,
-) -> Result<Option<Vec<u8>>, String> {
-    match state {
-        TargetState::Absent => Ok(None),
-        TargetState::Readable(bytes) => Ok(Some(bytes)),
-        TargetState::Directory => Err(directory_target_refusal(source, target)),
-        TargetState::Link(link) => Err(refusal_warning(source, &link.refusal())),
-        TargetState::Irregular(refusal) => Err(refusal_warning(source, &refusal)),
-        TargetState::Unreadable(error) => Err(unreadable_target_refusal(source, target, &error)),
-    }
+) -> Result<Option<Vec<u8>>, Refusal> {
+    let (condition, message) = match state {
+        TargetState::Absent => return Ok(None),
+        TargetState::Readable(bytes) => return Ok(Some(bytes)),
+        TargetState::BelowNonDirectory { parent } => {
+            return Err(below_non_directory_refusal(
+                source,
+                target,
+                parent.as_deref(),
+            ));
+        }
+        TargetState::Directory => (Condition::Directory, directory_message(source, target)),
+        TargetState::Link(link) => (Condition::Symlink, refusal_message(source, &link.refusal())),
+        TargetState::Irregular(refusal) => {
+            (Condition::Irregular, refusal_message(source, &refusal))
+        }
+        TargetState::Unreadable(error) => (
+            Condition::Unreadable,
+            unreadable_message(source, target, &FileSystemError::IoError(error)),
+        ),
+        TargetState::Undetermined(error) => (
+            Condition::Undetermined,
+            unreadable_message(source, target, &error),
+        ),
+    };
+    Err(Refusal::found(
+        located(condition, Location::Target),
+        message,
+    ))
 }
 
 /// What a directory at a target means and what to do about it, as one clause, so
@@ -216,65 +349,142 @@ pub(super) fn directory_at_target(target: &TargetPath) -> String {
     )
 }
 
-/// Why an entry whose target is a directory is refused.
-pub(super) fn directory_target_refusal(source: &str, target: &TargetPath) -> String {
+fn directory_message(source: &str, target: &TargetPath) -> String {
     format!("Skipping '{source}': {}", directory_at_target(target))
 }
 
-/// Why an entry whose target lies below a component that is not a directory is
-/// refused, naming that component. The sentence ends without a period, so a
-/// caller can extend it.
-pub(super) fn below_non_directory_refusal(
+// The refusal of a target below a component that is not a directory, from a read or
+// a write that met one. Names the component when the port found it.
+fn below_non_directory_refusal(
     source: &str,
     target: &TargetPath,
-    reason: &AbsentReason,
-) -> String {
-    format!(
-        "Skipping '{source}': the target '{}' {}",
-        target.display(),
-        reason.clause()
+    parent: Option<&Path>,
+) -> Refusal {
+    let clause = match parent {
+        Some(parent) => AbsentReason::ParentNotADirectory {
+            parent: parent.to_path_buf(),
+        }
+        .clause(),
+        None => "is below a component that is not a directory".to_string(),
+    };
+    Refusal::found(
+        located(Condition::NotADirectory, Location::Target),
+        format!(
+            "Skipping '{source}': the target '{}' {clause}.",
+            target.display()
+        ),
     )
+}
+
+/// What a refusal before any command adds to its sentence, when there was a
+/// command or a credential to not run or write.
+#[derive(Clone, Copy)]
+pub(super) struct Unrun {
+    /// A clause after the condition, such as ", so selfie will not write a
+    /// credential there".
+    pub(super) unwritten: &'static str,
+    /// A sentence after it, such as " No command was run.".
+    pub(super) unrun: &'static str,
+}
+
+impl Unrun {
+    /// Nothing to add.
+    pub(super) const NOTHING: Self = Self {
+        unwritten: "",
+        unrun: "",
+    };
+}
+
+// The refusal for what stands in the way of a file at `target`. The condition comes
+// from `found`, the one mapping every path shares; only the sentence is built here.
+fn path_refusal(source: &str, target: &TargetPath, found: &InTheWay<'_>, extra: Unrun) -> Refusal {
+    let Unrun { unwritten, unrun } = extra;
+    let message = match found {
+        InTheWay::Directory => format!("{}{unrun}", directory_message(source, target)),
+        InTheWay::NotADirectory(reason) => format!(
+            "Skipping '{source}': the target '{}' {}{unwritten}.{unrun}",
+            target.display(),
+            reason.clause()
+        ),
+        InTheWay::Undetermined(error) => format!(
+            "Skipping '{source}': selfie could not determine what is at the target{unwritten}.\
+             {unrun} The check failed with: {}",
+            FileSystemError::IoError(Arc::clone(error))
+        ),
+    };
+    Refusal::found(located(found.condition(), Location::Target), message)
+}
+
+/// The refusal for what `directory_state` reports at `target`, worded with
+/// `extra`, or `None` when nothing there bars a file.
+pub(super) fn path_state_refusal(
+    source: &str,
+    target: &TargetPath,
+    state: &DirectoryState,
+    extra: Unrun,
+) -> Option<Refusal> {
+    in_the_way(state).map(|found| path_refusal(source, target, &found, extra))
 }
 
 // Every site that words a refused deploy shares this, so apply, drift and the
 // writer cannot describe the same refusal differently. Format it here rather than
 // at a call site — no test pins this wrapper at the write site, so a copy there
 // could drift unnoticed.
-//
-// Keep this comment free of a call-site count; any number goes stale when the next caller is added.
-pub(super) fn refusal_warning(source: &str, refusal: &FileSystemError) -> String {
+fn refusal_message(source: &str, refusal: &FileSystemError) -> String {
     format!("Skipping '{source}': {refusal}")
 }
 
-// Why an entry whose target could not be read is refused, worded the same by apply
-// and drift.
-pub(super) fn unreadable_target_refusal(
-    source: &str,
-    target: &TargetPath,
-    error: &dyn std::fmt::Display,
-) -> String {
+/// The refusal of the entry `source` for what a guard found at its target.
+pub(super) fn refusal_for(source: &str, refusal: &FileSystemError) -> Refusal {
+    Refusal::found(
+        located(guarded(refusal), Location::Target),
+        refusal_message(source, refusal),
+    )
+}
+
+fn unreadable_message(source: &str, target: &TargetPath, error: &dyn std::fmt::Display) -> String {
     format!(
         "Skipping '{source}': target '{}' could not be read: {error}",
         target.display()
     )
 }
 
+// Why an entry whose target would not open is refused, worded the same by apply
+// and drift.
+pub(super) fn unreadable_target_refusal(
+    source: &str,
+    target: &TargetPath,
+    refusal: &OpenRefusal,
+) -> Refusal {
+    let condition = match refusal {
+        OpenRefusal::Unreadable(_) => Condition::Unreadable,
+        OpenRefusal::Undetermined(_) => Condition::Undetermined,
+    };
+    Refusal::found(
+        located(condition, Location::Target),
+        unreadable_message(source, target, refusal),
+    )
+}
+
 // The target's bytes if the entry can go on to a decision: `None` for an absent
-// target, `Err(warning)` for anything else. Apply and drift both classify through
+// target, `Err(refusal)` for anything else. Apply and drift both classify through
 // here, so they cannot answer differently about one file.
 pub(super) fn readable_target<F: FileSystem>(
     filesystem: &F,
     source: &str,
     target: &TargetPath,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Vec<u8>>, Refusal> {
     readable_or_refusal(source, target, read_target_state(filesystem, target))
 }
 
 // The frame for a target refused by the rule, which `classify_entry` gives for
 // apply and drift alike. `TargetRejection` supplies the words; this supplies the
 // frame.
-pub(super) fn target_refusal(target: &str, rejection: TargetRejection) -> String {
-    format!("Skipping '{target}': {}", rejection.message())
+pub(super) fn target_refusal(target: &str, rejection: TargetRejection) -> Refusal {
+    Refusal::found(
+        (Condition::TargetRule, Location::Entry),
+        format!("Skipping '{target}': {}", rejection.message()),
+    )
 }
 
 #[cfg(test)]

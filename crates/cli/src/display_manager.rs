@@ -405,7 +405,9 @@ impl DisplayManager {
             let mark = match ending {
                 StepEnding::Succeeded => Some(("✓", style("✓").green())),
                 StepEnding::Failed => Some(("✗", style("✗").red())),
-                StepEnding::Cancelled => None,
+                // The refusal or cancellation that follows says why; a mark
+                // would claim an outcome for commands that did not finish or start.
+                StepEnding::Cancelled | StepEnding::NotRun => None,
             };
             if let Some((plain, styled)) = mark {
                 self.record_stderr(&format!("{plain} {text}"));

@@ -728,13 +728,14 @@ written either way.
 
 A repository-file target that selfie cannot read is not a conflict, and it is not empty. That
 includes a target behind a parent directory selfie is not allowed to search, or below a symlink
-loop: selfie cannot tell what is there, so it does not write there. A target below a regular file,
-where nothing can be, is treated as absent, and the write that follows fails and is refused. selfie
-refuses the entry with a warning naming the target and the read error, shows no diff, and writes
-nothing; `--yes` does not lift that, and `selfie dotfiles drift` reports the same warning, counts
-the entry as refused, and exits `1` rather than calling the target changed. Make the target
-readable, or point the entry elsewhere, and run apply again. A secret-bearing entry refuses an
-unreadable target the same way, [before running its commands](#deploy-behavior-and-permissions).
+loop: selfie cannot tell what is there, so it does not write there. selfie refuses the entry with a
+warning naming the target and the read error, shows no diff, and writes nothing; `--yes` does not
+lift that, and `selfie dotfiles drift` reports the same warning, counts the entry as refused, and
+exits `1` rather than calling the target changed. A target below a regular file, where nothing can
+be written, is refused the same way, before anything is written, with a warning naming the file in
+the way; drift refuses it too rather than calling it untracked. Make the target readable, or point
+the entry elsewhere, and run apply again. A secret-bearing entry refuses an unreadable target the
+same way, [before running its commands](#deploy-behavior-and-permissions).
 
 ### Orphaned targets
 

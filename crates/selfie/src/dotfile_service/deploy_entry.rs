@@ -9,14 +9,13 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     dotfile_service::backup,
-    fs::{
-        filesystem::{FileSystem, FileSystemError},
-        target::TargetPath,
-    },
-    package::event::{DotfileSource, EventSender, RepoPath},
+    fs::{filesystem::FileSystem, target::TargetPath},
+    package::event::{DotfileSource, EventSender, Refusal, RepoPath},
 };
 
-use super::refusal::{guard_refusal, read_target_state, readable_or_refusal, refusal_warning};
+use super::refusal::{
+    classify_write, guard_refusal, read_target_state, readable_or_refusal, refusal_for,
+};
 use super::state_file::{LoadedState, save_deploy_state};
 
 /// Describes a single config file deployment operation
@@ -33,6 +32,10 @@ pub(super) struct DeployUnit<'a> {
     /// The spec name of the package the entry belongs to, recorded beside the
     /// checksum. `None` for a package with no spec file behind it.
     pub(super) package: Option<&'a str>,
+    /// The name of the package the entry belongs to, for a refusal to name.
+    pub(super) package_name: &'a str,
+    /// The entry's target as the package file spells it, for a refusal to name.
+    pub(super) entry_target: &'a str,
     /// Where copies of overwritten targets go, or `None` if there is nowhere to
     /// put one. `Some` does not mean a copy will be made.
     // A dry run can have a root here and writes nothing: under a preview ledger
@@ -168,8 +171,15 @@ async fn perform_deploy<F: FileSystem>(
                 backed_up.insert(unit.target_key.to_string(), path.clone());
                 (path, kept)
             }
-            Err(warning) => {
-                sender.send_warning(warning).await;
+            Err(not_kept) => {
+                match not_kept {
+                    NotKept::Refused(refusal) => {
+                        sender
+                            .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
+                            .await;
+                    }
+                    NotKept::Failed(warning) => sender.send_warning(warning).await,
+                }
                 // Left out of `backed_up`, so a refused entry does not mark the
                 // target as settled for a later one.
                 return Wrote::Refused;
@@ -187,19 +197,16 @@ async fn perform_deploy<F: FileSystem>(
         // going wrong rather than as selfie declining. The error names the target
         // in both arms, so neither repeats it.
         //
-        // Reaching the refusal arm here means the link or fifo appeared between
-        // `classify_entry`'s checks and this write. It is exercised by
-        // `the_writer_refuses_even_when_the_check_is_blinded`, which asserts only
-        // that the message names a symlink — not the `Skipping '{source}': `
-        // wrapper. Share `refusal_warning` rather than repeating the wording, or
-        // that unpinned half can drift.
-        let message = match &e {
-            FileSystemError::SymlinkedTarget { .. } | FileSystemError::IrregularTarget { .. } => {
-                refusal_warning(unit.source, &e)
+        // Reaching the refusal arm here means what refused the write appeared
+        // between `classify_entry`'s checks and this write.
+        match classify_write(unit.source, unit.target_path, &e) {
+            Some(refusal) => {
+                sender
+                    .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
+                    .await;
             }
-            _ => format!("Failed to write: {e}"),
-        };
-        sender.send_warning(message).await;
+            None => sender.send_warning(format!("Failed to write: {e}")).await,
+        }
         // `Refused` has the caller count this as refused and record nothing, so
         // nothing is recorded as deployed that was not. An entry already in the
         // state keeps its previous checksum and is stale rather than untracked,
@@ -238,13 +245,13 @@ async fn perform_deploy<F: FileSystem>(
 ///
 /// # Errors
 ///
-/// The warning to report, when the target cannot be read or the copy cannot be
+/// Why no copy was kept: the target cannot be read, or the copy cannot be
 /// written. Nothing has been written to the target in either case.
 fn keep_current<F: FileSystem>(
     filesystem: &F,
     unit: &DeployUnit<'_>,
     decided: Decided<'_>,
-) -> Result<Option<backup::Kept>, String> {
+) -> Result<Option<backup::Kept>, NotKept> {
     let Some(root) = unit.backups else {
         return Ok(None);
     };
@@ -259,13 +266,14 @@ fn keep_current<F: FileSystem>(
             // The guard first, as before every read of a target: a fifo or device
             // node put in place during the prompt must not be opened at all.
             if let Some(refusal) = guard_refusal(filesystem, unit.target_path) {
-                return Err(refusal_warning(unit.source, &refusal));
+                return Err(NotKept::Refused(refusal_for(unit.source, &refusal)));
             }
             readable_or_refusal(
                 unit.source,
                 unit.target_path,
                 read_target_state(filesystem, unit.target_path),
-            )?
+            )
+            .map_err(NotKept::Refused)?
         }
     };
     // Nothing there: nothing to keep, and the write creates it.
@@ -283,7 +291,15 @@ fn keep_current<F: FileSystem>(
 
     backup::keep(filesystem, root, unit.target_key, &current)
         .map(Some)
-        .map_err(|e| backup::refusal(unit.source, unit.target_path.path(), &e))
+        .map_err(|e| NotKept::Failed(backup::refusal(unit.source, unit.target_path.path(), &e)))
+}
+
+/// Why [`keep_current`] kept no copy.
+enum NotKept {
+    /// What is at the target bars the entry.
+    Refused(Refusal),
+    /// The copy could not be written.
+    Failed(String),
 }
 
 /// What an apply just recorded about a target.

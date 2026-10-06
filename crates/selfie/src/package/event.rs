@@ -68,6 +68,9 @@ pub enum StepEnding {
     Failed,
     /// The run was cancelled while it waited.
     Cancelled,
+    /// Nothing it was waiting to run ran: what the step was for was refused
+    /// before any command started.
+    NotRun,
 }
 
 /// Which configured directory a dotfile's source is read from.
@@ -770,6 +773,33 @@ impl EventSender {
             source: source.clone(),
             target: target.to_string(),
             reason,
+        })
+        .await;
+    }
+
+    /// Report a dotfile entry refused in `package`, whose target the package file
+    /// spells `spec_target`.
+    pub(crate) async fn send_dotfile_refused(
+        &self,
+        package: &str,
+        spec_target: &str,
+        refusal: Refusal,
+    ) {
+        let operation_info = self.touch_operation_info();
+        tracing::warn!(
+            operation_type = operation_info.operation_type.to_string(),
+            environment = &operation_info.environment,
+            package,
+            spec_target,
+            condition = ?refusal.condition,
+            at = ?refusal.at,
+            message = &refusal.message,
+        );
+        self.send(PackageEvent::DotfileRefused {
+            operation_info,
+            package: package.to_string(),
+            spec_target: spec_target.to_string(),
+            refusal,
         })
         .await;
     }
@@ -2876,6 +2906,20 @@ pub enum PackageEvent {
         reason: SkipReason,
     },
 
+    /// A dotfile entry selfie found a condition in and did not deploy or
+    /// compare. Nothing was written for it. Most refusals come before anything
+    /// runs; a secret-bearing entry's commands can run first, when the condition
+    /// appears at its target while they run.
+    DotfileRefused {
+        operation_info: OperationInfo,
+        /// The package the entry belongs to.
+        package: String,
+        /// The entry's target as the package file spells it, before `~` is
+        /// expanded, since a refusal can come before the target is expanded.
+        spec_target: String,
+        refusal: Refusal,
+    },
+
     /// A conflict was detected between repo and deployed version
     DotfileConflict {
         operation_info: OperationInfo,
@@ -3314,6 +3358,83 @@ pub enum SkipReason {
     /// A secret-bearing entry `dotfiles drift` reports without checking, since
     /// checking would run its commands.
     Unverifiable,
+}
+
+/// Why selfie did not deploy or compare a dotfile entry: what it found, where,
+/// and the sentence that says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// What selfie found. One state on disk is one condition, whichever check
+    /// found it.
+    pub condition: Condition,
+    /// Where it was found.
+    pub at: Location,
+    /// The refusal as a sentence for a person, with its remedy where it has one.
+    pub message: String,
+}
+
+impl Refusal {
+    /// A refusal for `condition` found `at`, worded by `message`.
+    pub(crate) fn found((condition, at): (Condition, Location), message: String) -> Self {
+        Self {
+            condition,
+            at,
+            message,
+        }
+    }
+}
+
+/// A condition under which selfie will not deploy or compare a dotfile entry.
+///
+/// Converts to a label for an adapter: `"not_a_directory"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum Condition {
+    /// Two or more of the package's entries deploy to one target here.
+    Collision,
+    /// The package file spells the entry wrongly: an unknown key, a wrong
+    /// combination of keys, or a var name that cannot be substituted.
+    InvalidEntry,
+    /// The target is not one selfie deploys to: relative, or `~user/...`.
+    TargetRule,
+    /// The source or template lies outside the package directory.
+    Escapes,
+    /// A symlink is there.
+    Symlink,
+    /// A fifo, socket or device node is there, or behind a symlink there.
+    Irregular,
+    /// A directory is there.
+    Directory,
+    /// A component above the target is not a directory, so nothing can be
+    /// written there.
+    NotADirectory,
+    /// Nothing is there.
+    Absent,
+    /// Something is there and could not be read.
+    Unreadable,
+    /// selfie could not find out what is there.
+    Undetermined,
+    /// An earlier command of the same program failed in this run, so this
+    /// entry's commands were not run.
+    EarlierProgramFailed,
+}
+
+/// Where selfie found a [`Condition`].
+///
+/// Converts to a label for an adapter: `"above_target"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum Location {
+    /// The entry as the package file spells it.
+    Entry,
+    /// The repository file a repository-file entry copies.
+    Source,
+    /// The template a template entry renders.
+    Template,
+    /// The target.
+    Target,
+    /// A directory above the target.
+    AboveTarget,
 }
 
 /// Whether a symlink is at a secret-bearing entry's target, which its deploy

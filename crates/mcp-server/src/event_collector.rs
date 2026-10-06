@@ -597,6 +597,21 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "type": "warning",
             "message": message,
         })),
+        // `spec_target` and `condition` rather than `target` and `kind`, which mean
+        // the expanded path and the source kind on every other dotfile row.
+        PackageEvent::DotfileRefused {
+            package,
+            spec_target,
+            refusal,
+            ..
+        } => Some(serde_json::json!({
+            "type": "dotfile_refused",
+            "package": package,
+            "spec_target": spec_target,
+            "condition": label(refusal.condition),
+            "location": label(refusal.at),
+            "message": refusal.message,
+        })),
         PackageEvent::DotfileDeploying { source, target, .. } => Some(with_source(
             serde_json::json!({
                 "type": "dotfile_deploying",
@@ -1395,6 +1410,71 @@ mod tests {
             let result = collect_events(Box::pin(stream::iter(events))).await;
 
             assert_eq!(result.data["data"][0]["kind"], kind);
+        }
+    }
+
+    // A refused entry is its own row, with the condition and location as labels and
+    // the sentence as prose. The condition set and the location set are pinned
+    // here, since a rename is a change to what an assistant matches on. Every
+    // variant is run, and the matches have no wildcard: a new variant does not
+    // compile until it names its label.
+    #[tokio::test]
+    async fn a_refused_entry_carries_its_condition_and_location_as_labels() {
+        use selfie::package::event::{Condition, Location, Refusal};
+        use strum::IntoEnumIterator as _;
+
+        let condition_label = |condition: Condition| match condition {
+            Condition::Collision => "collision",
+            Condition::InvalidEntry => "invalid_entry",
+            Condition::TargetRule => "target_rule",
+            Condition::Escapes => "escapes",
+            Condition::Symlink => "symlink",
+            Condition::Irregular => "irregular",
+            Condition::Directory => "directory",
+            Condition::NotADirectory => "not_a_directory",
+            Condition::Absent => "absent",
+            Condition::Unreadable => "unreadable",
+            Condition::Undetermined => "undetermined",
+            Condition::EarlierProgramFailed => "earlier_program_failed",
+        };
+        let location_label = |at: Location| match at {
+            Location::Entry => "entry",
+            Location::Source => "source",
+            Location::Template => "template",
+            Location::Target => "target",
+            Location::AboveTarget => "above_target",
+        };
+        let conditions = Condition::iter().map(|c| (c, condition_label(c)));
+        let locations: Vec<_> = Location::iter()
+            .map(|at| (at, location_label(at)))
+            .collect();
+        for ((condition, condition_label), (at, location_label)) in
+            conditions.zip(locations.into_iter().cycle())
+        {
+            let events = vec![PackageEvent::DotfileRefused {
+                operation_info: test_op_info(),
+                package: "bat".to_string(),
+                spec_target: "~/.batrc".to_string(),
+                refusal: Refusal {
+                    condition,
+                    at,
+                    message: "Skipping 'bat/config': a sentence".to_string(),
+                },
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            assert_eq!(
+                result.data["data"][0],
+                serde_json::json!({
+                    "type": "dotfile_refused",
+                    "package": "bat",
+                    "spec_target": "~/.batrc",
+                    "condition": condition_label,
+                    "location": location_label,
+                    "message": "Skipping 'bat/config': a sentence",
+                })
+            );
         }
     }
 
