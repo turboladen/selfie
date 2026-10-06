@@ -110,7 +110,11 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
 ) -> DeployOutcome {
     let Ledger::Record(recorder) = ledger else {
         sender
-            .send_dotfile_skipped(unit.event_source, unit.target_path.display(), "dry run")
+            .send_dotfile_skipped(
+                unit.event_source,
+                unit.target_path.display(),
+                crate::package::event::SkipReason::DryRun,
+            )
             .await;
         return DeployOutcome::Previewed;
     };
@@ -332,9 +336,12 @@ pub(super) async fn record_and_save<F: FileSystem>(
         DotfileSource::File {
             base: Some(base),
             path,
-            ..
         } => (path.to_string_lossy(), Some(base.kind)),
-        _ => (std::borrow::Cow::Borrowed(unit.source), None),
+        // A template is never recorded; it takes the secret-bearing path.
+        DotfileSource::File { base: None, .. }
+        | DotfileSource::Template { .. }
+        | DotfileSource::Command(_)
+        | DotfileSource::Recorded(_) => (std::borrow::Cow::Borrowed(unit.source), None),
     };
     loaded.state_mut().record_deployment(
         unit.target_key,

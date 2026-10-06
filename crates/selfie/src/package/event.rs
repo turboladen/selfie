@@ -92,14 +92,22 @@ pub struct SourceBase {
 /// Where a dotfile's content comes from, as events report it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DotfileSource {
-    /// A repository file, or a template rendered from one.
+    /// A repository file, copied as it is.
     File {
         /// The directory `path` is relative to, or `None` when the file lies under
         /// neither configured directory, and `path` is then the full path.
         base: Option<SourceBase>,
         /// The file, relative to `base`.
         path: std::path::PathBuf,
-        /// A template's var names; empty for a plain file.
+    },
+    /// A repository file rendered by substituting named values.
+    Template {
+        /// The directory `path` is relative to, or `None` when the template lies
+        /// under neither configured directory, and `path` is then the full path.
+        base: Option<SourceBase>,
+        /// The template, relative to `base`.
+        path: std::path::PathBuf,
+        /// The names of the values it substitutes.
         vars: Vec<String>,
     },
     /// A command whose output is the content.
@@ -109,20 +117,59 @@ pub enum DotfileSource {
     Recorded(String),
 }
 
+/// What kind of source a [`DotfileSource`] is, without its details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// [`DotfileSource::File`].
+    File,
+    /// [`DotfileSource::Template`].
+    Template,
+    /// [`DotfileSource::Command`].
+    Command,
+    /// [`DotfileSource::Recorded`].
+    Recorded,
+}
+
 impl DotfileSource {
-    /// The file's full path, when the source is a file.
+    /// The file's full path, when the source is a file or a template.
     #[must_use]
     pub fn absolute(&self) -> Option<std::path::PathBuf> {
         match self {
             Self::File {
                 base: Some(base),
                 path,
+            }
+            | Self::Template {
+                base: Some(base),
+                path,
                 ..
             } => Some(base.directory.join(path)),
-            Self::File {
+            Self::File { base: None, path }
+            | Self::Template {
                 base: None, path, ..
             } => Some(path.clone()),
             Self::Command(_) | Self::Recorded(_) => None,
+        }
+    }
+
+    /// The directory a file or template is read from, when it lies under a
+    /// configured one.
+    #[must_use]
+    pub fn base(&self) -> Option<&SourceBase> {
+        match self {
+            Self::File { base, .. } | Self::Template { base, .. } => base.as_ref(),
+            Self::Command(_) | Self::Recorded(_) => None,
+        }
+    }
+
+    /// What kind of source this is.
+    #[must_use]
+    pub fn kind(&self) -> SourceKind {
+        match self {
+            Self::File { .. } => SourceKind::File,
+            Self::Template { .. } => SourceKind::Template,
+            Self::Command(_) => SourceKind::Command,
+            Self::Recorded(_) => SourceKind::Recorded,
         }
     }
 }
@@ -148,9 +195,16 @@ impl DotfileSource {
                     DotfileSource::File {
                         base: Some(_),
                         path,
+                    }
+                    | DotfileSource::Template {
+                        base: Some(_),
+                        path,
                         ..
                     } => Some(path.clone()),
-                    _ => source.absolute(),
+                    DotfileSource::File { base: None, .. }
+                    | DotfileSource::Template { base: None, .. }
+                    | DotfileSource::Command(_)
+                    | DotfileSource::Recorded(_) => source.absolute(),
                 })
             }
         }
@@ -163,7 +217,11 @@ impl DotfileSource {
         path_of: impl Fn(&Self) -> Option<std::path::PathBuf>,
     ) -> fmt::Result {
         match self {
-            Self::File { vars, .. } => {
+            Self::File { .. } => {
+                let path = path_of(self).unwrap_or_default();
+                crate::package::write_file_source(f, &path.display(), &[])
+            }
+            Self::Template { vars, .. } => {
                 let path = path_of(self).unwrap_or_default();
                 let vars: Vec<&str> = vars.iter().map(String::as_str).collect();
                 crate::package::write_file_source(f, &path.display(), &vars)
@@ -732,14 +790,14 @@ impl EventSender {
         &self,
         source: &DotfileSource,
         target: impl fmt::Display,
-        reason: impl fmt::Display,
+        reason: SkipReason,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileSkipped {
             operation_info,
             source: source.clone(),
             target: target.to_string(),
-            reason: reason.to_string(),
+            reason,
         })
         .await;
     }
@@ -749,14 +807,16 @@ impl EventSender {
         &self,
         source: &DotfileSource,
         target: impl fmt::Display,
-        diff: impl fmt::Display,
+        detail: ConflictReport,
+        declined: bool,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileConflict {
             operation_info,
             source: source.clone(),
             target: target.to_string(),
-            diff: diff.to_string(),
+            detail,
+            declined,
         })
         .await;
     }
@@ -782,13 +842,13 @@ impl EventSender {
     pub(crate) async fn send_dotfile_drift_detected(
         &self,
         target: impl fmt::Display,
-        drift_type: impl fmt::Display,
+        drift_type: DriftType,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDriftDetected {
             operation_info,
             target: target.to_string(),
-            drift_type: drift_type.to_string(),
+            drift_type,
         })
         .await;
     }
@@ -2775,12 +2835,13 @@ pub enum PackageEvent {
         backup: Option<String>,
     },
 
-    /// A config file was skipped (already current or user declined)
+    /// A config file was left as it is, with nothing wrong: already current, a
+    /// dry run, or content selfie does not check without running commands.
     DotfileSkipped {
         operation_info: OperationInfo,
         source: DotfileSource,
         target: String,
-        reason: String,
+        reason: SkipReason,
     },
 
     /// A conflict was detected between repo and deployed version
@@ -2788,7 +2849,13 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         source: DotfileSource,
         target: String,
-        diff: String,
+        /// How the two sides differ, as far as selfie may show it.
+        detail: ConflictReport,
+        /// Whether the [`ConflictResolver`](crate::dotfile_service::port::ConflictResolver)
+        /// answered [`Skip`](crate::dotfile_service::port::ConflictResolution::Skip).
+        /// By that trait's contract the resolver had presented the conflict, so
+        /// a consumer whose resolver it was need not show it again.
+        declined: bool,
     },
 
     /// A target selfie deployed that no entry deploys to any more, whose file is
@@ -2809,12 +2876,9 @@ pub enum PackageEvent {
     DotfileDriftDetected {
         operation_info: OperationInfo,
         target: String,
-        /// The drift classification, and nothing else.
-        ///
-        /// A bare label — `not tracked`, `repo changed` — which the MCP server
-        /// serializes as a typed field and the CLI prints as one. Appending prose
-        /// here corrupts a value callers treat as an enum.
-        drift_type: String,
+        /// How the target and its source have moved since selfie last deployed
+        /// it. Never [`DriftType::None`]: a target with no drift sends no event.
+        drift_type: DriftType,
     },
 
     /// Post-install note to display to user
@@ -3073,6 +3137,163 @@ pub struct RefusedPackage {
     /// The spec file it was read from, or every file claiming the name for
     /// [`RefusalKind::AmbiguousName`].
     pub paths: Vec<std::path::PathBuf>,
+}
+
+/// How a deployed target and its source have moved since selfie last deployed
+/// it.
+///
+/// [`Display`](fmt::Display) words it for a person: "repo changed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DriftType {
+    /// The target holds what selfie last deployed, and the source has not
+    /// changed since.
+    None,
+    /// The source changed since the last deploy; the target did not.
+    RepoChanged,
+    /// The target changed since the last deploy; the source did not.
+    TargetChanged,
+    /// The source and the target both changed since the last deploy.
+    BothChanged,
+    /// Selfie has no record of deploying to the target.
+    NotTracked,
+}
+
+impl std::fmt::Display for DriftType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DriftType::None => write!(f, "none"),
+            DriftType::RepoChanged => write!(f, "repo changed"),
+            DriftType::TargetChanged => write!(f, "target changed"),
+            DriftType::BothChanged => write!(f, "both changed"),
+            DriftType::NotTracked => write!(f, "not tracked"),
+        }
+    }
+}
+
+/// How a dotfile's target differs from what selfie would write.
+///
+/// [`Display`](fmt::Display) renders it for a person: the diff, or the
+/// summary of a secret-bearing conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictReport {
+    /// A unified diff from the target to the repository file. Empty when the
+    /// two sides decode to the same text, which two different binary files can.
+    Diff(String),
+    /// A secret-bearing entry's conflict, which shows no content: only how many
+    /// lines each side holds.
+    Hidden {
+        /// Lines in the content a deploy would write.
+        resolved_lines: usize,
+        /// Lines in the target as it is.
+        current_lines: usize,
+    },
+}
+
+impl fmt::Display for ConflictReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Diff(diff) => f.write_str(diff),
+            // Says that nothing is kept, because every other overwrite selfie
+            // performs does keep a copy. A user who has seen that line elsewhere
+            // would otherwise assume this overwrite is recoverable too, and
+            // accepting is the only way past a secret conflict. It does not name
+            // the entry's source: every consumer is handed that separately.
+            Self::Hidden {
+                resolved_lines,
+                current_lines,
+            } => {
+                // One closure for both sides, so they cannot pluralize differently.
+                // It is the only information a user gets before deciding whether to
+                // overwrite a credential nothing recorded, so it should not read as
+                // though selfie cannot count.
+                let count = |n: usize| format!("{n} {}", crate::pluralize(n, "line", "lines"));
+                write!(
+                    f,
+                    "  target exists and differs from resolved output\n\n  \
+                     resolved output : {}\n  current target  : {}\n  (content hidden)\n  \
+                     no copy of the current target is kept",
+                    count(*resolved_lines),
+                    count(*current_lines),
+                )
+            }
+        }
+    }
+}
+
+/// Why a dotfile was left as it is.
+///
+/// [`Display`](fmt::Display) words the reason as a clause for a person.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipReason {
+    /// The target holds what selfie last deployed, and the source has not
+    /// changed since.
+    UpToDate,
+    /// The target already holds what would be written.
+    InSync,
+    /// A secret-bearing target already held what would be written; only its
+    /// permissions were narrowed to owner-only.
+    PermissionsTightened,
+    /// A dry run: the repository file would have been written.
+    DryRun,
+    /// A dry run of a secret-bearing entry: nothing ran, so its content and
+    /// whether it differs are unknown.
+    SecretDryRun {
+        /// How many commands the deploy would run.
+        commands: usize,
+        /// What the deploy would do about a symlink at the target.
+        link: LinkAtTarget,
+    },
+    /// A secret-bearing entry `dotfiles drift` reports without checking, since
+    /// checking would run its commands.
+    Unverifiable,
+}
+
+/// Whether a symlink is at a secret-bearing entry's target, which its deploy
+/// would replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkAtTarget {
+    /// No symlink is at the target.
+    NoLink,
+    /// A symlink is at the target, and this is its destination as the link
+    /// spells it.
+    To(std::path::PathBuf),
+    /// A symlink whose destination could not be read.
+    DestinationUnknown,
+}
+
+impl fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UpToDate => f.write_str("already up to date"),
+            Self::InSync => f.write_str("already in sync"),
+            Self::PermissionsTightened => {
+                f.write_str("already in sync (permissions tightened to owner-only)")
+            }
+            Self::DryRun => f.write_str("dry run"),
+            Self::SecretDryRun {
+                commands,
+                link: LinkAtTarget::NoLink,
+            } => write!(
+                f,
+                "dry run: would run {commands} command(s); content not resolved, so no comparison \
+                 is possible"
+            ),
+            Self::SecretDryRun { commands, link } => {
+                let destination = match link {
+                    LinkAtTarget::To(path) => format!(" to '{}'", path.display()),
+                    LinkAtTarget::NoLink | LinkAtTarget::DestinationUnknown => String::new(),
+                };
+                write!(
+                    f,
+                    "dry run: would run {commands} command(s), then replace the symlink{destination} \
+                     with a regular file readable only by you"
+                )
+            }
+            Self::Unverifiable => {
+                f.write_str("provider-sourced (not verifiable without resolving)")
+            }
+        }
+    }
 }
 
 /// Carries one package refused whole, before refusals are grouped by reason.
@@ -3338,6 +3559,50 @@ mod tests {
             .to_string()
             .contains("Invalid command")
         );
+    }
+
+    // The CLI prints these sentences for a skipped entry, so each is pinned.
+    #[test]
+    fn a_skip_reason_reads_as_a_sentence() {
+        let cases = [
+            (SkipReason::UpToDate, "already up to date"),
+            (SkipReason::InSync, "already in sync"),
+            (
+                SkipReason::PermissionsTightened,
+                "already in sync (permissions tightened to owner-only)",
+            ),
+            (SkipReason::DryRun, "dry run"),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 2,
+                    link: LinkAtTarget::NoLink,
+                },
+                "dry run: would run 2 command(s); content not resolved, so no comparison is possible",
+            ),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 1,
+                    link: LinkAtTarget::To("/etc/real".into()),
+                },
+                "dry run: would run 1 command(s), then replace the symlink to '/etc/real' with a \
+                 regular file readable only by you",
+            ),
+            (
+                SkipReason::SecretDryRun {
+                    commands: 1,
+                    link: LinkAtTarget::DestinationUnknown,
+                },
+                "dry run: would run 1 command(s), then replace the symlink with a regular file \
+                 readable only by you",
+            ),
+            (
+                SkipReason::Unverifiable,
+                "provider-sourced (not verifiable without resolving)",
+            ),
+        ];
+        for (reason, sentence) in cases {
+            assert_eq!(reason.to_string(), sentence, "{reason:?}");
+        }
     }
 
     #[test]

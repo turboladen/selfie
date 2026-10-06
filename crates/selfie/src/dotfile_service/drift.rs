@@ -10,13 +10,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::SelfieConfig,
-    dotfile_service::{
-        deploy::compute_checksum,
-        state::{DeployState, DriftType},
-    },
+    dotfile_service::{deploy::compute_checksum, state::DeployState},
     fs::filesystem::FileSystem,
     package::{
-        event::{EventSender, OperationResult, OperationSuccess, StepCount},
+        event::{DriftType, EventSender, OperationResult, OperationSuccess, StepCount},
         refusal::refuse_up_front,
     },
 };
@@ -148,7 +145,7 @@ where
                         .send_dotfile_skipped(
                             &secret.source,
                             secret.path.display(),
-                            "provider-sourced (not verifiable without resolving)",
+                            crate::package::event::SkipReason::Unverifiable,
                         )
                         .await;
                     tally.unverified += 1;
@@ -182,7 +179,7 @@ where
             );
             if drift != DriftType::None {
                 sender
-                    .send_dotfile_drift_detected(repo.target.display(), &drift)
+                    .send_dotfile_drift_detected(repo.target.display(), drift)
                     .await;
                 tally.drifted += 1;
             }

@@ -26,7 +26,10 @@ use selfie::{
     },
     fs::RealFileSystem,
     package::{
-        event::{OperationFailure, OperationResult, OperationSuccess, PackageEvent},
+        event::{
+            ConflictReport, LinkAtTarget, OperationFailure, OperationResult, OperationSuccess,
+            PackageEvent, SkipReason,
+        },
         repository::YamlPackageRepository,
     },
     privilege::{Elevation, Privilege, SudoPolicy},
@@ -1707,7 +1710,10 @@ async fn a_dry_run_reports_a_conflict_even_when_yes_would_accept_it() {
     let conflict = events
         .iter()
         .find_map(|e| match e {
-            PackageEvent::DotfileConflict { diff, .. } => Some(diff.clone()),
+            PackageEvent::DotfileConflict {
+                detail: ConflictReport::Diff(diff),
+                ..
+            } => Some(diff.clone()),
             _ => None,
         })
         .unwrap_or_else(|| panic!("no conflict was reported: {events:?}"));
@@ -1718,7 +1724,7 @@ async fn a_dry_run_reports_a_conflict_even_when_yes_would_accept_it() {
 
     assert!(
         !events.iter().any(
-            |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run")
+            |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::DryRun)
         ),
         "the entry was reported as a dry-run skip as well as a conflict: {events:?}"
     );
@@ -1812,7 +1818,7 @@ async fn test_apply_dry_run_does_not_write() {
 
     let has_skipped_dry_run = events
         .iter()
-        .any(|e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run"));
+        .any(|e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::DryRun));
     assert!(
         has_skipped_dry_run,
         "Should emit DotfileSkipped with 'dry run' reason"
@@ -4534,7 +4540,7 @@ mod secret_bearing {
             matches!(
                 e,
                 PackageEvent::DotfileSkipped { reason, .. }
-                    if reason.starts_with("already in sync")
+                    if matches!(reason, SkipReason::InSync | SkipReason::PermissionsTightened)
             )
         });
         assert!(skipped, "expected an in-sync skip, got: {events:?}");
@@ -4657,7 +4663,7 @@ mod secret_bearing {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("permissions")
+                PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::PermissionsTightened
             )),
             "the tightening must be reported rather than done silently: {events:?}"
         );
@@ -4715,7 +4721,7 @@ mod secret_bearing {
             events.iter().any(|e| matches!(
                 e,
                 PackageEvent::DotfileSkipped { reason, .. }
-                    if reason == "already in sync"
+                    if *reason == SkipReason::InSync
             )),
             "expected a plain in-sync skip, got: {events:?}"
         );
@@ -5326,8 +5332,13 @@ mod secret_bearing {
             events.iter().any(|e| matches!(
                 e,
                 PackageEvent::DotfileSkipped { reason, .. }
-                    if reason.contains("would run 1 command(s)")
-                        && reason.contains("then replace the symlink")
+                    if matches!(
+                        reason,
+                        SkipReason::SecretDryRun {
+                            commands: 1,
+                            link: LinkAtTarget::To(_) | LinkAtTarget::DestinationUnknown,
+                        }
+                    )
             )),
             "the preview must name the outcome a real run would reach: {:?}",
             events
@@ -5659,7 +5670,7 @@ mod secret_bearing {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("dry run")
+                PackageEvent::DotfileSkipped { reason, .. } if matches!(reason, SkipReason::DryRun | SkipReason::SecretDryRun { .. })
             )),
             "the dry run should still report the entry, got: {events:?}"
         );
@@ -5741,7 +5752,7 @@ mod secret_bearing {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("provider-sourced")
+                PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::Unverifiable
             )),
             "secret entries should be identified, got: {events:?}"
         );
@@ -5828,14 +5839,18 @@ mod secret_bearing {
         let (source, conflict) = events
             .iter()
             .find_map(|e| match e {
-                PackageEvent::DotfileConflict { source, diff, .. } => Some((source, diff)),
+                PackageEvent::DotfileConflict {
+                    source,
+                    detail: detail @ ConflictReport::Hidden { .. },
+                    ..
+                } => Some((source, detail.to_string())),
                 _ => None,
             })
             .expect("expected a conflict event");
 
         assert!(conflict.contains("lines"), "got: {conflict}");
         assert!(conflict.contains("content hidden"), "got: {conflict}");
-        test_common::assert_secret_free(conflict, SECRET, "the conflict diff");
+        test_common::assert_secret_free(&conflict, SECRET, "the conflict diff");
         // The command is a reference, not a credential, so the event names it, as
         // its source.
         assert_eq!(
@@ -5862,7 +5877,7 @@ mod secret_bearing {
         let summary = events
             .iter()
             .find_map(|event| match event {
-                PackageEvent::DotfileConflict { diff, .. } => Some(diff),
+                PackageEvent::DotfileConflict { detail, .. } => Some(detail.to_string()),
                 _ => None,
             })
             .expect("a conflict must be reported");
@@ -5875,7 +5890,7 @@ mod secret_bearing {
             !summary.contains("copied aside"),
             "nothing is copied aside here: {summary}"
         );
-        test_common::assert_secret_free(summary, SECRET, "the conflict summary");
+        test_common::assert_secret_free(&summary, SECRET, "the conflict summary");
     }
 
     #[tokio::test]
@@ -6612,7 +6627,7 @@ mod secret_bearing {
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("provider-sourced")
+                PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::Unverifiable
             )),
             "an undeployable entry is not merely unverifiable, got: {events:?}"
         );
@@ -7508,7 +7523,7 @@ mod symlinked_targets {
         );
         assert!(
             !events.iter().any(
-                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run")
+                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::DryRun)
             ),
             "the entry must not also be previewed as a deploy: {events:?}"
         );
@@ -7926,7 +7941,9 @@ mod symlink_consistency {
         events
             .iter()
             .filter_map(|event| match event {
-                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => {
+                    Some(drift_type.to_string())
+                }
                 _ => None,
             })
             .collect()
@@ -11290,7 +11307,10 @@ mod unreadable_targets {
         let diff = events
             .iter()
             .find_map(|e| match e {
-                PackageEvent::DotfileConflict { diff, .. } => Some(diff.as_str()),
+                PackageEvent::DotfileConflict {
+                    detail: ConflictReport::Diff(diff),
+                    ..
+                } => Some(diff.as_str()),
                 _ => None,
             })
             .expect("a conflict event");
@@ -11328,7 +11348,9 @@ mod target_classification {
         events
             .iter()
             .filter_map(|event| match event {
-                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => {
+                    Some(drift_type.to_string())
+                }
                 _ => None,
             })
             .collect()
@@ -11789,7 +11811,7 @@ mod target_reads_never_follow {
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DotfileSkipped { reason, .. } if reason.contains("already in sync")
+                PackageEvent::DotfileSkipped { reason, .. } if matches!(reason, SkipReason::InSync | SkipReason::PermissionsTightened)
             )),
             "a link must not be reported in sync: {events:?}"
         );
@@ -12144,7 +12166,10 @@ mod dry_run_conflicts {
         let conflicts: Vec<_> = events
             .iter()
             .filter_map(|e| match e {
-                PackageEvent::DotfileConflict { diff, .. } => Some(diff.as_str()),
+                PackageEvent::DotfileConflict {
+                    detail: ConflictReport::Diff(diff),
+                    ..
+                } => Some(diff.as_str()),
                 _ => None,
             })
             .collect();
@@ -13377,7 +13402,7 @@ mod backups_before_overwrite {
         // not pass this test by skipping the entry for an unrelated reason.
         assert!(
             events.iter().any(
-                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if reason == "dry run")
+                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::DryRun)
             ),
             "the entry must have reached the dry-run return in the writer: {events:?}"
         );
@@ -17442,7 +17467,8 @@ mod event_sources {
         );
     }
 
-    // A template carries its var names beside the path, not inside it.
+    // A template is reported as a template, carrying its var names beside the
+    // path, not inside it.
     #[tokio::test]
     async fn a_template_names_its_vars_apart_from_its_path() {
         let dirs = TestDirs::new();
@@ -17461,8 +17487,8 @@ mod event_sources {
         let sources = skipped_sources(&dry_run(&dirs).await);
 
         assert_eq!(sources.len(), 1, "{sources:?}");
-        let DotfileSource::File { base, path, vars } = &sources[0] else {
-            panic!("expected a file, got {:?}", sources[0]);
+        let DotfileSource::Template { base, path, vars } = &sources[0] else {
+            panic!("expected a template, got {:?}", sources[0]);
         };
         assert_eq!(
             base.as_ref().map(|b| b.kind),
@@ -18018,5 +18044,169 @@ mod a_state_directory_that_refuses_new_files {
             !dirs.dotfiles_dir.join("starship.yml").exists(),
             "{failure}"
         );
+    }
+}
+
+// Drift reports how each target moved as the type itself.
+mod drift_reports_its_type {
+    use super::*;
+    use selfie::package::event::DriftType;
+
+    fn drift_of(events: &[PackageEvent]) -> Vec<DriftType> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::DotfileDriftDetected { drift_type, .. } => Some(drift_type.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // One deployed target, then the source, the target, or both edited. Each
+    // edit gives its own type, so a check sending one type for every drift
+    // fails at least two of them.
+    #[tokio::test]
+    async fn each_kind_of_edit_is_its_own_type() {
+        for (edit_source, edit_target, expected) in [
+            (true, false, DriftType::RepoChanged),
+            (false, true, DriftType::TargetChanged),
+            (true, true, DriftType::BothChanged),
+        ] {
+            let dirs = TestDirs::new();
+            std::fs::write(dirs.package_dir.join("bat.conf"), "one").unwrap();
+            let target = dirs.target_dir.join("bat.conf");
+            create_package_with_dotfiles(
+                &dirs.package_dir,
+                "bat",
+                &[("bat.conf", target.to_str().unwrap())],
+            );
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+            assert!(target.exists(), "control: the target deployed");
+            if edit_source {
+                std::fs::write(dirs.package_dir.join("bat.conf"), "two").unwrap();
+            }
+            if edit_target {
+                std::fs::write(&target, "three").unwrap();
+            }
+
+            let events = collect_events(dirs.service().check_drift().await).await;
+
+            assert_eq!(
+                drift_of(&events),
+                std::slice::from_ref(&expected),
+                "{expected:?}: {events:#?}"
+            );
+        }
+    }
+}
+
+// A conflict says whether a resolver was shown it and declined, for a
+// repository file and a secret-bearing entry alike, so a consumer whose prompt
+// already showed it need not show it again.
+mod a_conflict_says_whether_it_was_declined {
+    use super::*;
+
+    struct Declining;
+
+    impl selfie::dotfile_service::port::ConflictResolver for Declining {
+        fn resolve(
+            &self,
+            _target: &str,
+            _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+        ) -> selfie::dotfile_service::port::ConflictResolution {
+            selfie::dotfile_service::port::ConflictResolution::Skip
+        }
+    }
+
+    fn declining() -> ApplyOptions {
+        ApplyOptions {
+            conflict_resolver: Some(std::sync::Arc::new(Declining)),
+            ..Default::default()
+        }
+    }
+
+    // One repository file and one command entry, each with a target holding
+    // something else, so both conflict.
+    fn conflicting(dirs: &TestDirs) {
+        std::fs::write(dirs.package_dir.join("repo.conf"), "from repo").unwrap();
+        let repo_target = dirs.target_dir.join("repo.conf");
+        let secret_target = dirs.target_dir.join("secret.conf");
+        std::fs::write(&repo_target, "edited").unwrap();
+        std::fs::write(&secret_target, "edited").unwrap();
+        std::fs::write(
+            dirs.package_dir.join("both.yml"),
+            format!(
+                "name: both\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+                 - source: repo.conf\n    target: \"{}\"\n  \
+                 - command: \"op read x\"\n    target: \"{}\"\n",
+                repo_target.display(),
+                secret_target.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    fn declined_flags(events: &[PackageEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PackageEvent::DotfileConflict { declined, .. } => Some(*declined),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_declined_conflict_says_so() {
+        let dirs = TestDirs::new();
+        conflicting(&dirs);
+        let service =
+            dirs.service_with_runner(FakeCommandRunner::new().succeeding("op read x", b"from op"));
+
+        let events = collect_events(service.apply_all(declining()).await).await;
+
+        assert_eq!(declined_flags(&events), [true, true], "{events:#?}");
+    }
+
+    struct Panicking;
+
+    impl selfie::dotfile_service::port::ConflictResolver for Panicking {
+        fn resolve(
+            &self,
+            _target: &str,
+            _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+        ) -> selfie::dotfile_service::port::ConflictResolution {
+            panic!("the resolver failed before showing anything");
+        }
+    }
+
+    // A resolver that gave no answer may never have shown the conflict, so the
+    // conflict is not marked declined, and a consumer still shows it.
+    #[tokio::test]
+    async fn a_conflict_a_resolver_did_not_answer_is_not_declined() {
+        let dirs = TestDirs::new();
+        conflicting(&dirs);
+        let service =
+            dirs.service_with_runner(FakeCommandRunner::new().succeeding("op read x", b"from op"));
+        let options = ApplyOptions {
+            conflict_resolver: Some(std::sync::Arc::new(Panicking)),
+            ..Default::default()
+        };
+
+        let events = collect_events(service.apply_all(options).await).await;
+
+        assert_eq!(declined_flags(&events), [false, false], "{events:#?}");
+    }
+
+    #[tokio::test]
+    async fn a_conflict_no_resolver_saw_says_so() {
+        let dirs = TestDirs::new();
+        conflicting(&dirs);
+        let service =
+            dirs.service_with_runner(FakeCommandRunner::new().succeeding("op read x", b"from op"));
+
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(declined_flags(&events), [false, false], "{events:#?}");
     }
 }

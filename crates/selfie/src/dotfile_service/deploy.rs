@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use super::state::DriftType;
+use crate::package::event::{DriftType, SkipReason};
 
 /// Compute the SHA-256 checksum of the given data, returning it as a hex string.
 pub fn compute_checksum(data: &[u8]) -> String {
@@ -33,7 +33,7 @@ pub enum DeployDecision {
     /// Safe to deploy (target doesn't exist or repo is newer).
     Deploy,
     /// Skip deployment (already up to date).
-    Skip(String),
+    Skip(SkipReason),
     /// Conflict detected — needs user input.
     Conflict,
 }
@@ -54,12 +54,12 @@ pub fn deploy_decision(
         return DeployDecision::Deploy;
     }
     match drift {
-        DriftType::None => DeployDecision::Skip("already up to date".into()),
+        DriftType::None => DeployDecision::Skip(SkipReason::UpToDate),
         DriftType::RepoChanged => DeployDecision::Deploy,
         DriftType::TargetChanged | DriftType::BothChanged => DeployDecision::Conflict,
         DriftType::NotTracked => {
             if source_checksum == target_checksum {
-                DeployDecision::Skip("already in sync".into())
+                DeployDecision::Skip(SkipReason::InSync)
             } else {
                 DeployDecision::Conflict
             }
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn test_deploy_decision_already_current() {
         let decision = deploy_decision(&DriftType::None, true, "a", "a");
-        assert_eq!(decision, DeployDecision::Skip("already up to date".into()));
+        assert_eq!(decision, DeployDecision::Skip(SkipReason::UpToDate));
     }
 
     #[test]
@@ -132,7 +132,7 @@ mod tests {
     #[test]
     fn test_deploy_decision_not_tracked_matching_checksums() {
         let decision = deploy_decision(&DriftType::NotTracked, true, "same", "same");
-        assert_eq!(decision, DeployDecision::Skip("already in sync".into()));
+        assert_eq!(decision, DeployDecision::Skip(SkipReason::InSync));
     }
 
     #[test]

@@ -191,7 +191,7 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
 
             Ok(Classified::RepoFile(RepoFile {
                 source,
-                event_source: file_source(source_base, &source_path, Vec::new()),
+                event_source: file_source(source_base, &source_path),
                 source_path,
                 target,
             }))
@@ -219,7 +219,7 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
                     if let Err(e) = read_template(filesystem, source, &path) {
                         return Err(Refused(format!("{frame} '{}': {e}", entry.target())));
                     }
-                    file_source(source_base, &path, vars.keys().cloned().collect())
+                    template_source(source_base, &path, vars.keys().cloned().collect())
                 }
                 ContentSource::Provider(command) => DotfileSource::Command(command.to_string()),
                 ContentSource::RepoFile(_) => unreachable!("a repository file takes the arm above"),
@@ -256,24 +256,30 @@ pub(super) fn source_base(config: &SelfieConfig, package: &Package) -> Option<So
     }
 }
 
-/// How events name the file at `path`: relative to `base` when it lies inside it,
-/// and in full otherwise.
-pub(super) fn file_source(
+/// How events name the repository file at `path`: relative to `base` when it
+/// lies inside it, and in full otherwise.
+pub(super) fn file_source(base: Option<&SourceBase>, path: &Path) -> DotfileSource {
+    let (base, path) = relative_to(base, path);
+    DotfileSource::File { base, path }
+}
+
+/// How events name the template at `path`, which substitutes `vars`, placed as
+/// [`file_source`] places a file.
+pub(super) fn template_source(
     base: Option<&SourceBase>,
     path: &Path,
     vars: Vec<String>,
 ) -> DotfileSource {
+    let (base, path) = relative_to(base, path);
+    DotfileSource::Template { base, path, vars }
+}
+
+// `path` relative to `base` with the base, when it lies inside it, else in
+// full with no base.
+fn relative_to(base: Option<&SourceBase>, path: &Path) -> (Option<SourceBase>, PathBuf) {
     match base.and_then(|base| Some((base, path.strip_prefix(&base.directory).ok()?))) {
-        Some((base, relative)) => DotfileSource::File {
-            base: Some(base.clone()),
-            path: relative.to_path_buf(),
-            vars,
-        },
-        None => DotfileSource::File {
-            base: None,
-            path: path.to_path_buf(),
-            vars,
-        },
+        Some((base, relative)) => (Some(base.clone()), relative.to_path_buf()),
+        None => (None, path.to_path_buf()),
     }
 }
 

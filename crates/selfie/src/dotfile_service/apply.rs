@@ -7,7 +7,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -17,13 +16,15 @@ use crate::{
     dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision},
         diff::unified_diff,
-        port::{ConflictDetail, ConflictResolution},
-        state::{DeployState, DriftType},
+        port::{ConflictDetail, ConflictResolution, put_to_resolver},
+        state::DeployState,
     },
     fs::filesystem::FileSystem,
     package::{
         Package,
-        event::{EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount},
+        event::{
+            DriftType, EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount,
+        },
         refusal::refuse_up_front,
     },
 };
@@ -544,7 +545,6 @@ where
                         if let crate::package::event::DotfileSource::File {
                             base: Some(base),
                             path,
-                            ..
                         } = &event_source
                             && let Ledger::Record(recorder) = &mut ledger
                             && recorder
@@ -561,7 +561,7 @@ where
                         }
 
                         sender
-                            .send_dotfile_skipped(&event_source, target_path.display(), &reason)
+                            .send_dotfile_skipped(&event_source, target_path.display(), reason)
                             .await;
                         break 'entry EntryOutcome::Skipped;
                     }
@@ -599,6 +599,7 @@ where
                         // someone runs to see what `--yes` would overwrite is the one
                         // place that count has to be right.
                         let mut decided = Decided::Now(current.as_deref());
+                        let mut declined = false;
                         let accept = if options.dry_run {
                             false
                         } else if options.auto_accept {
@@ -619,8 +620,7 @@ where
                             let src = event_source.clone();
                             let tgt = target_path.display().to_string();
                             let d = rendered.get_or_insert_with(&render).clone();
-                            let r = Arc::clone(resolver);
-                            tokio::task::spawn_blocking(move || {
+                            let answer = put_to_resolver(resolver, move |r| {
                                 r.resolve(
                                     &tgt,
                                     ConflictDetail::Diff {
@@ -629,9 +629,9 @@ where
                                     },
                                 )
                             })
-                            .await
-                            .unwrap_or(ConflictResolution::Skip)
-                                == ConflictResolution::Accept
+                            .await;
+                            declined = answer == Some(ConflictResolution::Skip);
+                            answer == Some(ConflictResolution::Accept)
                         } else {
                             false
                         };
@@ -643,7 +643,10 @@ where
                                 .send_dotfile_conflict(
                                     &event_source,
                                     target_path.display(),
-                                    rendered.get_or_insert_with(&render),
+                                    crate::package::event::ConflictReport::Diff(
+                                        rendered.take().unwrap_or_else(render),
+                                    ),
+                                    declined,
                                 )
                                 .await;
                             break 'entry EntryOutcome::Conflicted;

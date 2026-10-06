@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::SelfieConfig,
-    package::event::{BaseKind, DotfileSource, SourceBase},
+    package::event::{BaseKind, DotfileSource, DriftType, SourceBase},
 };
 use std::collections::HashMap;
 
@@ -52,27 +52,6 @@ pub struct DeployEntry {
     // parse. Apply fills it in when it finds such a target in sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base: Option<BaseKind>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DriftType {
-    None,
-    RepoChanged,
-    TargetChanged,
-    BothChanged,
-    NotTracked,
-}
-
-impl std::fmt::Display for DriftType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DriftType::None => write!(f, "none"),
-            DriftType::RepoChanged => write!(f, "repo changed"),
-            DriftType::TargetChanged => write!(f, "target changed"),
-            DriftType::BothChanged => write!(f, "both changed"),
-            DriftType::NotTracked => write!(f, "not tracked"),
-        }
-    }
 }
 
 impl DeployState {
@@ -204,7 +183,6 @@ impl DeployEntry {
                     },
                 }),
                 path: self.source.clone().into(),
-                vars: Vec::new(),
             },
             None => DotfileSource::Recorded(self.source.clone()),
         }
