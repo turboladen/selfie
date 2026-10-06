@@ -17,7 +17,9 @@ use crate::{
 };
 
 use super::refusal::{guard_refusal, read_target_state, readable_or_refusal, refusal_warning};
-use super::state_file::{LoadedState, save_deploy_state};
+use super::state_file::{
+    LoadedState, Recorder, WritableState, save_deploy_state, stopped_before_writing,
+};
 
 /// Describes a single config file deployment operation
 pub(super) struct DeployUnit<'a> {
@@ -61,7 +63,8 @@ pub(super) enum DeployOutcome {
     /// Refused or failed, and already reported as whichever it was. Nothing was
     /// written or recorded.
     Refused,
-    /// Written, and the deploy state could not record it. Carries why the run
+    /// The deploy state could not be written: before the target, so nothing was
+    /// written, or after it, so the target is unrecorded. Carries why the run
     /// stops.
     Unrecorded(String),
 }
@@ -73,7 +76,7 @@ pub(super) enum DeployOutcome {
 /// A secret-bearing entry's write is not gated by this type.
 pub(super) enum Ledger {
     /// A real run: writes targets, and records each write in this state.
-    Record(LoadedState),
+    Record(Recorder),
     /// A dry run: writes and records nothing. Holds the state it previews
     /// against, when one could be read.
     Preview(Option<LoadedState>),
@@ -83,7 +86,7 @@ impl Ledger {
     /// The state this run reads, if it has one.
     pub(super) fn loaded(&self) -> Option<&LoadedState> {
         match self {
-            Ledger::Record(loaded) => Some(loaded),
+            Ledger::Record(recorder) => Some(recorder.loaded()),
             Ledger::Preview(loaded) => loaded.as_ref(),
         }
     }
@@ -105,15 +108,21 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
     decided: Decided<'_>,
     backed_up: &mut HashMap<String, Option<PathBuf>>,
 ) -> DeployOutcome {
-    let Ledger::Record(loaded) = ledger else {
+    let Ledger::Record(recorder) = ledger else {
         sender
             .send_dotfile_skipped(unit.event_source, unit.target_path.display(), "dry run")
             .await;
         return DeployOutcome::Previewed;
     };
+    // The state is written back here, ahead of the backup and the target write,
+    // so a state that cannot be written stops the run before this entry writes.
+    let mut loaded = match recorder.writable(filesystem) {
+        Ok(loaded) => loaded,
+        Err(failure) => return DeployOutcome::Unrecorded(stopped_before_writing(&failure)),
+    };
     match perform_deploy(filesystem, sender, unit, decided, backed_up).await {
         Wrote::Written => {
-            match record_and_save(filesystem, loaded, sender, Recorded::Deployed, unit).await {
+            match record_and_save(filesystem, &mut loaded, sender, Recorded::Deployed, unit).await {
                 Some(reason) => DeployOutcome::Unrecorded(reason),
                 None => DeployOutcome::Deployed,
             }
@@ -312,7 +321,7 @@ impl std::fmt::Display for Recorded {
 // changed since is asked about.
 pub(super) async fn record_and_save<F: FileSystem>(
     filesystem: &F,
-    loaded: &mut LoadedState,
+    loaded: &mut WritableState<'_>,
     sender: &EventSender,
     recorded: Recorded,
     unit: &DeployUnit<'_>,

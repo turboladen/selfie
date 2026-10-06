@@ -110,7 +110,14 @@ pub(super) enum SecretOutcome {
     /// failed command's program so the caller can hold back that program's later
     /// commands in this run.
     CommandFailed(String),
+    /// The caller's write-back before the write failed, so nothing was written.
+    /// Carries why, already worded.
+    StateNotWritable(String),
 }
+
+/// What [`SecretApply::apply`] calls before it writes a target or asks about a
+/// conflict: `Err` with the reason stops the entry with nothing written.
+pub(super) type BeforeWrite<'g> = dyn FnMut() -> Result<(), String> + Send + 'g;
 
 /// A phase either lets the apply continue, or ends it with an outcome.
 ///
@@ -184,13 +191,25 @@ where
     ///
     /// Short-circuits a preview, resolves, then decides against what is already
     /// on disk.
-    pub(super) async fn apply(&self, target: &SecretEntry<'_>) -> SecretOutcome {
-        match self.run(target).await {
+    ///
+    /// Calls `before_write` just before any write to the target, including
+    /// tightening the mode of one already in sync, and before asking about a
+    /// conflict. An entry left exactly as it is never calls it.
+    pub(super) async fn apply(
+        &self,
+        target: &SecretEntry<'_>,
+        before_write: &mut BeforeWrite<'_>,
+    ) -> SecretOutcome {
+        match self.run(target, before_write).await {
             Ok(outcome) | Err(outcome) => outcome,
         }
     }
 
-    async fn run(&self, target: &SecretEntry<'_>) -> Phase<SecretOutcome> {
+    async fn run(
+        &self,
+        target: &SecretEntry<'_>,
+        before_write: &mut BeforeWrite<'_>,
+    ) -> Phase<SecretOutcome> {
         self.short_circuit_dry_run(target).await?;
 
         let resolved = self.resolve(target).await?;
@@ -216,6 +235,7 @@ where
         // the outcome must not depend on it (ADR-0005 decision 3).
         let current = match found {
             Found::Link(link) => {
+                before_write().map_err(SecretOutcome::StateNotWritable)?;
                 let outcome = self.write(target, &resolved).await;
                 if matches!(outcome, SecretOutcome::Deployed) {
                     self.sender
@@ -226,8 +246,11 @@ where
             }
             Found::Current(current) => current,
         };
-        self.settle_in_sync(target, &resolved, current.as_deref())
+        self.settle_in_sync(target, &resolved, current.as_deref(), before_write)
             .await?;
+        // Ahead of the conflict's question as well as the write, so no answer is
+        // asked for a write that cannot happen.
+        before_write().map_err(SecretOutcome::StateNotWritable)?;
         self.settle_conflict(target, &resolved, current.as_deref())
             .await?;
 
@@ -399,6 +422,7 @@ where
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
         current: Option<&[u8]>,
+        before_write: &mut BeforeWrite<'_>,
     ) -> Phase {
         let Some(bytes) = current else {
             return Ok(());
@@ -412,6 +436,7 @@ where
             // reported in sync on the strength of a file it no longer is.
             Err(refusal @ FileSystemError::SymlinkedTarget { .. }) => {
                 if let Ok(Some(link)) = classify_link(Some(refusal)) {
+                    before_write().map_err(SecretOutcome::StateNotWritable)?;
                     let outcome = self.write(target, resolved).await;
                     if matches!(outcome, SecretOutcome::Deployed) {
                         self.sender
@@ -431,6 +456,7 @@ where
         }
 
         // Same content, written the one way that establishes the mode atomically.
+        before_write().map_err(SecretOutcome::StateNotWritable)?;
         if let Err(e) = self
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)

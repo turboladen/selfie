@@ -177,6 +177,7 @@ mod tests {
         // directory under the home directory when the file names none.
         mock_home(&mut fs);
         fs.mock_directories_exist();
+        fs.mock_creatable_directories();
         fs
     }
 
@@ -229,6 +230,7 @@ mod tests {
         fs.mock_config_file(config_dir, config_yaml);
         mock_home(&mut fs);
         fs.mock_directories_exist();
+        fs.mock_creatable_directories();
         fs.expect_list_directory().returning(|_| Ok(Vec::new()));
         // No deploy state has been written yet.
         fs.expect_read_file()

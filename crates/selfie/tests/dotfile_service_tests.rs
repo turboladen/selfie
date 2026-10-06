@@ -608,6 +608,10 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.open_for_read_refusal(path)
     }
 
+    fn access_refusal(&self, directory: &std::path::Path) -> Option<selfie::fs::FileSystemError> {
+        self.0.access_refusal(directory)
+    }
+
     // Cancels too when asked what is at the path, which is how the orphan check
     // looks at a target it does not read.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
@@ -836,6 +840,10 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         self.inner.open_for_read_refusal(path)
     }
 
+    fn access_refusal(&self, directory: &std::path::Path) -> Option<selfie::fs::FileSystemError> {
+        self.inner.access_refusal(directory)
+    }
+
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
         if self.blind_to_directory_at.as_deref() == Some(path) {
             return selfie::fs::DirectoryState::Absent(selfie::fs::AbsentReason::Empty);
@@ -968,6 +976,10 @@ impl selfie::fs::FileSystem for HomeAt {
         self.0.open_for_read_refusal(path)
     }
 
+    fn access_refusal(&self, directory: &std::path::Path) -> Option<selfie::fs::FileSystemError> {
+        self.0.access_refusal(directory)
+    }
+
     // Delegated: this decorator's subject is the home directory, not directory state.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
         self.0.directory_state(path)
@@ -1064,6 +1076,10 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
         self.plain_checks
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.open_for_read_refusal(path)
+    }
+
+    fn access_refusal(&self, directory: &std::path::Path) -> Option<selfie::fs::FileSystemError> {
+        self.inner.access_refusal(directory)
     }
 
     // Delegated: this decorator's subject is the symlink question's second answer, not
@@ -1169,6 +1185,10 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
         self.inner.open_for_read_refusal(path)
     }
 
+    fn access_refusal(&self, directory: &std::path::Path) -> Option<selfie::fs::FileSystemError> {
+        self.inner.access_refusal(directory)
+    }
+
     // `directory_state` follows a link it finds, so asking it of the link is a
     // following stat.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
@@ -1272,6 +1292,10 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         path: &selfie::fs::TargetPath,
     ) -> Option<selfie::fs::FileSystemError> {
         self.inner.open_for_read_refusal(path)
+    }
+
+    fn access_refusal(&self, directory: &std::path::Path) -> Option<selfie::fs::FileSystemError> {
+        self.inner.access_refusal(directory)
     }
 
     // Delegated: this decorator's subject is the second symlink answer, not what is at
@@ -1381,6 +1405,10 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
         self.inner.open_for_read_refusal(path)
     }
 
+    fn access_refusal(&self, directory: &std::path::Path) -> Option<selfie::fs::FileSystemError> {
+        self.inner.access_refusal(directory)
+    }
+
     // Delegated: this decorator's subject is a failing write, not directory state.
     fn directory_state(&self, path: &std::path::Path) -> selfie::fs::DirectoryState {
         self.inner.directory_state(path)
@@ -1465,11 +1493,12 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
 // The deploy state is written after each record, not once at the end of the run.
 //
 // Two entries in one package, in declared order, so which deploys first does
-// not depend on directory listing. The filesystem allows exactly one write to
-// the state file. Written once after the loop, that write would carry both
-// entries and the run would report success; written after each record, the
-// first entry's save takes it, the second's fails, and the run stops naming
-// the target that went unrecorded while the first is already on disk.
+// not depend on directory listing. The filesystem allows exactly two writes to
+// the state file: the write-back before the first deploy, and one more. Written
+// once after the loop, that write would carry both entries and the run would
+// report success; written after each record, the first entry's save takes it,
+// the second's fails, and the run stops naming the target that went unrecorded
+// while the first is already on disk.
 #[tokio::test]
 async fn state_is_recorded_after_each_deploy_not_after_the_run() {
     let dirs = TestDirs::new();
@@ -1492,7 +1521,7 @@ async fn state_is_recorded_after_each_deploy_not_after_the_run() {
     let fs = StateWritesFailAfter {
         inner: RealFileSystem,
         state_file: state_file.clone(),
-        allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(2)),
     };
     let config = SelfieConfigBuilder::default()
         .environment("test")
@@ -7590,6 +7619,13 @@ mod symlinked_targets {
                 path: &selfie::fs::TargetPath,
             ) -> Option<selfie::fs::FileSystemError> {
                 self.0.open_for_read_refusal(path)
+            }
+
+            fn access_refusal(
+                &self,
+                directory: &std::path::Path,
+            ) -> Option<selfie::fs::FileSystemError> {
+                self.0.access_refusal(directory)
             }
 
             // Delegated: this decorator blinds the symlink check only.
@@ -13835,18 +13871,29 @@ mod a_failed_spec_save_strands_nothing {
 // and only the record is missing -- so the failure has to name what exists and
 // what recovers it.
 //
-// `TestDirs` configures `state_directory`, which is what makes the chmod below
-// bind: `deploy_state_path` probes only a configured directory, and an unset one
-// would be looked for under the home directory instead.
+// A state directory whose permissions refuse a write is refused before track
+// writes anything, so these fail the save itself, the way a full disk would,
+// after that check has passed.
 #[cfg(unix)]
 mod an_unrecorded_track_names_what_it_wrote {
     use super::*;
 
-    // A state directory that lists but cannot be written to. The load succeeds
-    // because an absent state file is the ordinary first run, and the save at the
-    // end is the only thing that fails.
-    fn unwritable_state_dir(dirs: &TestDirs) -> Option<RestoreMode> {
-        made_unwritable(&dirs.state_dir)
+    // The write-back track makes before it copies anything succeeds, and the save
+    // that records the track fails, as a full disk would make it.
+    fn track_whose_save_fails(
+        dirs: &TestDirs,
+    ) -> DotfileServiceImpl<
+        YamlPackageRepository<RealFileSystem>,
+        StateWritesFailAfter,
+        FakeCommandRunner,
+        RunningAs,
+    > {
+        let fs = StateWritesFailAfter {
+            inner: RealFileSystem,
+            state_file: dirs.state_dir.join("deploy-state.yml"),
+            allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        };
+        dirs.service_with_fs(fs, FakeCommandRunner::new())
     }
 
     #[tokio::test]
@@ -13855,13 +13902,8 @@ mod an_unrecorded_track_names_what_it_wrote {
         let target = dirs.target_dir.join("starship.toml");
         std::fs::write(&target, "format = \"$all\"").unwrap();
 
-        let Some(_restore) = unwritable_state_dir(&dirs) else {
-            eprintln!("SKIP the_failure_names_the_copy_and_the_spec: mode bits ignored");
-            return;
-        };
-
         let events = collect_events(
-            dirs.service_with_dotfiles()
+            track_whose_save_fails(&dirs)
                 .track_standalone("starship", target.to_str().unwrap())
                 .await,
         )
@@ -13875,9 +13917,13 @@ mod an_unrecorded_track_names_what_it_wrote {
         // asserting about a run that failed somewhere earlier.
         assert!(copy.exists(), "the copy was not written: {failure}");
         assert!(spec.exists(), "the spec was not written: {failure}");
+        // The write-back before the copy holds no record, so the target must be
+        // missing from whatever the state file holds.
+        let state =
+            std::fs::read_to_string(dirs.state_dir.join("deploy-state.yml")).unwrap_or_default();
         assert!(
-            !dirs.state_dir.join("deploy-state.yml").exists(),
-            "the state was written after all, so this tested nothing"
+            !state.contains("starship.toml"),
+            "the track was recorded after all, so this tested nothing: {state}"
         );
 
         assert!(
@@ -13899,13 +13945,8 @@ mod an_unrecorded_track_names_what_it_wrote {
         let target = dirs.target_dir.join("starship.toml");
         std::fs::write(&target, "format = \"$all\"").unwrap();
 
-        let Some(_restore) = unwritable_state_dir(&dirs) else {
-            eprintln!("SKIP the_failure_sends_the_user_to_apply_rather_than_back_to_track");
-            return;
-        };
-
         let events = collect_events(
-            dirs.service_with_dotfiles()
+            track_whose_save_fails(&dirs)
                 .track_standalone("starship", target.to_str().unwrap())
                 .await,
         )
@@ -16986,12 +17027,19 @@ mod orphans {
             serde_saphyr::to_string(&state).unwrap(),
         )
         .unwrap();
-        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
-            eprintln!("SKIP a_placement_that_cannot_be_saved_only_warns: mode bits ignored");
-            return;
+        // The save fails after the run's own write check has passed, as on a
+        // full disk: permissions that refuse it are refused before the run.
+        let fs = StateWritesFailAfter {
+            inner: RealFileSystem,
+            state_file: dirs.state_dir.join("deploy-state.yml"),
+            allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
-
-        let events = run_apply_all(&dirs).await;
+        let events = collect_events(
+            dirs.service_with_fs(fs, FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
 
         assert!(
             matches!(
@@ -17587,5 +17635,388 @@ mod refusals_grouped_by_reason {
 
         assert_grouped(&events);
         assert_eq!(drift_summary(&events).2, 4, "{events:#?}");
+    }
+}
+
+// apply and track ask whether the state directory takes a new file before they
+// write anything, so a deploy they could not record never happens.
+#[cfg(unix)]
+mod a_state_directory_that_refuses_new_files {
+    use super::*;
+
+    // Write one package that deploys to a target where nothing is yet, and return
+    // that target.
+    fn one_new_target(dirs: &TestDirs) -> PathBuf {
+        let source_dir = dirs.package_dir.join("app");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("rc"), "rc = 1").unwrap();
+        let target = dirs.target_dir.join("rc");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[("app/rc", target.to_str().unwrap())],
+        );
+        target
+    }
+
+    // Whether the run reported deploying anything.
+    fn deployed_any(events: &[PackageEvent]) -> bool {
+        events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. }))
+    }
+
+    async fn apply(dirs: &TestDirs, options: ApplyOptions) -> Vec<PackageEvent> {
+        collect_events(dirs.service().apply_all(options).await).await
+    }
+
+    // The state directory is not there yet, and its parent will not take it.
+    #[tokio::test]
+    async fn apply_refuses_before_writing_when_the_state_directory_cannot_be_created() {
+        let dirs = TestDirs::new();
+        let target = one_new_target(&dirs);
+        std::fs::remove_dir(&dirs.state_dir).unwrap();
+        let parent = dirs.state_dir.parent().unwrap().to_path_buf();
+        let Some(_restore) = made_unwritable(&parent) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+
+        let events = apply(&dirs, ApplyOptions::default()).await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("deploy state cannot be written"),
+            "{failure}"
+        );
+        assert!(failure.contains("Permission denied"), "{failure}");
+        assert!(
+            failure.contains("Stopped with nothing written"),
+            "{failure}"
+        );
+        assert!(!target.exists(), "the target was written: {failure}");
+        assert!(!deployed_any(&events), "{events:?}");
+        assert!(!dirs.state_dir.exists(), "the state directory was made");
+    }
+
+    // The state directory exists and holds a state, but will not take a new file.
+    #[tokio::test]
+    async fn apply_refuses_before_writing_when_the_state_directory_is_read_only() {
+        let dirs = TestDirs::new();
+        let target = one_new_target(&dirs);
+        apply(&dirs, ApplyOptions::default()).await;
+        let state_file = dirs.state_dir.join("deploy-state.yml");
+        let before = std::fs::read(&state_file).expect("the first run recorded the target");
+        std::fs::remove_file(&target).unwrap();
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+
+        let events = apply(&dirs, ApplyOptions::default()).await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("deploy state cannot be written"),
+            "{failure}"
+        );
+        assert!(!target.exists(), "the target was written: {failure}");
+        assert!(!deployed_any(&events), "{events:?}");
+        assert_eq!(std::fs::read(&state_file).unwrap(), before);
+    }
+
+    // The control: the first run, where nothing is there yet and the parent takes
+    // it, deploys and records.
+    #[tokio::test]
+    async fn the_first_run_creates_the_state_directory_and_records() {
+        let dirs = TestDirs::new();
+        let target = one_new_target(&dirs);
+        std::fs::remove_dir(&dirs.state_dir).unwrap();
+
+        let events = apply(&dirs, ApplyOptions::default()).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        assert!(target.exists());
+        assert!(dirs.state_dir.join("deploy-state.yml").exists());
+    }
+
+    // A dry run writes nothing, so it previews, and says a real run would stop.
+    #[tokio::test]
+    async fn a_dry_run_warns_that_a_real_run_would_stop() {
+        let dirs = TestDirs::new();
+        let target = one_new_target(&dirs);
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+        let options = ApplyOptions {
+            dry_run: true,
+            ..ApplyOptions::default()
+        };
+
+        let events = apply(&dirs, options).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|w| w.contains("deploy state cannot be written")
+                    && w.contains("A real run stops before its first write")),
+            "{events:?}"
+        );
+        assert!(!target.exists());
+    }
+
+    // A run with nothing to record never writes the state back, so a state
+    // directory it cannot write does not fail it.
+    #[tokio::test]
+    async fn a_run_with_nothing_to_record_does_not_need_the_state_written() {
+        let dirs = TestDirs::new();
+        let target = one_new_target(&dirs);
+        apply(&dirs, ApplyOptions::default()).await;
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+
+        let events = apply(&dirs, ApplyOptions::default()).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        assert!(target.exists());
+    }
+
+    // A write-back that fails for a reason permissions do not show, as over an
+    // immutable state file, still stops the run before the first deploy.
+    #[tokio::test]
+    async fn a_write_back_that_fails_stops_the_run_before_it_deploys() {
+        let dirs = TestDirs::new();
+        let target = one_new_target(&dirs);
+        let fs = StateWritesFailAfter {
+            inner: RealFileSystem,
+            state_file: dirs.state_dir.join("deploy-state.yml"),
+            allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+
+        let events = collect_events(
+            dirs.service_with_fs(fs, FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("Stopped with nothing written"),
+            "{failure}"
+        );
+        assert!(!target.exists(), "the target was written: {failure}");
+        assert!(!deployed_any(&events), "{events:?}");
+    }
+
+    // A secret-bearing entry records nothing, but its write is a write, so the
+    // state is written back before it: over a state that cannot be written, no
+    // credential reaches the disk.
+    #[tokio::test]
+    async fn a_secret_is_not_written_when_the_state_cannot_be() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        secret_bearing::provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"s3cret");
+
+        let events = collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("Stopped with nothing written"),
+            "{failure}"
+        );
+        assert!(!target.exists(), "the secret was written: {failure}");
+    }
+
+    // Tightening the mode of a secret already in sync rewrites the file, which is a
+    // write, so over a state that cannot be written the file is left exactly as it
+    // was: same mode, same inode.
+    #[tokio::test]
+    async fn an_in_sync_secret_is_not_tightened_when_the_state_cannot_be_written() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        secret_bearing::provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        std::fs::write(&target, "s3cret").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let inode = std::fs::metadata(&target).unwrap().ino();
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"s3cret");
+
+        let events = collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("Stopped with nothing written"),
+            "{failure}"
+        );
+        let metadata = std::fs::metadata(&target).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o644, "{failure}");
+        assert_eq!(metadata.ino(), inode, "the file was replaced: {failure}");
+    }
+
+    // A link at a secret target is replaced whatever is behind it, and that
+    // replacement is a write, so over a state that cannot be written the link is
+    // left as it is.
+    #[tokio::test]
+    async fn a_linked_secret_target_is_not_replaced_when_the_state_cannot_be_written() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let elsewhere = dirs.target_dir.join("elsewhere");
+        std::fs::write(&elsewhere, "not the secret").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+        secret_bearing::provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"s3cret");
+
+        let events = collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("Stopped with nothing written"),
+            "{failure}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link was replaced: {failure}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&elsewhere).unwrap(),
+            "not the secret"
+        );
+    }
+
+    // The question about a conflict is asked only once the state has been written
+    // back, so no answer is asked for a write that cannot happen.
+    #[tokio::test]
+    async fn a_conflict_is_not_asked_about_when_the_state_cannot_be_written() {
+        let dirs = TestDirs::new();
+        let target = one_new_target(&dirs);
+        std::fs::write(&target, "the user's own").unwrap();
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let events = apply(&dirs, counting_resolver(&asked)).await;
+
+        assert!(
+            failure_message(&events).contains("Stopped with nothing written"),
+            "{events:?}"
+        );
+        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "the user's own");
+    }
+
+    // A track refused for its own reasons writes nothing, so a mistyped state
+    // directory is not created by it.
+    #[tokio::test]
+    async fn a_refused_track_does_not_create_the_state_directory() {
+        let dirs = TestDirs::new();
+        std::fs::remove_dir(&dirs.state_dir).unwrap();
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"").unwrap();
+        // The copy's path is taken, so track refuses before it writes.
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("starship")).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("starship/starship.toml"), "x").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            failure_message(&events).contains("already exists"),
+            "{events:?}"
+        );
+        assert!(
+            !dirs.state_dir.exists(),
+            "the refused track created the state directory"
+        );
+    }
+
+    // track writes a copy and a spec before it records, so it asks first too.
+    #[tokio::test]
+    async fn track_refuses_before_writing_the_copy_or_the_spec() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("starship.toml");
+        std::fs::write(&target, "format = \"$all\"").unwrap();
+        let Some(_restore) = made_unwritable(&dirs.state_dir) else {
+            eprintln!("SKIP: mode bits ignored");
+            return;
+        };
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("deploy state cannot be written"),
+            "{failure}"
+        );
+        assert!(!dirs.dotfiles_dir.join("starship").exists(), "{failure}");
+        assert!(
+            !dirs.dotfiles_dir.join("starship.yml").exists(),
+            "{failure}"
+        );
     }
 }

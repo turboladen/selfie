@@ -399,6 +399,69 @@ pub trait FileSystem: Send + Sync {
     /// reads must still handle the read's own error.
     fn open_for_read_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
+    /// The refusal that keeps this process from creating an entry in the
+    /// existing directory `directory`, or `None` when its permissions allow one.
+    ///
+    /// Asks about `directory` alone; [`file_creation_refusal`](Self::file_creation_refusal)
+    /// is the question about a path that may not exist yet.
+    fn access_refusal(&self, directory: &Path) -> Option<FileSystemError>;
+
+    /// The refusal that keeps a new file from being created in `directory`, or
+    /// `None` when its permissions allow one. An absent `directory` is judged by
+    /// whether it could be created: the nearest ancestor that exists must be a
+    /// directory that allows a new entry, with nothing else in the way.
+    ///
+    /// A permission check, not a write: a later write can still fail, for example
+    /// on a full disk or where an existing file at the name refuses replacement.
+    /// Answers for this process's user.
+    fn file_creation_refusal(&self, directory: &Path) -> Option<FileSystemError> {
+        let refusal = |path: &Path, kind: io::ErrorKind| {
+            Some(FileSystemError::CannotCreateIn {
+                path: path.to_path_buf(),
+                source: Arc::new(io::Error::from(kind)),
+            })
+        };
+        // Walked through `directory_state`, so a file, a dangling link or an
+        // unknown path in the way is refused as what it is. `create_dir_all` makes
+        // every missing level from the nearest existing ancestor down, so that
+        // ancestor's permissions decide whether the rest can be created.
+        let mut candidate = if directory.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            directory.to_path_buf()
+        };
+        loop {
+            match self.directory_state(&candidate) {
+                DirectoryState::Directory => return self.access_refusal(&candidate),
+                DirectoryState::Absent(AbsentReason::Empty) => {
+                    // A walk that cannot climb further, at the root or at `.`,
+                    // has found nothing to create the directory in.
+                    let parent = parent_dir(&candidate);
+                    if candidate.parent().is_none() || parent == candidate {
+                        return refusal(&candidate, io::ErrorKind::NotFound);
+                    }
+                    candidate = parent.to_path_buf();
+                }
+                DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }) => {
+                    return refusal(&parent, io::ErrorKind::NotADirectory);
+                }
+                DirectoryState::Absent(AbsentReason::Occupied { .. }) => {
+                    return refusal(&candidate, io::ErrorKind::NotADirectory);
+                }
+                // `create_dir_all` meets the link itself and fails with EEXIST.
+                DirectoryState::Absent(AbsentReason::DanglingSymlink { .. }) => {
+                    return refusal(&candidate, io::ErrorKind::AlreadyExists);
+                }
+                DirectoryState::Unlistable(error) | DirectoryState::Unknown(error) => {
+                    return Some(FileSystemError::CannotCreateIn {
+                        path: candidate,
+                        source: Arc::new(io::Error::new(error.kind(), error.to_string())),
+                    });
+                }
+            }
+        }
+    }
+
     /// Whether a file is readable only by its owner
     ///
     /// Companion to [`write_file_private`](FileSystem::write_file_private), for
@@ -532,6 +595,15 @@ pub enum FileSystemError {
     /// instead, asked with a non-following stat; do not conflate the two.
     #[error("{}: target resolves to a {kind} and selfie will not write to it", .path.display())]
     IrregularTarget { path: PathBuf, kind: &'static str },
+
+    /// A new file cannot be created under `path`: the directory it was asked
+    /// about, or the nearest ancestor of it that exists, refuses one.
+    #[error("{}: {source}", .path.display())]
+    CannotCreateIn {
+        path: PathBuf,
+        #[source]
+        source: Arc<io::Error>,
+    },
 }
 
 // Why selfie will not read a file out of its own repository.
@@ -556,6 +628,18 @@ pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> String {
         // guard exists to prevent. Refuse on anything it reports.
         other => format!("selfie will not read the repository file: {other}"),
     }
+}
+
+/// The directory `path` lives in, as one the filesystem will actually open: its
+/// parent, or `.` for a bare name.
+///
+/// `Path::parent` gives `Some("")` for a bare name like `config.toml`, and
+/// `File::open("")` is `ENOENT`. `create_dir_all` and `tempfile_in` both cope
+/// with the empty path; the directory fsync does not.
+pub(crate) fn parent_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 /// Helpers that set up common expectations, so library and CLI tests can drive
@@ -594,6 +678,11 @@ impl MockFileSystem {
     /// Answer "a directory" for every directory classified.
     pub fn mock_directories_exist(&mut self) {
         self.mock_directory_state(DirectoryState::Directory);
+    }
+
+    /// Allow a new file in every directory asked about.
+    pub fn mock_creatable_directories(&mut self) {
+        self.expect_file_creation_refusal().returning(|_| None);
     }
 
     /// Return `content` whenever `path` is read.

@@ -25,7 +25,9 @@ use crate::{
 };
 
 use super::refusal::{TargetState, directory_at_target, guard_refusal, read_target_state};
-use super::state_file::{StateLoad, StateSaveError, load_deploy_state, save_deploy_state};
+use super::state_file::{
+    Recorder, StateLoad, StateSaveError, load_deploy_state, save_deploy_state,
+};
 
 /// Why a name cannot be a directory under the repository, or `None` if it can.
 fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
@@ -572,13 +574,13 @@ where
     // Ahead of every write below. Track ends by recording the deployment, and a
     // state file it could not load is one it must not write over, so the copy
     // and the spec are not created for a record that cannot be kept.
-    let mut loaded =
+    let mut recorder =
         match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
             StateLoad::Usable(loaded) => {
                 if let Some(warning) = loaded.directory_warning() {
                     sender.send_warning(warning.to_string()).await;
                 }
-                loaded
+                Recorder::new(loaded)
             }
             StateLoad::Unusable(failure) => {
                 return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
@@ -635,6 +637,18 @@ where
             source_path.display()
         )));
     }
+
+    // Written back after every refusal above and just before the first write, so
+    // a refused track writes nothing, and one whose state cannot be written stops
+    // before the copy and the spec exist.
+    let mut loaded = match recorder.writable(filesystem) {
+        Ok(loaded) => loaded,
+        Err(failure) => {
+            return OperationResult::Failure(OperationFailure::Generic(format!(
+                "Nothing was tracked. {failure}"
+            )));
+        }
+    };
 
     if let Err(e) =
         filesystem.write_file_no_follow(&repository_path(&source_path), content.as_bytes())

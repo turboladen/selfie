@@ -39,7 +39,8 @@ use super::orphan::{self, Catalog};
 use super::port::ApplyOptions;
 use super::secret::{SecretApply, SecretOutcome, programs_of};
 use super::state_file::{
-    LoadedState, StateLoad, load_deploy_state, read_only_state_warning, save_deploy_state,
+    LoadedState, Recorder, StateLoad, load_deploy_state, read_only_state_warning,
+    stopped_before_writing,
 };
 use super::warning::CollectionRefusal;
 
@@ -71,8 +72,9 @@ enum Stop {
     Package(String),
     /// Collecting the packages refused something while `stop_on_error` is on.
     Collection(CollectionRefusal),
-    /// The deploy state could not record a write. Carries the reason, already
-    /// worded. Stops the run whatever `stop_on_error` says.
+    /// The deploy state could not be written, before a write or after one.
+    /// Carries the reason, already worded. Stops the run whatever
+    /// `stop_on_error` says.
     Unrecorded(String),
 }
 
@@ -117,8 +119,8 @@ enum EntryOutcome {
     Conflicted,
     /// Refused or failed, and already reported as whichever it was.
     Refused,
-    /// Written, and the deploy state could not record it. Carries why the run
-    /// stops.
+    /// The deploy state could not be written, before the entry's write or after
+    /// it. Carries why the run stops.
     Unrecorded(String),
 }
 
@@ -226,6 +228,11 @@ where
     // proceeding would deploy files it can never record, and the next run would
     // re-evaluate every one of them as untracked. A dry run writes nothing, so it
     // warns instead and previews against an empty state.
+    //
+    // A state that loads but cannot be written is found by the `Recorder`, which
+    // writes it back just before the run's first write of any kind. A dry run
+    // writes nothing, so it asks the permissions instead and says what a real run
+    // would meet.
     let mut ledger =
         match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
             StateLoad::Usable(loaded) => {
@@ -233,9 +240,21 @@ where
                     sender.send_warning(warning.to_string()).await;
                 }
                 if options.dry_run {
+                    // A missing directory's warning already says why it cannot be
+                    // created, so only an existing one is warned about here.
+                    if loaded.directory_warning().is_none()
+                        && let Some(failure) = loaded.creation_refusal()
+                    {
+                        sender
+                            .send_warning(format!(
+                                "{failure}. A real run stops before its first write, including \
+                                 recording a file already in place"
+                            ))
+                            .await;
+                    }
                     Ledger::Preview(Some(loaded))
                 } else {
-                    Ledger::Record(loaded)
+                    Ledger::Record(Recorder::new(loaded))
                 }
             }
             StateLoad::Unusable(failure) if options.dry_run => {
@@ -419,7 +438,16 @@ where
                                 .await;
                             break 'entry EntryOutcome::Refused;
                         }
-                        break 'entry match secret_apply.apply(&secret).await {
+                        // A secret-bearing entry records nothing, but its write is a
+                        // write, so the state is written back before it as before any.
+                        let mut write_back = || match &mut ledger {
+                            Ledger::Record(recorder) => recorder
+                                .writable(filesystem)
+                                .map(|_| ())
+                                .map_err(|failure| stopped_before_writing(&failure)),
+                            Ledger::Preview(_) => Ok(()),
+                        };
+                        break 'entry match secret_apply.apply(&secret, &mut write_back).await {
                             SecretOutcome::Deployed => EntryOutcome::Deployed,
                             SecretOutcome::Skipped => EntryOutcome::Skipped,
                             SecretOutcome::Conflicted => EntryOutcome::Conflicted,
@@ -427,6 +455,9 @@ where
                             SecretOutcome::CommandFailed(program) => {
                                 failed_programs.insert(program);
                                 EntryOutcome::Refused
+                            }
+                            SecretOutcome::StateNotWritable(reason) => {
+                                EntryOutcome::Unrecorded(reason)
                             }
                         };
                     }
@@ -484,12 +515,27 @@ where
                         // `DriftType::None`. A symlinked target never reaches here: the
                         // guard above refused it before the read.
                         if drift == DriftType::NotTracked
-                            && let Ledger::Record(loaded) = &mut ledger
-                            && let Some(reason) =
-                                record_and_save(filesystem, loaded, sender, Recorded::InSync, &unit)
-                                    .await
+                            && let Ledger::Record(recorder) = &mut ledger
                         {
-                            break 'entry EntryOutcome::Unrecorded(reason);
+                            let mut loaded = match recorder.writable(filesystem) {
+                                Ok(loaded) => loaded,
+                                Err(failure) => {
+                                    break 'entry EntryOutcome::Unrecorded(stopped_before_writing(
+                                        &failure,
+                                    ));
+                                }
+                            };
+                            if let Some(reason) = record_and_save(
+                                filesystem,
+                                &mut loaded,
+                                sender,
+                                Recorded::InSync,
+                                &unit,
+                            )
+                            .await
+                            {
+                                break 'entry EntryOutcome::Unrecorded(reason);
+                            }
                         }
                         // A tracked record that names no base gains one, so an orphan
                         // it later becomes can be shown against it. Only in memory:
@@ -500,13 +546,14 @@ where
                             path,
                             ..
                         } = &event_source
-                            && let Ledger::Record(loaded) = &mut ledger
-                            && loaded
+                            && let Ledger::Record(recorder) = &mut ledger
+                            && recorder
+                                .loaded()
                                 .state()
                                 .get(&target_key)
                                 .is_some_and(|e| e.base().is_none())
                         {
-                            placed |= loaded.state_mut().place(
+                            placed |= recorder.state_mut().place(
                                 &target_key,
                                 &path.to_string_lossy(),
                                 base.kind,
@@ -557,6 +604,15 @@ where
                         } else if options.auto_accept {
                             true
                         } else if let Some(resolver) = &options.conflict_resolver {
+                            // Written back before the prompt, so no answer is asked for
+                            // a write that cannot happen.
+                            if let Ledger::Record(recorder) = &mut ledger
+                                && let Err(failure) = recorder.writable(filesystem)
+                            {
+                                break 'entry EntryOutcome::Unrecorded(stopped_before_writing(
+                                    &failure,
+                                ));
+                            }
                             // The prompt waits on the user, so what the decision read
                             // may no longer be at the target when the write comes.
                             decided = Decided::BeforePrompt;
@@ -677,10 +733,11 @@ where
         return None;
     }
     tally.orphaned = findings.reported;
-    // A dry run has no state to change, or leaves the one it read alone.
-    if let Ledger::Record(loaded) = &mut ledger
-        && (findings.settle(loaded.state_mut()) | placed)
-        && let Err(e) = save_deploy_state(filesystem, loaded)
+    // A dry run has no state to change, or leaves the one it read alone. The tidy
+    // writes the state only when it changed something.
+    if let Ledger::Record(recorder) = &mut ledger
+        && (findings.settle(recorder.state_mut()) | placed)
+        && let Err(e) = recorder.save(filesystem)
     {
         // Every deployment is already recorded; only the housekeeping is lost,
         // and the next run redoes it.
