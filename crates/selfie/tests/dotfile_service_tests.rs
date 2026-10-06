@@ -607,7 +607,7 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
     fn open_for_read_refusal(
         &self,
         path: &selfie::fs::TargetPath,
-    ) -> Option<selfie::fs::FileSystemError> {
+    ) -> Option<selfie::fs::OpenRefusal> {
         self.0.open_for_read_refusal(path)
     }
 
@@ -625,6 +625,16 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
             self.2.cancel();
         }
         self.0.read_file(path)
+    }
+
+    fn read_repository_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, selfie::fs::RepositoryRead> {
+        if path == self.1 {
+            self.2.cancel();
+        }
+        self.0.read_repository_file(path)
     }
 
     fn read_file_no_follow(
@@ -832,7 +842,7 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
     fn open_for_read_refusal(
         &self,
         path: &selfie::fs::TargetPath,
-    ) -> Option<selfie::fs::FileSystemError> {
+    ) -> Option<selfie::fs::OpenRefusal> {
         if self.blind_to_open_refusals {
             return None;
         }
@@ -848,6 +858,13 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
 
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.inner.read_file(path)
+    }
+
+    fn read_repository_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, selfie::fs::RepositoryRead> {
+        self.inner.read_repository_file(path)
     }
 
     fn read_file_no_follow(
@@ -967,7 +984,7 @@ impl selfie::fs::FileSystem for HomeAt {
     fn open_for_read_refusal(
         &self,
         path: &selfie::fs::TargetPath,
-    ) -> Option<selfie::fs::FileSystemError> {
+    ) -> Option<selfie::fs::OpenRefusal> {
         self.0.open_for_read_refusal(path)
     }
 
@@ -994,6 +1011,13 @@ impl selfie::fs::FileSystem for HomeAt {
 
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.0.read_file(path)
+    }
+
+    fn read_repository_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, selfie::fs::RepositoryRead> {
+        self.0.read_repository_file(path)
     }
     fn read_file_no_follow(
         &self,
@@ -1063,7 +1087,7 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
     fn open_for_read_refusal(
         &self,
         path: &selfie::fs::TargetPath,
-    ) -> Option<selfie::fs::FileSystemError> {
+    ) -> Option<selfie::fs::OpenRefusal> {
         self.plain_checks
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.open_for_read_refusal(path)
@@ -1088,6 +1112,13 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
 
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.inner.read_file(path)
+    }
+
+    fn read_repository_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, selfie::fs::RepositoryRead> {
+        self.inner.read_repository_file(path)
     }
 
     fn read_file_no_follow(
@@ -1168,7 +1199,7 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
     fn open_for_read_refusal(
         &self,
         path: &selfie::fs::TargetPath,
-    ) -> Option<selfie::fs::FileSystemError> {
+    ) -> Option<selfie::fs::OpenRefusal> {
         self.inner.open_for_read_refusal(path)
     }
 
@@ -1188,6 +1219,13 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
 
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.inner.read_file(path)
+    }
+
+    fn read_repository_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, selfie::fs::RepositoryRead> {
+        self.inner.read_repository_file(path)
     }
 
     fn read_file_no_follow(
@@ -1273,7 +1311,7 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
     fn open_for_read_refusal(
         &self,
         path: &selfie::fs::TargetPath,
-    ) -> Option<selfie::fs::FileSystemError> {
+    ) -> Option<selfie::fs::OpenRefusal> {
         self.inner.open_for_read_refusal(path)
     }
 
@@ -1299,6 +1337,13 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
 
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.inner.read_file(path)
+    }
+
+    fn read_repository_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, selfie::fs::RepositoryRead> {
+        self.inner.read_repository_file(path)
     }
 
     fn read_file_no_follow(
@@ -1380,7 +1425,7 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
     fn open_for_read_refusal(
         &self,
         path: &selfie::fs::TargetPath,
-    ) -> Option<selfie::fs::FileSystemError> {
+    ) -> Option<selfie::fs::OpenRefusal> {
         self.inner.open_for_read_refusal(path)
     }
 
@@ -1419,6 +1464,13 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
     }
     fn read_file(&self, path: &std::path::Path) -> Result<String, selfie::fs::FileSystemError> {
         self.inner.read_file(path)
+    }
+
+    fn read_repository_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<String, selfie::fs::RepositoryRead> {
+        self.inner.read_repository_file(path)
     }
     fn read_file_no_follow(
         &self,
@@ -7603,7 +7655,7 @@ mod symlinked_targets {
             fn open_for_read_refusal(
                 &self,
                 path: &selfie::fs::TargetPath,
-            ) -> Option<selfie::fs::FileSystemError> {
+            ) -> Option<selfie::fs::OpenRefusal> {
                 self.0.open_for_read_refusal(path)
             }
 
@@ -7626,6 +7678,13 @@ mod symlinked_targets {
 
             fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
                 self.0.read_file(path)
+            }
+
+            fn read_repository_file(
+                &self,
+                path: &Path,
+            ) -> Result<String, selfie::fs::RepositoryRead> {
+                self.0.read_repository_file(path)
             }
             // Follows, as a link planted between the read and the write is never
             // seen by the read: the race this test stands for runs past both looks.

@@ -214,7 +214,11 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 // a sentence meant for elsewhere.
 fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError {
     let kind = match failure {
-        FileSystemError::IoError(source) => PackageParseKind::Io { cause: source },
+        FileSystemError::IoError(source)
+        | FileSystemError::BelowNonDirectory { cause: source, .. }
+        | FileSystemError::DirectoryTarget { cause: source, .. } => {
+            PackageParseKind::Io { cause: source }
+        }
         FileSystemError::IrregularTarget { kind, .. } => PackageParseKind::IrregularFile { kind },
         FileSystemError::SymlinkedTarget { points_to, .. } => PackageParseKind::Refused {
             reason: match points_to {

@@ -9,7 +9,10 @@ use std::{
 
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
-use super::filesystem::{AbsentReason, DirectoryState, FileSystem, FileSystemError, TargetRead};
+use super::filesystem::{
+    AbsentReason, DirectoryState, FileSystem, FileSystemError, OpenRefusal, RepositoryRead,
+    TargetRead,
+};
 use super::target::TargetPath;
 
 /// Real file system implementation
@@ -137,10 +140,25 @@ fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), Fil
     // message names the parent; naming the target would blame a file that was
     // never touched.
     fs::create_dir_all(parent).map_err(|e| {
-        FileSystemError::IoError(Arc::new(std::io::Error::new(
-            e.kind(),
+        let kind = e.kind();
+        let cause = Arc::new(std::io::Error::new(
+            kind,
             format!("{}: {e}", parent.display()),
-        )))
+        ));
+        // `ENOTDIR` for a non-directory deeper up, `EEXIST` when the parent itself
+        // is a file or a dangling link: `create_dir_all` reports that it found
+        // something, not that it found a directory.
+        let below_non_directory = kind == io::ErrorKind::NotADirectory
+            || (kind == io::ErrorKind::AlreadyExists && !parent.is_dir());
+        if below_non_directory {
+            FileSystemError::BelowNonDirectory {
+                path: path.to_path_buf(),
+                parent: non_directory_ancestor(path),
+                cause,
+            }
+        } else {
+            FileSystemError::IoError(cause)
+        }
     })?;
 
     // Refusals are decided here, before a temporary file exists, so a refused
@@ -226,7 +244,22 @@ fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), Fil
     // Replaces the target by rename, so readers see either the old file or the
     // complete new one, and a symlink at the final component is replaced rather
     // than followed.
-    tmp.persist(path).map_err(|e| target_err(e.error))?;
+    tmp.persist(path).map_err(|e| {
+        // `EISDIR`: a directory took the target's place after the checks, and a
+        // file cannot be renamed over one.
+        if e.error.kind() == io::ErrorKind::IsADirectory {
+            let cause = Arc::new(std::io::Error::new(
+                e.error.kind(),
+                format!("{}: {}", path.display(), e.error),
+            ));
+            FileSystemError::DirectoryTarget {
+                path: path.to_path_buf(),
+                cause,
+            }
+        } else {
+            target_err(e.error)
+        }
+    })?;
 
     // The data is durable; the directory entry naming it is not. A freshly
     // created file can survive its own fsync and still vanish. `OwnerOnly`
@@ -379,6 +412,26 @@ fn not_regular(path: &Path, metadata: &fs::Metadata) -> Option<TargetRead> {
     None
 }
 
+/// What a failure to open or read a regular file that is there says: unreadable
+/// when selfie may not read it, and otherwise the error, which leaves what is there
+/// undetermined.
+// A permission refusal is the only failure whose remedy is the file's own mode.
+// `EMFILE`, `EIO` and the rest say nothing about the file, so they are not called
+// unreadable. `PermissionDenied` covers both `EACCES` and `EPERM`.
+fn regular_file_failure(error: io::Error) -> io::Result<TargetRead> {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        Ok(TargetRead::Unreadable(Arc::new(error)))
+    } else {
+        Err(error)
+    }
+}
+
+/// The first component above `path` that is not a directory: a file, or a symlink
+/// whose destination is not there. `None` when neither walk finds one.
+fn non_directory_ancestor(path: &Path) -> Option<PathBuf> {
+    first_non_directory_ancestor(path).or_else(|| dangling_ancestor(path))
+}
+
 /// Open `path` for reading without following a symlink at its final component or
 /// waiting on a fifo. Returns the file, or what is there instead when the open
 /// finds a state of its own: nothing, a link, a directory, a fifo, socket or device
@@ -406,21 +459,30 @@ fn open_no_follow(path: &Path) -> io::Result<Result<fs::File, TargetRead>> {
         .open(path)
     {
         Ok(file) => Ok(Ok(file)),
-        Err(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-            ) =>
-        {
-            Ok(Err(TargetRead::Absent))
+        // `ENOENT` is also what a path below a dangling link gets, and only the
+        // ancestors tell the two apart.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Err(match dangling_ancestor(path) {
+            Some(link) => TargetRead::BelowNonDirectory { parent: Some(link) },
+            None => TargetRead::Absent,
+        })),
+        // The errno says only that some component is not a directory, so the walk
+        // names which.
+        Err(e) if e.kind() == io::ErrorKind::NotADirectory => {
+            Ok(Err(TargetRead::BelowNonDirectory {
+                parent: non_directory_ancestor(path),
+            }))
         }
         // Anything else that failed to open is named from a non-following stat, so
         // the errno never has to say what is there: a link refused by `O_NOFOLLOW`
         // (`ELOOP`, or `EMLINK` on FreeBSD), a directory or fifo selfie may not
-        // open, a socket, which cannot be opened at all. A regular file, or a path
-        // the stat cannot reach either -- a loop above it -- is the open's own error.
+        // open, a socket, which cannot be opened at all. A regular file that will not
+        // open is judged by `regular_file_failure`. A path the stat cannot reach
+        // either -- a loop above it -- is the open's own error.
         Err(e) => match fs::symlink_metadata(path) {
-            Ok(metadata) => not_regular(path, &metadata).map(Err).ok_or(e),
+            Ok(metadata) => match not_regular(path, &metadata) {
+                Some(found) => Ok(Err(found)),
+                None => regular_file_failure(e).map(Err),
+            },
             Err(_) => Err(e),
         },
     }
@@ -429,6 +491,25 @@ fn open_no_follow(path: &Path) -> io::Result<Result<fs::File, TargetRead>> {
 impl FileSystem for RealFileSystem {
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
         fs::read_to_string(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
+    }
+
+    // From the errno, with a following stat only where the errno cannot tell:
+    // `EACCES` comes from the file itself or from a directory above it that may not
+    // be searched, and only the second leaves what is there unknown.
+    fn read_repository_file(&self, path: &Path) -> Result<String, RepositoryRead> {
+        fs::read_to_string(path).map_err(|e| {
+            let kind = e.kind();
+            let e = Arc::new(e);
+            match kind {
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => RepositoryRead::Absent(e),
+                io::ErrorKind::IsADirectory => RepositoryRead::Directory(e),
+                io::ErrorKind::InvalidData => RepositoryRead::Unreadable(e),
+                io::ErrorKind::PermissionDenied if fs::metadata(path).is_ok() => {
+                    RepositoryRead::Unreadable(e)
+                }
+                _ => RepositoryRead::Undetermined(e),
+            }
+        })
     }
 
     // The descriptor's own type, not the path's, decides what was opened: a fifo,
@@ -445,21 +526,32 @@ impl FileSystem for RealFileSystem {
             Ok(file) => file,
             Err(found) => return Ok(found),
         };
+        // From here a file is open, so a failure is of a file that is there.
+        let failure = |e: io::Error| regular_file_failure(e).map_err(io_error);
 
-        let metadata = file.metadata().map_err(io_error)?;
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(e) => return failure(e),
+        };
         if let Some(found) = not_regular(path, &metadata) {
             return Ok(found);
         }
 
         // A regular file: clear `O_NONBLOCK`, which is there only for the open, so
         // a filesystem that honors it on reads cannot fail one with `EAGAIN`.
-        let flags = fcntl(&file, FcntlArg::F_GETFL).map_err(|e| io_error(e.into()))?;
-        let flags = OFlag::from_bits_truncate(flags) - OFlag::O_NONBLOCK;
-        fcntl(&file, FcntlArg::F_SETFL(flags)).map_err(|e| io_error(e.into()))?;
+        let cleared = fcntl(&file, FcntlArg::F_GETFL).and_then(|flags| {
+            let flags = OFlag::from_bits_truncate(flags) - OFlag::O_NONBLOCK;
+            fcntl(&file, FcntlArg::F_SETFL(flags))
+        });
+        if let Err(e) = cleared {
+            return failure(e.into());
+        }
 
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes).map_err(io_error)?;
-        Ok(TargetRead::Bytes(bytes))
+        match file.read_to_end(&mut bytes) {
+            Ok(_) => Ok(TargetRead::Bytes(bytes)),
+            Err(e) => failure(e),
+        }
     }
 
     fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
@@ -489,10 +581,20 @@ impl FileSystem for RealFileSystem {
 
     // Everything `open_no_follow` names as a state of its own is left to the question
     // that owns it, so only a file that will not open, or cannot be told, refuses.
-    fn open_for_read_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
-        open_no_follow(path.path())
-            .err()
-            .map(|e| FileSystemError::IoError(Arc::new(e)))
+    fn open_for_read_refusal(&self, path: &TargetPath) -> Option<OpenRefusal> {
+        match open_no_follow(path.path()) {
+            Ok(Err(TargetRead::Unreadable(e))) => Some(OpenRefusal::Unreadable(e)),
+            Ok(Ok(_))
+            | Ok(Err(
+                TargetRead::Bytes(_)
+                | TargetRead::Absent
+                | TargetRead::BelowNonDirectory { .. }
+                | TargetRead::Directory
+                | TargetRead::Link { .. }
+                | TargetRead::Irregular { .. },
+            )) => None,
+            Err(e) => Some(OpenRefusal::Undetermined(Arc::new(e))),
+        }
     }
 
     // A non-following stat, like `symlink_refusal`'s: a link put at the target after
@@ -1327,7 +1429,7 @@ mod no_follow_write_tests {
     }
 
     #[test]
-    fn a_directory_at_the_target_is_an_ordinary_error() {
+    fn a_directory_at_the_target_is_named_as_a_directory() {
         let dir = tempdir().unwrap();
         let target = dir.path().join("config");
         fs::create_dir(&target).unwrap();
@@ -1336,11 +1438,11 @@ mod no_follow_write_tests {
             .write_file_no_follow(&tp(&target), b"content")
             .unwrap_err();
 
-        // Not every failure is a refusal. Misclassifying this one would report
-        // "target is a symlink" for a path that is nothing of the kind.
+        // Named as what is there. Misclassifying it would report "target is a
+        // symlink" for a path that is nothing of the kind.
         assert!(
-            matches!(err, FileSystemError::IoError(_)),
-            "expected an IO error, got {err:?}"
+            matches!(err, FileSystemError::DirectoryTarget { .. }),
+            "expected a directory at the target, got {err:?}"
         );
     }
 
@@ -1868,10 +1970,10 @@ mod no_follow_read_tests {
         let file = dir.path().join("target");
         fs::write(&file, b"\xffbytes").unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             read(&file).unwrap(),
-            TargetRead::Bytes(b"\xffbytes".to_vec())
-        );
+            TargetRead::Bytes(bytes) if bytes == b"\xffbytes"
+        ));
     }
 
     #[test]
@@ -1882,12 +1984,10 @@ mod no_follow_read_tests {
         let link = dir.path().join("target");
         std::os::unix::fs::symlink(&destination, &link).unwrap();
 
-        assert_eq!(
+        assert!(matches!(
             read(&link).unwrap(),
-            TargetRead::Link {
-                points_to: Some(destination)
-            }
-        );
+            TargetRead::Link { points_to: Some(found) } if found == destination
+        ));
     }
 
     // A dangling link is a link, not an absent target: reading it as absent would
@@ -1931,12 +2031,12 @@ mod no_follow_read_tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("reading a readerless fifo must not block");
 
-        assert_eq!(
+        assert!(matches!(
             result.unwrap(),
             TargetRead::Irregular {
                 kind: "named pipe (fifo)"
             }
-        );
+        ));
     }
 
     // A fifo selfie may not open is still named as one: the open fails with
@@ -1962,18 +2062,18 @@ mod no_follow_read_tests {
             return;
         }
 
-        assert_eq!(
+        assert!(matches!(
             read(&fifo).unwrap(),
             TargetRead::Irregular {
                 kind: "named pipe (fifo)"
             }
-        );
+        ));
     }
 
     #[test]
     fn a_directory_is_named_as_one() {
         let dir = tempdir().unwrap();
-        assert_eq!(read(dir.path()).unwrap(), TargetRead::Directory);
+        assert!(matches!(read(dir.path()).unwrap(), TargetRead::Directory));
     }
 
     // A directory selfie may not open is still a directory, not a read that failed:
@@ -1996,25 +2096,29 @@ mod no_follow_read_tests {
             return;
         }
 
-        assert_eq!(answer.unwrap(), TargetRead::Directory);
+        assert!(matches!(answer.unwrap(), TargetRead::Directory));
     }
 
     #[test]
     fn nothing_there_is_absent() {
         let dir = tempdir().unwrap();
-        assert_eq!(
+        assert!(matches!(
             read(&dir.path().join("absent")).unwrap(),
             TargetRead::Absent
-        );
+        ));
     }
 
-    // Below a regular file nothing can be, which is absent rather than a failure.
+    // Below a regular file nothing can be, and the read says so, naming the file:
+    // `ENOTDIR`, which the open would otherwise fold into "nothing there".
     #[test]
-    fn a_path_below_a_regular_file_is_absent() {
+    fn a_path_below_a_regular_file_names_the_file() {
         let dir = tempdir().unwrap();
         let file = dir.path().join("file");
         fs::write(&file, b"plain").unwrap();
-        assert_eq!(read(&file.join("target")).unwrap(), TargetRead::Absent);
+        assert!(matches!(
+            read(&file.join("target")).unwrap(),
+            TargetRead::BelowNonDirectory { parent: Some(parent) } if parent == file
+        ));
     }
 }
 
@@ -2027,7 +2131,7 @@ mod open_for_read_tests {
     use std::time::Duration;
     use tempfile::tempdir;
 
-    fn probe(path: &Path) -> Option<FileSystemError> {
+    fn probe(path: &Path) -> Option<OpenRefusal> {
         RealFileSystem.open_for_read_refusal(&crate::fs::target::repository_path(path))
     }
 
@@ -2043,9 +2147,10 @@ mod open_for_read_tests {
             eprintln!("SKIP a_file_it_may_not_read_is_refused: mode bits do not bite");
             return;
         }
+        // A file is there, so the refusal says it is unreadable, not unknown.
         assert!(
-            matches!(probe(&file), Some(FileSystemError::IoError(_))),
-            "a file the read cannot open must be refused"
+            matches!(probe(&file), Some(OpenRefusal::Unreadable(_))),
+            "a file the read cannot open must be refused as unreadable"
         );
     }
 
@@ -2482,5 +2587,202 @@ mod directory_state_tests {
             DirectoryState::Unlistable(_) => "unlistable".to_string(),
             DirectoryState::Unknown(_) => "unknown".to_string(),
         }
+    }
+}
+
+// These tests pin the answers the port gives where an operation fails, so a caller
+// never has to look again to learn what the failure found.
+#[cfg(test)]
+mod typed_failure_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn target(path: &Path) -> TargetPath {
+        crate::fs::target::repository_path(path)
+    }
+
+    // Mode bits do not bind root, so each test that relies on them skips there.
+    fn root() -> bool {
+        nix::unistd::Uid::effective().is_root()
+    }
+
+    #[test]
+    fn a_regular_file_that_will_not_open_reads_as_unreadable() {
+        if root() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("creds");
+        fs::write(&file, "x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let read = RealFileSystem.read_file_no_follow(&target(&file));
+
+        assert!(matches!(read, Ok(TargetRead::Unreadable(_))), "{read:?}");
+    }
+
+    // A path below a symlink whose destination is gone fails with `ENOENT`, as a path
+    // with nothing at it does, but nothing can be written there either: the link is
+    // what is in the way, and the read and the writer both name it.
+    #[test]
+    fn a_path_below_a_dangling_link_names_the_link() {
+        let dir = tempdir().unwrap();
+        let link = dir.path().join("d");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+        let path = link.join("config");
+
+        let read = RealFileSystem.read_file_no_follow(&target(&path));
+        let written = RealFileSystem.write_file_no_follow(&target(&path), b"x");
+
+        assert!(
+            matches!(&read, Ok(TargetRead::BelowNonDirectory { parent: Some(p) }) if *p == link),
+            "{read:?}"
+        );
+        assert!(
+            matches!(
+                &written,
+                Err(FileSystemError::BelowNonDirectory { parent: Some(p), .. }) if *p == link
+            ),
+            "{written:?}"
+        );
+        assert!(
+            !dir.path().join("nowhere").exists(),
+            "the destination is not created"
+        );
+    }
+
+    // Only a permission refusal makes a file that is there unreadable. Any other
+    // failure says nothing about the file, so what is there stays undetermined.
+    #[test]
+    fn only_a_permission_refusal_makes_a_file_unreadable() {
+        use nix::errno::Errno;
+
+        for errno in [Errno::EACCES, Errno::EPERM] {
+            let error = io::Error::from_raw_os_error(errno as i32);
+            assert!(
+                matches!(regular_file_failure(error), Ok(TargetRead::Unreadable(_))),
+                "{errno}"
+            );
+        }
+        for errno in [Errno::EIO, Errno::EMFILE, Errno::EINTR] {
+            let error = io::Error::from_raw_os_error(errno as i32);
+            assert!(regular_file_failure(error).is_err(), "{errno}");
+        }
+    }
+
+    // The direct parent a file: `create_dir_all` answers `EEXIST`. A file further
+    // up: `ENOTDIR`. Both are one condition.
+    #[test]
+    fn a_write_below_a_file_says_so_and_names_the_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("a-file");
+        fs::write(&file, "PLAIN").unwrap();
+
+        for path in [file.join("config"), file.join("deeper").join("config")] {
+            let written = RealFileSystem.write_file_no_follow(&target(&path), b"x");
+            assert!(
+                matches!(
+                    &written,
+                    Err(FileSystemError::BelowNonDirectory { parent: Some(parent), .. })
+                        if *parent == file
+                ),
+                "{path:?}: {written:?}"
+            );
+        }
+        assert_eq!(fs::read_to_string(&file).unwrap(), "PLAIN");
+    }
+
+    #[test]
+    fn a_write_over_a_directory_says_a_directory_is_there() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config");
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("inner"), "kept").unwrap();
+
+        let written = RealFileSystem.write_file_private(&target(&path), b"x");
+
+        assert!(
+            matches!(written, Err(FileSystemError::DirectoryTarget { .. })),
+            "{written:?}"
+        );
+        assert_eq!(fs::read_to_string(path.join("inner")).unwrap(), "kept");
+    }
+
+    // A directory selfie cannot write to is a failure of the write, not a
+    // condition of what is there.
+    #[test]
+    fn a_write_into_an_unwritable_directory_is_a_plain_io_error() {
+        if root() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+
+        let written = RealFileSystem.write_file_no_follow(&target(&locked.join("config")), b"x");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            matches!(written, Err(FileSystemError::IoError(_))),
+            "{written:?}"
+        );
+    }
+
+    #[test]
+    fn a_repository_read_says_what_it_found() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "PLAIN").unwrap();
+        let not_utf8 = dir.path().join("binary");
+        fs::write(&not_utf8, b"\xff\xfe").unwrap();
+        let read = |path: &Path| RealFileSystem.read_repository_file(path);
+
+        assert!(matches!(
+            read(&dir.path().join("missing")),
+            Err(RepositoryRead::Absent(_))
+        ));
+        assert!(matches!(
+            read(&file.join("below")),
+            Err(RepositoryRead::Absent(_))
+        ));
+        assert!(matches!(
+            read(dir.path()),
+            Err(RepositoryRead::Directory(_))
+        ));
+        assert!(matches!(
+            read(&not_utf8),
+            Err(RepositoryRead::Unreadable(_))
+        ));
+        assert_eq!(read(&file).unwrap(), "PLAIN");
+
+        if !root() {
+            let denied = dir.path().join("denied");
+            fs::write(&denied, "x").unwrap();
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(matches!(read(&denied), Err(RepositoryRead::Unreadable(_))));
+        }
+    }
+
+    // `EACCES` from a directory above the file, which may not be searched, leaves
+    // what is there unknown.
+    #[test]
+    fn a_repository_read_below_an_unsearchable_directory_is_undetermined() {
+        if root() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let closed = dir.path().join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::write(closed.join("file"), "x").unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let read = RealFileSystem.read_repository_file(&closed.join("file"));
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(
+            matches!(read, Err(RepositoryRead::Undetermined(_))),
+            "{read:?}"
+        );
     }
 }

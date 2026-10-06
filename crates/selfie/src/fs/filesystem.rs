@@ -38,13 +38,19 @@ pub enum DirectoryState {
 ///
 /// Returned by [`FileSystem::read_file_no_follow`], so no caller classifies a
 /// target by decoding an error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum TargetRead {
     /// A regular file, and its bytes.
     Bytes(Vec<u8>),
-    /// Nothing is at the path: it does not exist, or a component of it is not a
-    /// directory, where nothing can be.
+    /// Nothing is at the path.
     Absent,
+    /// A component above the path is not a directory, so nothing is at the path
+    /// and nothing can be written there: a file, or a symlink whose destination is
+    /// not there.
+    BelowNonDirectory {
+        /// The first such component, when it could be found.
+        parent: Option<PathBuf>,
+    },
     /// A directory, whether or not selfie may open it.
     Directory,
     /// A symlink at the final component, dangling or not. Not followed.
@@ -57,6 +63,8 @@ pub enum TargetRead {
         /// What is there, for the sentence: `named pipe (fifo)`, `socket`.
         kind: &'static str,
     },
+    /// A regular file is there, and selfie may not open or read it.
+    Unreadable(Arc<io::Error>),
 }
 
 /// Why no directory is at a path.
@@ -240,6 +248,14 @@ pub trait FileSystem: Send + Sync {
     /// content is not valid UTF-8, or any other IO error occurs.
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError>;
 
+    /// Read a file from the user's repository as UTF-8: a dotfile's source or
+    /// template. Follows symlinks, as a repository file may be one.
+    ///
+    /// # Errors
+    ///
+    /// [`RepositoryRead`], saying what the failed read found at the path.
+    fn read_repository_file(&self, path: &Path) -> Result<String, RepositoryRead>;
+
     /// Read a target without following a symlink at its final component and
     /// without blocking on a fifo. The reader for deploy targets.
     ///
@@ -253,8 +269,10 @@ pub trait FileSystem: Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`FileSystemError::IoError`] when what is there is unknown: a regular file
-    /// or a parent selfie may not open, a loop above the target.
+    /// [`FileSystemError::IoError`] when what is there is unknown: a parent selfie
+    /// may not search, a loop above the target, or a regular file that failed for a
+    /// reason other than permission, such as too many open files. A regular file
+    /// selfie may not open or read is [`TargetRead::Unreadable`], not an error.
     fn read_file_no_follow(&self, path: &TargetPath) -> Result<TargetRead, FileSystemError>;
 
     /// Write a file readable only by its owner, replacing it atomically. The
@@ -387,8 +405,8 @@ pub trait FileSystem: Send + Sync {
     /// opened.
     fn irregular_target_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
 
-    /// The refusal a read of `path` would meet when it opens it, or `None` when the
-    /// open succeeds, nothing is there, the final component is a symlink, or what is
+    /// What a read of `path` would meet when it opens it, or `None` when the open
+    /// succeeds, nothing is there, the final component is a symlink, or what is
     /// there is not a regular file: a directory, fifo, socket or device node.
     ///
     /// Opens and closes without reading a byte, never follows a symlink at the final
@@ -397,7 +415,7 @@ pub trait FileSystem: Send + Sync {
     ///
     /// Advisory: a target can change between this and the read, so a caller that
     /// reads must still handle the read's own error.
-    fn open_for_read_refusal(&self, path: &TargetPath) -> Option<FileSystemError>;
+    fn open_for_read_refusal(&self, path: &TargetPath) -> Option<OpenRefusal>;
 
     /// Whether a file is readable only by its owner
     ///
@@ -532,6 +550,53 @@ pub enum FileSystemError {
     /// instead, asked with a non-following stat; do not conflate the two.
     #[error("{}: target resolves to a {kind} and selfie will not write to it", .path.display())]
     IrregularTarget { path: PathBuf, kind: &'static str },
+
+    /// A write could not create the target because a component above it is not a
+    /// directory. `parent` is the first such component, when it could be found.
+    #[error("IO error: {cause}")]
+    BelowNonDirectory {
+        path: PathBuf,
+        parent: Option<PathBuf>,
+        cause: Arc<io::Error>,
+    },
+
+    /// A write could not replace the target because a directory is there.
+    #[error("IO error: {cause}")]
+    DirectoryTarget {
+        path: PathBuf,
+        cause: Arc<io::Error>,
+    },
+}
+
+/// What a failed read of a repository file found at the path.
+///
+/// Each carries the read's error, which its `Display` renders.
+#[derive(Error, Debug, Clone)]
+pub enum RepositoryRead {
+    /// Nothing is there, or a component above the path is not a directory.
+    #[error("IO error: {0}")]
+    Absent(Arc<io::Error>),
+    /// A directory is there.
+    #[error("IO error: {0}")]
+    Directory(Arc<io::Error>),
+    /// A file is there, and it could not be read: denied, or not UTF-8.
+    #[error("IO error: {0}")]
+    Unreadable(Arc<io::Error>),
+    /// What is there could not be found out.
+    #[error("IO error: {0}")]
+    Undetermined(Arc<io::Error>),
+}
+
+/// What an open of a target for reading met, from
+/// [`FileSystem::open_for_read_refusal`].
+#[derive(Error, Debug, Clone)]
+pub enum OpenRefusal {
+    /// A regular file is there, and selfie may not open it.
+    #[error("IO error: {0}")]
+    Unreadable(Arc<io::Error>),
+    /// What is there could not be found out.
+    #[error("IO error: {0}")]
+    Undetermined(Arc<io::Error>),
 }
 
 // Why selfie will not read a file out of its own repository.
