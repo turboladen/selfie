@@ -4,7 +4,8 @@ Date: 2026-09-28
 
 ## Status
 
-Accepted
+Accepted. Refined by [0009](0009-a-status-selfie-cannot-judge-names-why-in-one-type.md), which types
+the reason a status is unknown without changing any verdict or exit code.
 
 ## Context
 
