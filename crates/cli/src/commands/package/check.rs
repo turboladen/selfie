@@ -196,13 +196,6 @@ fn display_check_result_card(
                 status_style::format_no_check(use_colors)
             )
         }
-        CheckResult::CommandNotFound => {
-            format!(
-                "{}{}",
-                format_key_fn("Status"),
-                status_style::format_cmd_not_found(use_colors)
-            )
-        }
         CheckResult::Error(error) => {
             format!(
                 "{}{}\n{}{}",

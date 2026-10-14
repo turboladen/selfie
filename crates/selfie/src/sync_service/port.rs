@@ -48,19 +48,48 @@ pub struct PackageValidationFailure {
 /// A single validation issue within a package file.
 #[derive(Debug, Clone)]
 pub struct PackageValidationIssue {
-    /// Severity: `"ERROR"` or `"WARN"`.
-    pub level: String,
-    /// Issue category (e.g., `"ParseError"`, `"RequiredField"`).
-    pub category: String,
+    /// How bad it is: an error or a warning. A push never reports a notice.
+    pub level: crate::validation::ValidationLevel,
+    /// What kind of problem it is.
+    pub category: PushIssueCategory,
     /// The YAML field path affected (e.g., `"environments.test-env.install"`).
     pub field: String,
     /// Human-readable description.
     pub message: String,
-    /// Source location from parse errors (e.g., `"line 17 column 1"`), or `None`
-    /// for logical validation errors that don't map to a specific location.
-    pub location: Option<String>,
+    /// Where in the file the issue is, or `None` for one that does not map to a
+    /// position.
+    pub location: Option<crate::yaml::SourceLocation>,
     /// How to fix it, when the issue says.
     pub suggestion: Option<String>,
+}
+
+/// What kind of problem keeps a changed spec from being pushed.
+///
+/// [`Display`](std::fmt::Display) words it for a person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushIssueCategory {
+    /// An issue `selfie spec validate` reports.
+    Validation(crate::validation::ValidationErrorCategory),
+    /// Several spec files in one directory claim one name.
+    NameCollision,
+    /// The spec file could not be read.
+    FileError,
+    /// The spec file is not valid YAML for a package.
+    ParseError,
+    /// `selfie apply` would refuse the package.
+    ApplyRefusal,
+}
+
+impl std::fmt::Display for PushIssueCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(category) => write!(f, "{category}"),
+            Self::NameCollision => f.write_str("name collision"),
+            Self::FileError => f.write_str("file error"),
+            Self::ParseError => f.write_str("parse error"),
+            Self::ApplyRefusal => f.write_str("apply refusal"),
+        }
+    }
 }
 
 /// Options controlling how `sync push` behaves.

@@ -64,11 +64,11 @@ pub(crate) async fn handle_push(
                         .issues
                         .iter()
                         .map(|i| ValidationRow {
-                            level: &i.level,
-                            category: &i.category,
+                            level: i.level,
+                            category: i.category.to_string(),
                             field: &i.field,
                             message: &i.message,
-                            location: i.location.as_deref(),
+                            location: i.location,
                             suggestion: i.suggestion.as_deref(),
                         })
                         .collect(),

@@ -10,10 +10,7 @@ use crate::{
     },
     package::{
         Package, SpecOrigin,
-        event::{
-            EventSender, OperationResult, OperationSuccess, Outcome, ValidationResultData,
-            ValidationStatus,
-        },
+        event::{EventSender, OperationResult, OperationSuccess, Outcome, ValidationResultData},
         port::PackageRepository,
         service::ProgressTracker,
     },
@@ -107,22 +104,17 @@ where
         let issues = &super::validate::all_issues(package, source, environment);
         let validation_issues = super::validate::issue_payload(issues);
 
-        let status = match issues.outcome() {
-            Outcome::Failed => {
-                error_count += 1;
-                ValidationStatus::HasErrors
-            }
-            Outcome::Found => {
-                warning_count += 1;
-                ValidationStatus::HasWarnings
-            }
-            Outcome::Clean => ValidationStatus::Valid,
-        };
+        let outcome = issues.outcome();
+        match outcome {
+            Outcome::Failed => error_count += 1,
+            Outcome::Found => warning_count += 1,
+            Outcome::Clean => {}
+        }
 
         let validation_result = ValidationResultData {
             package_name: package.name().to_string(),
             environment: environment.to_string(),
-            status,
+            outcome,
             issues: validation_issues,
         };
 

@@ -187,9 +187,9 @@ async fn confirm_installable<CR: CommandRunner>(
             CheckResult::Error(error) => {
                 return Err(Box::new(OperationFailure::Generic(error.clone())));
             }
-            CheckResult::Failed { .. }
-            | CheckResult::NoCheckCommand
-            | CheckResult::CommandNotFound => return Err(otherwise.clone()),
+            CheckResult::Failed { .. } | CheckResult::NoCheckCommand => {
+                return Err(otherwise.clone());
+            }
         }
         confirmed.insert(name.clone(), result);
     }
@@ -428,7 +428,7 @@ async fn log_proceeding_with_installation(
                 .send_debug("No check command defined, proceeding with installation")
                 .await;
         }
-        CheckResult::Error(_) | CheckResult::TimedOut(_) | CheckResult::CommandNotFound => {
+        CheckResult::Error(_) | CheckResult::TimedOut(_) => {
             sender
                 .send_warning("Check command failed, but proceeding with installation anyway")
                 .await;
@@ -603,7 +603,7 @@ where
                     ))
                     .await;
             }
-            CheckResult::Error(_) | CheckResult::TimedOut(_) | CheckResult::CommandNotFound => {
+            CheckResult::Error(_) | CheckResult::TimedOut(_) => {
                 sender
                     .send_warning(
                         "Post-installation check failed, but installation command completed",

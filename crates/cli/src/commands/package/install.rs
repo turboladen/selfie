@@ -50,9 +50,6 @@ pub(crate) async fn handle_install(
                         selfie::package::event::CheckResult::NoCheckCommand => {
                             "No check command defined, proceeding with installation".to_string()
                         }
-                        selfie::package::event::CheckResult::CommandNotFound => {
-                            "Check command not found, proceeding with installation".to_string()
-                        }
                         selfie::package::event::CheckResult::Error(err) => {
                             format!("Check error ({err}), proceeding with installation")
                         }

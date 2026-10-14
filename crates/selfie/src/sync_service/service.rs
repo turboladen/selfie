@@ -792,7 +792,7 @@ fn validate_changed_packages(
     changes: &[(PathBuf, FileChangeKind)],
     environment: &str,
 ) -> Result<(), SyncError> {
-    use super::port::{PackageValidationFailure, PackageValidationIssue};
+    use super::port::{PackageValidationFailure, PackageValidationIssue, PushIssueCategory};
 
     let mut failures: Vec<PackageValidationFailure> = Vec::new();
 
@@ -854,8 +854,8 @@ fn validate_changed_packages(
         failures.push(PackageValidationFailure {
             path: relative.join(&names[0]).display().to_string(),
             issues: vec![PackageValidationIssue {
-                level: "ERROR".to_string(),
-                category: "NameCollision".to_string(),
+                level: crate::validation::ValidationLevel::Error,
+                category: PushIssueCategory::NameCollision,
                 field: "-".to_string(),
                 message: name_collision_message(&names),
                 location: None,
@@ -881,8 +881,8 @@ fn validate_changed_packages(
                 failures.push(PackageValidationFailure {
                     path: path_str,
                     issues: vec![PackageValidationIssue {
-                        level: "ERROR".to_string(),
-                        category: "FileError".to_string(),
+                        level: crate::validation::ValidationLevel::Error,
+                        category: PushIssueCategory::FileError,
                         field: "-".to_string(),
                         message: format!("failed to read: {e}"),
                         location: None,
@@ -899,16 +899,14 @@ fn validate_changed_packages(
                 // The location is its own field here, so the message must not repeat
                 // it. `ParseFailure` appends it when rendered, so the sentence is
                 // built from the parts rather than rendered and cut back down.
-                let location = e
-                    .location()
-                    .map(|at| format!("line {} column {}", at.line(), at.column()));
+                let location = e.location();
                 let message = e.reason();
 
                 failures.push(PackageValidationFailure {
                     path: path_str,
                     issues: vec![PackageValidationIssue {
-                        level: "ERROR".to_string(),
-                        category: "ParseError".to_string(),
+                        level: crate::validation::ValidationLevel::Error,
+                        category: PushIssueCategory::ParseError,
                         field: "-".to_string(),
                         message,
                         location,
@@ -925,33 +923,23 @@ fn validate_changed_packages(
             .issues()
             .all_issues()
             .iter()
-            // Positive, not negative: naming the levels that block a push means a
-            // level added later is absent here and absent from the match below,
-            // which fails the build at the one place that has to decide about it.
-            // A `!= Info` filter plus a wildcard would silently classify it as a
-            // warning and silently block every push.
-            .filter(|i| {
-                matches!(
-                    i.level(),
+            .filter_map(|i| {
+                // Exhaustive, with no wildcard, so a level added later fails the
+                // build here, the one place that has to decide whether it blocks a
+                // push. A `!= Info` filter would silently block every push on it.
+                match i.level() {
                     crate::validation::ValidationLevel::Error
-                        | crate::validation::ValidationLevel::Warning
-                )
-            })
-            .map(|i| PackageValidationIssue {
-                level: match i.level() {
-                    crate::validation::ValidationLevel::Error => "ERROR".to_string(),
-                    crate::validation::ValidationLevel::Warning => "WARN".to_string(),
-                    // Filtered out above; kept exhaustive so a new level is a
-                    // compile error rather than a silent reclassification.
-                    crate::validation::ValidationLevel::Info => {
-                        unreachable!("Info is filtered out before this map")
-                    }
-                },
-                category: format!("{:?}", i.category()),
-                field: i.field().to_string(),
-                message: i.message().to_string(),
-                location: i.location().map(str::to_string),
-                suggestion: i.suggestion().cloned(),
+                    | crate::validation::ValidationLevel::Warning => {}
+                    crate::validation::ValidationLevel::Info => return None,
+                }
+                Some(PackageValidationIssue {
+                    level: i.level(),
+                    category: PushIssueCategory::Validation(i.category()),
+                    field: i.field().to_string(),
+                    message: i.message().to_string(),
+                    location: i.location(),
+                    suggestion: i.suggestion().cloned(),
+                })
             })
             .collect();
 
@@ -993,16 +981,16 @@ fn apply_refusal_issue(
     issues: &[super::port::PackageValidationIssue],
 ) -> Option<super::port::PackageValidationIssue> {
     let reported = |field: &String| {
-        issues
-            .iter()
-            .any(|issue| issue.level == "ERROR" && issue.field == *field)
+        issues.iter().any(|issue| {
+            issue.level == crate::validation::ValidationLevel::Error && issue.field == *field
+        })
     };
     if refusal.fields().iter().all(reported) {
         return None;
     }
     Some(super::port::PackageValidationIssue {
-        level: "ERROR".to_string(),
-        category: "ApplyRefusal".to_string(),
+        level: crate::validation::ValidationLevel::Error,
+        category: super::port::PushIssueCategory::ApplyRefusal,
         field: "-".to_string(),
         message: format!("'selfie apply' would refuse this package: {refusal}"),
         location: None,
@@ -3068,9 +3056,15 @@ mod push_validation_tests {
             .and_then(|failure| failure.issues.first())
             .expect("the failure must carry an issue");
 
-        assert_eq!(issue.category, "ParseError");
+        assert_eq!(
+            issue.category,
+            crate::sync_service::PushIssueCategory::ParseError
+        );
         assert_eq!(issue.message, "unclosed bracket '{'");
-        assert_eq!(issue.location.as_deref(), Some("line 5 column 15"));
+        assert_eq!(
+            issue.location.map(|at| at.to_string()).as_deref(),
+            Some("line 5, column 15")
+        );
     }
 }
 
@@ -3757,7 +3751,51 @@ mod name_collision_tests {
             .expect("configs is refused");
 
         let issue = super::apply_refusal_issue(&refusal, &[]).expect("nothing reported it yet");
-        assert_eq!(issue.category, "ApplyRefusal");
+        assert_eq!(
+            issue.category,
+            crate::sync_service::PushIssueCategory::ApplyRefusal
+        );
+    }
+
+    // Only an error at the refusal's field reports it: a warning there names a
+    // lesser problem, so the refusal is still appended. An error at the same
+    // field is the control.
+    #[test]
+    fn a_warning_at_the_refused_field_does_not_report_the_refusal() {
+        let yaml = "name: myapp\nconfigs: []\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        let mut package: crate::package::Package = crate::yaml::parse(yaml).unwrap();
+        package.set_source(
+            std::path::PathBuf::from("/packages/myapp.yml"),
+            yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
+        );
+        let refusal = package
+            .spec_refusal("test-env")
+            .expect("configs is refused");
+        let at = |level| super::super::port::PackageValidationIssue {
+            level,
+            category: crate::sync_service::PushIssueCategory::Validation(
+                crate::validation::ValidationErrorCategory::InvalidValue,
+            ),
+            field: refusal.fields()[0].clone(),
+            message: "m".to_string(),
+            location: None,
+            suggestion: None,
+        };
+
+        assert!(
+            super::apply_refusal_issue(
+                &refusal,
+                &[at(crate::validation::ValidationLevel::Warning)]
+            )
+            .is_some(),
+            "a warning does not report the refusal"
+        );
+        assert!(
+            super::apply_refusal_issue(&refusal, &[at(crate::validation::ValidationLevel::Error)])
+                .is_none(),
+            "control: an error at the field does"
+        );
     }
 
     // Errors only: a missing section also draws a warning about the current
@@ -3769,7 +3807,7 @@ mod name_collision_tests {
         failures
             .iter()
             .flat_map(|f| &f.issues)
-            .filter(|issue| issue.level == "ERROR")
+            .filter(|issue| issue.level == crate::validation::ValidationLevel::Error)
             .count()
     }
 

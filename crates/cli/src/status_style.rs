@@ -40,11 +40,6 @@ pub(crate) fn format_no_check(use_colors: bool) -> String {
     format_status_indicator("⚠", "No check", use_colors, |s| s.yellow())
 }
 
-/// Format a "command not found" status indicator
-pub(crate) fn format_cmd_not_found(use_colors: bool) -> String {
-    format_status_indicator("✗", "Cmd not found", use_colors, |s| s.red())
-}
-
 /// Format a status check error indicator
 pub(crate) fn format_status_error(use_colors: bool) -> String {
     format_status_indicator("✗", "Error", use_colors, |s| s.red())
@@ -79,7 +74,6 @@ pub(crate) fn format_check_result(
         Some(CheckResult::Success { .. }) => styled_text("Installed", use_colors, |s| s.green()),
         Some(CheckResult::Failed { .. }) => styled_text("Not installed", use_colors, |s| s.cyan()),
         Some(CheckResult::NoCheckCommand) => styled_text("No check", use_colors, |s| s.yellow()),
-        Some(CheckResult::CommandNotFound) => styled_text("Cmd not found", use_colors, |s| s.red()),
         Some(CheckResult::Error(e)) => {
             let msg = format!("Error: {e}");
             styled_text(&msg, use_colors, |s| s.red())
@@ -136,12 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_cmd_not_found() {
-        let result = format_cmd_not_found(false);
-        assert!(result.contains("Cmd not found"));
-    }
-
-    #[test]
     fn test_format_status_error() {
         let result = format_status_error(false);
         assert!(result.contains("Error"));
@@ -184,7 +172,6 @@ mod tests {
             format_not_installed(false),
             format_no_check(false),
             format_no_audit(false),
-            format_cmd_not_found(false),
             format_status_error(false),
             format_audit_clean(false),
             format_audit_conflicts(false),
