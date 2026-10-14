@@ -35,11 +35,6 @@ pub(crate) fn format_not_installed(use_colors: bool) -> String {
     format_status_indicator("✗", "Not installed", use_colors, |s| s.cyan())
 }
 
-/// Format a "no check command" status indicator
-pub(crate) fn format_no_check(use_colors: bool) -> String {
-    format_status_indicator("⚠", "No check", use_colors, |s| s.yellow())
-}
-
 /// Format a status check error indicator
 pub(crate) fn format_status_error(use_colors: bool) -> String {
     format_status_indicator("✗", "Error", use_colors, |s| s.red())
@@ -69,17 +64,20 @@ pub(crate) fn format_check_result(
     status: Option<&selfie::package::event::CheckResult>,
     use_colors: bool,
 ) -> String {
-    use selfie::package::event::CheckResult;
+    use selfie::package::event::{CheckFailure, CheckResult};
     match status {
         Some(CheckResult::Success { .. }) => styled_text("Installed", use_colors, |s| s.green()),
         Some(CheckResult::Failed { .. }) => styled_text("Not installed", use_colors, |s| s.cyan()),
         Some(CheckResult::NoCheckCommand) => styled_text("No check", use_colors, |s| s.yellow()),
-        Some(CheckResult::Error(e)) => {
-            let msg = format!("Error: {e}");
-            styled_text(&msg, use_colors, |s| s.red())
+        Some(CheckResult::CouldNotRun(CheckFailure::Canceled { .. })) => {
+            styled_text("Canceled", use_colors, |s| s.yellow())
         }
-        Some(CheckResult::TimedOut(timed_out)) => {
+        Some(CheckResult::CouldNotRun(CheckFailure::TimedOut(timed_out))) => {
             styled_text(&timed_out.to_string(), use_colors, |s| s.red())
+        }
+        Some(CheckResult::CouldNotRun(failure)) => {
+            let msg = format!("Error: {failure}");
+            styled_text(&msg, use_colors, |s| s.red())
         }
         None => styled_text("N/A", use_colors, |s| s.dim()),
     }
@@ -124,12 +122,6 @@ mod tests {
     }
 
     #[test]
-    fn test_format_no_check() {
-        let result = format_no_check(false);
-        assert!(result.contains("No check"));
-    }
-
-    #[test]
     fn test_format_status_error() {
         let result = format_status_error(false);
         assert!(result.contains("Error"));
@@ -170,7 +162,6 @@ mod tests {
             format_installed(false),
             format_valid(false),
             format_not_installed(false),
-            format_no_check(false),
             format_no_audit(false),
             format_status_error(false),
             format_audit_clean(false),

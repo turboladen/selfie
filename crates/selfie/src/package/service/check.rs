@@ -2,13 +2,13 @@
 
 use super::steps;
 use crate::{
-    commands::runner::{CommandError, CommandRunner, TimedOut},
+    commands::runner::{CommandError, CommandRunner},
     config::SelfieConfig,
     package::{
         GetPackage,
         event::{
-            CheckResult, CheckResultData, CheckVerdict, CommandFailure, EventSender,
-            OperationFailure, OperationResult, OperationSuccess, StepEnding,
+            CheckFailure, CheckResult, CheckResultData, CheckVerdict, EventSender, OperationResult,
+            OperationSuccess, StepEnding,
         },
         port::{PackageError, PackageRepository},
         service::ProgressTracker,
@@ -73,7 +73,19 @@ where
     .await
     {
         Ok(check_result) => check_result,
-        Err(err) => return OperationResult::Failure(err.into()),
+        Err(err) => {
+            // The row says why the check gave no answer; the run still fails
+            // as the error does.
+            sender
+                .send_check_result(could_not_run(
+                    package_name,
+                    config.environment(),
+                    check_command.as_deref(),
+                    &err,
+                ))
+                .await;
+            return OperationResult::Failure(err.into());
+        }
     };
 
     // Step 4: Send the check result event
@@ -202,13 +214,7 @@ fn create_operation_result(
             exit_code: *exit_code,
             stderr: crate::commands::BoundedText::bound(stderr.as_bytes()),
         }),
-        CheckResult::TimedOut(timed_out) => OperationResult::Failure(
-            OperationFailure::CommandError(CommandFailure::TimedOut(timed_out.clone())),
-        ),
-        // Every error recorded here names the command already.
-        CheckResult::Error(error) => {
-            OperationResult::Failure(OperationFailure::Generic(error.clone()))
-        }
+        CheckResult::CouldNotRun(failure) => OperationResult::Failure(failure.into()),
         // A package with no check command is answered before any command runs,
         // so this result never reaches here.
         CheckResult::NoCheckCommand => OperationResult::Failure("Unexpected check result".into()),
@@ -273,8 +279,10 @@ where
 /// check's answer; only a command that could not give one failed.
 pub(super) fn check_ending(result: &CheckResult, token: &CancellationToken) -> StepEnding {
     match result {
-        CheckResult::Error(_) if token.is_cancelled() => StepEnding::Cancelled,
-        CheckResult::Error(_) | CheckResult::TimedOut(_) => StepEnding::Failed,
+        // A timeout is the check's own failure, whatever else canceled the run.
+        CheckResult::CouldNotRun(CheckFailure::TimedOut(_)) => StepEnding::Failed,
+        CheckResult::CouldNotRun(_) if token.is_cancelled() => StepEnding::Cancelled,
+        CheckResult::CouldNotRun(_) => StepEnding::Failed,
         CheckResult::Success { .. } | CheckResult::Failed { .. } | CheckResult::NoCheckCommand => {
             StepEnding::Succeeded
         }
@@ -319,7 +327,7 @@ fn could_not_run(
         package_name: package_name.to_string(),
         environment: environment.to_string(),
         check_command: check_command.map(str::to_string),
-        result: CheckResult::Error(err.to_string()),
+        result: CheckResult::CouldNotRun(CheckFailure::from(err)),
     }
 }
 
@@ -364,10 +372,7 @@ where
             | CommandError::SpawnFailed { .. }
             | CommandError::Cancelled { .. }),
         ) => return Err(err),
-        Err(CommandError::Timeout {
-            command, timeout, ..
-        }) => CheckResult::TimedOut(TimedOut::new(command, timeout)),
-        Err(err) => CheckResult::Error(err.to_string()),
+        Err(err) => CheckResult::CouldNotRun(CheckFailure::from(&err)),
     };
 
     Ok(CheckResultData {
@@ -376,4 +381,34 @@ where
         check_command: Some(cmd.to_string()),
         result,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A check that timed out ends its step failed even when the run was
+    // canceled meanwhile; any other check that gave no answer then ends it
+    // canceled.
+    #[test]
+    fn a_timed_out_check_ends_its_step_failed_even_once_canceled() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let timed_out = check_ending(
+            &CheckResult::CouldNotRun(CheckFailure::TimedOut(
+                crate::commands::runner::TimedOut::new("c", std::time::Duration::from_secs(1)),
+            )),
+            &token,
+        );
+        let unreadable = check_ending(
+            &CheckResult::CouldNotRun(CheckFailure::ResultUnreadable {
+                message: "m".to_string(),
+            }),
+            &token,
+        );
+
+        assert_eq!(timed_out, StepEnding::Failed);
+        assert_eq!(unreadable, StepEnding::Cancelled);
+    }
 }

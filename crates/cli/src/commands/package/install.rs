@@ -35,33 +35,7 @@ pub(crate) async fn handle_install(
                 return true;
             }
 
-            match event {
-                // What the pre-install check found, before the install runs: detail
-                // about the run, shown under `--verbose`.
-                PackageEvent::CheckResultCompleted { check_result, .. } => {
-                    let message = match &check_result.result {
-                        selfie::package::event::CheckResult::Success { .. } => {
-                            "Package is already installed".to_string()
-                        }
-                        selfie::package::event::CheckResult::Failed { .. } => {
-                            "Package not currently installed, proceeding with installation"
-                                .to_string()
-                        }
-                        selfie::package::event::CheckResult::NoCheckCommand => {
-                            "No check command defined, proceeding with installation".to_string()
-                        }
-                        selfie::package::event::CheckResult::Error(err) => {
-                            format!("Check error ({err}), proceeding with installation")
-                        }
-                        selfie::package::event::CheckResult::TimedOut(timed_out) => {
-                            format!("Check {timed_out}; proceeding with installation")
-                        }
-                    };
-                    display.print_status(message);
-                    true
-                }
-                _ => false,
-            }
+            false
         })
         .await;
 

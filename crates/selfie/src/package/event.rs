@@ -3032,6 +3032,8 @@ pub struct PackageListData {
 pub struct PackageListItem {
     pub name: String,
     pub environments: Vec<String>,
+    /// The check command run for this item, when there is one.
+    pub check_command: Option<String>,
     pub status: Option<CheckResult>,
 }
 
@@ -3346,22 +3348,141 @@ pub struct CheckResultData {
 }
 
 /// Result of a check operation
-#[derive(Debug, Clone, strum::Display)]
+#[derive(Debug, Clone)]
 pub enum CheckResult {
-    #[strum(to_string = "successfully")]
+    /// The check ran and said the package is installed.
     Success { stdout: String, stderr: String },
-    #[strum(to_string = "with failures")]
+    /// The check ran and said the package is not installed.
     Failed {
         stdout: String,
         stderr: String,
         exit_code: Option<i32>,
     },
-    #[strum(to_string = "but no check command defined")]
+    /// The package declares no check command here.
     NoCheckCommand,
-    #[strum(to_string = "with errors")]
-    Error(String),
-    #[strum(to_string = "but timed out")]
+    /// The check gave no answer, for the reason carried.
+    CouldNotRun(CheckFailure),
+}
+
+/// Why a check command gave no answer.
+///
+/// [`Display`](fmt::Display) words it for a person. [`kind`](Self::kind) is
+/// its label, the variant's name in snake_case.
+#[derive(Debug, Clone, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum CheckFailure {
+    /// The run was canceled while the check ran.
+    Canceled {
+        /// The error's sentence, naming the command.
+        message: String,
+    },
+    /// selfie could not start the check, or could not attach to its output
+    /// once it had, so the check may not have run at all.
+    CouldNotStart {
+        /// The error's sentence, naming the command.
+        message: String,
+    },
+    /// The directory the check was to run in could not be entered. No part of
+    /// the check ran.
+    WorkingDirectoryUnusable {
+        /// The check command.
+        command: String,
+        /// The directory it was to run in.
+        working_directory: std::path::PathBuf,
+        /// The error's sentence, naming both and why.
+        message: String,
+    },
+    /// The check ran past `command_timeout` and was stopped.
     TimedOut(TimedOut),
+    /// The check started, and selfie could not read its result to the end:
+    /// its output, or its exit status.
+    ResultUnreadable {
+        /// The error's sentence, naming the command.
+        message: String,
+    },
+    /// The task running the check failed, which is a bug in selfie and not in
+    /// the check command.
+    Internal {
+        /// What failed.
+        message: String,
+    },
+}
+
+impl CheckFailure {
+    /// The label for this failure, such as `"could_not_start"`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+}
+
+impl fmt::Display for CheckFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Canceled { message }
+            | Self::CouldNotStart { message }
+            | Self::WorkingDirectoryUnusable { message, .. }
+            | Self::ResultUnreadable { message } => f.write_str(message),
+            Self::TimedOut(timed_out) => write!(f, "{timed_out}"),
+            Self::Internal { message } => write!(
+                f,
+                "selfie failed while running the check, which is a bug in selfie and not in \
+                 the check command: {message}"
+            ),
+        }
+    }
+}
+
+impl From<&CheckFailure> for OperationFailure {
+    fn from(failure: &CheckFailure) -> Self {
+        match failure {
+            CheckFailure::TimedOut(timed_out) => {
+                OperationFailure::CommandError(CommandFailure::TimedOut(timed_out.clone()))
+            }
+            // Each of these sentences names the command already.
+            CheckFailure::Canceled { .. }
+            | CheckFailure::CouldNotStart { .. }
+            | CheckFailure::WorkingDirectoryUnusable { .. }
+            | CheckFailure::ResultUnreadable { .. }
+            | CheckFailure::Internal { .. } => OperationFailure::Generic(failure.to_string()),
+        }
+    }
+}
+
+impl From<&crate::commands::runner::CommandError> for CheckFailure {
+    fn from(err: &crate::commands::runner::CommandError) -> Self {
+        use crate::commands::runner::CommandError;
+
+        // Every variant is listed, with no `_` arm, so a new `CommandError` is a
+        // compile error here and not a silent relabeling.
+        match err {
+            CommandError::Cancelled { .. } => Self::Canceled {
+                message: err.to_string(),
+            },
+            CommandError::SpawnFailed { .. }
+            | CommandError::StdoutSpawn(_)
+            | CommandError::StderrSpawn(_) => Self::CouldNotStart {
+                message: err.to_string(),
+            },
+            CommandError::WorkingDirectoryUnusable {
+                command,
+                working_directory,
+                ..
+            } => Self::WorkingDirectoryUnusable {
+                command: command.clone(),
+                working_directory: working_directory.clone(),
+                message: err.to_string(),
+            },
+            CommandError::Timeout {
+                command, timeout, ..
+            } => Self::TimedOut(TimedOut::new(command.clone(), *timeout)),
+            CommandError::OutputReadFailed { .. }
+            | CommandError::ContentMarkersAbsent { .. }
+            | CommandError::IoError { .. } => Self::ResultUnreadable {
+                message: err.to_string(),
+            },
+        }
+    }
 }
 
 /// What a check that ran found.
@@ -3594,37 +3715,135 @@ mod tests {
         assert_eq!(large_step_count.total, 2_000_000);
     }
 
+    // Every `CommandError` maps to one `CheckFailure`, by the table ADR 0009 sets.
     #[test]
-    fn test_check_result_display() {
-        assert_eq!(
-            format!(
-                "{}",
-                CheckResult::Success {
-                    stdout: String::new(),
-                    stderr: String::new()
-                }
+    fn every_command_error_maps_to_its_check_failure() {
+        use crate::commands::runner::{CommandError, OutputStream};
+        use std::{path::PathBuf, sync::Arc, time::Duration};
+
+        let io = || Arc::new(std::io::Error::other("e"));
+        let cmd = || "check-x".to_string();
+        let dir = || PathBuf::from("/p");
+        let unusable_directory = CommandError::WorkingDirectoryUnusable {
+            command: cmd(),
+            working_directory: dir(),
+            source: io(),
+        };
+        let cases = [
+            (
+                CommandError::Cancelled {
+                    command: cmd(),
+                    working_directory: dir(),
+                },
+                "canceled",
             ),
-            "successfully"
-        );
-        assert_eq!(
-            format!(
-                "{}",
-                CheckResult::Failed {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: Some(1)
-                }
+            (
+                CommandError::SpawnFailed {
+                    command: cmd(),
+                    program: "sh".to_string(),
+                    working_directory: dir(),
+                    source: io(),
+                },
+                "could_not_start",
             ),
-            "with failures"
-        );
-        assert_eq!(
-            format!("{}", CheckResult::NoCheckCommand),
-            "but no check command defined"
-        );
-        assert_eq!(
-            format!("{}", CheckResult::Error("test".to_string())),
-            "with errors"
-        );
+            (CommandError::StdoutSpawn(cmd()), "could_not_start"),
+            (CommandError::StderrSpawn(cmd()), "could_not_start"),
+            (unusable_directory.clone(), "working_directory_unusable"),
+            (
+                CommandError::Timeout {
+                    command: cmd(),
+                    timeout: Duration::from_secs(1),
+                    working_directory: dir(),
+                },
+                "timed_out",
+            ),
+            (
+                CommandError::OutputReadFailed {
+                    command: cmd(),
+                    working_directory: dir(),
+                    stream: OutputStream::Stdout,
+                    source: io(),
+                },
+                "result_unreadable",
+            ),
+            (
+                CommandError::ContentMarkersAbsent {
+                    command: cmd(),
+                    working_directory: dir(),
+                },
+                "result_unreadable",
+            ),
+            (
+                CommandError::IoError {
+                    command: cmd(),
+                    working_directory: dir(),
+                    source: io(),
+                },
+                "result_unreadable",
+            ),
+        ];
+        for (error, kind) in &cases {
+            let failure = CheckFailure::from(error);
+            assert_eq!(failure.kind(), *kind, "{error:?}");
+            // The sentence is the error's own, whichever fields it is built from.
+            assert_eq!(failure.to_string(), error.to_string(), "{error:?}");
+        }
+        // The working directory's fields travel, for a consumer that names them.
+        let CheckFailure::WorkingDirectoryUnusable {
+            command,
+            working_directory,
+            ..
+        } = CheckFailure::from(&unusable_directory)
+        else {
+            panic!("expected an unusable working directory");
+        };
+        assert_eq!((command.as_str(), working_directory), ("check-x", dir()));
+    }
+
+    // The label set is the MCP contract, so each label is pinned.
+    #[test]
+    fn every_check_failure_has_its_label() {
+        let message = || "m".to_string();
+        let cases = [
+            (CheckFailure::Canceled { message: message() }, "canceled"),
+            (
+                CheckFailure::CouldNotStart { message: message() },
+                "could_not_start",
+            ),
+            (
+                CheckFailure::WorkingDirectoryUnusable {
+                    command: "c".to_string(),
+                    working_directory: "/p".into(),
+                    message: message(),
+                },
+                "working_directory_unusable",
+            ),
+            (
+                CheckFailure::TimedOut(TimedOut::new("c", std::time::Duration::from_secs(1))),
+                "timed_out",
+            ),
+            (
+                CheckFailure::ResultUnreadable { message: message() },
+                "result_unreadable",
+            ),
+            (CheckFailure::Internal { message: message() }, "internal"),
+        ];
+        for (failure, label) in cases {
+            assert_eq!(failure.kind(), label, "{failure:?}");
+        }
+    }
+
+    // A panicked check task is reported as selfie's bug, so the user is not sent
+    // to fix a check command that is fine.
+    #[test]
+    fn an_internal_failure_says_it_is_a_selfie_bug() {
+        let sentence = CheckFailure::Internal {
+            message: "Task failed: panicked".to_string(),
+        }
+        .to_string();
+
+        assert!(sentence.contains("a bug in selfie"), "{sentence}");
+        assert!(sentence.ends_with("Task failed: panicked"), "{sentence}");
     }
 
     #[test]

@@ -400,8 +400,7 @@ fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
         CheckResult::Success { .. } => EnvironmentStatus::Installed,
         CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
         CheckResult::NoCheckCommand => EnvironmentStatus::Unknown("no check command".to_string()),
-        CheckResult::Error(e) => EnvironmentStatus::Unknown(e),
-        CheckResult::TimedOut(timed_out) => EnvironmentStatus::Unknown(timed_out.to_string()),
+        CheckResult::CouldNotRun(failure) => EnvironmentStatus::Unknown(failure.to_string()),
     }
 }
 

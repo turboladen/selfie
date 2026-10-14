@@ -83,8 +83,11 @@ fn format_list_item(
 
     let result = match &package_item.status {
         Some(event::CheckResult::Success { .. }) => ListItemResult::Success,
-        Some(event::CheckResult::Failed { .. })
-        | Some(event::CheckResult::Error(_) | event::CheckResult::TimedOut(_)) => {
+        // A canceled check says nothing about the package, so it is not a failure.
+        Some(event::CheckResult::CouldNotRun(event::CheckFailure::Canceled { .. })) => {
+            ListItemResult::Warning
+        }
+        Some(event::CheckResult::Failed { .. }) | Some(event::CheckResult::CouldNotRun(_)) => {
             ListItemResult::Failure
         }
         Some(event::CheckResult::NoCheckCommand) | None => ListItemResult::Warning,
@@ -402,10 +405,28 @@ mod tests {
         assert_eq!(result, "No check");
     }
 
+    // A canceled check reads as canceled, not as a red error.
+    #[test]
+    fn a_canceled_check_reads_as_canceled() {
+        let result = status_style::format_check_result(
+            Some(&event::CheckResult::CouldNotRun(
+                event::CheckFailure::Canceled {
+                    message: "Command cancelled: check-x".to_string(),
+                },
+            )),
+            false,
+        );
+        assert_eq!(result, "Canceled");
+    }
+
     #[test]
     fn test_format_check_status_error() {
         let result = status_style::format_check_result(
-            Some(&event::CheckResult::Error("test error".to_string())),
+            Some(&event::CheckResult::CouldNotRun(
+                event::CheckFailure::ResultUnreadable {
+                    message: "test error".to_string(),
+                },
+            )),
             false,
         );
         assert_eq!(result, "Error: test error");
@@ -485,6 +506,7 @@ mod tests {
     fn test_handle_list_event_with_valid_packages() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = selfie::package::event::PackageListItem {
+            check_command: None,
             name: "test-package".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
@@ -549,6 +571,7 @@ mod tests {
     fn test_handle_list_event_mixed_packages_and_environment_stats() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = selfie::package::event::PackageListItem {
+            check_command: None,
             name: "test-package".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
@@ -593,12 +616,14 @@ mod tests {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let packages = vec![
             PackageListItem {
+                check_command: None,
                 name: "alpha".to_string(),
 
                 environments: vec![TEST_ENV.to_string()],
                 status: None,
             },
             PackageListItem {
+                check_command: None,
                 name: "beta".to_string(),
 
                 environments: vec![TEST_ENV.to_string()],
@@ -625,12 +650,14 @@ mod tests {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             packages: vec![
                 PackageListItem {
+                    check_command: None,
                     name: "zebra".to_string(),
 
                     environments: vec![TEST_ENV.to_string()],
                     status: None,
                 },
                 PackageListItem {
+                    check_command: None,
                     name: "alpha".to_string(),
 
                     environments: vec![TEST_ENV.to_string()],
@@ -643,6 +670,7 @@ mod tests {
         let completed_zebra = event::PackageEvent::PackageListItemCompleted {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_item: PackageListItem {
+                check_command: None,
                 name: "zebra".to_string(),
 
                 environments: vec![TEST_ENV.to_string()],
@@ -657,6 +685,7 @@ mod tests {
         let completed_alpha = event::PackageEvent::PackageListItemCompleted {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
             package_item: PackageListItem {
+                check_command: None,
                 name: "alpha".to_string(),
 
                 environments: vec![TEST_ENV.to_string()],
@@ -717,6 +746,7 @@ mod tests {
 
         // Success variant
         let success_item = PackageListItem {
+            check_command: None,
             name: "ripgrep".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
@@ -733,6 +763,7 @@ mod tests {
 
         // Failure variant
         let failure_item = PackageListItem {
+            check_command: None,
             name: "missing-pkg".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
@@ -750,6 +781,7 @@ mod tests {
 
         // Warning variant (no check command)
         let warning_item = PackageListItem {
+            check_command: None,
             name: "no-check".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
@@ -763,6 +795,7 @@ mod tests {
 
         // N/A variant (status is None)
         let na_item = PackageListItem {
+            check_command: None,
             name: "pending".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
@@ -773,10 +806,33 @@ mod tests {
         assert!(matches!(result, ListItemResult::Warning));
     }
 
+    // A canceled check is a warning row, not a failed one: it says nothing
+    // about the package.
+    #[test]
+    fn a_canceled_check_is_a_warning_row() {
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let item = PackageListItem {
+            check_command: None,
+            name: "slow".to_string(),
+            environments: vec![TEST_ENV.to_string()],
+            status: Some(event::CheckResult::CouldNotRun(
+                event::CheckFailure::Canceled {
+                    message: "Command cancelled: sleep 5".to_string(),
+                },
+            )),
+        };
+
+        let row = format_list_item(&item, &config, false, false);
+
+        assert!(matches!(row.result, ListItemResult::Warning));
+        assert_eq!(row.status, "Canceled");
+    }
+
     #[test]
     fn test_handle_list_event_package_item_completed() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let package_item = PackageListItem {
+            check_command: None,
             name: "test-package".to_string(),
 
             environments: vec![TEST_ENV.to_string()],

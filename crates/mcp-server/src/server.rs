@@ -535,7 +535,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_check",
-        description = "Check if a package is installed in the current environment by running its configured check command. A check command that exits non-zero for any reason, a kill included, means the package is not installed: a successful call with status 'found'. No check command, selfie's own timeout, or a command that could not be started comes back as an ERROR result. A blank check command (empty, whitespace, or only a comment) counts as no check command. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
+        description = "Check if a package is installed in the current environment by running its configured check command. A check command that exits non-zero for any reason, a kill included, means the package is not installed: a successful call with status 'found'. No check command, selfie's own timeout, or a command that could not be started comes back as an ERROR result. The `check_result` row's `status` is \"installed\", \"not installed\", \"no check command defined\", \"error\" or \"timed out\"; for the last two, `kind` says why the check gave no answer: \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\" or \"result_unreadable\"; `reason` says it in prose, and `working_directory` names the directory for \"working_directory_unusable\". All three are null otherwise; branch on `kind`. A blank check command (empty, whitespace, or only a comment) counts as no check command. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
     )]
     async fn package_check(
         &self,
@@ -588,6 +588,7 @@ impl SelfieServer {
     #[tool(
         name = "selfie_package_list",
         description = "List packages with installation status. Set all=true to include packages from other environments. \
+Each `package_list_item` row's `status` is \"installed\", \"not installed\", \"no check command defined\", \"error\" or \"timed out\"; for the last two, `kind` says why the check gave no answer: \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\", \"result_unreadable\" or \"internal\" (a fault in selfie, not in the check command); `reason` says it in prose, and `working_directory` names the directory for \"working_directory_unusable\". Each is null otherwise. A row's `command` is its check command, null when it has none. \
 A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location. \
 A spec that loaded but that selfie will not read is listed in the summary's `refused` array, with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\" or \"no_environments\"; branch on it) and `reason`, \
 and is not counted in total_packages. Without all=true, a spec is refused when 'selfie apply' would refuse it in the current environment; \

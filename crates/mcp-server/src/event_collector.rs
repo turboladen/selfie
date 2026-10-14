@@ -410,13 +410,16 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                 })
                 .collect();
         }
-        PackageEvent::CheckResultCompleted { check_result, .. } => Some(serde_json::json!({
-            "type": "check_result",
-            "package": &check_result.package_name,
-            "environment": &check_result.environment,
-            "command": &check_result.check_command,
-            "status": check_status_label(&check_result.result),
-        })),
+        PackageEvent::CheckResultCompleted { check_result, .. } => Some(with_fields(
+            serde_json::json!({
+                "type": "check_result",
+                "package": &check_result.package_name,
+                "environment": &check_result.environment,
+                "command": &check_result.check_command,
+                "status": check_status_label(&check_result.result),
+            }),
+            check_failure_fields(Some(&check_result.result)),
+        )),
         PackageEvent::AuditResultCompleted { audit_result, .. } => Some(serde_json::json!({
             "type": "audit_result",
             "package": &audit_result.package_name,
@@ -477,12 +480,16 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             }))
         }
         PackageEvent::PackageListReady { .. } => None, // CLI-specific event for spinner setup
-        PackageEvent::PackageListItemCompleted { package_item, .. } => Some(serde_json::json!({
-            "type": "package_list_item",
-            "name": &package_item.name,
-            "environments": &package_item.environments,
-            "status": package_item.status.as_ref().map(check_status_label),
-        })),
+        PackageEvent::PackageListItemCompleted { package_item, .. } => Some(with_fields(
+            serde_json::json!({
+                "type": "package_list_item",
+                "name": &package_item.name,
+                "environments": &package_item.environments,
+                "command": &package_item.check_command,
+                "status": package_item.status.as_ref().map(check_status_label),
+            }),
+            check_failure_fields(package_item.status.as_ref()),
+        )),
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
@@ -923,9 +930,49 @@ fn check_status_label(result: &CheckResult) -> &'static str {
         CheckResult::Success { .. } => "installed",
         CheckResult::Failed { .. } => "not installed",
         CheckResult::NoCheckCommand => "no check command defined",
-        CheckResult::Error(_) => "error",
-        CheckResult::TimedOut(_) => "timed out",
+        CheckResult::CouldNotRun(selfie::package::event::CheckFailure::TimedOut(_)) => "timed out",
+        CheckResult::CouldNotRun(_) => "error",
     }
+}
+
+/// Adds `fields` to the JSON object `row`.
+fn with_fields(mut row: Value, fields: serde_json::Map<String, Value>) -> Value {
+    if let Value::Object(map) = &mut row {
+        map.extend(fields);
+    }
+    row
+}
+
+/// Renders why a check gave no answer as `kind` (the label), `reason` (prose)
+/// and `working_directory`, which is set only for a directory that could not be
+/// entered. All three are null for a check that answered.
+fn check_failure_fields(result: Option<&CheckResult>) -> serde_json::Map<String, Value> {
+    use selfie::package::event::CheckFailure;
+
+    let failure = match result {
+        Some(CheckResult::CouldNotRun(failure)) => Some(failure),
+        _ => None,
+    };
+    let working_directory = match failure {
+        Some(CheckFailure::WorkingDirectoryUnusable {
+            working_directory, ..
+        }) => Some(working_directory.display().to_string()),
+        _ => None,
+    };
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "kind".to_string(),
+        Value::from(failure.map(CheckFailure::kind)),
+    );
+    fields.insert(
+        "reason".to_string(),
+        Value::from(failure.map(ToString::to_string)),
+    );
+    fields.insert(
+        "working_directory".to_string(),
+        Value::from(working_directory),
+    );
+    fields
 }
 
 fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -> Vec<Value> {
@@ -1854,6 +1901,127 @@ mod tests {
         );
     }
 
+    // A check that gave no answer keeps its published `status` and says why in
+    // `kind`; one that answered has no kind.
+    #[tokio::test]
+    async fn a_check_that_gave_no_answer_says_why_in_kind() {
+        use selfie::package::event::CheckFailure;
+
+        let row = |result| PackageEvent::CheckResultCompleted {
+            operation_info: test_op_info(),
+            check_result: CheckResultData {
+                package_name: "p".to_string(),
+                environment: "test".to_string(),
+                check_command: Some("check-p".to_string()),
+                result,
+            },
+        };
+        let events = vec![
+            row(CheckResult::CouldNotRun(CheckFailure::CouldNotStart {
+                message: "m".to_string(),
+            })),
+            row(CheckResult::CouldNotRun(CheckFailure::TimedOut(
+                selfie::commands::runner::TimedOut::new(
+                    "check-p",
+                    std::time::Duration::from_secs(1),
+                ),
+            ))),
+            row(CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = result.data["data"].as_array().expect("data is an array");
+        let fields: Vec<(&Value, &Value)> =
+            rows.iter().map(|r| (&r["status"], &r["kind"])).collect();
+        assert_eq!(
+            fields,
+            [
+                (&Value::from("error"), &Value::from("could_not_start")),
+                (&Value::from("timed out"), &Value::from("timed_out")),
+                (&Value::from("installed"), &Value::Null),
+            ]
+        );
+    }
+
+    // A listing row names its check command for every check that gave no
+    // answer, as a check row does.
+    #[tokio::test]
+    async fn a_listing_row_names_its_command() {
+        use selfie::package::event::{CheckFailure, PackageListItem};
+
+        let events = vec![PackageEvent::PackageListItemCompleted {
+            operation_info: test_op_info(),
+            package_item: PackageListItem {
+                check_command: Some("sleep 5".to_string()),
+                name: "slow".to_string(),
+                environments: vec!["test".to_string()],
+                status: Some(CheckResult::CouldNotRun(CheckFailure::TimedOut(
+                    selfie::commands::runner::TimedOut::new(
+                        "sleep 5",
+                        std::time::Duration::from_secs(1),
+                    ),
+                ))),
+            },
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["kind"], "timed_out");
+        assert_eq!(row["command"], "sleep 5");
+    }
+
+    // A check in a directory it could not enter carries the sentence and the
+    // directory, in a check row and in a listing row, and each names the
+    // command.
+    #[tokio::test]
+    async fn an_unusable_directory_reaches_check_and_list_rows() {
+        use selfie::package::event::{CheckFailure, PackageListItem};
+
+        let failure = || {
+            CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable {
+                command: "check-p".to_string(),
+                working_directory: "/gone".into(),
+                message: "Cannot run 'check-p' in /gone: missing".to_string(),
+            })
+        };
+        let events = vec![
+            PackageEvent::CheckResultCompleted {
+                operation_info: test_op_info(),
+                check_result: CheckResultData {
+                    package_name: "p".to_string(),
+                    environment: "test".to_string(),
+                    check_command: Some("check-p".to_string()),
+                    result: failure(),
+                },
+            },
+            PackageEvent::PackageListItemCompleted {
+                operation_info: test_op_info(),
+                package_item: PackageListItem {
+                    check_command: Some("check-p".to_string()),
+                    name: "p".to_string(),
+                    environments: vec!["test".to_string()],
+                    status: Some(failure()),
+                },
+            },
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = result.data["data"].as_array().expect("data is an array");
+        for row in rows {
+            assert_eq!(row["kind"], "working_directory_unusable", "{row}");
+            assert_eq!(row["reason"], "Cannot run 'check-p' in /gone: missing");
+            assert_eq!(row["working_directory"], "/gone");
+            assert_eq!(row["command"], "check-p");
+        }
+        assert_eq!(rows.len(), 2);
+    }
+
     #[tokio::test]
     async fn test_collect_success_with_check_result() {
         let events = vec![
@@ -2369,6 +2537,7 @@ mod tests {
             PackageEvent::PackageListItemCompleted {
                 operation_info: test_op_info(),
                 package_item: PackageListItem {
+                    check_command: None,
                     name: "ripgrep".to_string(),
 
                     environments: vec!["macos".to_string()],
@@ -2381,6 +2550,7 @@ mod tests {
             PackageEvent::PackageListItemCompleted {
                 operation_info: test_op_info(),
                 package_item: PackageListItem {
+                    check_command: None,
                     name: "missing-pkg".to_string(),
 
                     environments: vec!["macos".to_string()],

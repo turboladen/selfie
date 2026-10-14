@@ -106,7 +106,10 @@ async fn a_check_whose_output_could_not_be_read_is_an_error_not_a_verdict() {
 
     let verdict = check_verdict(&events);
     assert!(
-        matches!(verdict, CheckResult::Error(_)),
+        matches!(
+            verdict,
+            CheckResult::CouldNotRun(selfie::package::event::CheckFailure::ResultUnreadable { .. })
+        ),
         "an unreadable check became the verdict {verdict:?}"
     );
     assert!(

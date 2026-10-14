@@ -2625,3 +2625,141 @@ mod timeouts {
         );
     }
 }
+
+// A check that gave no answer says why: a canceled check reads as canceled, and
+// one that could not start or enter its directory says so, in `package check`,
+// in `package list` and in a dependency's status.
+mod checks_that_gave_no_answer {
+    use std::path::PathBuf;
+
+    use selfie::{
+        commands::runner::CommandError,
+        package::event::{CheckFailure, CheckResult},
+    };
+    use test_common::{FakeCommandRunner, create_service_test_service_with_runner};
+
+    use super::*;
+
+    fn canceled(command: &str) -> FakeCommandRunner {
+        FakeCommandRunner::new().erroring(
+            command,
+            CommandError::Cancelled {
+                command: command.to_string(),
+                working_directory: PathBuf::from("/"),
+            },
+        )
+    }
+
+    // Writes a spec for `app`, whose check is `check-app`.
+    fn app(dir: &TempDir) {
+        std::fs::write(
+            dir.path().join("app.yml"),
+            "name: app\nenvironments:\n  test:\n    install: \"install-app\"\n    check: \
+             \"check-app\"\n",
+        )
+        .unwrap();
+    }
+
+    // Runs `package check app` and returns the row it sent, with every event.
+    async fn checked(runner: FakeCommandRunner) -> (Option<CheckResult>, Vec<PackageEvent>) {
+        let dir = TempDir::new().unwrap();
+        app(&dir);
+        let service = create_service_test_service_with_runner(&dir, runner);
+        let events = collect_events(service.check("app").await).await;
+        let row = events.iter().find_map(|event| match event {
+            PackageEvent::CheckResultCompleted { check_result, .. } => {
+                Some(check_result.result.clone())
+            }
+            _ => None,
+        });
+        (row, events)
+    }
+
+    // A check the run's cancellation stopped sends a row that says canceled,
+    // and the run still fails as a canceled one.
+    #[tokio::test]
+    async fn a_canceled_check_sends_a_canceled_row_and_fails() {
+        let (row, events) = checked(canceled("check-app")).await;
+
+        assert!(
+            matches!(
+                row,
+                Some(CheckResult::CouldNotRun(CheckFailure::Canceled { .. }))
+            ),
+            "{row:?}"
+        );
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Failure(_))
+            ),
+            "{events:?}"
+        );
+    }
+
+    // A check whose working directory could not be entered sends a row naming
+    // the directory, and the run still fails.
+    #[tokio::test]
+    async fn a_check_in_an_unusable_directory_sends_its_row_and_fails() {
+        let runner = FakeCommandRunner::new().erroring(
+            "check-app",
+            CommandError::WorkingDirectoryUnusable {
+                command: "check-app".to_string(),
+                working_directory: PathBuf::from("/gone"),
+                source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            },
+        );
+
+        let (row, events) = checked(runner).await;
+
+        match row {
+            Some(CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable {
+                working_directory,
+                ..
+            })) => assert_eq!(working_directory, PathBuf::from("/gone")),
+            other => panic!("expected an unusable working directory, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Failure(_))
+            ),
+            "{events:?}"
+        );
+    }
+
+    // A listing whose check was canceled reports the item canceled, not as a check
+    // command that failed.
+    #[tokio::test]
+    async fn a_canceled_check_is_listed_as_canceled() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("app.yml"),
+            "name: app\nenvironments:\n  test:\n    install: \"install-app\"\n    check: \
+             \"check-app\"\n",
+        )
+        .unwrap();
+        let runner = canceled("check-app");
+        let service = create_service_test_service_with_runner(&dir, runner);
+
+        let events =
+            collect_events(selfie::package::PackageService::list(&service, false).await).await;
+
+        let status = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageListItemCompleted { package_item, .. } => {
+                    package_item.status.clone()
+                }
+                _ => None,
+            })
+            .expect("the item must be listed with a status");
+        assert!(
+            matches!(
+                status,
+                CheckResult::CouldNotRun(CheckFailure::Canceled { .. })
+            ),
+            "{status:?}"
+        );
+    }
+}
