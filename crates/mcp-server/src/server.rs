@@ -605,7 +605,7 @@ with all=true, when a key in any environment cannot be trusted. A result that co
 
     #[tool(
         name = "selfie_package_status",
-        description = "Check runtime installation status for a specific package in the current environment. Fails, naming the reason, when selfie will not read the package's spec. A dependency whose spec selfie will not read has an unknown status carrying that reason."
+        description = "Check runtime installation status for a specific package in the current environment. Fails, naming the reason, when selfie will not read the package's spec. The package's own row and each `dependency_statuses` and `recommend_statuses` row carry `status` (\"installed\", \"not installed\" or \"unknown\"), and for an unknown one `kind`, `reason` and the fields its kind adds; branch on `kind`; `reason` is prose. `kind` is \"not_found\" (no spec has the name), \"unloadable\" (a spec has it and could not be loaded; `failure` carries the parse failure's `kind`, `reason` and `line`/`column`), \"ambiguous_name\" (several files claim the name; `conflicting_paths` lists them), \"package_directory_unreadable\", \"refused\" (`refusal` is `{kind, reason}`: the refusal's kind, labeled as a `package_refused` row labels it, and its reason), \"not_in_environment\", \"no_check_command\", or why the check gave no answer: \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\" or \"result_unreadable\". An unknown row whose lookup returned an error no lookup is expected to return has a null `kind`, and its `reason` is that error's sentence. Each field that does not apply is null."
     )]
     async fn package_status(
         &self,
@@ -940,6 +940,68 @@ fn push_error_json(error: &selfie::sync_service::SyncError) -> serde_json::Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A description that lists the labels of why a status is unknown, or why a
+    // check gave no answer, lists every one the enums define.
+    #[test]
+    fn the_status_descriptions_list_every_label() {
+        use selfie::package::event::{CheckFailure, RefusalKind, UnknownStatus};
+        use selfie::package::port::LookupFailure;
+        use strum::VariantNames;
+
+        // UnknownStatus's own labels, one per variant that names one. The match
+        // is exhaustive, so a variant added later fails the build here until its
+        // label is gathered.
+        let own: Vec<&str> = [
+            UnknownStatus::Refused {
+                kind: RefusalKind::NoEnvironments,
+                reason: String::new(),
+            },
+            UnknownStatus::NotInEnvironment,
+            UnknownStatus::NoCheckCommand,
+        ]
+        .iter()
+        .filter_map(|unknown| match unknown {
+            UnknownStatus::Refused { .. }
+            | UnknownStatus::NotInEnvironment
+            | UnknownStatus::NoCheckCommand => unknown.kind(),
+            // These take the carried failure's label, gathered from its enum
+            // below, or have none.
+            UnknownStatus::LookupFailed(_)
+            | UnknownStatus::CheckFailed(_)
+            | UnknownStatus::Error(_) => None,
+        })
+        .collect();
+        // Only `package list` runs checks in tasks of their own, so only its
+        // description offers an internal failure, a check task that panicked.
+        let internal = CheckFailure::Internal {
+            message: String::new(),
+        }
+        .kind();
+        let quoted = |description: &str, label: &str| description.contains(&format!("\"{label}\""));
+        let description = |tool: rmcp::model::Tool| tool.description.unwrap_or_default();
+
+        let status = description(SelfieServer::package_status_tool_attr());
+        for label in LookupFailure::VARIANTS.iter().chain(&own) {
+            assert!(quoted(&status, label), "package_status omits {label}");
+        }
+        for (name, text) in [
+            ("package_status", &status),
+            (
+                "package_check",
+                &description(SelfieServer::package_check_tool_attr()),
+            ),
+            (
+                "package_list",
+                &description(SelfieServer::package_list_tool_attr()),
+            ),
+        ] {
+            for label in CheckFailure::VARIANTS {
+                let offered = *label != internal || name == "package_list";
+                assert_eq!(quoted(text, label), offered, "{name} and {label}");
+            }
+        }
+    }
 
     // The quoted labels in the sentence of `description` that starts at `lead`.
     fn labels_after(description: &str, lead: &str) -> Vec<String> {

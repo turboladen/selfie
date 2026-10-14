@@ -957,11 +957,20 @@ mod a_spec_selfie_cannot_read {
             .expect("the root's status must be sent");
         assert_eq!(statuses.len(), 1);
         match &statuses[0].status {
-            selfie::package::event::EnvironmentStatus::Unknown(reason) => assert!(
-                reason.starts_with("is refused: ") && reason.contains("_environments"),
-                "the status must say it is refused and name the key, got: {reason}"
-            ),
-            other => panic!("the dependency must be unknown, got: {other:?}"),
+            selfie::package::event::EnvironmentStatus::Unknown(
+                unknown @ selfie::package::event::UnknownStatus::Refused { kind, .. },
+            ) => {
+                assert_eq!(
+                    *kind,
+                    selfie::package::event::RefusalKind::UnknownTopLevelKeys
+                );
+                let reason = unknown.to_string();
+                assert!(
+                    reason.starts_with("is refused: ") && reason.contains("_environments"),
+                    "the status must say it is refused and name the key, got: {reason}"
+                );
+            }
+            other => panic!("the dependency must be refused, got: {other:?}"),
         }
     }
 
@@ -2630,10 +2639,10 @@ mod timeouts {
 // one that could not start or enter its directory says so, in `package check`,
 // in `package list` and in a dependency's status.
 mod checks_that_gave_no_answer {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Duration};
 
     use selfie::{
-        commands::runner::CommandError,
+        commands::runner::{CommandError, TimedOut},
         package::event::{CheckFailure, CheckResult},
     };
     use test_common::{FakeCommandRunner, create_service_test_service_with_runner};
@@ -2645,6 +2654,17 @@ mod checks_that_gave_no_answer {
             command,
             CommandError::Cancelled {
                 command: command.to_string(),
+                working_directory: PathBuf::from("/"),
+            },
+        )
+    }
+
+    fn timing_out(command: &str) -> FakeCommandRunner {
+        FakeCommandRunner::new().erroring(
+            command,
+            CommandError::Timeout {
+                command: command.to_string(),
+                timeout: Duration::from_secs(2),
                 working_directory: PathBuf::from("/"),
             },
         )
@@ -2761,5 +2781,176 @@ mod checks_that_gave_no_answer {
             ),
             "{status:?}"
         );
+    }
+
+    // Runs `package status app` and returns each dependency's status.
+    async fn dependency_statuses(
+        dir: &TempDir,
+        runner: FakeCommandRunner,
+    ) -> Vec<selfie::package::event::DependencyStatus> {
+        let service = create_service_test_service_with_runner(dir, runner);
+        let events = collect_events(service.status("app").await).await;
+        events
+            .into_iter()
+            .find_map(|event| match event {
+                PackageEvent::EnvironmentStatusChecked {
+                    environment_status, ..
+                } => Some(environment_status.dependency_statuses),
+                _ => None,
+            })
+            .expect("the package's status must be sent")
+    }
+
+    // Writes specs for `app` and for `dep`, its dependency, whose check is
+    // `check-dep`.
+    fn app_and_dep(dir: &TempDir) {
+        std::fs::write(
+            dir.path().join("app.yml"),
+            "name: app\nenvironments:\n  test:\n    install: \"install-app\"\n    \
+             dependencies: [dep]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("dep.yml"),
+            "name: dep\nenvironments:\n  test:\n    install: \"install-dep\"\n    check: \
+             \"check-dep\"\n",
+        )
+        .unwrap();
+    }
+
+    // A dependency whose check times out is unknown because it timed out, and
+    // carries the timeout itself.
+    #[tokio::test]
+    async fn a_dependency_check_that_times_out_is_unknown_as_a_timeout() {
+        use selfie::package::event::{CheckFailure, EnvironmentStatus, UnknownStatus};
+
+        let dir = TempDir::new().unwrap();
+        app_and_dep(&dir);
+
+        let statuses = dependency_statuses(&dir, timing_out("check-dep")).await;
+
+        assert!(
+            matches!(
+                &statuses[..],
+                [dep] if matches!(
+                    &dep.status,
+                    EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
+                        CheckFailure::TimedOut(timed_out)
+                    )) if *timed_out == TimedOut::new("check-dep", Duration::from_secs(2))
+                )
+            ),
+            "{statuses:?}"
+        );
+    }
+
+    // A dependency whose check was canceled is unknown because it was canceled,
+    // not because its check command is broken.
+    #[tokio::test]
+    async fn a_canceled_dependency_check_is_unknown_as_canceled() {
+        use selfie::package::event::{CheckFailure, EnvironmentStatus, UnknownStatus};
+
+        let dir = TempDir::new().unwrap();
+        app_and_dep(&dir);
+        let runner = canceled("check-dep");
+
+        let statuses = dependency_statuses(&dir, runner).await;
+
+        assert!(
+            matches!(
+                &statuses[..],
+                [dep] if matches!(
+                    &dep.status,
+                    EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
+                        CheckFailure::Canceled { .. }
+                    ))
+                )
+            ),
+            "{statuses:?}"
+        );
+        assert_eq!(
+            match &statuses[0].status {
+                EnvironmentStatus::Unknown(unknown) => unknown.kind().unwrap_or_default(),
+                other => panic!("{other:?}"),
+            },
+            "canceled"
+        );
+    }
+}
+
+// Each dependency selfie cannot look up is unknown for what its lookup was
+// about: none answers to the name, two files claim it, or one answered and
+// would not parse, which carries the parse failure and its location.
+#[tokio::test]
+async fn status_classifies_each_dependency_it_could_not_look_up() {
+    use selfie::package::{
+        event::{EnvironmentStatus, UnknownStatus},
+        port::LookupFailure,
+    };
+
+    let temp_dir = TempDir::new().unwrap();
+    let _ = create_service_test_package_file_with_deps(
+        &temp_dir,
+        "root",
+        &["broken", "absent", "twice"],
+    );
+    std::fs::write(
+        temp_dir.path().join("broken.yaml"),
+        "name: broken\nenvironments: {oops\n",
+    )
+    .unwrap();
+    for file in ["twice.yml", "twice.yaml"] {
+        std::fs::write(
+            temp_dir.path().join(file),
+            "name: twice\nenvironments:\n  test:\n    install: \"true\"\n",
+        )
+        .unwrap();
+    }
+    let service = create_service_test_service(&temp_dir);
+
+    let events = collect_events(service.status("root").await).await;
+
+    let statuses = events
+        .iter()
+        .find_map(|event| match event {
+            PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } => Some(&environment_status.dependency_statuses),
+            _ => None,
+        })
+        .expect("the root's status must be sent");
+    let status_of = |name: &str| {
+        &statuses
+            .iter()
+            .find(|dep| dep.name == name)
+            .unwrap_or_else(|| panic!("no status for {name}: {statuses:?}"))
+            .status
+    };
+    match status_of("broken") {
+        EnvironmentStatus::Unknown(UnknownStatus::LookupFailed(LookupFailure::Unloadable(
+            spec,
+        ))) => {
+            assert!(
+                matches!(
+                    spec.failure().kind(),
+                    selfie::package::port::PackageParseKind::Yaml { source }
+                        if source.location().is_some()
+                ),
+                "{spec:?}"
+            );
+        }
+        other => panic!("an unparsable dependency is unloadable, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            status_of("absent"),
+            EnvironmentStatus::Unknown(UnknownStatus::LookupFailed(LookupFailure::NotFound(_)))
+        ),
+        "{statuses:?}"
+    );
+    match status_of("twice") {
+        EnvironmentStatus::Unknown(UnknownStatus::LookupFailed(LookupFailure::AmbiguousName(
+            name,
+        ))) => assert_eq!(name.conflicting_paths().len(), 2, "{name:?}"),
+        other => panic!("a name two files claim is ambiguous, got {other:?}"),
     }
 }

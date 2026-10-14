@@ -3002,7 +3002,64 @@ pub struct EnvironmentStatusData {
 pub enum EnvironmentStatus {
     Installed,
     NotInstalled,
-    Unknown(String),
+    /// selfie could not tell, for the reason given.
+    Unknown(UnknownStatus),
+}
+
+/// Why selfie could not tell whether a package is installed.
+///
+/// [`Display`](fmt::Display) words the reason for a person. [`kind`](Self::kind)
+/// is its label: the label of the failure it carries, or for the other kinds,
+/// the variant's name in snake_case.
+#[derive(Debug, Clone)]
+pub enum UnknownStatus {
+    /// The package's spec could not be looked up.
+    LookupFailed(crate::package::port::LookupFailure),
+    /// The spec loaded and selfie refuses it whole.
+    Refused {
+        /// Which refusal it is.
+        kind: RefusalKind,
+        /// The objection as a clause.
+        reason: String,
+    },
+    /// The spec declares nothing for the current environment.
+    NotInEnvironment,
+    /// The spec declares no check command for the current environment.
+    NoCheckCommand,
+    /// The check command gave no answer.
+    CheckFailed(CheckFailure),
+    /// The lookup returned an error no lookup is expected to return. It is
+    /// reported as itself, with no label.
+    Error(crate::package::port::PackageRepoError),
+}
+
+impl UnknownStatus {
+    /// The label for this reason, such as `"not_found"` or `"timed_out"`, or
+    /// `None` for an [`Error`](Self::Error), which has none.
+    #[must_use]
+    pub fn kind(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::LookupFailed(failure) => failure.kind(),
+            Self::CheckFailed(failure) => failure.kind(),
+            Self::Refused { .. } => "refused",
+            Self::NotInEnvironment => "not_in_environment",
+            Self::NoCheckCommand => "no_check_command",
+            Self::Error(_) => return None,
+        })
+    }
+}
+
+impl fmt::Display for UnknownStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LookupFailed(failure) => write!(f, "{failure}"),
+            Self::Refused { reason, .. } => write!(f, "is refused: {reason}"),
+            Self::NotInEnvironment => f.write_str("not in current environment"),
+            Self::NoCheckCommand => f.write_str("no check command"),
+            Self::CheckFailed(failure) => write!(f, "{failure}"),
+            Self::Error(error) => write!(f, "{error}"),
+        }
+    }
 }
 
 /// Installation status of a dependency package
@@ -3368,7 +3425,7 @@ pub enum CheckResult {
 ///
 /// [`Display`](fmt::Display) words it for a person. [`kind`](Self::kind) is
 /// its label, the variant's name in snake_case.
-#[derive(Debug, Clone, strum::IntoStaticStr)]
+#[derive(Debug, Clone, strum::IntoStaticStr, strum::VariantNames)]
 #[strum(serialize_all = "snake_case")]
 pub enum CheckFailure {
     /// The run was canceled while the check ran.

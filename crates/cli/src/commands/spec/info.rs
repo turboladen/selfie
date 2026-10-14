@@ -311,14 +311,53 @@ mod tests {
         assert!(result.contains("Not installed"));
     }
 
+    // A dependency no spec answers to, and one whose spec answered and could
+    // not be loaded, each print the error that says which.
     #[test]
     fn test_format_dependency_with_status_unknown() {
-        let dep = DependencyStatus {
+        use selfie::package::event::UnknownStatus;
+        use selfie::package::port::{PackageError, PackageRepoError};
+
+        let missing = DependencyStatus {
             name: "missing".to_string(),
-            status: EnvironmentStatus::Unknown("package not found".to_string()),
+            status: EnvironmentStatus::Unknown(UnknownStatus::LookupFailed(
+                PackageRepoError::from(PackageError::PackageNotFound {
+                    name: "missing".to_string(),
+                    packages_path: "/packages".into(),
+                    files_examined: 0,
+                    search_patterns: Vec::new(),
+                })
+                .into_lookup_failure()
+                .expect("a lookup returns this error"),
+            )),
         };
-        let result = format_dependency_with_status(&dep, false);
-        assert!(result.starts_with("missing: "));
-        assert!(result.contains("package not found"));
+        let result = format_dependency_with_status(&missing, false);
+        assert!(result.starts_with("missing: "), "{result}");
+        assert!(
+            result.contains("Unknown (Package `missing` not found in path /packages)"),
+            "{result}"
+        );
+
+        let source = selfie::yaml::parse::<selfie::package::Package>("name: broken\nx: {oops\n")
+            .expect_err("the fixture must not parse");
+        let broken = DependencyStatus {
+            name: "broken".to_string(),
+            status: EnvironmentStatus::Unknown(UnknownStatus::LookupFailed(
+                PackageRepoError::from(PackageError::ParseError {
+                    name: "broken".to_string(),
+                    packages_path: "/packages".into(),
+                    failed_file: "/packages/broken.yml".into(),
+                    source: selfie::package::port::PackageParseError::new(
+                        "/packages/broken.yml",
+                        selfie::package::port::PackageParseKind::Yaml { source },
+                    ),
+                })
+                .into_lookup_failure()
+                .expect("a lookup returns this error"),
+            )),
+        };
+        let result = format_dependency_with_status(&broken, false);
+        assert!(result.starts_with("broken: Unknown ("), "{result}");
+        assert!(result.contains("/packages/broken.yml"), "{result}");
     }
 }
