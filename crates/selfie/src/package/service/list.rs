@@ -237,7 +237,7 @@ where
                     environments,
                     status: Some(crate::package::event::CheckResult::CouldNotRun(
                         crate::package::event::CheckFailure::Internal {
-                            message: format!("Task failed: {e}"),
+                            message: crate::commands::BoundedText::of(&format!("Task failed: {e}")),
                         },
                     )),
                 };

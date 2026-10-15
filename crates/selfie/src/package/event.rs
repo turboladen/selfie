@@ -1471,15 +1471,22 @@ impl std::fmt::Display for OperationFailure {
 
 impl std::fmt::Display for CommandFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::commands::BoundedText;
+
+        // Every sentence here embeds the spec's own `command:` string, which is
+        // unbounded. `TimedOut` and `UnusableDirectory` bound their own; the
+        // execution failure's sentence is bounded in its arm.
         match self {
             CommandFailure::ExecutionFailed {
-                command, exit_code, ..
-            } => {
-                if let Some(code) = exit_code {
-                    write!(f, "Command `{command}` failed with exit code {code}")
-                } else {
-                    write!(f, "Command `{command}` failed")
-                }
+                command,
+                exit_code: Some(code),
+                ..
+            } => f.write_str(
+                BoundedText::of(&format!("Command `{command}` failed with exit code {code}"))
+                    .as_str(),
+            ),
+            CommandFailure::ExecutionFailed { command, .. } => {
+                f.write_str(BoundedText::of(&format!("Command `{command}` failed")).as_str())
             }
             CommandFailure::TimedOut(timed_out) => write!(f, "{timed_out}"),
             CommandFailure::WorkingDirectoryUnusable(unusable) => write!(f, "{unusable}"),
@@ -1874,28 +1881,9 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             crate::commands::runner::CommandError::WorkingDirectoryUnusable(unusable) => {
                 OperationFailure::CommandError(CommandFailure::WorkingDirectoryUnusable(unusable))
             }
-            // Listed rather than matched with `_`, so adding a `CommandError`
-            // variant fails to build here. This arm renders the error with
-            // `Display`, and a variant whose `Display` carried command output
-            // would leak it into `PackageEvent::Completed` and on to the CLI and
-            // the MCP server's JSON. Every variant below names the command and
-            // otherwise only text selfie chose. Check that before extending.
-            //
-            // `OutputReadFailed` renders the failed stream and an `io::Error`,
-            // never output bytes. `ContentMarkersAbsent` renders the command and
-            // nothing else -- it exists because the capture could not be split.
-            crate::commands::runner::CommandError::Cancelled { .. }
-            // `IoError` comes from a command that started, so it was found; it
-            // renders the command and an `io::Error`.
-            | crate::commands::runner::CommandError::IoError { .. }
-            // Names the program that would not start, which is not the command.
-            | crate::commands::runner::CommandError::SpawnFailed { .. }
-            | crate::commands::runner::CommandError::OutputReadFailed { .. }
-            | crate::commands::runner::CommandError::ContentMarkersAbsent { .. }
-            | crate::commands::runner::CommandError::StdoutSpawn(_)
-            | crate::commands::runner::CommandError::StderrSpawn(_) => {
-                OperationFailure::Generic(err.to_string())
-            }
+            // The rest render as the check failure they classify as, whose
+            // `Display` bounds the sentence.
+            other => OperationFailure::from(&CheckFailure::from(&other)),
         }
     }
 }
@@ -3523,14 +3511,14 @@ pub enum CheckResult {
 pub enum CheckFailure {
     /// The run was canceled while the check ran.
     Canceled {
-        /// The error's sentence, naming the command.
-        message: String,
+        /// The error's sentence, naming the command, bounded.
+        message: crate::commands::BoundedText,
     },
     /// selfie could not start the check, or could not attach to its output
     /// once it had, so the check may not have run at all.
     CouldNotStart {
-        /// The error's sentence, naming the command.
-        message: String,
+        /// The error's sentence, naming the command, bounded.
+        message: crate::commands::BoundedText,
     },
     /// The directory the check was to run in could not be entered. No part of
     /// the check ran.
@@ -3540,14 +3528,14 @@ pub enum CheckFailure {
     /// The check started, and selfie could not read its result to the end:
     /// its output, or its exit status.
     ResultUnreadable {
-        /// The error's sentence, naming the command.
-        message: String,
+        /// The error's sentence, naming the command, bounded.
+        message: crate::commands::BoundedText,
     },
     /// The task running the check failed, which is a bug in selfie and not in
     /// the check command.
     Internal {
         /// What failed.
-        message: String,
+        message: crate::commands::BoundedText,
     },
 }
 
@@ -3564,7 +3552,7 @@ impl fmt::Display for CheckFailure {
         match self {
             Self::Canceled { message }
             | Self::CouldNotStart { message }
-            | Self::ResultUnreadable { message } => f.write_str(message),
+            | Self::ResultUnreadable { message } => f.write_str(message.as_str()),
             Self::WorkingDirectoryUnusable(unusable) => write!(f, "{unusable}"),
             Self::TimedOut(timed_out) => write!(f, "{timed_out}"),
             Self::Internal { message } => write!(
@@ -3599,15 +3587,20 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
         use crate::commands::runner::CommandError;
 
         // Every variant is listed, with no `_` arm, so a new `CommandError` is a
-        // compile error here and not a silent relabeling.
+        // compile error here and not a silent relabeling. The messages are the
+        // error's `Display`, and a variant whose `Display` carried command output
+        // would leak it to every adapter, operation failures included. Each one
+        // names the command and otherwise only text selfie chose: an `io::Error`,
+        // the stream that failed, or the program that would not start. Check that
+        // before extending.
         match err {
             CommandError::Cancelled { .. } => Self::Canceled {
-                message: err.to_string(),
+                message: crate::commands::BoundedText::of(err),
             },
             CommandError::SpawnFailed { .. }
             | CommandError::StdoutSpawn(_)
             | CommandError::StderrSpawn(_) => Self::CouldNotStart {
-                message: err.to_string(),
+                message: crate::commands::BoundedText::of(err),
             },
             CommandError::WorkingDirectoryUnusable(unusable) => {
                 Self::WorkingDirectoryUnusable(unusable.clone())
@@ -3618,7 +3611,7 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
             CommandError::OutputReadFailed { .. }
             | CommandError::ContentMarkersAbsent { .. }
             | CommandError::IoError { .. } => Self::ResultUnreadable {
-                message: err.to_string(),
+                message: crate::commands::BoundedText::of(err),
             },
         }
     }
@@ -3854,19 +3847,18 @@ mod tests {
         assert_eq!(large_step_count.total, 2_000_000);
     }
 
-    // Every `CommandError` maps to one `CheckFailure`, by the table ADR 0009 sets.
-    #[test]
-    fn every_command_error_maps_to_its_check_failure() {
+    // One of every `CommandError`, each naming `command`, with the label its
+    // check failure takes.
+    fn every_command_error(
+        command: &str,
+    ) -> Vec<(crate::commands::runner::CommandError, &'static str)> {
         use crate::commands::runner::{CommandError, OutputStream};
         use std::{path::PathBuf, sync::Arc, time::Duration};
 
         let io = || Arc::new(std::io::Error::other("e"));
-        let cmd = || "check-x".to_string();
+        let cmd = || command.to_string();
         let dir = || PathBuf::from("/p");
-        let unusable_directory = CommandError::WorkingDirectoryUnusable(
-            crate::commands::runner::UnusableDirectory::new(cmd(), dir(), io()),
-        );
-        let cases = [
+        vec![
             (
                 CommandError::Cancelled {
                     command: cmd(),
@@ -3885,7 +3877,12 @@ mod tests {
             ),
             (CommandError::StdoutSpawn(cmd()), "could_not_start"),
             (CommandError::StderrSpawn(cmd()), "could_not_start"),
-            (unusable_directory.clone(), "working_directory_unusable"),
+            (
+                CommandError::WorkingDirectoryUnusable(
+                    crate::commands::runner::UnusableDirectory::new(cmd(), dir(), io()),
+                ),
+                "working_directory_unusable",
+            ),
             (
                 CommandError::Timeout {
                     command: cmd(),
@@ -3918,7 +3915,22 @@ mod tests {
                 },
                 "result_unreadable",
             ),
-        ];
+        ]
+    }
+
+    // Every `CommandError` maps to one `CheckFailure`, by the table ADR 0009 sets.
+    #[test]
+    fn every_command_error_maps_to_its_check_failure() {
+        use crate::commands::runner::CommandError;
+
+        let unusable_directory = CommandError::WorkingDirectoryUnusable(
+            crate::commands::runner::UnusableDirectory::new(
+                "check-x",
+                "/p",
+                std::sync::Arc::new(std::io::Error::other("e")),
+            ),
+        );
+        let cases = every_command_error("check-x");
         for (error, kind) in &cases {
             let failure = CheckFailure::from(error);
             assert_eq!(failure.kind(), *kind, "{error:?}");
@@ -3933,8 +3945,41 @@ mod tests {
         };
         assert_eq!(
             (unusable.command(), unusable.working_directory()),
-            ("check-x", dir().as_path())
+            ("check-x", std::path::Path::new("/p"))
         );
+    }
+
+    // A command failure's sentence is bounded wherever it renders, on the check
+    // side and the operation side, since it names the spec's unbounded command.
+    #[test]
+    fn a_command_failures_sentence_is_bounded() {
+        let long = "Z".repeat(30_000);
+        let execution = |exit_code| CommandFailure::ExecutionFailed {
+            command: long.clone(),
+            exit_code,
+            stderr: crate::commands::BoundedText::bound(b""),
+        };
+        // The inner types bound their own sentence, so an adapter that unwraps a
+        // variant cannot print it whole either.
+        let mut sentences = vec![
+            execution(Some(1)).to_string(),
+            execution(None).to_string(),
+            TimedOut::new(long.clone(), std::time::Duration::from_secs(1)).to_string(),
+            crate::commands::runner::UnusableDirectory::new(
+                long.clone(),
+                "/p",
+                std::sync::Arc::new(std::io::Error::other("e")),
+            )
+            .to_string(),
+        ];
+        for (error, _) in every_command_error(&long) {
+            sentences.push(CheckFailure::from(&error).to_string());
+            sentences.push(OperationFailure::from(error).to_string());
+        }
+        for sentence in sentences {
+            assert!(sentence.contains("bytes elided"), "{}", &sentence[..80]);
+            assert!(sentence.matches('Z').count() < 3_000, "{}", &sentence[..80]);
+        }
     }
 
     // An unusable working directory is one typed value on the check side and on
@@ -4039,7 +4084,7 @@ mod tests {
     // The label set is the MCP contract, so each label is pinned.
     #[test]
     fn every_check_failure_has_its_label() {
-        let message = || "m".to_string();
+        let message = || crate::commands::BoundedText::bound(b"m");
         let cases = [
             (CheckFailure::Canceled { message: message() }, "canceled"),
             (
@@ -4078,7 +4123,7 @@ mod tests {
     #[test]
     fn an_internal_failure_says_it_is_a_selfie_bug() {
         let sentence = CheckFailure::Internal {
-            message: "Task failed: panicked".to_string(),
+            message: crate::commands::BoundedText::bound(b"Task failed: panicked"),
         }
         .to_string();
 

@@ -101,7 +101,8 @@ A check gives `CheckResult::Success` or `CheckResult::Failed` when it ran and an
 have run. `ResultUnreadable` means the check started and selfie could not read its result to the
 end: its output, or its exit status, which a failed wait loses. `Internal` is a check task that
 panicked, which only `package list`'s own tasks can do; its sentence says it is a bug in selfie.
-Each sentence is the `CommandError`'s own.
+Each sentence is the `CommandError`'s own, bounded as forwarded text is, so one that embeds a long
+command is elided in the middle. The types that carry the sentence apply the bound themselves.
 
 `CommandError::WorkingDirectoryUnusable` carries an `UnusableDirectory`: the command, the directory
 and the cause, with its sentence derived from them. A check carries that value as

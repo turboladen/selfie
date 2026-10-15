@@ -975,7 +975,7 @@ mod tests {
         // Only `package list` runs checks in tasks of their own, so only its
         // description offers an internal failure, a check task that panicked.
         let internal = CheckFailure::Internal {
-            message: String::new(),
+            message: selfie::commands::BoundedText::bound(b""),
         }
         .kind();
         let quoted = |description: &str, label: &str| description.contains(&format!("\"{label}\""));

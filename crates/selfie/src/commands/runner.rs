@@ -434,13 +434,14 @@ impl UnusableDirectory {
 
 impl std::fmt::Display for UnusableDirectory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
+        // Bounded here for the reason `timed_out_sentence` is.
+        let sentence = format!(
             "Cannot run '{}' in {}: {}",
             self.command,
             self.working_directory.display(),
             self.cause
-        )
+        );
+        f.write_str(BoundedText::of(&sentence).as_str())
     }
 }
 
@@ -494,7 +495,12 @@ fn timed_out_sentence(command: &str, timeout: Duration) -> String {
         )
     };
     let plural = if amount == 1 { "" } else { "s" };
-    format!("`{command}` timed out after {amount} {unit}{plural}, the limit `command_timeout` sets")
+    let sentence = format!(
+        "`{command}` timed out after {amount} {unit}{plural}, the limit `command_timeout` sets"
+    );
+    // Bounded here, inside the type, because the sentence embeds the spec's own
+    // `command:` string, which is unbounded, and every adapter renders it.
+    BoundedText::of(&sentence).into_string()
 }
 
 /// Errors that can occur during command execution
@@ -688,6 +694,12 @@ impl BoundedText {
         }
     }
 
+    /// `text` rendered and bounded, as [`bound`](Self::bound) bounds its bytes.
+    #[must_use]
+    pub fn of(text: &impl std::fmt::Display) -> Self {
+        Self::bound(text.to_string().as_bytes())
+    }
+
     /// Borrow the bounded text.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -710,6 +722,20 @@ impl std::fmt::Display for BoundedText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Rendering then bounding is the same bound as on the bytes.
+    #[test]
+    fn of_bounds_what_it_renders() {
+        let long = "Z".repeat(MAX_BOUNDED_BYTES * 3);
+
+        let bounded = BoundedText::of(&long);
+
+        assert_eq!(
+            bounded.as_str(),
+            BoundedText::bound(long.as_bytes()).as_str()
+        );
+        assert!(bounded.as_str().contains("bytes elided"));
+    }
 
     #[test]
     fn bound_does_not_split_a_multibyte_character_at_the_head_cut() {

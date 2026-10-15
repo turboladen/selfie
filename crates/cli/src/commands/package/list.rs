@@ -411,7 +411,7 @@ mod tests {
         let result = status_style::format_check_result(
             Some(&event::CheckResult::CouldNotRun(
                 event::CheckFailure::Canceled {
-                    message: "Command cancelled: check-x".to_string(),
+                    message: selfie::commands::BoundedText::bound(b"Command cancelled: check-x"),
                 },
             )),
             false,
@@ -424,7 +424,7 @@ mod tests {
         let result = status_style::format_check_result(
             Some(&event::CheckResult::CouldNotRun(
                 event::CheckFailure::ResultUnreadable {
-                    message: "test error".to_string(),
+                    message: selfie::commands::BoundedText::bound(b"test error"),
                 },
             )),
             false,
@@ -817,7 +817,7 @@ mod tests {
             environments: vec![TEST_ENV.to_string()],
             status: Some(event::CheckResult::CouldNotRun(
                 event::CheckFailure::Canceled {
-                    message: "Command cancelled: sleep 5".to_string(),
+                    message: selfie::commands::BoundedText::bound(b"Command cancelled: sleep 5"),
                 },
             )),
         };

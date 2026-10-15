@@ -1988,7 +1988,7 @@ mod tests {
         };
         let events = vec![
             row(CheckResult::CouldNotRun(CheckFailure::CouldNotStart {
-                message: "m".to_string(),
+                message: selfie::commands::BoundedText::bound(b"m"),
             })),
             row(CheckResult::CouldNotRun(CheckFailure::TimedOut(
                 selfie::commands::runner::TimedOut::new(
@@ -2812,7 +2812,7 @@ mod tests {
             (UnknownStatus::NoCheckCommand, "no_check_command"),
             (
                 UnknownStatus::CheckFailed(CheckFailure::Canceled {
-                    message: "m".to_string(),
+                    message: selfie::commands::BoundedText::bound(b"m"),
                 }),
                 "canceled",
             ),

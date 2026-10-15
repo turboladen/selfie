@@ -403,7 +403,7 @@ mod tests {
         );
         let unreadable = check_ending(
             &CheckResult::CouldNotRun(CheckFailure::ResultUnreadable {
-                message: "m".to_string(),
+                message: crate::commands::BoundedText::bound(b"m"),
             }),
             &token,
         );
