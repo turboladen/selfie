@@ -1352,6 +1352,8 @@ pub enum CommandFailure {
     },
     /// A command ran past its timeout and was stopped.
     TimedOut(TimedOut),
+    /// A command could not enter the directory it was to run in.
+    WorkingDirectoryUnusable(crate::commands::runner::UnusableDirectory),
 }
 
 /// Dependency resolution failure details
@@ -1388,6 +1390,13 @@ impl std::fmt::Display for OperationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OperationFailure::Package(e) => write!(f, "{e}"),
+            // The sentence alone, as a failure that is not a command's own reads:
+            // the directory, not the command, is what failed.
+            OperationFailure::CommandError(
+                unusable @ CommandFailure::WorkingDirectoryUnusable(_),
+            ) => {
+                write!(f, "{unusable}")
+            }
             OperationFailure::CommandError(cmd_err) => write!(f, "Command error: {cmd_err}"),
             OperationFailure::DependencyError(dep_err) => {
                 write!(f, "Dependency error: {dep_err}")
@@ -1473,6 +1482,7 @@ impl std::fmt::Display for CommandFailure {
                 }
             }
             CommandFailure::TimedOut(timed_out) => write!(f, "{timed_out}"),
+            CommandFailure::WorkingDirectoryUnusable(unusable) => write!(f, "{unusable}"),
         }
     }
 }
@@ -1861,6 +1871,9 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             } => OperationFailure::CommandError(CommandFailure::TimedOut(TimedOut::new(
                 command, timeout,
             ))),
+            crate::commands::runner::CommandError::WorkingDirectoryUnusable(unusable) => {
+                OperationFailure::CommandError(CommandFailure::WorkingDirectoryUnusable(unusable))
+            }
             // Listed rather than matched with `_`, so adding a `CommandError`
             // variant fails to build here. This arm renders the error with
             // `Display`, and a variant whose `Display` carried command output
@@ -1875,8 +1888,6 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             // `IoError` comes from a command that started, so it was found; it
             // renders the command and an `io::Error`.
             | crate::commands::runner::CommandError::IoError { .. }
-            // Renders the command, the directory and an `io::Error`.
-            | crate::commands::runner::CommandError::WorkingDirectoryUnusable { .. }
             // Names the program that would not start, which is not the command.
             | crate::commands::runner::CommandError::SpawnFailed { .. }
             | crate::commands::runner::CommandError::OutputReadFailed { .. }
@@ -3523,14 +3534,7 @@ pub enum CheckFailure {
     },
     /// The directory the check was to run in could not be entered. No part of
     /// the check ran.
-    WorkingDirectoryUnusable {
-        /// The check command.
-        command: String,
-        /// The directory it was to run in.
-        working_directory: std::path::PathBuf,
-        /// The error's sentence, naming both and why.
-        message: String,
-    },
+    WorkingDirectoryUnusable(crate::commands::runner::UnusableDirectory),
     /// The check ran past `command_timeout` and was stopped.
     TimedOut(TimedOut),
     /// The check started, and selfie could not read its result to the end:
@@ -3560,8 +3564,8 @@ impl fmt::Display for CheckFailure {
         match self {
             Self::Canceled { message }
             | Self::CouldNotStart { message }
-            | Self::WorkingDirectoryUnusable { message, .. }
             | Self::ResultUnreadable { message } => f.write_str(message),
+            Self::WorkingDirectoryUnusable(unusable) => write!(f, "{unusable}"),
             Self::TimedOut(timed_out) => write!(f, "{timed_out}"),
             Self::Internal { message } => write!(
                 f,
@@ -3578,10 +3582,12 @@ impl From<&CheckFailure> for OperationFailure {
             CheckFailure::TimedOut(timed_out) => {
                 OperationFailure::CommandError(CommandFailure::TimedOut(timed_out.clone()))
             }
+            CheckFailure::WorkingDirectoryUnusable(unusable) => OperationFailure::CommandError(
+                CommandFailure::WorkingDirectoryUnusable(unusable.clone()),
+            ),
             // Each of these sentences names the command already.
             CheckFailure::Canceled { .. }
             | CheckFailure::CouldNotStart { .. }
-            | CheckFailure::WorkingDirectoryUnusable { .. }
             | CheckFailure::ResultUnreadable { .. }
             | CheckFailure::Internal { .. } => OperationFailure::Generic(failure.to_string()),
         }
@@ -3603,15 +3609,9 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
             | CommandError::StderrSpawn(_) => Self::CouldNotStart {
                 message: err.to_string(),
             },
-            CommandError::WorkingDirectoryUnusable {
-                command,
-                working_directory,
-                ..
-            } => Self::WorkingDirectoryUnusable {
-                command: command.clone(),
-                working_directory: working_directory.clone(),
-                message: err.to_string(),
-            },
+            CommandError::WorkingDirectoryUnusable(unusable) => {
+                Self::WorkingDirectoryUnusable(unusable.clone())
+            }
             CommandError::Timeout {
                 command, timeout, ..
             } => Self::TimedOut(TimedOut::new(command.clone(), *timeout)),
@@ -3863,11 +3863,9 @@ mod tests {
         let io = || Arc::new(std::io::Error::other("e"));
         let cmd = || "check-x".to_string();
         let dir = || PathBuf::from("/p");
-        let unusable_directory = CommandError::WorkingDirectoryUnusable {
-            command: cmd(),
-            working_directory: dir(),
-            cause: io(),
-        };
+        let unusable_directory = CommandError::WorkingDirectoryUnusable(
+            crate::commands::runner::UnusableDirectory::new(cmd(), dir(), io()),
+        );
         let cases = [
             (
                 CommandError::Cancelled {
@@ -3928,15 +3926,59 @@ mod tests {
             assert_eq!(failure.to_string(), error.to_string(), "{error:?}");
         }
         // The working directory's fields travel, for a consumer that names them.
-        let CheckFailure::WorkingDirectoryUnusable {
-            command,
-            working_directory,
-            ..
-        } = CheckFailure::from(&unusable_directory)
+        let CheckFailure::WorkingDirectoryUnusable(unusable) =
+            CheckFailure::from(&unusable_directory)
         else {
             panic!("expected an unusable working directory");
         };
-        assert_eq!((command.as_str(), working_directory), ("check-x", dir()));
+        assert_eq!(
+            (unusable.command(), unusable.working_directory()),
+            ("check-x", dir().as_path())
+        );
+    }
+
+    // An unusable working directory is one typed value on the check side and on
+    // the operation side, built from one error, and the operation failure reads
+    // as the error's own sentence with no "Command error:" prefix.
+    #[test]
+    fn an_unusable_directory_is_one_value_and_one_sentence_on_both_sides() {
+        use crate::commands::runner::{CommandError, UnusableDirectory};
+
+        let err = CommandError::WorkingDirectoryUnusable(UnusableDirectory::new(
+            "check-x",
+            "/gone",
+            std::sync::Arc::new(std::io::Error::other("missing")),
+        ));
+        let sentence = "Cannot run 'check-x' in /gone: missing";
+        assert_eq!(err.to_string(), sentence);
+
+        let check = CheckFailure::from(&err);
+        let from_check = OperationFailure::from(&check);
+        let from_error = OperationFailure::from(err.clone());
+
+        // The same command and directory on each side, and the same sentence.
+        let fields = |u: &UnusableDirectory| {
+            (
+                u.command().to_string(),
+                u.working_directory().to_path_buf(),
+                u.to_string(),
+            )
+        };
+        let expected = ("check-x".to_string(), "/gone".into(), sentence.to_string());
+        let CheckFailure::WorkingDirectoryUnusable(unusable) = &check else {
+            panic!("expected an unusable working directory, got {check:?}");
+        };
+        assert_eq!(fields(unusable), expected);
+        assert_eq!(unusable.cause().to_string(), "missing");
+        for failure in [&from_check, &from_error] {
+            let OperationFailure::CommandError(CommandFailure::WorkingDirectoryUnusable(unusable)) =
+                failure
+            else {
+                panic!("expected an unusable working directory, got {failure:?}");
+            };
+            assert_eq!(fields(unusable), expected);
+            assert_eq!(failure.to_string(), sentence);
+        }
     }
 
     // A package that cannot be written as YAML fails as that, not as an I/O
@@ -4005,11 +4047,15 @@ mod tests {
                 "could_not_start",
             ),
             (
-                CheckFailure::WorkingDirectoryUnusable {
-                    command: "c".to_string(),
-                    working_directory: "/p".into(),
-                    message: message(),
-                },
+                CheckFailure::from(
+                    &crate::commands::runner::CommandError::WorkingDirectoryUnusable(
+                        crate::commands::runner::UnusableDirectory::new(
+                            "c".to_string(),
+                            "/p",
+                            std::sync::Arc::new(std::io::Error::other("e")),
+                        ),
+                    ),
+                ),
                 "working_directory_unusable",
             ),
             (

@@ -386,6 +386,64 @@ impl std::fmt::Display for OutputStream {
     }
 }
 
+/// A command that could not enter the directory it was to run in: it is
+/// missing, not a directory, or not searchable. No part of the command ran.
+///
+/// [`Display`](std::fmt::Display) names the command, the directory and why.
+#[derive(Debug, Clone)]
+pub struct UnusableDirectory {
+    command: String,
+    working_directory: PathBuf,
+    cause: Arc<std::io::Error>,
+}
+
+impl UnusableDirectory {
+    /// Records that `command` could not enter `working_directory`, for `cause`.
+    #[must_use]
+    pub fn new(
+        command: impl Into<String>,
+        working_directory: impl Into<PathBuf>,
+        cause: Arc<std::io::Error>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            working_directory: working_directory.into(),
+            cause,
+        }
+    }
+
+    /// The command that could not run.
+    #[must_use]
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// The directory it could not enter.
+    #[must_use]
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+
+    /// Why the directory could not be entered, such as a missing directory or
+    /// a denied search.
+    #[must_use]
+    pub fn cause(&self) -> &std::io::Error {
+        &self.cause
+    }
+}
+
+impl std::fmt::Display for UnusableDirectory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Cannot run '{}' in {}: {}",
+            self.command,
+            self.working_directory.display(),
+            self.cause
+        )
+    }
+}
+
 /// A command selfie stopped because it ran past `command_timeout`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimedOut {
@@ -471,14 +529,10 @@ pub enum CommandError {
         cause: Arc<std::io::Error>,
     },
 
-    /// The directory the command was to run in could not be entered: it is
-    /// missing, not a directory, or not searchable. No part of the command ran.
-    #[error("Cannot run '{command}' in {}: {cause}", working_directory.display())]
-    WorkingDirectoryUnusable {
-        command: String,
-        working_directory: PathBuf,
-        cause: Arc<std::io::Error>,
-    },
+    /// The directory the command was to run in could not be entered. No part of
+    /// the command ran.
+    #[error("{0}")]
+    WorkingDirectoryUnusable(UnusableDirectory),
 
     /// One of the command's output pipes could not be read to the end.
     ///

@@ -368,7 +368,7 @@ where
             exit_code: Some(output.exit_code()),
         },
         Err(
-            err @ (CommandError::WorkingDirectoryUnusable { .. }
+            err @ (CommandError::WorkingDirectoryUnusable(_)
             | CommandError::SpawnFailed { .. }
             | CommandError::Cancelled { .. }),
         ) => return Err(err),

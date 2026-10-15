@@ -438,11 +438,13 @@ fn spawn_error(
     // directory and nothing ran; this probe only picks the message, so a race
     // can misname a failure but never runs a line of the command.
     if is_unenterable(working_dir) {
-        return CommandError::WorkingDirectoryUnusable {
-            command: command.to_string(),
-            working_directory: working_dir.to_path_buf(),
-            cause: Arc::new(source),
-        };
+        return CommandError::WorkingDirectoryUnusable(
+            crate::commands::runner::UnusableDirectory::new(
+                command.to_string(),
+                working_dir.to_path_buf(),
+                Arc::new(source),
+            ),
+        );
     }
     CommandError::SpawnFailed {
         command: command.to_string(),
@@ -1478,9 +1480,9 @@ mod tests {
     // Asserts `error` blames `dir`, by variant and in the message a user reads.
     fn assert_unusable(error: &CommandError, dir: &Path) {
         match error {
-            CommandError::WorkingDirectoryUnusable {
-                working_directory, ..
-            } => assert_eq!(working_directory, dir),
+            CommandError::WorkingDirectoryUnusable(unusable) => {
+                assert_eq!(unusable.working_directory(), dir);
+            }
             other => panic!("expected WorkingDirectoryUnusable, got: {other:?}"),
         }
         let rendered = error.to_string();

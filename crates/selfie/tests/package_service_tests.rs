@@ -2723,20 +2723,21 @@ mod checks_that_gave_no_answer {
     async fn a_check_in_an_unusable_directory_sends_its_row_and_fails() {
         let runner = FakeCommandRunner::new().erroring(
             "check-app",
-            CommandError::WorkingDirectoryUnusable {
-                command: "check-app".to_string(),
-                working_directory: PathBuf::from("/gone"),
-                cause: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
-            },
+            CommandError::WorkingDirectoryUnusable(
+                selfie::commands::runner::UnusableDirectory::new(
+                    "check-app".to_string(),
+                    PathBuf::from("/gone"),
+                    std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                ),
+            ),
         );
 
         let (row, events) = checked(runner).await;
 
         match row {
-            Some(CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable {
-                working_directory,
-                ..
-            })) => assert_eq!(working_directory, PathBuf::from("/gone")),
+            Some(CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable(unusable))) => {
+                assert_eq!(unusable.working_directory(), PathBuf::from("/gone"));
+            }
             other => panic!("expected an unusable working directory, got {other:?}"),
         }
         assert!(

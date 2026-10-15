@@ -462,7 +462,7 @@ rm -rf package package.tar.gz";
 
         fn assert_names(error: &CommandError, dir: &Path) {
             assert!(
-                matches!(error, CommandError::WorkingDirectoryUnusable { .. }),
+                matches!(error, CommandError::WorkingDirectoryUnusable(_)),
                 "expected WorkingDirectoryUnusable, got: {error:?}"
             );
             let rendered = error.to_string();

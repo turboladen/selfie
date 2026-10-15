@@ -119,11 +119,9 @@ mod tests {
                 working_directory: dir(),
                 cause: cause(),
             },
-            CommandError::WorkingDirectoryUnusable {
-                command: command(),
-                working_directory: dir(),
-                cause: cause(),
-            },
+            CommandError::WorkingDirectoryUnusable(
+                crate::commands::runner::UnusableDirectory::new(command(), dir(), cause()),
+            ),
             CommandError::OutputReadFailed {
                 command: command(),
                 working_directory: dir(),

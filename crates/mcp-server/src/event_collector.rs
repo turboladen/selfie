@@ -956,9 +956,9 @@ fn check_failure_fields(result: Option<&CheckResult>) -> serde_json::Map<String,
         _ => None,
     };
     let working_directory = match failure {
-        Some(CheckFailure::WorkingDirectoryUnusable {
-            working_directory, ..
-        }) => Some(working_directory.display().to_string()),
+        Some(CheckFailure::WorkingDirectoryUnusable(unusable)) => {
+            Some(unusable.working_directory().display().to_string())
+        }
         _ => None,
     };
     let mut fields = serde_json::Map::new();
@@ -2053,11 +2053,15 @@ mod tests {
         use selfie::package::event::{CheckFailure, PackageListItem};
 
         let failure = || {
-            CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable {
-                command: "check-p".to_string(),
-                working_directory: "/gone".into(),
-                message: "Cannot run 'check-p' in /gone: missing".to_string(),
-            })
+            CheckResult::CouldNotRun(CheckFailure::from(
+                &selfie::commands::runner::CommandError::WorkingDirectoryUnusable(
+                    selfie::commands::runner::UnusableDirectory::new(
+                        "check-p".to_string(),
+                        "/gone",
+                        std::sync::Arc::new(std::io::Error::other("missing")),
+                    ),
+                ),
+            ))
         };
         let events = vec![
             PackageEvent::CheckResultCompleted {
