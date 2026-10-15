@@ -18,6 +18,7 @@ use crate::{
         event::{
             CheckResult, DependencyStatus, EnvironmentStatus, EnvironmentStatusData, EventSender,
             OperationResult, OperationSuccess, PackageInfoData, ScopedDotfile, StepEnding,
+            UnknownStatus,
         },
         git::GitStatusProvider,
         port::PackageRepository,
@@ -317,20 +318,27 @@ fn look_up_dependency<PR: PackageRepository>(
 ) -> DependencyLookup {
     let dep_package = match repo.get_package(dep_name) {
         Ok(pkg) => pkg,
-        Err(err) => return DependencyLookup::Known(EnvironmentStatus::Unknown(format!("{err}"))),
+        Err(err) => {
+            let unknown = match err.into_lookup_failure() {
+                Ok(failure) => UnknownStatus::LookupFailed(failure),
+                Err(error) => UnknownStatus::Error(error),
+            };
+            return DependencyLookup::Known(EnvironmentStatus::Unknown(unknown));
+        }
     };
 
     // The refusal is asked before the lookup below, which a shadowing key makes
     // miss or find a decoy.
     if let Some(reason) = dep_package.package.spec_refusal(current_env) {
-        return DependencyLookup::Known(EnvironmentStatus::Unknown(format!(
-            "is refused: {reason}"
-        )));
+        return DependencyLookup::Known(EnvironmentStatus::Unknown(UnknownStatus::Refused {
+            kind: reason.kind(),
+            reason: reason.to_string(),
+        }));
     }
 
     let Some(env_config) = dep_package.package.environments().get(current_env) else {
         return DependencyLookup::Known(EnvironmentStatus::Unknown(
-            "not in current environment".to_string(),
+            UnknownStatus::NotInEnvironment,
         ));
     };
 
@@ -350,58 +358,47 @@ async fn check_dependency_statuses<CR: CommandRunner>(
     token: &CancellationToken,
     max_concurrent: usize,
 ) -> Vec<DependencyStatus> {
-    // Only the checks are chunked, so a known status never takes a slot a
-    // command could use. `join_all` answers in the order it was given.
-    let checks: Vec<(&str, &str)> = looked_up
-        .iter()
-        .filter_map(|(name, lookup)| match lookup {
-            DependencyLookup::Check(command) => Some((name.as_str(), command.as_str())),
-            DependencyLookup::Known(_) => None,
-        })
-        .collect();
-    let mut checked = Vec::with_capacity(checks.len());
-    for chunk in checks.chunks(max_concurrent.max(1)) {
-        let futures: Vec<_> = chunk
-            .iter()
-            .map(|(name, command)| async move {
-                let result = super::check::execute_check_command_quiet(
-                    name,
-                    current_env,
-                    Some(command),
-                    package_dir,
-                    command_runner,
-                    token,
-                )
-                .await;
-                check_result_to_status(result.result)
-            })
-            .collect();
-        checked.extend(futures::future::join_all(futures).await);
-    }
-
-    let mut checked = checked.into_iter();
-    looked_up
-        .into_iter()
-        .map(|(name, lookup)| DependencyStatus {
-            status: match lookup {
+    // Each lookup becomes its status in one pass, so every dependency has
+    // exactly one. The semaphore bounds the commands alone, so a known status
+    // never takes a slot a command could use. `join_all` answers in the order
+    // it was given.
+    let slots = tokio::sync::Semaphore::new(max_concurrent.max(1));
+    let statuses = looked_up.into_iter().map(|(name, lookup)| {
+        let slots = &slots;
+        async move {
+            let status = match lookup {
                 DependencyLookup::Known(status) => status,
-                // One status per check, taken in the same order the checks ran.
-                DependencyLookup::Check(_) => checked
-                    .next()
-                    .unwrap_or_else(|| EnvironmentStatus::Unknown("not checked".to_string())),
-            },
-            name,
-        })
-        .collect()
+                DependencyLookup::Check(command) => {
+                    let _slot = slots
+                        .acquire()
+                        .await
+                        .expect("the semaphore is never closed");
+                    let result = super::check::execute_check_command_quiet(
+                        &name,
+                        current_env,
+                        Some(&command),
+                        package_dir,
+                        command_runner,
+                        token,
+                    )
+                    .await;
+                    check_result_to_status(result.result)
+                }
+            };
+            DependencyStatus { name, status }
+        }
+    });
+    futures::future::join_all(statuses).await
 }
 
 fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
     match result {
         CheckResult::Success { .. } => EnvironmentStatus::Installed,
         CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
-        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown("no check command".to_string()),
-        CheckResult::Error(e) => EnvironmentStatus::Unknown(e),
-        CheckResult::TimedOut(timed_out) => EnvironmentStatus::Unknown(timed_out.to_string()),
+        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand),
+        CheckResult::CouldNotRun(failure) => {
+            EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(failure))
+        }
     }
 }
 
@@ -791,8 +788,101 @@ mod tests {
                 );
                 assert!(matches!(
                     &environment_status.dependency_statuses[0].status,
-                    EnvironmentStatus::Unknown(reason) if reason.contains("not found")
+                    EnvironmentStatus::Unknown(UnknownStatus::LookupFailed(
+                        crate::package::port::LookupFailure::NotFound(_)
+                    ))
                 ));
+                found = true;
+            }
+        }
+        assert!(found, "Expected EnvironmentStatusChecked event");
+    }
+
+    // An error a lookup does not return is shown as itself, with no label, and
+    // never as an unreadable package directory.
+    #[tokio::test]
+    async fn a_dependency_error_no_lookup_returns_is_shown_as_itself() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| {
+                b.install("echo install")
+                    .check_some("echo check")
+                    .dependencies(vec!["missing-dep"])
+            })
+            .path(&pkg_path)
+            .build();
+
+        let mut mock_repo = MockPackageRepository::new();
+        let pkg_clone = package.clone();
+        mock_repo.expect_get_package().returning(move |name: &str| {
+            if name == "test-pkg" {
+                Ok(GetPackage::from_existing(
+                    pkg_clone.clone(),
+                    pkg_path.clone(),
+                ))
+            } else {
+                Err(PackageError::NoCheckCommand {
+                    package_name: name.to_string(),
+                    environment: "test".to_string(),
+                    package_file: temp_dir.path().join("missing-dep.yml"),
+                    other_envs_with_check: vec![],
+                }
+                .into())
+            }
+        });
+
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner
+            .expect_execute()
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output(true)) }));
+
+        let (sender, mut rx) = status_test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let token = CancellationToken::new();
+
+        let result = handle_status(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)));
+
+        drop(sender);
+        let mut found = false;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::EnvironmentStatusChecked {
+                environment_status, ..
+            } = event
+                && environment_status.is_current
+            {
+                assert_eq!(environment_status.dependency_statuses.len(), 1);
+                assert_eq!(
+                    environment_status.dependency_statuses[0].name,
+                    "missing-dep"
+                );
+                match &environment_status.dependency_statuses[0].status {
+                    EnvironmentStatus::Unknown(unknown @ UnknownStatus::Error(_)) => {
+                        assert_eq!(unknown.kind(), None);
+                        assert!(
+                            unknown.to_string().starts_with("No check command defined"),
+                            "{unknown}"
+                        );
+                    }
+                    other => panic!("expected the error as itself, got {other:?}"),
+                }
                 found = true;
             }
         }
@@ -884,7 +974,7 @@ mod tests {
                 assert_eq!(environment_status.dependency_statuses.len(), 1);
                 assert!(matches!(
                     &environment_status.dependency_statuses[0].status,
-                    EnvironmentStatus::Unknown(reason) if reason.contains("not in current environment")
+                    EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment)
                 ));
                 found = true;
             }

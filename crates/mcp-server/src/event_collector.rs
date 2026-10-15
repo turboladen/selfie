@@ -410,13 +410,16 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                 })
                 .collect();
         }
-        PackageEvent::CheckResultCompleted { check_result, .. } => Some(serde_json::json!({
-            "type": "check_result",
-            "package": &check_result.package_name,
-            "environment": &check_result.environment,
-            "command": &check_result.check_command,
-            "status": check_status_label(&check_result.result),
-        })),
+        PackageEvent::CheckResultCompleted { check_result, .. } => Some(with_fields(
+            serde_json::json!({
+                "type": "check_result",
+                "package": &check_result.package_name,
+                "environment": &check_result.environment,
+                "command": &check_result.check_command,
+                "status": check_status_label(&check_result.result),
+            }),
+            check_failure_fields(Some(&check_result.result)),
+        )),
         PackageEvent::AuditResultCompleted { audit_result, .. } => Some(serde_json::json!({
             "type": "audit_result",
             "package": &audit_result.package_name,
@@ -459,30 +462,32 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             let dep_statuses = dep_statuses_to_json(&environment_status.dependency_statuses);
             let rec_statuses = dep_statuses_to_json(&environment_status.recommend_statuses);
 
-            Some(serde_json::json!({
-                "type": "environment_status",
-                "environment": &environment_status.environment_name,
-                "is_current": environment_status.is_current,
-                "install_command": &environment_status.install_command,
-                "check_command": &environment_status.check_command,
-                "dependencies": &environment_status.dependencies,
-                "dependency_statuses": dep_statuses,
-                "recommends": &environment_status.recommends,
-                "recommend_statuses": rec_statuses,
-                "status": environment_status.status.as_ref().map(|s| match s {
-                    selfie::package::event::EnvironmentStatus::Installed => "installed",
-                    selfie::package::event::EnvironmentStatus::NotInstalled => "not installed",
-                    selfie::package::event::EnvironmentStatus::Unknown(_) => "unknown",
+            Some(with_fields(
+                serde_json::json!({
+                    "type": "environment_status",
+                    "environment": &environment_status.environment_name,
+                    "is_current": environment_status.is_current,
+                    "install_command": &environment_status.install_command,
+                    "check_command": &environment_status.check_command,
+                    "dependencies": &environment_status.dependencies,
+                    "dependency_statuses": dep_statuses,
+                    "recommends": &environment_status.recommends,
+                    "recommend_statuses": rec_statuses,
                 }),
-            }))
+                status_fields(environment_status.status.as_ref()),
+            ))
         }
         PackageEvent::PackageListReady { .. } => None, // CLI-specific event for spinner setup
-        PackageEvent::PackageListItemCompleted { package_item, .. } => Some(serde_json::json!({
-            "type": "package_list_item",
-            "name": &package_item.name,
-            "environments": &package_item.environments,
-            "status": package_item.status.as_ref().map(check_status_label),
-        })),
+        PackageEvent::PackageListItemCompleted { package_item, .. } => Some(with_fields(
+            serde_json::json!({
+                "type": "package_list_item",
+                "name": &package_item.name,
+                "environments": &package_item.environments,
+                "command": &package_item.check_command,
+                "status": package_item.status.as_ref().map(check_status_label),
+            }),
+            check_failure_fields(package_item.status.as_ref()),
+        )),
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
@@ -923,29 +928,124 @@ fn check_status_label(result: &CheckResult) -> &'static str {
         CheckResult::Success { .. } => "installed",
         CheckResult::Failed { .. } => "not installed",
         CheckResult::NoCheckCommand => "no check command defined",
-        CheckResult::Error(_) => "error",
-        CheckResult::TimedOut(_) => "timed out",
+        CheckResult::CouldNotRun(selfie::package::event::CheckFailure::TimedOut(_)) => "timed out",
+        CheckResult::CouldNotRun(_) => "error",
     }
 }
 
+/// Adds `fields` to the JSON object `row`.
+fn with_fields(mut row: Value, fields: serde_json::Map<String, Value>) -> Value {
+    if let Value::Object(map) = &mut row {
+        map.extend(fields);
+    }
+    row
+}
+
+/// Renders why a check gave no answer as `kind` (the label), `reason` (prose)
+/// and `working_directory`, which is set only for a directory that could not be
+/// entered. All three are null for a check that answered.
+fn check_failure_fields(result: Option<&CheckResult>) -> serde_json::Map<String, Value> {
+    use selfie::package::event::CheckFailure;
+
+    let failure = match result {
+        Some(CheckResult::CouldNotRun(failure)) => Some(failure),
+        _ => None,
+    };
+    let working_directory = match failure {
+        Some(CheckFailure::WorkingDirectoryUnusable {
+            working_directory, ..
+        }) => Some(working_directory.display().to_string()),
+        _ => None,
+    };
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "kind".to_string(),
+        Value::from(failure.map(CheckFailure::kind)),
+    );
+    fields.insert(
+        "reason".to_string(),
+        Value::from(failure.map(ToString::to_string)),
+    );
+    fields.insert(
+        "working_directory".to_string(),
+        Value::from(working_directory),
+    );
+    fields
+}
+
+/// Renders each dependency or recommendation as its `name` and the fields
+/// [`status_fields`] gives its status.
 fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -> Vec<Value> {
     statuses
         .iter()
         .map(|dep| {
-            let (status, reason) = match &dep.status {
-                selfie::package::event::EnvironmentStatus::Installed => ("installed", None),
-                selfie::package::event::EnvironmentStatus::NotInstalled => ("not installed", None),
-                selfie::package::event::EnvironmentStatus::Unknown(reason) => {
-                    ("unknown", Some(reason.as_str()))
-                }
-            };
-            serde_json::json!({
-                "name": &dep.name,
-                "status": status,
-                "reason": reason,
-            })
+            let mut row = status_fields(Some(&dep.status));
+            row.insert("name".to_string(), Value::from(dep.name.as_str()));
+            Value::Object(row)
         })
         .collect()
+}
+
+/// Renders a package's status as `status`, and for an unknown one `kind` (the
+/// label to branch on) and `reason` (prose), plus `failure` for a spec that
+/// could not be parsed or read, `conflicting_paths` for a name several files
+/// claim, and `refusal`, `{kind, reason}`, for a refused spec. A field that does
+/// not apply is null.
+// One function renders the package's own status and every dependency and
+// recommendation row, so the two shapes cannot disagree.
+fn status_fields(
+    status: Option<&selfie::package::event::EnvironmentStatus>,
+) -> serde_json::Map<String, Value> {
+    use selfie::package::{
+        event::{EnvironmentStatus, UnknownStatus},
+        port::LookupFailure,
+    };
+
+    let mut fields = serde_json::Map::new();
+    let label = status.map(|status| match status {
+        EnvironmentStatus::Installed => "installed",
+        EnvironmentStatus::NotInstalled => "not installed",
+        EnvironmentStatus::Unknown(_) => "unknown",
+    });
+    fields.insert("status".to_string(), Value::from(label));
+    let unknown = match status {
+        Some(EnvironmentStatus::Unknown(unknown)) => Some(unknown),
+        _ => None,
+    };
+    fields.insert(
+        "kind".to_string(),
+        Value::from(unknown.and_then(UnknownStatus::kind)),
+    );
+    fields.insert(
+        "reason".to_string(),
+        Value::from(unknown.map(ToString::to_string)),
+    );
+    let failure = match unknown {
+        Some(UnknownStatus::LookupFailed(LookupFailure::Unloadable(spec))) => {
+            parse_failure_json(spec.failure())
+        }
+        _ => Value::Null,
+    };
+    fields.insert("failure".to_string(), failure);
+    let paths = match unknown {
+        Some(UnknownStatus::LookupFailed(LookupFailure::AmbiguousName(name))) => Value::from(
+            name.conflicting_paths()
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+        ),
+        _ => Value::Null,
+    };
+    fields.insert("conflicting_paths".to_string(), paths);
+    let refusal = match unknown {
+        Some(UnknownStatus::Refused { kind, reason }) => serde_json::json!({
+            "kind": refusal_kind_label(*kind),
+            "reason": reason,
+        }),
+        _ => Value::Null,
+    };
+    fields.insert("refusal".to_string(), refusal);
+    fields
 }
 
 fn audit_details(result: &AuditResult) -> Value {
@@ -1854,6 +1954,127 @@ mod tests {
         );
     }
 
+    // A check that gave no answer keeps its published `status` and says why in
+    // `kind`; one that answered has no kind.
+    #[tokio::test]
+    async fn a_check_that_gave_no_answer_says_why_in_kind() {
+        use selfie::package::event::CheckFailure;
+
+        let row = |result| PackageEvent::CheckResultCompleted {
+            operation_info: test_op_info(),
+            check_result: CheckResultData {
+                package_name: "p".to_string(),
+                environment: "test".to_string(),
+                check_command: Some("check-p".to_string()),
+                result,
+            },
+        };
+        let events = vec![
+            row(CheckResult::CouldNotRun(CheckFailure::CouldNotStart {
+                message: "m".to_string(),
+            })),
+            row(CheckResult::CouldNotRun(CheckFailure::TimedOut(
+                selfie::commands::runner::TimedOut::new(
+                    "check-p",
+                    std::time::Duration::from_secs(1),
+                ),
+            ))),
+            row(CheckResult::Success {
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = result.data["data"].as_array().expect("data is an array");
+        let fields: Vec<(&Value, &Value)> =
+            rows.iter().map(|r| (&r["status"], &r["kind"])).collect();
+        assert_eq!(
+            fields,
+            [
+                (&Value::from("error"), &Value::from("could_not_start")),
+                (&Value::from("timed out"), &Value::from("timed_out")),
+                (&Value::from("installed"), &Value::Null),
+            ]
+        );
+    }
+
+    // A listing row names its check command for every check that gave no
+    // answer, as a check row does.
+    #[tokio::test]
+    async fn a_listing_row_names_its_command() {
+        use selfie::package::event::{CheckFailure, PackageListItem};
+
+        let events = vec![PackageEvent::PackageListItemCompleted {
+            operation_info: test_op_info(),
+            package_item: PackageListItem {
+                check_command: Some("sleep 5".to_string()),
+                name: "slow".to_string(),
+                environments: vec!["test".to_string()],
+                status: Some(CheckResult::CouldNotRun(CheckFailure::TimedOut(
+                    selfie::commands::runner::TimedOut::new(
+                        "sleep 5",
+                        std::time::Duration::from_secs(1),
+                    ),
+                ))),
+            },
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["kind"], "timed_out");
+        assert_eq!(row["command"], "sleep 5");
+    }
+
+    // A check in a directory it could not enter carries the sentence and the
+    // directory, in a check row and in a listing row, and each names the
+    // command.
+    #[tokio::test]
+    async fn an_unusable_directory_reaches_check_and_list_rows() {
+        use selfie::package::event::{CheckFailure, PackageListItem};
+
+        let failure = || {
+            CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable {
+                command: "check-p".to_string(),
+                working_directory: "/gone".into(),
+                message: "Cannot run 'check-p' in /gone: missing".to_string(),
+            })
+        };
+        let events = vec![
+            PackageEvent::CheckResultCompleted {
+                operation_info: test_op_info(),
+                check_result: CheckResultData {
+                    package_name: "p".to_string(),
+                    environment: "test".to_string(),
+                    check_command: Some("check-p".to_string()),
+                    result: failure(),
+                },
+            },
+            PackageEvent::PackageListItemCompleted {
+                operation_info: test_op_info(),
+                package_item: PackageListItem {
+                    check_command: Some("check-p".to_string()),
+                    name: "p".to_string(),
+                    environments: vec!["test".to_string()],
+                    status: Some(failure()),
+                },
+            },
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = result.data["data"].as_array().expect("data is an array");
+        for row in rows {
+            assert_eq!(row["kind"], "working_directory_unusable", "{row}");
+            assert_eq!(row["reason"], "Cannot run 'check-p' in /gone: missing");
+            assert_eq!(row["working_directory"], "/gone");
+            assert_eq!(row["command"], "check-p");
+        }
+        assert_eq!(rows.len(), 2);
+    }
+
     #[tokio::test]
     async fn test_collect_success_with_check_result() {
         let events = vec![
@@ -2369,6 +2590,7 @@ mod tests {
             PackageEvent::PackageListItemCompleted {
                 operation_info: test_op_info(),
                 package_item: PackageListItem {
+                    check_command: None,
                     name: "ripgrep".to_string(),
 
                     environments: vec!["macos".to_string()],
@@ -2381,6 +2603,7 @@ mod tests {
             PackageEvent::PackageListItemCompleted {
                 operation_info: test_op_info(),
                 package_item: PackageListItem {
+                    check_command: None,
                     name: "missing-pkg".to_string(),
 
                     environments: vec!["macos".to_string()],
@@ -2483,6 +2706,207 @@ mod tests {
         assert_eq!(result.data["data"][0]["type"], "removal_dependency_info");
         assert_eq!(result.data["data"][0]["package"], "target-pkg");
         assert_eq!(result.data["data"][0]["dependent_packages"][0], "dep-a");
+    }
+
+    // These build each lookup failure the way production does, by classifying
+    // the error a lookup returned.
+    fn lookup(error: selfie::package::port::PackageError) -> selfie::package::event::UnknownStatus {
+        selfie::package::event::UnknownStatus::LookupFailed(
+            selfie::package::port::PackageRepoError::from(error)
+                .into_lookup_failure()
+                .expect("a lookup returns this error"),
+        )
+    }
+
+    fn not_found() -> selfie::package::event::UnknownStatus {
+        lookup(selfie::package::port::PackageError::PackageNotFound {
+            name: "d".to_string(),
+            packages_path: "/packages".into(),
+            files_examined: 0,
+            search_patterns: Vec::new(),
+        })
+    }
+
+    fn ambiguous() -> selfie::package::event::UnknownStatus {
+        lookup(selfie::package::port::PackageError::MultiplePackagesFound {
+            name: "twice".to_string(),
+            packages_path: "/packages".into(),
+            conflicting_paths: vec!["/packages/twice.yaml".into(), "/packages/twice.yml".into()],
+            files_examined: 2,
+            search_patterns: Vec::new(),
+        })
+    }
+
+    fn unloadable() -> selfie::package::event::UnknownStatus {
+        use selfie::package::port::{PackageParseError, PackageParseKind};
+
+        let source =
+            selfie::yaml::parse::<selfie::package::Package>("name: dep\nenvironments: {oops\n")
+                .expect_err("the fixture must not parse");
+        lookup(selfie::package::port::PackageError::ParseError {
+            name: "dep".to_string(),
+            packages_path: "/packages".into(),
+            failed_file: "/packages/dep.yml".into(),
+            source: PackageParseError::new("/packages/dep.yml", PackageParseKind::Yaml { source }),
+        })
+    }
+
+    fn directory_unreadable() -> selfie::package::event::UnknownStatus {
+        selfie::package::event::UnknownStatus::LookupFailed(
+            selfie::package::port::PackageRepoError::from(
+                selfie::package::port::PackageListError::new(
+                    "/packages".into(),
+                    selfie::fs::DirectoryState::Unlistable(std::sync::Arc::new(
+                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    )),
+                ),
+            )
+            .into_lookup_failure()
+            .expect("a lookup returns this error"),
+        )
+    }
+
+    // The label set is the MCP contract, so each label is pinned. A check that
+    // gave no answer takes its failure's label.
+    #[test]
+    fn every_unknown_status_has_its_label() {
+        use selfie::package::event::{CheckFailure, RefusalKind, UnknownStatus};
+
+        let cases = [
+            (not_found(), "not_found"),
+            (unloadable(), "unloadable"),
+            (ambiguous(), "ambiguous_name"),
+            (directory_unreadable(), "package_directory_unreadable"),
+            (
+                UnknownStatus::Refused {
+                    kind: RefusalKind::NoEnvironments,
+                    reason: "r".to_string(),
+                },
+                "refused",
+            ),
+            (UnknownStatus::NotInEnvironment, "not_in_environment"),
+            (UnknownStatus::NoCheckCommand, "no_check_command"),
+            (
+                UnknownStatus::CheckFailed(CheckFailure::Canceled {
+                    message: "m".to_string(),
+                }),
+                "canceled",
+            ),
+        ];
+        for (unknown, label) in cases {
+            assert_eq!(unknown.kind(), Some(label), "{unknown:?}");
+        }
+    }
+
+    // A dependency row carries its status's kind and reason, and the field its
+    // kind adds: the refusal's kind, or the paths claiming an ambiguous name.
+    #[test]
+    fn a_dependency_row_carries_what_its_kind_adds() {
+        use selfie::package::event::{
+            DependencyStatus, EnvironmentStatus, RefusalKind, UnknownStatus,
+        };
+
+        let rows = dep_statuses_to_json(&[
+            DependencyStatus {
+                name: "twice".to_string(),
+                status: EnvironmentStatus::Unknown(ambiguous()),
+            },
+            DependencyStatus {
+                name: "refused".to_string(),
+                status: EnvironmentStatus::Unknown(UnknownStatus::Refused {
+                    kind: RefusalKind::UnknownTopLevelKeys,
+                    reason: "unknown key".to_string(),
+                }),
+            },
+            DependencyStatus {
+                name: "ok".to_string(),
+                status: EnvironmentStatus::Installed,
+            },
+        ]);
+
+        assert_eq!(rows[0]["kind"], "ambiguous_name");
+        assert_eq!(
+            rows[0]["conflicting_paths"],
+            serde_json::json!(["/packages/twice.yaml", "/packages/twice.yml"])
+        );
+        assert_eq!(rows[1]["kind"], "refused");
+        assert_eq!(
+            rows[1]["refusal"],
+            serde_json::json!({"kind": "unknown_top_level_keys", "reason": "unknown key"})
+        );
+        assert_eq!(rows[1]["reason"], "is refused: unknown key");
+        assert_eq!(rows[2]["status"], "installed");
+        for field in ["kind", "reason", "failure", "conflicting_paths", "refusal"] {
+            assert_eq!(rows[2][field], Value::Null, "{field}");
+        }
+    }
+
+    // An unloadable dependency carries its parse failure as the fields a skipped
+    // spec carries.
+    #[test]
+    fn an_unloadable_dependency_carries_its_parse_failure() {
+        use selfie::package::event::{DependencyStatus, EnvironmentStatus};
+
+        let rows = dep_statuses_to_json(&[DependencyStatus {
+            name: "dep".to_string(),
+            status: EnvironmentStatus::Unknown(unloadable()),
+        }]);
+
+        assert_eq!(rows[0]["kind"], "unloadable");
+        assert_eq!(rows[0]["failure"]["kind"], "yaml");
+        assert_eq!(rows[0]["failure"]["line"], 2);
+    }
+
+    // An error a lookup does not return reaches its row as itself, with no
+    // label, and never as an unreadable package directory.
+    #[test]
+    fn an_error_no_lookup_returns_has_no_label() {
+        use selfie::package::event::{DependencyStatus, EnvironmentStatus, UnknownStatus};
+        use selfie::package::port::{PackageError, PackageRepoError};
+
+        let error = PackageRepoError::from(PackageError::NoCheckCommand {
+            package_name: "dep".to_string(),
+            environment: "test".to_string(),
+            package_file: "/packages/dep.yml".into(),
+            other_envs_with_check: Vec::new(),
+        });
+        let sentence = error.to_string();
+        let rows = dep_statuses_to_json(&[DependencyStatus {
+            name: "dep".to_string(),
+            status: EnvironmentStatus::Unknown(UnknownStatus::Error(error)),
+        }]);
+
+        assert_eq!(rows[0]["status"], "unknown");
+        assert_eq!(rows[0]["kind"], Value::Null);
+        assert_eq!(rows[0]["reason"], sentence);
+    }
+
+    // The package's own unknown status says why, as a dependency row does.
+    #[tokio::test]
+    async fn an_unknown_package_status_carries_its_kind_and_reason() {
+        use selfie::package::event::{EnvironmentStatus, EnvironmentStatusData, UnknownStatus};
+
+        let events = vec![PackageEvent::EnvironmentStatusChecked {
+            operation_info: test_op_info(),
+            environment_status: EnvironmentStatusData {
+                environment_name: "test".to_string(),
+                is_current: true,
+                install_command: Some("true".to_string()),
+                check_command: None,
+                dependencies: vec![],
+                dependency_statuses: vec![],
+                recommends: vec![],
+                recommend_statuses: vec![],
+                status: Some(EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand)),
+            },
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let row = &result.data["data"][0];
+        assert_eq!(row["status"], "unknown");
+        assert_eq!(row["kind"], "no_check_command");
+        assert_eq!(row["reason"], "no check command");
     }
 
     #[tokio::test]

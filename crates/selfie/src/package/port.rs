@@ -266,15 +266,7 @@ impl PackageRepoError {
     // is what selfie-vhw4 was about.
     #[must_use]
     pub fn means_no_such_package(&self) -> bool {
-        match self {
-            Self::PackageError(e) => matches!(**e, PackageError::PackageNotFound { .. }),
-            // A missing package directory holds no file to lose, and the write
-            // creates it -- `write_file_no_follow` runs `create_dir_all` first. A
-            // file or a dangling link at the path holds none either, but that
-            // `create_dir_all` fails against it, so it is not "no such package".
-            Self::PackageListError(listing) => listing.may_be_created(),
-            _ => false,
-        }
+        self.lookup_kind() == Some(LookupKind::NotFound)
     }
 
     /// Whether this error is about the file or files sitting at that name.
@@ -290,24 +282,219 @@ impl PackageRepoError {
     /// behind it is neither.
     ///
     /// [`means_no_such_package`]: Self::means_no_such_package
-    // The catch-all answers `false`, so an error variant added later is
-    // propagated as itself rather than relabelled as this package's spec. That
-    // is the safe direction: a caller losing the parent's name is recoverable,
-    // a caller blaming the wrong file is not.
     #[must_use]
     pub fn names_an_unusable_spec(&self) -> bool {
+        matches!(
+            self.lookup_kind(),
+            Some(LookupKind::AmbiguousName | LookupKind::Unloadable)
+        )
+    }
+
+    /// Says what a failed lookup that returned this error was about, or `None`
+    /// for an error a lookup does not return.
+    #[must_use]
+    pub fn lookup_kind(&self) -> Option<LookupKind> {
+        self.lookup().map(|lookup| match lookup {
+            Lookup::NotFound => LookupKind::NotFound,
+            Lookup::AmbiguousName(_) => LookupKind::AmbiguousName,
+            Lookup::Unloadable(_) => LookupKind::Unloadable,
+            Lookup::PackageDirectoryUnreadable => LookupKind::PackageDirectoryUnreadable,
+        })
+    }
+
+    /// Turns this error from a package lookup into the failure
+    /// [`lookup_kind`](Self::lookup_kind) names, carrying the facts that kind
+    /// needs.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error unchanged when a lookup does not return it, so the
+    /// caller reports it as itself.
+    pub fn into_lookup_failure(self) -> Result<LookupFailure, Self> {
+        // The facts are copied out first, which ends the borrow before `self`
+        // moves into the wrapper beside them.
+        let facts = match self.lookup() {
+            None => return Err(self),
+            Some(Lookup::NotFound) => Facts::NotFound,
+            Some(Lookup::AmbiguousName(paths)) => Facts::Paths(paths.to_vec()),
+            Some(Lookup::Unloadable(failure)) => Facts::Failure(failure.clone()),
+            Some(Lookup::PackageDirectoryUnreadable) => Facts::UnreadableDirectory,
+        };
+        Ok(match facts {
+            Facts::NotFound => LookupFailure::NotFound(NotFound(self)),
+            Facts::UnreadableDirectory => {
+                LookupFailure::PackageDirectoryUnreadable(UnreadableDirectory(self))
+            }
+            Facts::Paths(conflicting_paths) => LookupFailure::AmbiguousName(AmbiguousName {
+                conflicting_paths,
+                error: self,
+            }),
+            Facts::Failure(failure) => LookupFailure::Unloadable(UnloadableSpec {
+                failure,
+                error: self,
+            }),
+        })
+    }
+
+    /// What a failed lookup that returned this error was about, borrowing the
+    /// facts its kind needs. The one classification every lookup question asks.
+    fn lookup(&self) -> Option<Lookup<'_>> {
+        // Every variant is listed, with no `_` arm, so a new error is a compile
+        // error here and not a silent relabeling. `None`, shown as itself, is the
+        // safe answer for an error that is not about one spec: a caller losing the
+        // package's name is recoverable, a caller blaming the wrong file is not.
         match self {
-            Self::PackageError(e) => matches!(
-                **e,
-                PackageError::ParseError { .. }
-                    | PackageError::UnreadableFile { .. }
-                    | PackageError::UnusableName { .. }
-                    | PackageError::MultiplePackagesFound { .. }
-            ),
-            _ => false,
+            Self::PackageError(error) => match &**error {
+                PackageError::PackageNotFound { .. } => Some(Lookup::NotFound),
+                PackageError::MultiplePackagesFound {
+                    conflicting_paths, ..
+                } => Some(Lookup::AmbiguousName(conflicting_paths)),
+                PackageError::ParseError { source, .. }
+                | PackageError::UnreadableFile { source, .. }
+                | PackageError::UnusableName { source, .. } => Some(Lookup::Unloadable(source)),
+                // Raised by the service once a spec has loaded, never by a lookup.
+                PackageError::EnvironmentNotFound { .. }
+                | PackageError::NoCheckCommand { .. }
+                | PackageError::NoInstallCommand { .. }
+                // Raised by `spec create`, never by a lookup.
+                | PackageError::PackageAlreadyExists { .. }
+                | PackageError::PackagePathOccupied { .. } => None,
+            },
+            // A missing package directory holds no file to lose, and the write
+            // creates it -- `write_file_no_follow` runs `create_dir_all` first. A
+            // file or a dangling link at the path holds none either, but that
+            // `create_dir_all` fails against it, so it is not "no such package".
+            Self::PackageListError(listing) if listing.may_be_created() => Some(Lookup::NotFound),
+            Self::PackageListError(_) => Some(Lookup::PackageDirectoryUnreadable),
+            // Raised by `save_package`, never by a lookup.
+            Self::IoError(_)
+            | Self::UnknownDotfileFields { .. }
+            | Self::UnknownTopLevelFields { .. }
+            | Self::UncheckedTopLevel { .. }
+            | Self::UnknownEnvironmentFields { .. }
+            | Self::UnwritablePath { .. }
+            // Raised by `dotfiles track`, never by a lookup.
+            | Self::FileSystemError(_) => None,
         }
     }
 }
+
+/// What [`PackageRepoError::lookup`] found, borrowing the facts each kind needs.
+enum Lookup<'a> {
+    NotFound,
+    AmbiguousName(&'a [PathBuf]),
+    Unloadable(&'a PackageParseError),
+    PackageDirectoryUnreadable,
+}
+
+/// The facts copied out of a [`Lookup`] before the error moves.
+enum Facts {
+    NotFound,
+    Paths(Vec<PathBuf>),
+    Failure(PackageParseError),
+    UnreadableDirectory,
+}
+
+/// What a failed lookup of a package was about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookupKind {
+    /// No spec answers to the name.
+    NotFound,
+    /// Several spec files claim the name.
+    AmbiguousName,
+    /// A spec answers to the name and could not be loaded.
+    Unloadable,
+    /// The package directory could not be read.
+    PackageDirectoryUnreadable,
+}
+
+/// A failed lookup of one package, carrying the facts its kind needs.
+///
+/// [`Display`](std::fmt::Display) is the error's own sentence. Its label is the
+/// variant's name in snake_case. Only
+/// [`PackageRepoError::into_lookup_failure`] builds one, so a variant always
+/// carries the error its kind names.
+#[derive(Debug, Clone, strum::IntoStaticStr, strum::VariantNames)]
+#[strum(serialize_all = "snake_case")]
+pub enum LookupFailure {
+    /// No spec answers to the name.
+    NotFound(NotFound),
+    /// Several spec files claim the name, so none is used.
+    AmbiguousName(AmbiguousName),
+    /// A spec answers to the name and could not be loaded.
+    Unloadable(UnloadableSpec),
+    /// The package directory could not be read, so no spec was looked at.
+    PackageDirectoryUnreadable(UnreadableDirectory),
+}
+
+impl LookupFailure {
+    /// The label for this failure, such as `"not_found"`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+
+    /// The error the lookup returned.
+    #[must_use]
+    pub fn into_error(self) -> PackageRepoError {
+        match self {
+            Self::NotFound(NotFound(error))
+            | Self::AmbiguousName(AmbiguousName { error, .. })
+            | Self::Unloadable(UnloadableSpec { error, .. })
+            | Self::PackageDirectoryUnreadable(UnreadableDirectory(error)) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for LookupFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(NotFound(error))
+            | Self::AmbiguousName(AmbiguousName { error, .. })
+            | Self::Unloadable(UnloadableSpec { error, .. })
+            | Self::PackageDirectoryUnreadable(UnreadableDirectory(error)) => write!(f, "{error}"),
+        }
+    }
+}
+
+/// A lookup no spec answered, holding the error as it came. Its sentence names
+/// the package directory when nothing at all is at its path.
+#[derive(Debug, Clone)]
+pub struct NotFound(PackageRepoError);
+
+/// A name several spec files claim.
+#[derive(Debug, Clone)]
+pub struct AmbiguousName {
+    conflicting_paths: Vec<PathBuf>,
+    error: PackageRepoError,
+}
+
+impl AmbiguousName {
+    /// The files claiming the name.
+    #[must_use]
+    pub fn conflicting_paths(&self) -> &[PathBuf] {
+        &self.conflicting_paths
+    }
+}
+
+/// A spec that answers to a name and could not be loaded.
+#[derive(Debug, Clone)]
+pub struct UnloadableSpec {
+    failure: PackageParseError,
+    error: PackageRepoError,
+}
+
+impl UnloadableSpec {
+    /// What went wrong, with its place in the file when it does not parse.
+    #[must_use]
+    pub fn failure(&self) -> &PackageParseError {
+        &self.failure
+    }
+}
+
+/// A package directory that could not be read, holding the error as it came.
+#[derive(Debug, Clone)]
+pub struct UnreadableDirectory(PackageRepoError);
 
 impl From<PackageError> for PackageRepoError {
     fn from(err: PackageError) -> Self {
@@ -802,7 +989,194 @@ impl PackageParseKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use mockall::predicate::*;
+
+    fn listing(state: DirectoryState) -> PackageRepoError {
+        PackageRepoError::from(PackageListError::new("/packages".into(), state))
+    }
+
+    fn package_error(error: PackageError) -> PackageRepoError {
+        PackageRepoError::from(error)
+    }
+
+    fn unreadable(name: &str, kind: PackageParseKind) -> (PathBuf, PackageParseError) {
+        let file = PathBuf::from(format!("/packages/{name}.yml"));
+        (file.clone(), PackageParseError::new(file, kind))
+    }
+
+    // Every error a lookup returns, each with the kind it is classified as.
+    fn lookup_errors() -> Vec<(PackageRepoError, LookupKind)> {
+        let source = crate::yaml::parse::<crate::package::Package>("name: dep\nx: {oops\n")
+            .expect_err("the fixture must not parse");
+        let (file, parse) = unreadable("dep", PackageParseKind::Yaml { source });
+        let (unread_file, unread) = unreadable(
+            "dep",
+            PackageParseKind::Unreadable {
+                reason: "a fifo".to_string(),
+            },
+        );
+        let (name_file, bad_name) = unreadable(
+            "Dep",
+            PackageParseKind::Unreadable {
+                reason: "a capital".to_string(),
+            },
+        );
+        vec![
+            (
+                package_error(PackageError::PackageNotFound {
+                    name: "dep".to_string(),
+                    packages_path: "/packages".into(),
+                    files_examined: 0,
+                    search_patterns: Vec::new(),
+                }),
+                LookupKind::NotFound,
+            ),
+            (
+                listing(DirectoryState::Absent(crate::fs::AbsentReason::Empty)),
+                LookupKind::NotFound,
+            ),
+            (
+                package_error(PackageError::MultiplePackagesFound {
+                    name: "twice".to_string(),
+                    packages_path: "/packages".into(),
+                    conflicting_paths: vec![
+                        "/packages/twice.yaml".into(),
+                        "/packages/twice.yml".into(),
+                    ],
+                    files_examined: 2,
+                    search_patterns: Vec::new(),
+                }),
+                LookupKind::AmbiguousName,
+            ),
+            (
+                package_error(PackageError::ParseError {
+                    name: "dep".to_string(),
+                    packages_path: "/packages".into(),
+                    failed_file: file,
+                    source: parse,
+                }),
+                LookupKind::Unloadable,
+            ),
+            (
+                package_error(PackageError::UnreadableFile {
+                    name: "dep".to_string(),
+                    packages_path: "/packages".into(),
+                    failed_file: unread_file,
+                    source: unread,
+                }),
+                LookupKind::Unloadable,
+            ),
+            (
+                package_error(PackageError::UnusableName {
+                    name: "Dep".to_string(),
+                    packages_path: "/packages".into(),
+                    failed_file: name_file,
+                    source: bad_name,
+                }),
+                LookupKind::Unloadable,
+            ),
+            (
+                listing(DirectoryState::Unlistable(Arc::new(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                )))),
+                LookupKind::PackageDirectoryUnreadable,
+            ),
+        ]
+    }
+
+    // Each error a lookup returns is classified by what it is about, its failure
+    // takes that kind's label, and it reads as the error's own sentence.
+    #[test]
+    fn a_failed_lookup_is_classified_by_what_it_is_about() {
+        for (error, kind) in lookup_errors() {
+            assert_eq!(error.lookup_kind(), Some(kind), "{error:?}");
+            assert_eq!(
+                error.means_no_such_package(),
+                kind == LookupKind::NotFound,
+                "{error:?}"
+            );
+            assert_eq!(
+                error.names_an_unusable_spec(),
+                matches!(kind, LookupKind::AmbiguousName | LookupKind::Unloadable),
+                "{error:?}"
+            );
+            let sentence = error.to_string();
+            let failure = error
+                .into_lookup_failure()
+                .expect("a lookup returns this error");
+            assert_eq!(failure.to_string(), sentence);
+            let label = match kind {
+                LookupKind::NotFound => "not_found",
+                LookupKind::AmbiguousName => "ambiguous_name",
+                LookupKind::Unloadable => "unloadable",
+                LookupKind::PackageDirectoryUnreadable => "package_directory_unreadable",
+            };
+            assert_eq!(failure.kind(), label);
+        }
+    }
+
+    // Each lookup failure carries the facts its kind needs: the files claiming an
+    // ambiguous name, and an unloadable spec's parse failure.
+    #[test]
+    fn a_lookup_failure_carries_its_facts() {
+        for (error, _) in lookup_errors() {
+            match error
+                .into_lookup_failure()
+                .expect("a lookup returns this error")
+            {
+                LookupFailure::AmbiguousName(name) => {
+                    assert_eq!(name.conflicting_paths().len(), 2);
+                }
+                LookupFailure::Unloadable(spec) => {
+                    assert!(
+                        spec.failure().package_path().starts_with("/packages"),
+                        "{spec:?}"
+                    );
+                }
+                LookupFailure::NotFound(_) | LookupFailure::PackageDirectoryUnreadable(_) => {}
+            }
+        }
+    }
+
+    // An error a lookup never returns has no lookup kind and comes back
+    // unchanged, so a caller reports it as itself.
+    #[test]
+    fn an_error_no_lookup_returns_comes_back_unchanged() {
+        let errors = [
+            package_error(PackageError::NoCheckCommand {
+                package_name: "dep".to_string(),
+                environment: "test".to_string(),
+                package_file: "/packages/dep.yml".into(),
+                other_envs_with_check: Vec::new(),
+            }),
+            PackageRepoError::IoError(Arc::new(std::io::Error::other("save"))),
+            package_error(PackageError::PackageAlreadyExists {
+                name: "dep".to_string(),
+                file_path: "/packages/dep.yml".into(),
+            }),
+        ];
+        for error in errors {
+            assert_eq!(error.lookup_kind(), None, "{error:?}");
+            assert!(!error.means_no_such_package());
+            assert!(!error.names_an_unusable_spec());
+            let sentence = error.to_string();
+            let returned = error
+                .into_lookup_failure()
+                .expect_err("a lookup does not return this error");
+            assert_eq!(returned.to_string(), sentence);
+        }
+        assert!(matches!(
+            package_error(PackageError::NoCheckCommand {
+                package_name: "dep".to_string(),
+                environment: "test".to_string(),
+                package_file: "/packages/dep.yml".into(),
+                other_envs_with_check: Vec::new(),
+            })
+            .into_lookup_failure(),
+            Err(PackageRepoError::PackageError(e)) if matches!(*e, PackageError::NoCheckCommand { .. })
+        ));
+    }
 
     #[test]
     fn test_mock_find_dependent_packages() {

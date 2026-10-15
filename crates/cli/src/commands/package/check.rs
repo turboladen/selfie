@@ -141,14 +141,6 @@ fn display_check_result_card(
 ) {
     let use_colors = config.use_colors();
 
-    // Common fields via ResultCard
-    display
-        .result_card("Check Results")
-        .field("Package", &check_result.package_name)
-        .field("Environment", &check_result.environment)
-        .field_if("Command", check_result.check_command.as_deref())
-        .print();
-
     // Status line stays inline — complex branching with conditional sub-fields
     let format_key_fn =
         |field: &str| -> String { format!("{}{}: ", INDENT, format_key(field, use_colors)) };
@@ -189,32 +181,15 @@ fn display_check_result_card(
                 status
             }
         }
-        CheckResult::NoCheckCommand => {
-            format!(
-                "{}{}",
-                format_key_fn("Status"),
-                status_style::format_no_check(use_colors)
-            )
-        }
-        CheckResult::Error(error) => {
-            format!(
-                "{}{}\n{}{}",
-                format_key_fn("Status"),
-                status_style::format_status_error(use_colors),
-                format_key_fn("Details"),
-                error
-            )
-        }
-        CheckResult::TimedOut(timed_out) => {
-            format!(
-                "{}{}\n{}{}",
-                format_key_fn("Status"),
-                status_style::format_status_error(use_colors),
-                format_key_fn("Details"),
-                timed_out
-            )
-        }
+        // No answer, so no card: the failure that follows says why on stderr.
+        CheckResult::NoCheckCommand | CheckResult::CouldNotRun(_) => return,
     };
 
+    display
+        .result_card("Check Results")
+        .field("Package", &check_result.package_name)
+        .field("Environment", &check_result.environment)
+        .field_if("Command", check_result.check_command.as_deref())
+        .print();
     display.println(status_line);
 }

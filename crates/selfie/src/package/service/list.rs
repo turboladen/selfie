@@ -26,6 +26,7 @@ use crate::{
 struct PackageMetadata {
     name: String,
     environments: Vec<String>,
+    check_command: Option<String>,
 }
 
 pub(super) async fn handle_list<PR, CR>(
@@ -93,6 +94,7 @@ where
     let ready_items: Vec<PackageListItem> = packages_to_process
         .iter()
         .map(|package| PackageListItem {
+            check_command: None,
             name: package.name().to_string(),
             environments: package.environments().keys().cloned().collect(),
             status: None,
@@ -138,6 +140,11 @@ where
         .map(|p| PackageMetadata {
             name: p.name().to_string(),
             environments: p.environments().keys().cloned().collect(),
+            check_command: p
+                .environments()
+                .get(config.environment())
+                .and_then(|env| env.check())
+                .map(str::to_string),
         })
         .collect();
 
@@ -186,6 +193,7 @@ where
 
                 // Create the package list item
                 let package_item = PackageListItem {
+                    check_command,
                     name: package_name,
                     environments: package_environments,
                     status,
@@ -208,25 +216,33 @@ where
                 // Use the captured metadata so the CLI can resolve the correct spinner.
                 // Fallback to defaults if index is somehow out of bounds — this is
                 // error-recovery code and must not panic or mask the original failure.
-                let (name, environments) = match package_metadata.get(i) {
-                    Some(meta) => (meta.name.clone(), meta.environments.clone()),
+                let (name, environments, check_command) = match package_metadata.get(i) {
+                    Some(meta) => (
+                        meta.name.clone(),
+                        meta.environments.clone(),
+                        meta.check_command.clone(),
+                    ),
                     None => {
                         tracing::warn!(
                             index = i,
                             "package_metadata index out of bounds in JoinError handler"
                         );
-                        (String::new(), Vec::new())
+                        (String::new(), Vec::new(), None)
                     }
                 };
-                sender
-                    .send_package_list_item(PackageListItem {
-                        name,
-                        environments,
-                        status: Some(crate::package::event::CheckResult::Error(format!(
-                            "Task failed: {e}"
-                        ))),
-                    })
-                    .await;
+                // Counted with the rest, as any check that gave no answer is.
+                let package_item = PackageListItem {
+                    check_command,
+                    name,
+                    environments,
+                    status: Some(crate::package::event::CheckResult::CouldNotRun(
+                        crate::package::event::CheckFailure::Internal {
+                            message: format!("Task failed: {e}"),
+                        },
+                    )),
+                };
+                sender.send_package_list_item(package_item.clone()).await;
+                results.push((i, package_item));
             }
         }
     }
@@ -301,6 +317,8 @@ mod tests {
         current: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
         delay: std::time::Duration,
+        // Whether `execute` panics, as a bug in a check task would.
+        panics: bool,
     }
 
     impl ConcurrencyTrackingRunner {
@@ -309,6 +327,7 @@ mod tests {
                 current: Arc::new(AtomicUsize::new(0)),
                 peak: Arc::new(AtomicUsize::new(0)),
                 delay,
+                panics: false,
             }
         }
 
@@ -328,6 +347,7 @@ mod tests {
             _working_dir: &std::path::Path,
             _token: &CancellationToken,
         ) -> Result<CommandOutput, CommandError> {
+            assert!(!self.panics, "the check task panicked");
             let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
 
@@ -390,6 +410,80 @@ mod tests {
             crate::package::event::OperationContext::default(),
         );
         (sender, rx)
+    }
+
+    // A check task that panics is listed and counted like any check that gave
+    // no answer, and its item says the fault is selfie's.
+    #[tokio::test]
+    async fn a_panicked_check_task_is_listed_and_counted() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+        let package = PackageBuilder::default()
+            .name("pkg")
+            .environment("test", |b| {
+                b.install("echo install").check_some("echo check")
+            })
+            .path(temp_dir.path().join("pkg.yml"))
+            .build();
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo.expect_list_packages().returning(move || {
+            Ok(crate::package::port::ListPackagesOutput(vec![Ok(
+                package.clone()
+            )]))
+        });
+        let runner = ConcurrencyTrackingRunner {
+            panics: true,
+            ..ConcurrencyTrackingRunner::new(std::time::Duration::ZERO)
+        };
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+
+        let result = handle_list(
+            &mock_repo,
+            &config,
+            &runner,
+            &sender,
+            &mut progress,
+            false,
+            &CancellationToken::new(),
+        )
+        .await;
+        drop(sender);
+
+        assert!(
+            matches!(
+                result,
+                OperationResult::Success(OperationSuccess::PackageListGenerated {
+                    valid_count: 1,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        let mut listed = None;
+        while let Some(event) = rx.recv().await {
+            if let crate::package::event::PackageEvent::PackageListLoaded { package_list, .. } =
+                event
+            {
+                listed = Some(package_list.valid_packages);
+            }
+        }
+        let listed = listed.expect("the summary must be sent");
+        assert!(
+            matches!(
+                &listed[..],
+                [item] if matches!(
+                    item.status,
+                    Some(crate::package::event::CheckResult::CouldNotRun(
+                        crate::package::event::CheckFailure::Internal { .. }
+                    ))
+                )
+            ),
+            "{listed:?}"
+        );
     }
 
     #[tokio::test]

@@ -215,16 +215,22 @@ where
             // failure that is not about that package's file either, such as a
             // directory selfie could not list, is not its spec's fault, and
             // saying the spec will not be read blames the wrong thing.
-            if repo_err.means_no_such_package() {
-                OperationFailure::missing_dependency(parent, package_name.to_string())
-            } else if repo_err.names_an_unusable_spec() {
-                OperationFailure::unreadable_spec(
+            match repo_err.into_lookup_failure() {
+                Ok(crate::package::port::LookupFailure::NotFound(_)) => {
+                    OperationFailure::missing_dependency(parent, package_name.to_string())
+                }
+                Ok(
+                    failure @ (crate::package::port::LookupFailure::AmbiguousName(_)
+                    | crate::package::port::LookupFailure::Unloadable(_)),
+                ) => OperationFailure::unreadable_spec(
                     package_name.to_string(),
                     Some(parent),
-                    repo_err.to_string(),
-                )
-            } else {
-                OperationFailure::from(repo_err)
+                    failure.to_string(),
+                ),
+                Ok(
+                    failure @ crate::package::port::LookupFailure::PackageDirectoryUnreadable(_),
+                ) => OperationFailure::from(failure.into_error()),
+                Err(error) => OperationFailure::from(error),
             }
         })?;
 
