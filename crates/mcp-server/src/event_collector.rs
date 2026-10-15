@@ -424,14 +424,20 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             }),
             check_failure_fields(Some(&check_result.result)),
         )),
-        PackageEvent::AuditResultCompleted { audit_result, .. } => Some(serde_json::json!({
-            "type": "audit_result",
-            "package": &audit_result.package_name,
-            "environment": &audit_result.environment,
-            "command": &audit_result.audit_command,
-            "status": format!("{}", audit_result.result),
-            "details": audit_details(&audit_result.result),
-        })),
+        PackageEvent::AuditResultCompleted { audit_result, .. } => Some(with_fields(
+            serde_json::json!({
+                "type": "audit_result",
+                "package": &audit_result.package_name,
+                "environment": &audit_result.environment,
+                "command": &audit_result.audit_command,
+                "status": format!("{}", audit_result.result),
+                "details": audit_details(&audit_result.result),
+            }),
+            failure_fields(match &audit_result.result {
+                AuditResult::CouldNotRun(failure) => Some(failure),
+                _ => None,
+            }),
+        )),
         PackageEvent::PackageInfoLoaded { package_info, .. } => {
             let dotfiles: Vec<Value> = package_info
                 .dotfiles
@@ -949,12 +955,19 @@ fn with_fields(mut row: Value, fields: serde_json::Map<String, Value>) -> Value 
 /// and `working_directory`, which is set only for a directory that could not be
 /// entered. All three are null for a check that answered.
 fn check_failure_fields(result: Option<&CheckResult>) -> serde_json::Map<String, Value> {
-    use selfie::package::event::CheckFailure;
-
-    let failure = match result {
+    failure_fields(match result {
         Some(CheckResult::CouldNotRun(failure)) => Some(failure),
         _ => None,
-    };
+    })
+}
+
+/// Renders why a check or audit command gave no answer as `kind`, `reason`
+/// and `working_directory`, each null where it does not apply.
+fn failure_fields(
+    failure: Option<&selfie::package::event::CheckFailure>,
+) -> serde_json::Map<String, Value> {
+    use selfie::package::event::CheckFailure;
+
     let working_directory = match failure {
         Some(CheckFailure::WorkingDirectoryUnusable(unusable)) => {
             Some(unusable.working_directory().display().to_string())
@@ -1060,6 +1073,7 @@ fn audit_details(result: &AuditResult) -> Value {
         }
         AuditResult::NotInstalled | AuditResult::NoAuditCommand => Value::Null,
         AuditResult::Error(e) => serde_json::json!({ "error": e }),
+        AuditResult::CouldNotRun(failure) => serde_json::json!({ "error": failure.to_string() }),
     }
 }
 
@@ -1800,27 +1814,69 @@ mod tests {
         assert_eq!(result.data["result"]["outcome"], "found");
     }
 
-    // An audit whose command failed is a success value that cannot answer the
-    // question and refused nothing: an error result, with a status of its own.
+    // An audit whose command failed, and one that could not run, are each a
+    // success value that cannot answer the question and refused nothing: an
+    // error result, with a status of its own.
     #[tokio::test]
     async fn an_audit_that_could_not_run_is_an_error_result_with_a_failed_status() {
-        use selfie::package::event::{OperationSuccess, StepCount};
+        use selfie::package::event::{CheckFailure, OperationSuccess, StepCount};
 
-        let events = vec![PackageEvent::Completed {
+        for audit_result in [
+            AuditResult::Error("Audit command failed (exit code 1): ".to_string()),
+            AuditResult::CouldNotRun(CheckFailure::CouldNotStart {
+                message: selfie::commands::BoundedText::bound(b"spawn failed"),
+            }),
+        ] {
+            let events = vec![PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::PackageAudited {
+                    package_name: "p".to_string(),
+                    environment: "test".to_string(),
+                    audit_result,
+                    steps_completed: StepCount::new(1, 1),
+                }),
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            assert!(!result.success);
+            assert_eq!(result.data["result"]["status"], "failed");
+            assert_eq!(result.data["result"]["outcome"], "failed");
+        }
+    }
+
+    // An audit that gave no answer keeps its published status and says why
+    // with the fields a check row carries.
+    #[tokio::test]
+    async fn an_audit_that_gave_no_answer_says_why_as_a_check_does() {
+        use selfie::commands::runner::{CommandError, UnusableDirectory};
+        use selfie::package::event::{AuditResultData, CheckFailure};
+
+        let failure = CheckFailure::from(&CommandError::WorkingDirectoryUnusable(
+            UnusableDirectory::new(
+                "audit-p",
+                "/gone",
+                std::sync::Arc::new(std::io::Error::other("missing")),
+            ),
+        ));
+        let events = vec![PackageEvent::AuditResultCompleted {
             operation_info: test_op_info(),
-            result: OperationResult::Success(OperationSuccess::PackageAudited {
+            audit_result: AuditResultData {
                 package_name: "p".to_string(),
                 environment: "test".to_string(),
-                audit_result: AuditResult::Error("spawn failed".to_string()),
-                steps_completed: StepCount::new(1, 1),
-            }),
+                audit_command: Some("audit-p".to_string()),
+                result: AuditResult::CouldNotRun(failure.clone()),
+            },
         }];
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
-        assert!(!result.success);
-        assert_eq!(result.data["result"]["status"], "failed");
-        assert_eq!(result.data["result"]["outcome"], "failed");
+        let row = &result.data["data"][0];
+        assert_eq!(row["status"], "with errors", "{row}");
+        assert_eq!(row["kind"], "working_directory_unusable", "{row}");
+        assert_eq!(row["reason"], failure.to_string(), "{row}");
+        assert_eq!(row["working_directory"], "/gone", "{row}");
+        assert_eq!(row["details"]["error"], failure.to_string(), "{row}");
     }
 
     // A check that ran and found the package missing answered the question, so

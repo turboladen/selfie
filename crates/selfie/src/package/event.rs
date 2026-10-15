@@ -2322,9 +2322,12 @@ impl OperationSuccess {
             OperationSuccess::PackageAudited { audit_result, .. } => match audit_result {
                 AuditResult::Clean { .. } => Outcome::Clean,
                 AuditResult::Conflicts { .. } | AuditResult::NotInstalled => Outcome::Found,
-                // Neither can answer the question: one audit did not run, and the
-                // other has nothing to run.
-                AuditResult::Error(_) | AuditResult::NoAuditCommand => Outcome::Failed,
+                // None of these answers the question: an audit that exited non-zero
+                // reported an error, one that could not run gave nothing, and a
+                // package with no audit command has nothing to run.
+                AuditResult::Error(_)
+                | AuditResult::CouldNotRun(_)
+                | AuditResult::NoAuditCommand => Outcome::Failed,
             },
             // A package with no audit command is left out of every count: across
             // many packages, not having one is ordinary.
@@ -3502,7 +3505,7 @@ pub enum CheckResult {
     CouldNotRun(CheckFailure),
 }
 
-/// Why a check command gave no answer.
+/// Why a check or audit command gave no answer.
 ///
 /// [`Display`](fmt::Display) words it for a person. [`kind`](Self::kind) is
 /// its label, the variant's name in snake_case.
@@ -3671,6 +3674,9 @@ pub enum AuditResult {
     NoAuditCommand,
     #[strum(to_string = "with errors")]
     Error(String),
+    /// The audit command gave no answer, for a reason selfie names.
+    #[strum(to_string = "with errors")]
+    CouldNotRun(CheckFailure),
 }
 
 /// Structured data for validation results
@@ -4581,6 +4587,13 @@ mod tests {
             (
                 "audit error",
                 audited(AuditResult::Error("boom".to_string())),
+                Outcome::Failed,
+            ),
+            (
+                "audit that could not run",
+                audited(AuditResult::CouldNotRun(CheckFailure::TimedOut(
+                    TimedOut::new("c", std::time::Duration::from_secs(1)),
+                ))),
                 Outcome::Failed,
             ),
             (

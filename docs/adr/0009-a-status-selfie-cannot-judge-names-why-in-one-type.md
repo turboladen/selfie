@@ -107,7 +107,9 @@ command is elided in the middle. The types that carry the sentence apply the bou
 `CommandError::WorkingDirectoryUnusable` carries an `UnusableDirectory`: the command, the directory
 and the cause, with its sentence derived from them. A check carries that value as
 `CheckFailure::WorkingDirectoryUnusable`. An operation that fails on it, from a check or from an
-install command, fails as `CommandFailure::WorkingDirectoryUnusable`. A dotfile `command:` source
+install command, fails as `CommandFailure::WorkingDirectoryUnusable`. An audit that gives no answer,
+for this or any other cause, succeeds with `AuditResult::CouldNotRun` carrying the same
+`CheckFailure`, and its MCP row carries the fields a check row does. A dotfile `command:` source
 reports it through its own resolve error.
 
 A check that could not run reaches its row as `CouldNotRun` in `package check`, `package list` and

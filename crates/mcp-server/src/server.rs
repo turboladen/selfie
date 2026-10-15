@@ -548,7 +548,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_audit",
-        description = "Audit a package's installation sources and detect conflicts (e.g., installed via both npm and homebrew). A conflict, or a package nothing provides, is a successful call with status 'found'. An audit command that fails, or a package with no audit command, comes back as an ERROR result with status 'failed'; a blank audit command (empty, whitespace, or only a comment) counts as none. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
+        description = "Audit a package's installation sources and detect conflicts (e.g., installed via both npm and homebrew). A conflict, or a package nothing provides, is a successful call with status 'found'. An audit command that fails, or a package with no audit command, comes back as an ERROR result with status 'failed'; a blank audit command (empty, whitespace, or only a comment) counts as none. An `audit_result` row for an audit whose command could not run keeps `status` \"with errors\" and adds why: `kind` is \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\" or \"result_unreadable\"; `reason` says it in prose, and `working_directory` names the directory for \"working_directory_unusable\". All three are null otherwise, including a row for a spec selfie could not load or an environment the spec does not configure, whose `details.error` says why; branch on `kind`. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
     )]
     async fn package_audit(
         &self,
@@ -561,7 +561,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_audit_all",
-        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A package with no audit command is skipped. A conflict, or a package nothing provides, anywhere in the run is a successful call with status 'found'. An audit that could not run comes back as an ERROR result with status 'failed', and a spec left out (one that could not be loaded, or that selfie will not read) as an ERROR result with status 'refused' and a `refused` count. A spec selfie will not read is reported, before any audit runs, as a `package_refused` row per package, with `package`, `paths` (its spec file), `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\" or \"no_environments\"; branch on it) and `reason` (prose, shared by every package refused for it). Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
+        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A package with no audit command is skipped. An `audit_result` row for an audit whose command could not run keeps `status` \"with errors\" and adds why: `kind` is \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\" or \"result_unreadable\"; `reason` says it in prose, and `working_directory` names the directory for \"working_directory_unusable\". All three are null otherwise, including a row for a spec selfie could not load or an environment the spec does not configure, whose `details.error` says why; branch on `kind`. A conflict, or a package nothing provides, anywhere in the run is a successful call with status 'found'. An audit that could not run comes back as an ERROR result with status 'failed', and a spec left out (one that could not be loaded, or that selfie will not read) as an ERROR result with status 'refused' and a `refused` count. A spec selfie will not read is reported, before any audit runs, as a `package_refused` row per package, with `package`, `paths` (its spec file), `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\" or \"no_environments\"; branch on it) and `reason` (prose, shared by every package refused for it). Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn package_audit_all(&self) -> Result<CallToolResult, McpError> {
         let stream = self.service.audit_all().await;
@@ -1017,6 +1017,38 @@ mod tests {
             labels_after(&description, "A name that breaks the spec-name rule"),
             [Uncreatable::InvalidName.kind()]
         );
+    }
+
+    // Both audit descriptions list exactly the labels an audit that gave no
+    // answer can take: every check failure's but `internal`, which only a check
+    // task in `package list` can produce.
+    #[test]
+    fn the_audit_descriptions_list_every_failure_label() {
+        use selfie::package::event::CheckFailure;
+        use strum::VariantNames;
+
+        let internal = CheckFailure::Internal {
+            message: selfie::commands::BoundedText::bound(b""),
+        }
+        .kind();
+        let expected: Vec<&str> = CheckFailure::VARIANTS
+            .iter()
+            .copied()
+            .filter(|label| *label != internal)
+            .collect();
+        for tool in [
+            SelfieServer::package_audit_tool_attr(),
+            SelfieServer::package_audit_all_tool_attr(),
+        ] {
+            let description = tool.description.unwrap_or_default();
+            let mut listed = labels_after(&description, "`kind` is \"canceled\"");
+            // The sentence names `working_directory_unusable` twice.
+            listed.sort_unstable();
+            listed.dedup();
+            let mut expected = expected.clone();
+            expected.sort_unstable();
+            assert_eq!(listed, expected, "{}", tool.name);
+        }
     }
 
     // The quoted labels in the sentence of `description` that starts at `lead`.
