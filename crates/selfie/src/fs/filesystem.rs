@@ -418,7 +418,7 @@ pub trait FileSystem: Send + Sync {
         let refusal = |path: &Path, kind: io::ErrorKind| {
             Some(FileSystemError::CannotCreateIn {
                 path: path.to_path_buf(),
-                source: Arc::new(io::Error::from(kind)),
+                cause: Arc::new(io::Error::from(kind)),
             })
         };
         // Walked through `directory_state`, so a file, a dangling link or an
@@ -455,7 +455,7 @@ pub trait FileSystem: Send + Sync {
                 DirectoryState::Unlistable(error) | DirectoryState::Unknown(error) => {
                     return Some(FileSystemError::CannotCreateIn {
                         path: candidate,
-                        source: Arc::new(io::Error::new(error.kind(), error.to_string())),
+                        cause: Arc::new(io::Error::new(error.kind(), error.to_string())),
                     });
                 }
             }
@@ -598,11 +598,10 @@ pub enum FileSystemError {
 
     /// A new file cannot be created under `path`: the directory it was asked
     /// about, or the nearest ancestor of it that exists, refuses one.
-    #[error("{}: {source}", .path.display())]
+    #[error("{}: {cause}", .path.display())]
     CannotCreateIn {
         path: PathBuf,
-        #[source]
-        source: Arc<io::Error>,
+        cause: Arc<io::Error>,
     },
 }
 
@@ -814,6 +813,22 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    // A file-system error names its cause once and does not also chain it, so a
+    // consumer walking the chain does not print the cause twice.
+    #[test]
+    fn every_file_system_error_names_its_cause_once() {
+        use std::error::Error as _;
+
+        let error = FileSystemError::CannotCreateIn {
+            path: PathBuf::from("/state"),
+            cause: Arc::new(io::Error::other("the cause")),
+        };
+
+        let message = error.to_string();
+        assert_eq!(message.matches("the cause").count(), 1, "{message}");
+        assert!(error.source().is_none(), "{message} also chains its cause");
+    }
 
     // The `other` arm fails closed. Nothing returns a non-`IrregularTarget`
     // variant from `irregular_target_refusal` today, so this is the only thing

@@ -379,11 +379,13 @@ async fn install_stops_at_a_check_that_cannot_enter_the_package_directory() {
         &format!("    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n"),
     );
     let gone = temp.path().join("gone");
-    let unusable = selfie::commands::CommandError::WorkingDirectoryUnusable {
-        command: CHECK_CMD.to_string(),
-        working_directory: gone.clone(),
-        source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
-    };
+    let unusable = selfie::commands::CommandError::WorkingDirectoryUnusable(
+        selfie::commands::runner::UnusableDirectory::new(
+            CHECK_CMD.to_string(),
+            gone.clone(),
+            std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        ),
+    );
     let runner = FakeCommandRunner::new()
         .erroring(CHECK_CMD, unusable)
         .succeeding(INSTALL_CMD, b"");
@@ -398,10 +400,15 @@ async fn install_stops_at_a_check_that_cannot_enter_the_package_directory() {
     let OperationResult::Failure(failure) = completed(&events) else {
         panic!("install must fail: {events:?}");
     };
-    assert!(
-        failure.to_string().contains(&gone.display().to_string()),
-        "the failure must name the directory: {failure}"
-    );
+    // The typed failure, carrying the directory, with the error's own sentence.
+    let selfie::package::event::OperationFailure::CommandError(
+        selfie::package::event::CommandFailure::WorkingDirectoryUnusable(unusable),
+    ) = failure
+    else {
+        panic!("expected an unusable working directory, got {failure:?}");
+    };
+    assert_eq!(unusable.working_directory(), gone.as_path());
+    assert_eq!(failure.to_string(), unusable.to_string(), "{failure}");
     let commands: Vec<String> = runner.calls().into_iter().map(|(c, _)| c).collect();
     assert_eq!(
         commands,
@@ -426,11 +433,13 @@ async fn check_names_a_package_directory_it_cannot_enter_not_the_command() {
         &format!("    install: \"true\"\n    check: \"{CHECK_CMD}\"\n"),
     );
     let gone = temp.path().join("gone");
-    let unusable = selfie::commands::CommandError::WorkingDirectoryUnusable {
-        command: CHECK_CMD.to_string(),
-        working_directory: gone.clone(),
-        source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
-    };
+    let unusable = selfie::commands::CommandError::WorkingDirectoryUnusable(
+        selfie::commands::runner::UnusableDirectory::new(
+            CHECK_CMD.to_string(),
+            gone.clone(),
+            std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        ),
+    );
     let runner = FakeCommandRunner::new().erroring(CHECK_CMD, unusable);
 
     let events = collect_events(service(temp.path(), temp.path(), runner).check("pkg").await).await;
@@ -438,11 +447,15 @@ async fn check_names_a_package_directory_it_cannot_enter_not_the_command() {
     let OperationResult::Failure(failure) = completed(&events) else {
         panic!("check must fail: {events:?}");
     };
+    let selfie::package::event::OperationFailure::CommandError(
+        selfie::package::event::CommandFailure::WorkingDirectoryUnusable(unusable),
+    ) = failure
+    else {
+        panic!("expected an unusable working directory, got {failure:?}");
+    };
+    assert_eq!(unusable.working_directory(), gone.as_path());
     let rendered = failure.to_string();
-    assert!(
-        rendered.contains(&gone.display().to_string()),
-        "the failure must name the directory: {rendered}"
-    );
+    assert_eq!(rendered, unusable.to_string());
     assert!(
         !rendered.contains("Invalid command"),
         "the check command is not at fault: {rendered}"

@@ -21,6 +21,10 @@ fn failure_json(failure: &OperationFailure) -> Value {
     if let OperationFailure::InvalidSpec { issues, .. } = failure {
         payload["issues"] = issues.iter().map(issue_json).collect::<Vec<_>>().into();
     }
+    // A refused create carries its reason as a label.
+    if let OperationFailure::Uncreatable { reason, .. } = failure {
+        payload["kind"] = reason.kind().into();
+    }
     // A field, so an assistant can tell a typo from a spec that failed to load
     // without matching the sentence in `error`.
     if let OperationFailure::NoSuchPackage { reason, .. } = failure {
@@ -365,7 +369,7 @@ fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value
     // reports a location, rather than inheriting `None` from an arm that never
     // considered it.
     let (at, reason) = match error.kind() {
-        PackageParseKind::Yaml { source } => (source.location(), source.reason()),
+        PackageParseKind::Yaml { cause } => (cause.location(), cause.reason()),
         other @ (PackageParseKind::Io { .. }
         | PackageParseKind::Unreadable { .. }
         | PackageParseKind::IrregularFile { .. }
@@ -420,14 +424,20 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             }),
             check_failure_fields(Some(&check_result.result)),
         )),
-        PackageEvent::AuditResultCompleted { audit_result, .. } => Some(serde_json::json!({
-            "type": "audit_result",
-            "package": &audit_result.package_name,
-            "environment": &audit_result.environment,
-            "command": &audit_result.audit_command,
-            "status": format!("{}", audit_result.result),
-            "details": audit_details(&audit_result.result),
-        })),
+        PackageEvent::AuditResultCompleted { audit_result, .. } => Some(with_fields(
+            serde_json::json!({
+                "type": "audit_result",
+                "package": &audit_result.package_name,
+                "environment": &audit_result.environment,
+                "command": &audit_result.audit_command,
+                "status": format!("{}", audit_result.result),
+                "details": audit_details(&audit_result.result),
+            }),
+            failure_fields(match &audit_result.result {
+                AuditResult::CouldNotRun(failure) => Some(failure),
+                _ => None,
+            }),
+        )),
         PackageEvent::PackageInfoLoaded { package_info, .. } => {
             let dotfiles: Vec<Value> = package_info
                 .dotfiles
@@ -945,16 +955,23 @@ fn with_fields(mut row: Value, fields: serde_json::Map<String, Value>) -> Value 
 /// and `working_directory`, which is set only for a directory that could not be
 /// entered. All three are null for a check that answered.
 fn check_failure_fields(result: Option<&CheckResult>) -> serde_json::Map<String, Value> {
-    use selfie::package::event::CheckFailure;
-
-    let failure = match result {
+    failure_fields(match result {
         Some(CheckResult::CouldNotRun(failure)) => Some(failure),
         _ => None,
-    };
+    })
+}
+
+/// Renders why a check or audit command gave no answer as `kind`, `reason`
+/// and `working_directory`, each null where it does not apply.
+fn failure_fields(
+    failure: Option<&selfie::package::event::CheckFailure>,
+) -> serde_json::Map<String, Value> {
+    use selfie::package::event::CheckFailure;
+
     let working_directory = match failure {
-        Some(CheckFailure::WorkingDirectoryUnusable {
-            working_directory, ..
-        }) => Some(working_directory.display().to_string()),
+        Some(CheckFailure::WorkingDirectoryUnusable(unusable)) => {
+            Some(unusable.working_directory().display().to_string())
+        }
         _ => None,
     };
     let mut fields = serde_json::Map::new();
@@ -1056,6 +1073,7 @@ fn audit_details(result: &AuditResult) -> Value {
         }
         AuditResult::NotInstalled | AuditResult::NoAuditCommand => Value::Null,
         AuditResult::Error(e) => serde_json::json!({ "error": e }),
+        AuditResult::CouldNotRun(failure) => serde_json::json!({ "error": failure.to_string() }),
     }
 }
 
@@ -1611,6 +1629,19 @@ mod tests {
         assert!(rows.iter().all(|r| r.get("status").is_none()), "{rows:?}");
     }
 
+    // A refused spec create says why as a label.
+    #[test]
+    fn an_uncreatable_spec_carries_its_kind() {
+        use selfie::package::event::Uncreatable;
+
+        let payload = failure_json(&OperationFailure::Uncreatable {
+            package_name: "../x".to_string(),
+            reason: Uncreatable::InvalidName,
+        });
+
+        assert_eq!(payload["kind"], "invalid_name");
+    }
+
     // An orphan is a row of its own and a count in the result, and leaves the
     // result a success.
     #[tokio::test]
@@ -1783,27 +1814,69 @@ mod tests {
         assert_eq!(result.data["result"]["outcome"], "found");
     }
 
-    // An audit whose command failed is a success value that cannot answer the
-    // question and refused nothing: an error result, with a status of its own.
+    // An audit whose command failed, and one that could not run, are each a
+    // success value that cannot answer the question and refused nothing: an
+    // error result, with a status of its own.
     #[tokio::test]
     async fn an_audit_that_could_not_run_is_an_error_result_with_a_failed_status() {
-        use selfie::package::event::{OperationSuccess, StepCount};
+        use selfie::package::event::{CheckFailure, OperationSuccess, StepCount};
 
-        let events = vec![PackageEvent::Completed {
+        for audit_result in [
+            AuditResult::Error("Audit command failed (exit code 1): ".to_string()),
+            AuditResult::CouldNotRun(CheckFailure::CouldNotStart {
+                message: selfie::commands::BoundedText::bound(b"spawn failed"),
+            }),
+        ] {
+            let events = vec![PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::PackageAudited {
+                    package_name: "p".to_string(),
+                    environment: "test".to_string(),
+                    audit_result,
+                    steps_completed: StepCount::new(1, 1),
+                }),
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            assert!(!result.success);
+            assert_eq!(result.data["result"]["status"], "failed");
+            assert_eq!(result.data["result"]["outcome"], "failed");
+        }
+    }
+
+    // An audit that gave no answer keeps its published status and says why
+    // with the fields a check row carries.
+    #[tokio::test]
+    async fn an_audit_that_gave_no_answer_says_why_as_a_check_does() {
+        use selfie::commands::runner::{CommandError, UnusableDirectory};
+        use selfie::package::event::{AuditResultData, CheckFailure};
+
+        let failure = CheckFailure::from(&CommandError::WorkingDirectoryUnusable(
+            UnusableDirectory::new(
+                "audit-p",
+                "/gone",
+                std::sync::Arc::new(std::io::Error::other("missing")),
+            ),
+        ));
+        let events = vec![PackageEvent::AuditResultCompleted {
             operation_info: test_op_info(),
-            result: OperationResult::Success(OperationSuccess::PackageAudited {
+            audit_result: AuditResultData {
                 package_name: "p".to_string(),
                 environment: "test".to_string(),
-                audit_result: AuditResult::Error("spawn failed".to_string()),
-                steps_completed: StepCount::new(1, 1),
-            }),
+                audit_command: Some("audit-p".to_string()),
+                result: AuditResult::CouldNotRun(failure.clone()),
+            },
         }];
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
-        assert!(!result.success);
-        assert_eq!(result.data["result"]["status"], "failed");
-        assert_eq!(result.data["result"]["outcome"], "failed");
+        let row = &result.data["data"][0];
+        assert_eq!(row["status"], "with errors", "{row}");
+        assert_eq!(row["kind"], "working_directory_unusable", "{row}");
+        assert_eq!(row["reason"], failure.to_string(), "{row}");
+        assert_eq!(row["working_directory"], "/gone", "{row}");
+        assert_eq!(row["details"]["error"], failure.to_string(), "{row}");
     }
 
     // A check that ran and found the package missing answered the question, so
@@ -1971,7 +2044,7 @@ mod tests {
         };
         let events = vec![
             row(CheckResult::CouldNotRun(CheckFailure::CouldNotStart {
-                message: "m".to_string(),
+                message: selfie::commands::BoundedText::bound(b"m"),
             })),
             row(CheckResult::CouldNotRun(CheckFailure::TimedOut(
                 selfie::commands::runner::TimedOut::new(
@@ -2036,11 +2109,15 @@ mod tests {
         use selfie::package::event::{CheckFailure, PackageListItem};
 
         let failure = || {
-            CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable {
-                command: "check-p".to_string(),
-                working_directory: "/gone".into(),
-                message: "Cannot run 'check-p' in /gone: missing".to_string(),
-            })
+            CheckResult::CouldNotRun(CheckFailure::from(
+                &selfie::commands::runner::CommandError::WorkingDirectoryUnusable(
+                    selfie::commands::runner::UnusableDirectory::new(
+                        "check-p".to_string(),
+                        "/gone",
+                        std::sync::Arc::new(std::io::Error::other("missing")),
+                    ),
+                ),
+            ))
         };
         let events = vec![
             PackageEvent::CheckResultCompleted {
@@ -2180,7 +2257,7 @@ mod tests {
             .expect_err("the fixture must not parse");
         let error = selfie::package::port::PackageParseError::new(
             "/packages/creds.yml",
-            selfie::package::port::PackageParseKind::Yaml { source },
+            selfie::package::port::PackageParseKind::Yaml { cause: source },
         );
 
         let events = vec![PackageEvent::SpecSkipped {
@@ -2277,7 +2354,7 @@ mod tests {
                 .expect_err("the fixture must not parse");
         let error = selfie::package::port::PackageParseError::new(
             "/packages/creds.yml",
-            selfie::package::port::PackageParseKind::Yaml { source },
+            selfie::package::port::PackageParseKind::Yaml { cause: source },
         );
 
         let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::SpecListLoaded {
@@ -2312,7 +2389,7 @@ mod tests {
                 .expect_err("the fixture must not parse");
         let error = selfie::package::port::PackageParseError::new(
             "/packages/creds.yml",
-            selfie::package::port::PackageParseKind::Yaml { source },
+            selfie::package::port::PackageParseKind::Yaml { cause: source },
         );
 
         let stream: EventStream = Box::pin(stream::iter(vec![PackageEvent::PackageListLoaded {
@@ -2487,9 +2564,9 @@ mod tests {
             name: "creds".to_string(),
             packages_path: std::path::PathBuf::from("/packages"),
             failed_file: std::path::PathBuf::from("/packages/creds.yml"),
-            source: selfie::package::port::PackageParseError::new(
+            cause: selfie::package::port::PackageParseError::new(
                 "/packages/creds.yml",
-                selfie::package::port::PackageParseKind::Yaml { source },
+                selfie::package::port::PackageParseKind::Yaml { cause: source },
             ),
         };
 
@@ -2747,7 +2824,10 @@ mod tests {
             name: "dep".to_string(),
             packages_path: "/packages".into(),
             failed_file: "/packages/dep.yml".into(),
-            source: PackageParseError::new("/packages/dep.yml", PackageParseKind::Yaml { source }),
+            cause: PackageParseError::new(
+                "/packages/dep.yml",
+                PackageParseKind::Yaml { cause: source },
+            ),
         })
     }
 
@@ -2788,7 +2868,7 @@ mod tests {
             (UnknownStatus::NoCheckCommand, "no_check_command"),
             (
                 UnknownStatus::CheckFailed(CheckFailure::Canceled {
-                    message: "m".to_string(),
+                    message: selfie::commands::BoundedText::bound(b"m"),
                 }),
                 "canceled",
             ),

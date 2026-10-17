@@ -193,8 +193,9 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 
         let content = self.read_spec_file(path)?;
 
-        let mut package: Package = crate::yaml::parse(&content)
-            .map_err(|source| PackageParseError::new(path, PackageParseKind::Yaml { source }))?;
+        let mut package: Package = crate::yaml::parse(&content).map_err(|source| {
+            PackageParseError::new(path, PackageParseKind::Yaml { cause: source })
+        })?;
         package.set_source(path.to_path_buf(), content, self.origin);
 
         Ok(package)
@@ -213,7 +214,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 // a sentence meant for elsewhere.
 fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError {
     let kind = match failure {
-        FileSystemError::IoError(source) => PackageParseKind::Io { source },
+        FileSystemError::IoError(source) => PackageParseKind::Io { cause: source },
         FileSystemError::IrregularTarget { kind, .. } => PackageParseKind::IrregularFile { kind },
         FileSystemError::SymlinkedTarget { points_to, .. } => PackageParseKind::Refused {
             reason: match points_to {
@@ -337,19 +338,19 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
                     name: name.to_string(),
                     packages_path: self.package_dir.clone(),
                     failed_file: package_file.clone(),
-                    source,
+                    cause: source,
                 },
                 PackageParseKind::InvalidName { .. } => PackageError::UnusableName {
                     name: name.to_string(),
                     packages_path: self.package_dir.clone(),
                     failed_file: package_file.clone(),
-                    source,
+                    cause: source,
                 },
                 PackageParseKind::Yaml { .. } => PackageError::ParseError {
                     name: name.to_string(),
                     packages_path: self.package_dir.clone(),
                     failed_file: package_file.clone(),
-                    source,
+                    cause: source,
                 },
             })?;
 
@@ -440,12 +441,8 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         }
 
         // Serialize the package to YAML
-        let yaml_content = serde_saphyr::to_string(package).map_err(|e| {
-            PackageRepoError::IoError(Arc::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to serialize package to YAML: {e}"),
-            )))
-        })?;
+        let yaml_content =
+            crate::yaml::serialize(package).map_err(PackageRepoError::Unserializable)?;
 
         // Write the YAML content to the specified path.
         //
@@ -1070,7 +1067,7 @@ mod tests {
                 PackageError::ParseError {
                     name,
                     packages_path,
-                    source,
+                    cause: source,
                     ..
                 } => {
                     assert_eq!(name, "invalid");

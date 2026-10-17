@@ -438,11 +438,13 @@ fn spawn_error(
     // directory and nothing ran; this probe only picks the message, so a race
     // can misname a failure but never runs a line of the command.
     if is_unenterable(working_dir) {
-        return CommandError::WorkingDirectoryUnusable {
-            command: command.to_string(),
-            working_directory: working_dir.to_path_buf(),
-            source: Arc::new(source),
-        };
+        return CommandError::WorkingDirectoryUnusable(
+            crate::commands::runner::UnusableDirectory::new(
+                command.to_string(),
+                working_dir.to_path_buf(),
+                Arc::new(source),
+            ),
+        );
     }
     CommandError::SpawnFailed {
         command: command.to_string(),
@@ -452,7 +454,7 @@ fn spawn_error(
             .to_string_lossy()
             .into_owned(),
         working_directory: working_dir.to_path_buf(),
-        source: Arc::new(source),
+        cause: Arc::new(source),
     }
 }
 
@@ -520,7 +522,7 @@ where
             command: command.to_string(),
             working_directory: working_directory.to_path_buf(),
             stream,
-            source: Arc::new(source),
+            cause: Arc::new(source),
         }
     };
 
@@ -529,7 +531,7 @@ where
             wait.await.map_err(|e| CommandError::IoError {
                 command: command.to_string(),
                 working_directory: working_directory.to_path_buf(),
-                source: Arc::new(e),
+                cause: Arc::new(e),
             })
         },
         async { stdout.await.map_err(read_failed(OutputStream::Stdout)) },
@@ -670,7 +672,7 @@ where
                     command: command.to_string(),
                     working_directory: working_directory.to_path_buf(),
                     stream,
-                    source: Arc::new(source),
+                    cause: Arc::new(source),
                 })?;
 
             // The captured output accumulates the raw bytes...
@@ -702,7 +704,7 @@ where
         child.wait().await.map_err(|e| CommandError::IoError {
             command: command.to_string(),
             working_directory: working_directory.to_path_buf(),
-            source: Arc::new(e),
+            cause: Arc::new(e),
         })
     };
 
@@ -1302,7 +1304,7 @@ mod tests {
         let cmd_error = CommandError::IoError {
             command: "test-command".to_string(),
             working_directory: PathBuf::from("/tmp"),
-            source: Arc::new(io_error),
+            cause: Arc::new(io_error),
         };
         assert!(cmd_error.to_string().contains("test-command"));
 
@@ -1478,9 +1480,9 @@ mod tests {
     // Asserts `error` blames `dir`, by variant and in the message a user reads.
     fn assert_unusable(error: &CommandError, dir: &Path) {
         match error {
-            CommandError::WorkingDirectoryUnusable {
-                working_directory, ..
-            } => assert_eq!(working_directory, dir),
+            CommandError::WorkingDirectoryUnusable(unusable) => {
+                assert_eq!(unusable.working_directory(), dir);
+            }
             other => panic!("expected WorkingDirectoryUnusable, got: {other:?}"),
         }
         let rendered = error.to_string();

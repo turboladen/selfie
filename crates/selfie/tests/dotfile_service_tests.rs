@@ -16437,7 +16437,7 @@ mod orphans {
             DeployState::empty()
         };
         state.record_deployment(target, source, "seeded", package, None);
-        std::fs::write(&path, serde_saphyr::to_string(&state).unwrap()).unwrap();
+        std::fs::write(&path, selfie::yaml::serialize(&state).unwrap()).unwrap();
     }
 
     // A file the user still has at an orphaned target.
@@ -16957,7 +16957,7 @@ mod orphans {
         }
         std::fs::write(
             dirs.state_dir.join("deploy-state.yml"),
-            serde_saphyr::to_string(&state).unwrap(),
+            selfie::yaml::serialize(&state).unwrap(),
         )
         .unwrap();
 
@@ -17007,7 +17007,7 @@ mod orphans {
         }
         std::fs::write(
             dirs.state_dir.join("deploy-state.yml"),
-            serde_saphyr::to_string(&state).unwrap(),
+            selfie::yaml::serialize(&state).unwrap(),
         )
         .unwrap();
 
@@ -17049,7 +17049,7 @@ mod orphans {
         state.record_deployment(&key, "alpha/a", entry.checksum(), Some("alpha"), None);
         std::fs::write(
             dirs.state_dir.join("deploy-state.yml"),
-            serde_saphyr::to_string(&state).unwrap(),
+            selfie::yaml::serialize(&state).unwrap(),
         )
         .unwrap();
         // The save fails after the run's own write check has passed, as on a
@@ -17098,7 +17098,7 @@ mod orphans {
         }
         std::fs::write(
             dirs.state_dir.join("deploy-state.yml"),
-            serde_saphyr::to_string(&state).unwrap(),
+            selfie::yaml::serialize(&state).unwrap(),
         )
         .unwrap();
 

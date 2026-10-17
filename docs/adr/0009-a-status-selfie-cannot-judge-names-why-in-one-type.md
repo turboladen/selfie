@@ -81,7 +81,7 @@ Rejected: a nested `unknown` object on the root only. It gives one fact two shap
 
 ```rust
 pub enum CheckFailure { Canceled { message }, CouldNotStart { message },
-                        WorkingDirectoryUnusable { command, working_directory, message },
+                        WorkingDirectoryUnusable(UnusableDirectory),
                         TimedOut(TimedOut), ResultUnreadable { message }, Internal { message } }
 ```
 
@@ -101,7 +101,16 @@ A check gives `CheckResult::Success` or `CheckResult::Failed` when it ran and an
 have run. `ResultUnreadable` means the check started and selfie could not read its result to the
 end: its output, or its exit status, which a failed wait loses. `Internal` is a check task that
 panicked, which only `package list`'s own tasks can do; its sentence says it is a bug in selfie.
-Each sentence is the `CommandError`'s own.
+Each sentence is the `CommandError`'s own, bounded as forwarded text is, so one that embeds a long
+command is elided in the middle. The types that carry the sentence apply the bound themselves.
+
+`CommandError::WorkingDirectoryUnusable` carries an `UnusableDirectory`: the command, the directory
+and the cause, with its sentence derived from them. A check carries that value as
+`CheckFailure::WorkingDirectoryUnusable`. An operation that fails on it, from a check or from an
+install command, fails as `CommandFailure::WorkingDirectoryUnusable`. An audit that gives no answer,
+for this or any other cause, succeeds with `AuditResult::CouldNotRun` carrying the same
+`CheckFailure`, and its MCP row carries the fields a check row does. A dotfile `command:` source
+reports it through its own resolve error.
 
 A check that could not run reaches its row as `CouldNotRun` in `package check`, `package list` and
 `package status`. `package check` then fails as the error does. `package list` and `package status`
@@ -133,7 +142,9 @@ rename is a reviewed contract change, and no table can drift from its enum.
 - `package check` and `package list` rows keep their published `status` values, `"error"` and
   `"timed out"`, and carry `kind`, `reason` and `working_directory`, and a listing row also
   `command`, for a check that gave no answer.
-- The CLI prints one sentence per status. `Display` on each type is that sentence.
+- The CLI prints one sentence per status. `Display` on each type is that sentence. An operation that
+  fails on an unusable working directory reads as the error's own sentence, with no `Command error:`
+  prefix.
 - Exit codes are unchanged: 0006 scores a canceled run 130, and a check selfie timed out or could
   not start as Failed.
 - Whether a validation's stored outcome can disagree with its counts is a separate question, and

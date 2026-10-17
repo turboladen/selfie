@@ -17,15 +17,75 @@
 // snippet quotes a window of lines around the failure rather than the failing line.
 //
 // The exception `clippy.toml` exists to create. This module holds the workspace's
-// only deserializing call of serde-saphyr, and the classifier has to name the
-// parser's own error type to take one apart. Everywhere else, both are denied.
+// only call of serde-saphyr in each direction, and the classifiers have to name
+// its own error types to take one apart. Everywhere else, all of them are denied.
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    reason = "the entry point and classifier every other caller is funneled into"
+    reason = "the entry points and classifiers every other caller is funneled into"
 )]
 
 use serde::de::DeserializeOwned;
+
+/// Write `value` as YAML.
+///
+/// # Errors
+///
+/// A [`SerializeFailure`] when `value` cannot be written as YAML. It names the
+/// kind of failure and never quotes the value.
+pub fn serialize<T: serde::Serialize>(value: &T) -> Result<String, SerializeFailure> {
+    serde_saphyr::to_string(value).map_err(|e| SerializeFailure::of(&e))
+}
+
+/// Why a value could not be written as YAML, without quoting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerializeFailure {
+    /// A value refused to be written, or its own rendering failed.
+    Value,
+    /// The serializer failed in a way that is a bug in selfie, not in the value.
+    Internal,
+}
+
+impl SerializeFailure {
+    // Classified from the variant alone. Two of serde-saphyr's variants carry free
+    // text: `Message` holds whatever a `Serialize` impl said, which can name a key
+    // or quote a value, and `Unexpected` holds the serializer's own words. Neither
+    // is rendered.
+    //
+    // The value's: `Message`, `Format` (a `Display` impl failing inside
+    // `collect_str`), and the four the `SingleQuoted` and `Tagged` wrappers raise
+    // about what they were given. Selfie's: `Unexpected`, serde-saphyr's own
+    // invariant violation; `InvalidOptions`, since selfie passes none; and `IO`,
+    // which only the `io::Write` adapter builds, while `serialize` writes into a
+    // `String` through `fmt::Write`.
+    fn of(error: &serde_saphyr::SerializeError) -> Self {
+        use serde_saphyr::SerializeError as E;
+        match error {
+            E::Message { .. }
+            | E::Format { .. }
+            | E::SingleQuotedRequiresEscaping { .. }
+            | E::EmptyResolvedTag
+            | E::InvalidGlobalTagUri { .. }
+            | E::CoreTypeTagAsEnumVariant { .. } => Self::Value,
+            E::Unexpected { .. } | E::InvalidOptions(_) | E::IO { .. } => Self::Internal,
+            // `SerializeError` is `#[non_exhaustive]`, so a variant added later
+            // lands here. It is classed as selfie's until someone reads what it
+            // means and lists it above.
+            _ => Self::Internal,
+        }
+    }
+}
+
+impl std::fmt::Display for SerializeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Value => "a value in it has a shape YAML cannot hold",
+            Self::Internal => "the YAML serializer failed, which is a bug in selfie",
+        })
+    }
+}
+
+impl std::error::Error for SerializeFailure {}
 
 /// Read `content` as `T`.
 ///
@@ -447,6 +507,87 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     use std::collections::HashMap;
+
+    // A value whose `Serialize` impl fails with its own words, as one naming a
+    // key or a value would.
+    struct Refuses;
+
+    impl serde::Serialize for Refuses {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("hunter2-is-the-value"))
+        }
+    }
+
+    // A write failure never quotes what the value said; the control shows the
+    // raw error does.
+    #[test]
+    fn a_write_failure_does_not_quote_the_value() {
+        let raw = serde_saphyr::to_string(&Refuses).unwrap_err().to_string();
+        assert!(raw.contains("hunter2-is-the-value"), "control: {raw}");
+
+        let failure = serialize(&Refuses).unwrap_err();
+
+        assert_eq!(failure, SerializeFailure::Value);
+        assert!(!failure.to_string().contains("hunter2"), "{failure}");
+    }
+
+    // A failure the value causes, wrappers included, is the value's; one only
+    // selfie or serde-saphyr can cause is selfie's.
+    #[test]
+    fn a_write_failure_is_classed_by_whose_it_is() {
+        use serde_saphyr::SerializeError as E;
+
+        let tag = || "!x".to_string();
+        let cases = [
+            (
+                E::Message {
+                    msg: "m".to_string(),
+                },
+                SerializeFailure::Value,
+            ),
+            (
+                E::Format {
+                    error: std::fmt::Error,
+                },
+                SerializeFailure::Value,
+            ),
+            (
+                E::SingleQuotedRequiresEscaping { ch: '\n' },
+                SerializeFailure::Value,
+            ),
+            (E::EmptyResolvedTag, SerializeFailure::Value),
+            (
+                E::InvalidGlobalTagUri { tag: tag() },
+                SerializeFailure::Value,
+            ),
+            (
+                E::CoreTypeTagAsEnumVariant {
+                    tag: tag(),
+                    variant: "v".to_string(),
+                },
+                SerializeFailure::Value,
+            ),
+            (
+                E::Unexpected {
+                    msg: "m".to_string(),
+                },
+                SerializeFailure::Internal,
+            ),
+            (
+                E::InvalidOptions("o".to_string()),
+                SerializeFailure::Internal,
+            ),
+            (
+                E::IO {
+                    error: std::io::Error::other("e"),
+                },
+                SerializeFailure::Internal,
+            ),
+        ];
+        for (error, class) in cases {
+            assert_eq!(SerializeFailure::of(&error), class, "{error:?}");
+        }
+    }
 
     // Line 0 is the parser's unknown location, so it cannot be built. Column 0
     // on a real line is a location like any other.

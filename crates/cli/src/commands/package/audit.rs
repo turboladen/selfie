@@ -143,6 +143,9 @@ fn display_audit_output_only(audit_result: &AuditResultData, display: &DisplayMa
         AuditResult::Error(err) => {
             display.print_error(format!("{} — error: {}", audit_result.package_name, err));
         }
+        AuditResult::CouldNotRun(failure) => {
+            display.print_error(format!("{} — error: {failure}", audit_result.package_name));
+        }
     }
 }
 
@@ -153,6 +156,14 @@ fn display_audit_summary_line(
 ) {
     let use_colors = config.use_colors();
     let name = &audit_result.package_name;
+    let error = |err: &str| {
+        let label = if use_colors {
+            console::style("error").red().to_string()
+        } else {
+            "error".to_string()
+        };
+        format!("{label}: {err}")
+    };
 
     let status = match &audit_result.result {
         AuditResult::Clean { sources } => {
@@ -198,14 +209,8 @@ fn display_audit_summary_line(
                 "no audit command".to_string()
             }
         }
-        AuditResult::Error(err) => {
-            let label = if use_colors {
-                console::style("error").red().to_string()
-            } else {
-                "error".to_string()
-            };
-            format!("{label}: {err}")
-        }
+        AuditResult::Error(err) => error(err),
+        AuditResult::CouldNotRun(failure) => error(&failure.to_string()),
     };
 
     display.println(format!("  {name}: {status}"));
@@ -230,6 +235,15 @@ fn display_audit_result_card(
     let format_key_fn =
         |field: &str| -> String { format!("{}{}: ", INDENT, format_key(field, use_colors)) };
 
+    let error = |err: &str| {
+        format!(
+            "{}{}\n{}{}",
+            format_key_fn("Status"),
+            status_style::format_status_error(use_colors),
+            format_key_fn("Details"),
+            err
+        )
+    };
     let status_line = match &audit_result.result {
         AuditResult::Clean { sources } => {
             format!(
@@ -277,16 +291,56 @@ fn display_audit_result_card(
                 status_style::format_no_audit(use_colors)
             )
         }
-        AuditResult::Error(err) => {
-            format!(
-                "{}{}\n{}{}",
-                format_key_fn("Status"),
-                status_style::format_status_error(use_colors),
-                format_key_fn("Details"),
-                err
-            )
-        }
+        AuditResult::Error(err) => error(err),
+        AuditResult::CouldNotRun(failure) => error(&failure.to_string()),
     };
 
     display.println(status_line);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use selfie::package::event::CheckFailure;
+
+    // An audit that could not run prints, in each of the three places an audit
+    // result is shown, exactly what an audit error with the same sentence
+    // prints.
+    #[test]
+    fn an_audit_that_could_not_run_prints_as_an_audit_error() {
+        let failure = CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
+            "sleep 9",
+            std::time::Duration::from_secs(1),
+        ));
+        let row = |result| AuditResultData {
+            package_name: "p".to_string(),
+            environment: "test".to_string(),
+            audit_command: Some("sleep 9".to_string()),
+            result,
+        };
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(
+            std::path::Path::new("/packages"),
+        ));
+        let printed = |audit: &AuditResultData| {
+            let display = DisplayManager::new(false);
+            display_audit_output_only(audit, &display);
+            display_audit_summary_line(audit, &config, &display);
+            display_audit_result_card(audit, &config, &display);
+            display.printed()
+        };
+
+        let could_not_run = printed(&row(AuditResult::CouldNotRun(failure.clone())));
+        let error = printed(&row(AuditResult::Error(failure.to_string())));
+
+        assert_eq!(could_not_run, error);
+        let sentence = failure.to_string();
+        assert_eq!(
+            could_not_run
+                .iter()
+                .filter(|(_, line)| line.contains(&sentence))
+                .count(),
+            3,
+            "{could_not_run:?}"
+        );
+    }
 }

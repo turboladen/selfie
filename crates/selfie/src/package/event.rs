@@ -1219,15 +1219,23 @@ pub enum OperationFailure {
         package_name: String,
         reason: String,
     },
-    /// A spec that would not pass `spec validate`, so nothing was written.
+    /// A spec write that validation refused, so nothing was written.
     ///
     /// `issues` lists every issue the validation found, errors first, then
     /// warnings and notices, in the shape a validation result carries.
     // Typed so an adapter can render each issue in its own channel, and an MCP
     // client gets the fields rather than a sentence to parse.
     InvalidSpec {
+        /// Whether the spec was being created or updated.
+        action: SpecWrite,
         package_name: String,
         issues: Vec<ValidationIssueData>,
+    },
+    /// A spec `spec create` refuses to write for its name or its path, before
+    /// anything is looked up or written.
+    Uncreatable {
+        package_name: String,
+        reason: Uncreatable,
     },
     /// A command named a package it could not find.
     // Typed rather than folded into `Generic` so an adapter can tell a typo from
@@ -1238,6 +1246,61 @@ pub enum OperationFailure {
     },
     /// Generic failure with a freeform message
     Generic(String),
+}
+
+/// Why `spec create` refuses a spec by its name or its path.
+///
+/// [`kind`](Self::kind) is its label, the variant's name in snake_case.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum Uncreatable {
+    /// The package name breaks the spec-name rule.
+    InvalidName,
+    /// The spec's path is not directly in the package directory.
+    OutsidePackageDirectory {
+        path: std::path::PathBuf,
+        directory: std::path::PathBuf,
+    },
+    /// The spec's file name is not one the loader reads as a spec.
+    UnloadableFileName { path: std::path::PathBuf },
+}
+
+impl Uncreatable {
+    /// The label for this refusal, such as `"invalid_name"`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+
+    /// The sentence refusing to create `package_name` for this reason.
+    #[must_use]
+    pub fn refusal(&self, package_name: &str) -> String {
+        match self {
+            Self::InvalidName => format!(
+                "Refusing to create '{package_name}': it is not a valid spec name. Rename it: {}.",
+                crate::package::SPEC_NAME_RULE
+            ),
+            Self::OutsidePackageDirectory { path, directory } => format!(
+                "Refusing to create '{package_name}': {} is not directly in the package \
+                 directory {}, where every spec has to be.",
+                path.display(),
+                directory.display()
+            ),
+            Self::UnloadableFileName { path } => format!(
+                "Refusing to create '{package_name}': selfie would not load {} as a spec. Its \
+                 name before the .yml or .yaml extension has to follow the rule for a package \
+                 name.",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// A write to a spec that validation can refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecWrite {
+    Create,
+    Update,
 }
 
 /// Why a named package could not be found.
@@ -1289,6 +1352,8 @@ pub enum CommandFailure {
     },
     /// A command ran past its timeout and was stopped.
     TimedOut(TimedOut),
+    /// A command could not enter the directory it was to run in.
+    WorkingDirectoryUnusable(crate::commands::runner::UnusableDirectory),
 }
 
 /// Dependency resolution failure details
@@ -1325,6 +1390,13 @@ impl std::fmt::Display for OperationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OperationFailure::Package(e) => write!(f, "{e}"),
+            // The sentence alone, as a failure that is not a command's own reads:
+            // the directory, not the command, is what failed.
+            OperationFailure::CommandError(
+                unusable @ CommandFailure::WorkingDirectoryUnusable(_),
+            ) => {
+                write!(f, "{unusable}")
+            }
             OperationFailure::CommandError(cmd_err) => write!(f, "Command error: {cmd_err}"),
             OperationFailure::DependencyError(dep_err) => {
                 write!(f, "Dependency error: {dep_err}")
@@ -1340,6 +1412,7 @@ impl std::fmt::Display for OperationFailure {
                 reason,
             } => write!(f, "Cannot use package `{package_name}`: {reason}"),
             OperationFailure::InvalidSpec {
+                action,
                 package_name,
                 issues,
             } => {
@@ -1347,13 +1420,30 @@ impl std::fmt::Display for OperationFailure {
                     .iter()
                     .filter(|issue| issue.level == crate::validation::ValidationLevel::Error)
                     .count();
-                write!(
-                    f,
-                    "Refusing to create '{package_name}': it would not pass spec validate ({errors} \
-                     {}), so nothing was written",
-                    crate::pluralize(errors, "error", "errors")
-                )
+                let errors = format!("{errors} {}", crate::pluralize(errors, "error", "errors"));
+                // A create validates the whole spec, as `spec validate` does. An
+                // update writes the whole spec, so required fields, URLs and
+                // environment contents are checked across all of it, and an error
+                // can sit in a field the update never touched. Only command syntax
+                // is narrowed, to the environments the update changed, so the count
+                // can be lower than `spec validate`'s.
+                match action {
+                    SpecWrite::Create => write!(
+                        f,
+                        "Refusing to create '{package_name}': it would not pass spec validate \
+                         ({errors}), so nothing was written"
+                    ),
+                    SpecWrite::Update => write!(
+                        f,
+                        "Refusing to update '{package_name}': the updated spec would not pass \
+                         validation ({errors}), so nothing was written"
+                    ),
+                }
             }
+            OperationFailure::Uncreatable {
+                package_name,
+                reason,
+            } => f.write_str(&reason.refusal(package_name)),
             OperationFailure::NoSuchPackage { name, reason } => match reason {
                 NoSuchPackageReason::NotFound => write!(f, "No package named '{name}' was found"),
                 NoSuchPackageReason::MaybeInUnlistableDirectory => write!(
@@ -1381,17 +1471,25 @@ impl std::fmt::Display for OperationFailure {
 
 impl std::fmt::Display for CommandFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::commands::BoundedText;
+
+        // Every sentence here embeds the spec's own `command:` string, which is
+        // unbounded. `TimedOut` and `UnusableDirectory` bound their own; the
+        // execution failure's sentence is bounded in its arm.
         match self {
             CommandFailure::ExecutionFailed {
-                command, exit_code, ..
-            } => {
-                if let Some(code) = exit_code {
-                    write!(f, "Command `{command}` failed with exit code {code}")
-                } else {
-                    write!(f, "Command `{command}` failed")
-                }
+                command,
+                exit_code: Some(code),
+                ..
+            } => f.write_str(
+                BoundedText::of(&format!("Command `{command}` failed with exit code {code}"))
+                    .as_str(),
+            ),
+            CommandFailure::ExecutionFailed { command, .. } => {
+                f.write_str(BoundedText::of(&format!("Command `{command}` failed")).as_str())
             }
             CommandFailure::TimedOut(timed_out) => write!(f, "{timed_out}"),
+            CommandFailure::WorkingDirectoryUnusable(unusable) => write!(f, "{unusable}"),
         }
     }
 }
@@ -1780,30 +1878,12 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
             } => OperationFailure::CommandError(CommandFailure::TimedOut(TimedOut::new(
                 command, timeout,
             ))),
-            // Listed rather than matched with `_`, so adding a `CommandError`
-            // variant fails to build here. This arm renders the error with
-            // `Display`, and a variant whose `Display` carried command output
-            // would leak it into `PackageEvent::Completed` and on to the CLI and
-            // the MCP server's JSON. Every variant below names the command and
-            // otherwise only text selfie chose. Check that before extending.
-            //
-            // `OutputReadFailed` renders the failed stream and an `io::Error`,
-            // never output bytes. `ContentMarkersAbsent` renders the command and
-            // nothing else -- it exists because the capture could not be split.
-            crate::commands::runner::CommandError::Cancelled { .. }
-            // `IoError` comes from a command that started, so it was found; it
-            // renders the command and an `io::Error`.
-            | crate::commands::runner::CommandError::IoError { .. }
-            // Renders the command, the directory and an `io::Error`.
-            | crate::commands::runner::CommandError::WorkingDirectoryUnusable { .. }
-            // Names the program that would not start, which is not the command.
-            | crate::commands::runner::CommandError::SpawnFailed { .. }
-            | crate::commands::runner::CommandError::OutputReadFailed { .. }
-            | crate::commands::runner::CommandError::ContentMarkersAbsent { .. }
-            | crate::commands::runner::CommandError::StdoutSpawn(_)
-            | crate::commands::runner::CommandError::StderrSpawn(_) => {
-                OperationFailure::Generic(err.to_string())
+            crate::commands::runner::CommandError::WorkingDirectoryUnusable(unusable) => {
+                OperationFailure::CommandError(CommandFailure::WorkingDirectoryUnusable(unusable))
             }
+            // The rest render as the check failure they classify as, whose
+            // `Display` bounds the sentence.
+            other => OperationFailure::from(&CheckFailure::from(&other)),
         }
     }
 }
@@ -2242,9 +2322,12 @@ impl OperationSuccess {
             OperationSuccess::PackageAudited { audit_result, .. } => match audit_result {
                 AuditResult::Clean { .. } => Outcome::Clean,
                 AuditResult::Conflicts { .. } | AuditResult::NotInstalled => Outcome::Found,
-                // Neither can answer the question: one audit did not run, and the
-                // other has nothing to run.
-                AuditResult::Error(_) | AuditResult::NoAuditCommand => Outcome::Failed,
+                // None of these answers the question: an audit that exited non-zero
+                // reported an error, one that could not run gave nothing, and a
+                // package with no audit command has nothing to run.
+                AuditResult::Error(_)
+                | AuditResult::CouldNotRun(_)
+                | AuditResult::NoAuditCommand => Outcome::Failed,
             },
             // A package with no audit command is left out of every count: across
             // many packages, not having one is ordinary.
@@ -2597,7 +2680,8 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             // and must not pick up the "File system error: " frame above, which is
             // what would reintroduce the target-facing phrasing it exists to
             // avoid. Each message is worth stating in exactly one place.
-            err @ (crate::package::port::PackageRepoError::UnknownDotfileFields { .. }
+            err @ (crate::package::port::PackageRepoError::Unserializable(_)
+            | crate::package::port::PackageRepoError::UnknownDotfileFields { .. }
             | crate::package::port::PackageRepoError::UnknownTopLevelFields { .. }
             | crate::package::port::PackageRepoError::UncheckedTopLevel { .. }
             | crate::package::port::PackageRepoError::UnknownEnvironmentFields { .. }
@@ -3421,7 +3505,7 @@ pub enum CheckResult {
     CouldNotRun(CheckFailure),
 }
 
-/// Why a check command gave no answer.
+/// Why a check or audit command gave no answer.
 ///
 /// [`Display`](fmt::Display) words it for a person. [`kind`](Self::kind) is
 /// its label, the variant's name in snake_case.
@@ -3430,38 +3514,31 @@ pub enum CheckResult {
 pub enum CheckFailure {
     /// The run was canceled while the check ran.
     Canceled {
-        /// The error's sentence, naming the command.
-        message: String,
+        /// The error's sentence, naming the command, bounded.
+        message: crate::commands::BoundedText,
     },
     /// selfie could not start the check, or could not attach to its output
     /// once it had, so the check may not have run at all.
     CouldNotStart {
-        /// The error's sentence, naming the command.
-        message: String,
+        /// The error's sentence, naming the command, bounded.
+        message: crate::commands::BoundedText,
     },
     /// The directory the check was to run in could not be entered. No part of
     /// the check ran.
-    WorkingDirectoryUnusable {
-        /// The check command.
-        command: String,
-        /// The directory it was to run in.
-        working_directory: std::path::PathBuf,
-        /// The error's sentence, naming both and why.
-        message: String,
-    },
+    WorkingDirectoryUnusable(crate::commands::runner::UnusableDirectory),
     /// The check ran past `command_timeout` and was stopped.
     TimedOut(TimedOut),
     /// The check started, and selfie could not read its result to the end:
     /// its output, or its exit status.
     ResultUnreadable {
-        /// The error's sentence, naming the command.
-        message: String,
+        /// The error's sentence, naming the command, bounded.
+        message: crate::commands::BoundedText,
     },
     /// The task running the check failed, which is a bug in selfie and not in
     /// the check command.
     Internal {
         /// What failed.
-        message: String,
+        message: crate::commands::BoundedText,
     },
 }
 
@@ -3478,8 +3555,8 @@ impl fmt::Display for CheckFailure {
         match self {
             Self::Canceled { message }
             | Self::CouldNotStart { message }
-            | Self::WorkingDirectoryUnusable { message, .. }
-            | Self::ResultUnreadable { message } => f.write_str(message),
+            | Self::ResultUnreadable { message } => f.write_str(message.as_str()),
+            Self::WorkingDirectoryUnusable(unusable) => write!(f, "{unusable}"),
             Self::TimedOut(timed_out) => write!(f, "{timed_out}"),
             Self::Internal { message } => write!(
                 f,
@@ -3496,10 +3573,12 @@ impl From<&CheckFailure> for OperationFailure {
             CheckFailure::TimedOut(timed_out) => {
                 OperationFailure::CommandError(CommandFailure::TimedOut(timed_out.clone()))
             }
+            CheckFailure::WorkingDirectoryUnusable(unusable) => OperationFailure::CommandError(
+                CommandFailure::WorkingDirectoryUnusable(unusable.clone()),
+            ),
             // Each of these sentences names the command already.
             CheckFailure::Canceled { .. }
             | CheckFailure::CouldNotStart { .. }
-            | CheckFailure::WorkingDirectoryUnusable { .. }
             | CheckFailure::ResultUnreadable { .. }
             | CheckFailure::Internal { .. } => OperationFailure::Generic(failure.to_string()),
         }
@@ -3511,32 +3590,31 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
         use crate::commands::runner::CommandError;
 
         // Every variant is listed, with no `_` arm, so a new `CommandError` is a
-        // compile error here and not a silent relabeling.
+        // compile error here and not a silent relabeling. The messages are the
+        // error's `Display`, and a variant whose `Display` carried command output
+        // would leak it to every adapter, operation failures included. Each one
+        // names the command and otherwise only text selfie chose: an `io::Error`,
+        // the stream that failed, or the program that would not start. Check that
+        // before extending.
         match err {
             CommandError::Cancelled { .. } => Self::Canceled {
-                message: err.to_string(),
+                message: crate::commands::BoundedText::of(err),
             },
             CommandError::SpawnFailed { .. }
             | CommandError::StdoutSpawn(_)
             | CommandError::StderrSpawn(_) => Self::CouldNotStart {
-                message: err.to_string(),
+                message: crate::commands::BoundedText::of(err),
             },
-            CommandError::WorkingDirectoryUnusable {
-                command,
-                working_directory,
-                ..
-            } => Self::WorkingDirectoryUnusable {
-                command: command.clone(),
-                working_directory: working_directory.clone(),
-                message: err.to_string(),
-            },
+            CommandError::WorkingDirectoryUnusable(unusable) => {
+                Self::WorkingDirectoryUnusable(unusable.clone())
+            }
             CommandError::Timeout {
                 command, timeout, ..
             } => Self::TimedOut(TimedOut::new(command.clone(), *timeout)),
             CommandError::OutputReadFailed { .. }
             | CommandError::ContentMarkersAbsent { .. }
             | CommandError::IoError { .. } => Self::ResultUnreadable {
-                message: err.to_string(),
+                message: crate::commands::BoundedText::of(err),
             },
         }
     }
@@ -3596,6 +3674,9 @@ pub enum AuditResult {
     NoAuditCommand,
     #[strum(to_string = "with errors")]
     Error(String),
+    /// The audit command gave no answer, for a reason selfie names.
+    #[strum(to_string = "with errors")]
+    CouldNotRun(CheckFailure),
 }
 
 /// Structured data for validation results
@@ -3772,21 +3853,18 @@ mod tests {
         assert_eq!(large_step_count.total, 2_000_000);
     }
 
-    // Every `CommandError` maps to one `CheckFailure`, by the table ADR 0009 sets.
-    #[test]
-    fn every_command_error_maps_to_its_check_failure() {
+    // One of every `CommandError`, each naming `command`, with the label its
+    // check failure takes.
+    fn every_command_error(
+        command: &str,
+    ) -> Vec<(crate::commands::runner::CommandError, &'static str)> {
         use crate::commands::runner::{CommandError, OutputStream};
         use std::{path::PathBuf, sync::Arc, time::Duration};
 
         let io = || Arc::new(std::io::Error::other("e"));
-        let cmd = || "check-x".to_string();
+        let cmd = || command.to_string();
         let dir = || PathBuf::from("/p");
-        let unusable_directory = CommandError::WorkingDirectoryUnusable {
-            command: cmd(),
-            working_directory: dir(),
-            source: io(),
-        };
-        let cases = [
+        vec![
             (
                 CommandError::Cancelled {
                     command: cmd(),
@@ -3799,13 +3877,18 @@ mod tests {
                     command: cmd(),
                     program: "sh".to_string(),
                     working_directory: dir(),
-                    source: io(),
+                    cause: io(),
                 },
                 "could_not_start",
             ),
             (CommandError::StdoutSpawn(cmd()), "could_not_start"),
             (CommandError::StderrSpawn(cmd()), "could_not_start"),
-            (unusable_directory.clone(), "working_directory_unusable"),
+            (
+                CommandError::WorkingDirectoryUnusable(
+                    crate::commands::runner::UnusableDirectory::new(cmd(), dir(), io()),
+                ),
+                "working_directory_unusable",
+            ),
             (
                 CommandError::Timeout {
                     command: cmd(),
@@ -3819,7 +3902,7 @@ mod tests {
                     command: cmd(),
                     working_directory: dir(),
                     stream: OutputStream::Stdout,
-                    source: io(),
+                    cause: io(),
                 },
                 "result_unreadable",
             ),
@@ -3834,11 +3917,26 @@ mod tests {
                 CommandError::IoError {
                     command: cmd(),
                     working_directory: dir(),
-                    source: io(),
+                    cause: io(),
                 },
                 "result_unreadable",
             ),
-        ];
+        ]
+    }
+
+    // Every `CommandError` maps to one `CheckFailure`, by the table ADR 0009 sets.
+    #[test]
+    fn every_command_error_maps_to_its_check_failure() {
+        use crate::commands::runner::CommandError;
+
+        let unusable_directory = CommandError::WorkingDirectoryUnusable(
+            crate::commands::runner::UnusableDirectory::new(
+                "check-x",
+                "/p",
+                std::sync::Arc::new(std::io::Error::other("e")),
+            ),
+        );
+        let cases = every_command_error("check-x");
         for (error, kind) in &cases {
             let failure = CheckFailure::from(error);
             assert_eq!(failure.kind(), *kind, "{error:?}");
@@ -3846,21 +3944,153 @@ mod tests {
             assert_eq!(failure.to_string(), error.to_string(), "{error:?}");
         }
         // The working directory's fields travel, for a consumer that names them.
-        let CheckFailure::WorkingDirectoryUnusable {
-            command,
-            working_directory,
-            ..
-        } = CheckFailure::from(&unusable_directory)
+        let CheckFailure::WorkingDirectoryUnusable(unusable) =
+            CheckFailure::from(&unusable_directory)
         else {
             panic!("expected an unusable working directory");
         };
-        assert_eq!((command.as_str(), working_directory), ("check-x", dir()));
+        assert_eq!(
+            (unusable.command(), unusable.working_directory()),
+            ("check-x", std::path::Path::new("/p"))
+        );
+    }
+
+    // A command failure's sentence is bounded wherever it renders, on the check
+    // side and the operation side, since it names the spec's unbounded command.
+    #[test]
+    fn a_command_failures_sentence_is_bounded() {
+        let long = "Z".repeat(30_000);
+        let execution = |exit_code| CommandFailure::ExecutionFailed {
+            command: long.clone(),
+            exit_code,
+            stderr: crate::commands::BoundedText::bound(b""),
+        };
+        // The inner types bound their own sentence, so an adapter that unwraps a
+        // variant cannot print it whole either.
+        let mut sentences = vec![
+            execution(Some(1)).to_string(),
+            execution(None).to_string(),
+            TimedOut::new(long.clone(), std::time::Duration::from_secs(1)).to_string(),
+            crate::commands::runner::UnusableDirectory::new(
+                long.clone(),
+                "/p",
+                std::sync::Arc::new(std::io::Error::other("e")),
+            )
+            .to_string(),
+        ];
+        for (error, _) in every_command_error(&long) {
+            sentences.push(CheckFailure::from(&error).to_string());
+            sentences.push(OperationFailure::from(error).to_string());
+        }
+        for sentence in sentences {
+            assert!(sentence.contains("bytes elided"), "{}", &sentence[..80]);
+            assert!(sentence.matches('Z').count() < 3_000, "{}", &sentence[..80]);
+        }
+    }
+
+    // An unusable working directory is one typed value on the check side and on
+    // the operation side, built from one error, and the operation failure reads
+    // as the error's own sentence with no "Command error:" prefix.
+    #[test]
+    fn an_unusable_directory_is_one_value_and_one_sentence_on_both_sides() {
+        use crate::commands::runner::{CommandError, UnusableDirectory};
+
+        let err = CommandError::WorkingDirectoryUnusable(UnusableDirectory::new(
+            "check-x",
+            "/gone",
+            std::sync::Arc::new(std::io::Error::other("missing")),
+        ));
+        let sentence = "Cannot run 'check-x' in /gone: missing";
+        assert_eq!(err.to_string(), sentence);
+
+        let check = CheckFailure::from(&err);
+        let from_check = OperationFailure::from(&check);
+        let from_error = OperationFailure::from(err.clone());
+
+        // The same command and directory on each side, and the same sentence.
+        let fields = |u: &UnusableDirectory| {
+            (
+                u.command().to_string(),
+                u.working_directory().to_path_buf(),
+                u.to_string(),
+            )
+        };
+        let expected = ("check-x".to_string(), "/gone".into(), sentence.to_string());
+        let CheckFailure::WorkingDirectoryUnusable(unusable) = &check else {
+            panic!("expected an unusable working directory, got {check:?}");
+        };
+        assert_eq!(fields(unusable), expected);
+        assert_eq!(unusable.cause().to_string(), "missing");
+        for failure in [&from_check, &from_error] {
+            let OperationFailure::CommandError(CommandFailure::WorkingDirectoryUnusable(unusable)) =
+                failure
+            else {
+                panic!("expected an unusable working directory, got {failure:?}");
+            };
+            assert_eq!(fields(unusable), expected);
+            assert_eq!(failure.to_string(), sentence);
+        }
+    }
+
+    // A package that cannot be written as YAML fails as that, not as an I/O
+    // error, and the sentence names the failure's class.
+    #[test]
+    fn an_unserializable_package_is_not_an_io_error() {
+        let failure =
+            OperationFailure::from(crate::package::port::PackageRepoError::Unserializable(
+                crate::yaml::SerializeFailure::Value,
+            ));
+
+        assert_eq!(
+            failure.to_string(),
+            "The package cannot be written as YAML: a value in it has a shape YAML cannot hold"
+        );
+    }
+
+    // Each refusal's label is pinned, since an MCP client branches on it.
+    #[test]
+    fn every_uncreatable_reason_has_its_label() {
+        let cases = [
+            (Uncreatable::InvalidName, "invalid_name"),
+            (
+                Uncreatable::OutsidePackageDirectory {
+                    path: "/x/a.yml".into(),
+                    directory: "/p".into(),
+                },
+                "outside_package_directory",
+            ),
+            (
+                Uncreatable::UnloadableFileName {
+                    path: "/p/a b.yml".into(),
+                },
+                "unloadable_file_name",
+            ),
+        ];
+        for (reason, label) in cases {
+            assert_eq!(reason.kind(), label, "{reason:?}");
+            // The failure reads as its reason's sentence, which the CLI's own
+            // name check shares.
+            let failure = OperationFailure::Uncreatable {
+                package_name: "x y".to_string(),
+                reason: reason.clone(),
+            };
+            assert_eq!(failure.to_string(), reason.refusal("x y"), "{reason:?}");
+        }
+        assert_eq!(
+            crate::package::spec_name_refusal("x y"),
+            Some(Uncreatable::InvalidName.refusal("x y"))
+        );
+        assert!(
+            Uncreatable::InvalidName
+                .refusal("x y")
+                .contains("it is not a valid spec name")
+        );
     }
 
     // The label set is the MCP contract, so each label is pinned.
     #[test]
     fn every_check_failure_has_its_label() {
-        let message = || "m".to_string();
+        let message = || crate::commands::BoundedText::bound(b"m");
         let cases = [
             (CheckFailure::Canceled { message: message() }, "canceled"),
             (
@@ -3868,11 +4098,15 @@ mod tests {
                 "could_not_start",
             ),
             (
-                CheckFailure::WorkingDirectoryUnusable {
-                    command: "c".to_string(),
-                    working_directory: "/p".into(),
-                    message: message(),
-                },
+                CheckFailure::from(
+                    &crate::commands::runner::CommandError::WorkingDirectoryUnusable(
+                        crate::commands::runner::UnusableDirectory::new(
+                            "c".to_string(),
+                            "/p",
+                            std::sync::Arc::new(std::io::Error::other("e")),
+                        ),
+                    ),
+                ),
                 "working_directory_unusable",
             ),
             (
@@ -3895,7 +4129,7 @@ mod tests {
     #[test]
     fn an_internal_failure_says_it_is_a_selfie_bug() {
         let sentence = CheckFailure::Internal {
-            message: "Task failed: panicked".to_string(),
+            message: crate::commands::BoundedText::bound(b"Task failed: panicked"),
         }
         .to_string();
 
@@ -4353,6 +4587,13 @@ mod tests {
             (
                 "audit error",
                 audited(AuditResult::Error("boom".to_string())),
+                Outcome::Failed,
+            ),
+            (
+                "audit that could not run",
+                audited(AuditResult::CouldNotRun(CheckFailure::TimedOut(
+                    TimedOut::new("c", std::time::Duration::from_secs(1)),
+                ))),
                 Outcome::Failed,
             ),
             (

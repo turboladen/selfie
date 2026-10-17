@@ -139,11 +139,15 @@ pub enum PackageRepoError {
 
     /// IO error during repository operation
     #[error("IO error: {0}")]
-    IoError(#[from] Arc<std::io::Error>),
+    IoError(Arc<std::io::Error>),
 
     /// File system error during repository operation
     #[error("File system error: {0}")]
-    FileSystemError(#[from] FileSystemError),
+    FileSystemError(FileSystemError),
+
+    /// The package could not be written as YAML, so nothing was saved.
+    #[error("The package cannot be written as YAML: {0}")]
+    Unserializable(crate::yaml::SerializeFailure),
 
     /// Refused to rewrite a package whose dotfile entries carry unrecognized keys.
     ///
@@ -253,6 +257,18 @@ pub enum PackageRepoError {
     },
 }
 
+impl From<Arc<std::io::Error>> for PackageRepoError {
+    fn from(error: Arc<std::io::Error>) -> Self {
+        Self::IoError(error)
+    }
+}
+
+impl From<FileSystemError> for PackageRepoError {
+    fn from(error: FileSystemError) -> Self {
+        Self::FileSystemError(error)
+    }
+}
+
 impl PackageRepoError {
     /// Whether this means no package file exists at that name.
     ///
@@ -349,9 +365,9 @@ impl PackageRepoError {
                 PackageError::MultiplePackagesFound {
                     conflicting_paths, ..
                 } => Some(Lookup::AmbiguousName(conflicting_paths)),
-                PackageError::ParseError { source, .. }
-                | PackageError::UnreadableFile { source, .. }
-                | PackageError::UnusableName { source, .. } => Some(Lookup::Unloadable(source)),
+                PackageError::ParseError { cause, .. }
+                | PackageError::UnreadableFile { cause, .. }
+                | PackageError::UnusableName { cause, .. } => Some(Lookup::Unloadable(cause)),
                 // Raised by the service once a spec has loaded, never by a lookup.
                 PackageError::EnvironmentNotFound { .. }
                 | PackageError::NoCheckCommand { .. }
@@ -368,6 +384,7 @@ impl PackageRepoError {
             Self::PackageListError(_) => Some(Lookup::PackageDirectoryUnreadable),
             // Raised by `save_package`, never by a lookup.
             Self::IoError(_)
+            | Self::Unserializable(_)
             | Self::UnknownDotfileFields { .. }
             | Self::UnknownTopLevelFields { .. }
             | Self::UncheckedTopLevel { .. }
@@ -663,14 +680,13 @@ pub enum PackageError {
     // message tells the reader to go open it, and a directory is not something
     // you can open -- the two `spec` commands that say so were both naming a
     // path the user still had to search.
-    #[error("Parse error in package `{name}` from {}: {source}", failed_file.display())]
+    #[error("Parse error in package `{name}` from {}: {cause}", failed_file.display())]
     ParseError {
         name: String,
         packages_path: PathBuf,
         /// The specific file that failed to parse
         failed_file: PathBuf,
-        #[source]
-        source: PackageParseError,
+        cause: PackageParseError,
     },
 
     /// Package definition file exists but its contents never reached the parser
@@ -679,28 +695,26 @@ pub enum PackageError {
     /// selfie either declined to open the file or the read itself failed. Saying
     /// "parse error" for a fifo sends the reader to inspect YAML syntax in a file
     /// that has none.
-    #[error("Cannot read package `{name}` from {}: {source}", failed_file.display())]
+    #[error("Cannot read package `{name}` from {}: {cause}", failed_file.display())]
     UnreadableFile {
         name: String,
         packages_path: PathBuf,
         /// The specific file that could not be read
         failed_file: PathBuf,
-        #[source]
-        source: PackageParseError,
+        cause: PackageParseError,
     },
 
     /// Package definition file exists, but its file name is not a valid spec name
     ///
     /// The file is never read, so neither "parse error" nor "cannot read" is
     /// true of it: the remedy is renaming the file.
-    #[error("Cannot use package `{name}` from {}: {source}", failed_file.display())]
+    #[error("Cannot use package `{name}` from {}: {cause}", failed_file.display())]
     UnusableName {
         name: String,
         packages_path: PathBuf,
         /// The file whose name is refused
         failed_file: PathBuf,
-        #[source]
-        source: PackageParseError,
+        cause: PackageParseError,
     },
 
     /// The requested environment is not configured for this package
@@ -865,10 +879,9 @@ impl ListPackagesOutput {
 #[error("{kind}")]
 pub struct PackageParseError {
     package_path: PathBuf,
-    // `#[source]` as well as interpolated, so a caller walking the chain reaches
-    // the `ParseFailure` or the `io::Error` underneath. Every other error in this
-    // module carries its payload both ways.
-    #[source]
+    // Interpolated and not also `#[source]`: an error that both renders its cause
+    // and chains it prints the cause twice for any consumer that walks the chain.
+    // The same holds for every error in this module.
     kind: PackageParseKind,
 }
 
@@ -903,18 +916,12 @@ impl PackageParseError {
 #[derive(Error, Debug, Clone)]
 pub enum PackageParseKind {
     /// YAML syntax or structure error in the package file
-    #[error("YAML parsing error: {source}")]
-    Yaml {
-        #[source]
-        source: crate::yaml::ParseFailure,
-    },
+    #[error("YAML parsing error: {cause}")]
+    Yaml { cause: crate::yaml::ParseFailure },
 
     /// IO error occurred while reading the package file
-    #[error("I/O error reading the package file: {source}")]
-    Io {
-        #[source]
-        source: Arc<std::io::Error>,
-    },
+    #[error("I/O error reading the package file: {cause}")]
+    Io { cause: Arc<std::io::Error> },
 
     /// The package file could not be read, for a reason that is nobody's mistake
     ///
@@ -1009,7 +1016,7 @@ mod tests {
     fn lookup_errors() -> Vec<(PackageRepoError, LookupKind)> {
         let source = crate::yaml::parse::<crate::package::Package>("name: dep\nx: {oops\n")
             .expect_err("the fixture must not parse");
-        let (file, parse) = unreadable("dep", PackageParseKind::Yaml { source });
+        let (file, parse) = unreadable("dep", PackageParseKind::Yaml { cause: source });
         let (unread_file, unread) = unreadable(
             "dep",
             PackageParseKind::Unreadable {
@@ -1054,7 +1061,7 @@ mod tests {
                     name: "dep".to_string(),
                     packages_path: "/packages".into(),
                     failed_file: file,
-                    source: parse,
+                    cause: parse,
                 }),
                 LookupKind::Unloadable,
             ),
@@ -1063,7 +1070,7 @@ mod tests {
                     name: "dep".to_string(),
                     packages_path: "/packages".into(),
                     failed_file: unread_file,
-                    source: unread,
+                    cause: unread,
                 }),
                 LookupKind::Unloadable,
             ),
@@ -1072,7 +1079,7 @@ mod tests {
                     name: "Dep".to_string(),
                     packages_path: "/packages".into(),
                     failed_file: name_file,
-                    source: bad_name,
+                    cause: bad_name,
                 }),
                 LookupKind::Unloadable,
             ),
@@ -1151,6 +1158,7 @@ mod tests {
                 other_envs_with_check: Vec::new(),
             }),
             PackageRepoError::IoError(Arc::new(std::io::Error::other("save"))),
+            PackageRepoError::Unserializable(crate::yaml::SerializeFailure::Value),
             package_error(PackageError::PackageAlreadyExists {
                 name: "dep".to_string(),
                 file_path: "/packages/dep.yml".into(),
@@ -1176,6 +1184,52 @@ mod tests {
             .into_lookup_failure(),
             Err(PackageRepoError::PackageError(e)) if matches!(*e, PackageError::NoCheckCommand { .. })
         ));
+    }
+
+    // An error that names its cause in its message does not also chain it, so
+    // a consumer walking the chain prints each cause once.
+    #[test]
+    fn every_package_error_names_its_cause_once() {
+        let parse = || {
+            PackageParseError::new(
+                "/p/bat.yml",
+                PackageParseKind::Unreadable {
+                    reason: "the cause".to_string(),
+                },
+            )
+        };
+        let errors: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(PackageError::ParseError {
+                name: "bat".to_string(),
+                packages_path: "/p".into(),
+                failed_file: "/p/bat.yml".into(),
+                cause: parse(),
+            }),
+            Box::new(PackageError::UnreadableFile {
+                name: "bat".to_string(),
+                packages_path: "/p".into(),
+                failed_file: "/p/bat.yml".into(),
+                cause: parse(),
+            }),
+            Box::new(PackageError::UnusableName {
+                name: "bat".to_string(),
+                packages_path: "/p".into(),
+                failed_file: "/p/bat.yml".into(),
+                cause: parse(),
+            }),
+            Box::new(parse()),
+            Box::new(PackageRepoError::IoError(Arc::new(std::io::Error::other(
+                "the cause",
+            )))),
+            Box::new(PackageRepoError::FileSystemError(FileSystemError::IoError(
+                Arc::new(std::io::Error::other("the cause")),
+            ))),
+        ];
+        for error in errors {
+            let message = error.to_string();
+            assert_eq!(message.matches("the cause").count(), 1, "{message}");
+            assert!(error.source().is_none(), "{message} also chains its cause");
+        }
     }
 
     #[test]

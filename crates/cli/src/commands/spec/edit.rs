@@ -93,11 +93,6 @@ fn editor_success_message(
     })
 }
 
-/// The directory standalone dotfile specs are read from.
-fn dotfiles_repo_directory(config: &CliConfig) -> std::path::PathBuf {
-    config.selfie_config().dotfiles_directory()
-}
-
 /// Create `package_name` for `spec edit`, once the user confirms, the way
 /// `spec create` creates one, and return where it was written.
 ///
@@ -136,13 +131,25 @@ async fn create_for_edit(
         // The user asked to edit that spec, so a different name is not the way
         // out: say which kind it is and where to edit it.
         display.print_error(match &error {
-            namespace::NamespaceValidationError::Conflict(namespace::NamespaceConflict {
-                found_in: namespace::NameLocation::Dotfiles,
-                ..
-            }) => format!(
+            namespace::NamespaceValidationError::Conflict(
+                conflict @ namespace::NamespaceConflict {
+                    found_in: namespace::NameLocation::Dotfiles,
+                    ..
+                },
+            ) if conflict.paths().len() == 1 => format!(
                 "'{package_name}' is a standalone dotfile spec, and `spec edit` opens package \
-                 specs only. Edit its file in {} directly.",
-                dotfiles_repo_directory(config).display()
+                 specs only. Edit {} directly.",
+                conflict.claimants()
+            ),
+            namespace::NamespaceValidationError::Conflict(
+                conflict @ namespace::NamespaceConflict {
+                    found_in: namespace::NameLocation::Dotfiles,
+                    ..
+                },
+            ) => format!(
+                "Several standalone dotfile specs claim '{package_name}', {}, and `spec edit` \
+                 opens package specs only. Remove all but one, then edit the one left directly.",
+                conflict.claimants()
             ),
             _ => name_check_refusal(package_name, &error),
         });
@@ -331,6 +338,55 @@ mod tests {
             "{:?}",
             display.printed()
         );
+        // It names the file to edit, not only the directory holding it.
+        let file = temp.path().join("dotfiles/other.yml").display().to_string();
+        assert!(
+            display
+                .printed()
+                .iter()
+                .any(|(_, line)| line.contains(&format!("Edit {file} directly."))),
+            "{:?}",
+            display.printed()
+        );
+        assert!(listed(&packages).is_empty());
+    }
+
+    // A name several standalone specs claim is refused with each file named,
+    // and the user is told all but one must go.
+    #[tokio::test]
+    async fn a_name_several_standalone_specs_claim_names_each_file() {
+        let (temp, packages, config, service) = empty_packages(test_common::TEST_ENV);
+        for file in ["other.yml", "other.yaml"] {
+            fs::write(
+                temp.path().join("dotfiles").join(file),
+                "name: other\ndotfiles:\n  - source: other\n    target: ~/.other\n",
+            )
+            .unwrap();
+        }
+        let repo = common::create_package_repository(&config);
+        let display = DisplayManager::new(false);
+
+        let code = create_for_edit(&service, &repo, "other", &config, &display)
+            .await
+            .unwrap_err();
+
+        assert_eq!(code, 1, "{:?}", display.printed());
+        let printed = display.printed();
+        let refusal = printed
+            .iter()
+            .map(|(_, line)| line)
+            .find(|line| line.contains("Several standalone dotfile specs claim 'other'"))
+            .unwrap_or_else(|| panic!("{printed:?}"));
+        for file in ["other.yml", "other.yaml"] {
+            let path = temp
+                .path()
+                .join("dotfiles")
+                .join(file)
+                .display()
+                .to_string();
+            assert!(refusal.contains(&format!("{path:?}")), "{refusal}");
+        }
+        assert!(refusal.contains("Remove all but one"), "{refusal}");
         assert!(listed(&packages).is_empty());
     }
 
@@ -445,7 +501,7 @@ mod tests {
             .build();
 
         // Serialize to YAML
-        let yaml_content = serde_saphyr::to_string(&original_package).unwrap();
+        let yaml_content = selfie::yaml::serialize(&original_package).unwrap();
 
         // Deserialize back
         let deserialized: selfie::package::Package = selfie::yaml::parse(&yaml_content).unwrap();

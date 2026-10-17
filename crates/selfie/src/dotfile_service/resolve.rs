@@ -321,9 +321,7 @@ async fn run_capture<CR: CommandRunner>(
         .await
         .map_err(|e| match e {
             CommandError::ContentMarkersAbsent { .. } => CaptureFailure::Unseparable,
-            other => CaptureFailure::Failed(
-                BoundedText::bound(other.to_string().as_bytes()).into_string(),
-            ),
+            other => CaptureFailure::Failed(BoundedText::of(&other).into_string()),
         })?;
 
     // **This check is what keeps a failed run's bytes out of a file.** Nothing
@@ -513,7 +511,7 @@ mod tests {
                     command: command.to_string(),
                     working_directory: working_dir.to_path_buf(),
                     stream: crate::commands::OutputStream::Stdout,
-                    source: std::sync::Arc::new(std::io::Error::other("pipe died mid-read")),
+                    cause: std::sync::Arc::new(std::io::Error::other("pipe died mid-read")),
                 });
             }
 

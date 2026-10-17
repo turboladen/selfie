@@ -7,8 +7,8 @@ use crate::{
     package::{
         GetPackage,
         event::{
-            AuditResult, AuditResultData, EventSender, OperationResult, OperationSuccess,
-            StepEnding,
+            AuditResult, AuditResultData, CheckFailure, EventSender, OperationResult,
+            OperationSuccess, StepEnding,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -182,7 +182,7 @@ impl AuditTally {
         match result {
             AuditResult::Conflicts { .. } => self.conflicts += 1,
             AuditResult::NotInstalled => self.not_installed += 1,
-            AuditResult::Error(_) => self.errors += 1,
+            AuditResult::Error(_) | AuditResult::CouldNotRun(_) => self.errors += 1,
             AuditResult::Clean { .. } | AuditResult::NoAuditCommand => {}
         }
     }
@@ -400,7 +400,8 @@ where
                 // (`event_collector::audit_details`), so an unbounded stderr here
                 // is unbounded egress. `AuditResult::Error` is a rendered
                 // sentence rather than a stderr field, so it stays a `String` and
-                // the bound is applied at this construction site.
+                // the bound is applied at this construction site. A
+                // `CheckFailure` bounds its own sentence where it renders.
                 let stderr = crate::commands::BoundedText::bound(output.stderr());
                 let exit_code = output.exit_code();
                 AuditResultData {
@@ -413,19 +414,12 @@ where
                 }
             }
         }
-        // Bounded for the same reason as the non-zero-exit arm above, and with
-        // the same expression `resolve.rs`'s `run_capture` bounds: no
-        // `CommandError` variant's `Display` prints process output, but every one
-        // embeds the package file's own `command:` string, which is unbounded.
-        // Treating two identical expressions differently is how the gap in the
-        // arm above went unnoticed.
+        // The audit gave no answer, so it says why as a check does.
         Err(err) => AuditResultData {
             package_name: package_name.to_string(),
             environment: environment.to_string(),
             audit_command: Some(cmd.to_string()),
-            result: AuditResult::Error(
-                crate::commands::BoundedText::bound(err.to_string().as_bytes()).into_string(),
-            ),
+            result: AuditResult::CouldNotRun(CheckFailure::from(&err)),
         },
     }
 }
@@ -635,6 +629,16 @@ mod tests {
         }
     }
 
+    // An audit that gave no answer counts toward the run's errors.
+    #[test]
+    fn an_audit_that_gave_no_answer_counts_as_an_error() {
+        let mut tally = AuditTally::default();
+        tally.count(&AuditResult::CouldNotRun(CheckFailure::TimedOut(
+            crate::commands::runner::TimedOut::new("c", std::time::Duration::from_secs(1)),
+        )));
+        assert_eq!(tally.errors, 1);
+    }
+
     #[tokio::test]
     async fn test_handle_audit_error_on_nonzero_exit() {
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -778,11 +782,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_audit_commands_error_message_is_bounded() {
-        // The sibling of the test above, for the `Err(err)` arm rather than the
-        // non-zero-exit arm. No `CommandError` variant's `Display` prints process
-        // output, but every one embeds the package file's own `command:` string,
-        // which is unbounded -- so this arm renders untrusted text too. Without
-        // this test the bound on it is a line whose removal nothing notices.
+        // The sibling of the test above, for an audit that gave no answer. Every
+        // `CommandError` embeds the package file's own `command:` string, which is
+        // unbounded, so the failure it becomes renders untrusted text too.
         use crate::commands::runner::{CommandError, MAX_BOUNDED_BYTES};
 
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -838,7 +840,8 @@ mod tests {
         match result {
             OperationResult::Success(OperationSuccess::PackageAudited { audit_result, .. }) => {
                 match audit_result {
-                    AuditResult::Error(message) => {
+                    AuditResult::CouldNotRun(failure) => {
+                        let message = failure.to_string();
                         assert!(
                             message.contains("bytes elided"),
                             "not marked as elided: {message}"
@@ -858,10 +861,97 @@ mod tests {
                             "the head and tail together should come to the bound"
                         );
                     }
-                    other => panic!("Expected AuditResult::Error, got: {other:?}"),
+                    other => panic!("Expected AuditResult::CouldNotRun, got: {other:?}"),
                 }
             }
             other => panic!("Expected PackageAudited, got: {other:?}"),
+        }
+    }
+
+    // An audit that gave no answer says why as a check failure, with the label
+    // a check gives the same cause, not as a sentence among other errors.
+    #[tokio::test]
+    async fn an_audit_that_gave_no_answer_is_a_typed_failure() {
+        use crate::commands::runner::CommandError;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| b.install("echo install").audit_some("sleep 9"))
+            .path(temp_dir.path().join("test-pkg.yml"))
+            .build();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_get_package()
+            .returning(move |_| Ok(GetPackage::from_existing(package.clone(), pkg_path.clone())));
+        let errors = [
+            (
+                CommandError::Timeout {
+                    command: "sleep 9".to_string(),
+                    timeout: std::time::Duration::from_secs(1),
+                    working_directory: std::path::PathBuf::from("/pkg"),
+                },
+                "timed_out",
+            ),
+            (
+                CommandError::WorkingDirectoryUnusable(
+                    crate::commands::runner::UnusableDirectory::new(
+                        "sleep 9",
+                        "/pkg",
+                        std::sync::Arc::new(std::io::Error::other("gone")),
+                    ),
+                ),
+                "working_directory_unusable",
+            ),
+            (
+                CommandError::SpawnFailed {
+                    command: "sleep 9".to_string(),
+                    program: "/bin/sh".to_string(),
+                    working_directory: std::path::PathBuf::from("/pkg"),
+                    cause: std::sync::Arc::new(std::io::Error::other("no shell")),
+                },
+                "could_not_start",
+            ),
+            (
+                CommandError::Cancelled {
+                    command: "sleep 9".to_string(),
+                    working_directory: std::path::PathBuf::from("/pkg"),
+                },
+                "canceled",
+            ),
+        ];
+
+        for (error, kind) in errors {
+            let mut mock_runner = MockCommandRunner::new();
+            mock_runner.expect_execute().returning(move |_, _, _| {
+                let error = error.clone();
+                Box::pin(async move { Err(error) })
+            });
+            let (sender, _rx) = test_sender();
+
+            let result = handle_audit(
+                "test-pkg",
+                &mock_repo,
+                &config,
+                &mock_runner,
+                &sender,
+                &mut ProgressTracker::new(3),
+                &CancellationToken::new(),
+            )
+            .await;
+
+            let OperationResult::Success(OperationSuccess::PackageAudited { audit_result, .. }) =
+                result
+            else {
+                panic!("Expected PackageAudited, got: {result:?}");
+            };
+            let AuditResult::CouldNotRun(failure) = audit_result else {
+                panic!("Expected CouldNotRun, got: {audit_result:?}");
+            };
+            assert_eq!(failure.kind(), kind);
+            assert!(failure.to_string().contains("sleep 9"), "{failure}");
         }
     }
 

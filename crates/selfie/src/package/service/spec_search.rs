@@ -120,7 +120,7 @@ mod tests {
         crate::package::port::PackageParseError::new(
             path,
             crate::package::port::PackageParseKind::Io {
-                source: std::sync::Arc::new(std::io::Error::new(
+                cause: std::sync::Arc::new(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "file not found",
                 )),

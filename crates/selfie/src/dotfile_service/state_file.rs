@@ -210,7 +210,7 @@ fn creation_failure_at<F: FileSystem>(
 ) -> Option<StateLoadFailure> {
     let refusal = filesystem.file_creation_refusal(directory)?;
     let (blocked, why) = match refusal {
-        FileSystemError::CannotCreateIn { path, source } => (path, source.to_string()),
+        FileSystemError::CannotCreateIn { path, cause } => (path, cause.to_string()),
         other => (directory.to_path_buf(), other.to_string()),
     };
     Some(StateLoadFailure::StateDirectoryNotWritable {
@@ -238,7 +238,7 @@ pub(crate) enum StateLoad {
 pub(crate) enum StateLoadFailure {
     /// The file has no location.
     #[error("Cannot locate the deploy state file: {0}")]
-    Locate(#[source] StatePathError),
+    Locate(StatePathError),
     /// Something that is not a directory occupies the state directory's path.
     #[error(
         "Cannot use the deploy state: '{}' {what}. Remove it, or point state_directory elsewhere",
@@ -269,7 +269,7 @@ pub(crate) enum StateLoadFailure {
         "The deploy state cannot be written: {0}. Free the space or lift the lock that stops \
          it, or point state_directory elsewhere"
     )]
-    StateNotWritable(#[source] StateSaveError),
+    StateNotWritable(StateSaveError),
     /// Something that is not a regular file sits at the path.
     #[error(
         "Cannot read the deploy state: '{}' is a {kind}. Remove it, or point state_directory elsewhere",
@@ -278,13 +278,12 @@ pub(crate) enum StateLoadFailure {
     Irregular { path: PathBuf, kind: &'static str },
     /// The file exists and could not be read.
     #[error(
-        "Cannot read deploy state '{}': {source}. Fix the file's permissions, or move it aside",
+        "Cannot read deploy state '{}': {cause}. Fix the file's permissions, or move it aside",
         .path.display()
     )]
     Read {
         path: PathBuf,
-        #[source]
-        source: FileSystemError,
+        cause: FileSystemError,
     },
     /// The file exists and holds nothing.
     #[error(
@@ -294,14 +293,10 @@ pub(crate) enum StateLoadFailure {
     Empty { path: PathBuf },
     /// The file exists and is not a deploy state selfie can read.
     #[error(
-        "Cannot parse deploy state '{}': {source}. Repair the file, or move it aside to start over",
+        "Cannot parse deploy state '{}': {cause}. Repair the file, or move it aside to start over",
         .path.display()
     )]
-    Parse {
-        path: PathBuf,
-        #[source]
-        source: ParseFailure,
-    },
+    Parse { path: PathBuf, cause: ParseFailure },
 }
 
 fn not_writable_sentence(directory: &Path, blocked: &Path, why: &str, configured: bool) -> String {
@@ -331,13 +326,12 @@ fn not_writable_sentence(directory: &Path, blocked: &Path, why: &str, configured
 pub(crate) enum StateSaveError {
     /// selfie's own state would not serialize: a bug, not a filesystem condition.
     #[error("Cannot serialize the deploy state: {0}")]
-    Serialize(#[source] serde_saphyr::SerializeError),
+    Serialize(crate::yaml::SerializeFailure),
     /// The write failed.
-    #[error("Cannot write deploy state '{}': {source}", .path.display())]
+    #[error("Cannot write deploy state '{}': {cause}", .path.display())]
     Write {
         path: PathBuf,
-        #[source]
-        source: FileSystemError,
+        cause: FileSystemError,
     },
 }
 
@@ -497,7 +491,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         Some(source) => {
             return StateLoad::Unusable(StateLoadFailure::Read {
                 path: path.path().to_path_buf(),
-                source,
+                cause: source,
             });
         }
         None => {}
@@ -513,7 +507,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         Err(source) => {
             return StateLoad::Unusable(StateLoadFailure::Read {
                 path: path.path().to_path_buf(),
-                source,
+                cause: source,
             });
         }
     };
@@ -541,7 +535,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         Ok(state) => StateLoad::Usable(located.holding(state)),
         Err(source) => StateLoad::Unusable(StateLoadFailure::Parse {
             path: path.path().to_path_buf(),
-            source,
+            cause: source,
         }),
     }
 }
@@ -574,12 +568,12 @@ fn write_state<F: FileSystem>(filesystem: &F, loaded: &LoadedState) -> Result<()
     // write it describes, so making the state survive a crash the target write did
     // not would widen that window. The ordering is established at the other end:
     // `write_file_no_follow` is durable before `record_deployment` runs (selfie-aub).
-    let yaml = serde_saphyr::to_string(&loaded.state).map_err(StateSaveError::Serialize)?;
+    let yaml = crate::yaml::serialize(&loaded.state).map_err(StateSaveError::Serialize)?;
     filesystem
         .write_file_private(&loaded.path, yaml.as_bytes())
         .map_err(|source| StateSaveError::Write {
             path: loaded.path.path().to_path_buf(),
-            source,
+            cause: source,
         })
 }
 
@@ -598,6 +592,32 @@ mod tests {
 
     const STATE_DIR: &str = "/state";
     const STATE_FILE: &str = "/state/deploy-state.yml";
+
+    // A state error that names its cause in its message does not also chain it.
+    #[test]
+    fn every_state_error_names_its_cause_once() {
+        let cause =
+            || FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other("the cause")));
+        let errors: Vec<Box<dyn std::error::Error>> = vec![
+            Box::new(StateLoadFailure::Read {
+                path: STATE_FILE.into(),
+                cause: cause(),
+            }),
+            Box::new(StateSaveError::Write {
+                path: STATE_FILE.into(),
+                cause: cause(),
+            }),
+            Box::new(StateLoadFailure::StateNotWritable(StateSaveError::Write {
+                path: STATE_FILE.into(),
+                cause: cause(),
+            })),
+        ];
+        for error in errors {
+            let message = error.to_string();
+            assert_eq!(message.matches("the cause").count(), 1, "{message}");
+            assert!(error.source().is_none(), "{message} also chains its cause");
+        }
+    }
 
     // A filesystem on which the state directory is a directory. Every test whose
     // subject is the state file rather than the directory starts here.
@@ -672,7 +692,7 @@ mod tests {
         fs.expect_file_creation_refusal().returning(|_| {
             Some(FileSystemError::CannotCreateIn {
                 path: PathBuf::from("/"),
-                source: std::sync::Arc::new(std::io::Error::from(
+                cause: std::sync::Arc::new(std::io::Error::from(
                     std::io::ErrorKind::PermissionDenied,
                 )),
             })

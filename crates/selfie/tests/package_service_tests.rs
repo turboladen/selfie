@@ -2535,7 +2535,7 @@ mod blank_commands {
     async fn the_spec_create_template_does_not_install() {
         let dir = TempDir::new().unwrap();
         let template = Package::new_template("fresh");
-        let yaml = serde_saphyr::to_string(&template)
+        let yaml = selfie::yaml::serialize(&template)
             .unwrap()
             .replace("default:", "test:");
         std::fs::write(dir.path().join("fresh.yml"), yaml).unwrap();
@@ -2723,20 +2723,21 @@ mod checks_that_gave_no_answer {
     async fn a_check_in_an_unusable_directory_sends_its_row_and_fails() {
         let runner = FakeCommandRunner::new().erroring(
             "check-app",
-            CommandError::WorkingDirectoryUnusable {
-                command: "check-app".to_string(),
-                working_directory: PathBuf::from("/gone"),
-                source: std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
-            },
+            CommandError::WorkingDirectoryUnusable(
+                selfie::commands::runner::UnusableDirectory::new(
+                    "check-app".to_string(),
+                    PathBuf::from("/gone"),
+                    std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                ),
+            ),
         );
 
         let (row, events) = checked(runner).await;
 
         match row {
-            Some(CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable {
-                working_directory,
-                ..
-            })) => assert_eq!(working_directory, PathBuf::from("/gone")),
+            Some(CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable(unusable))) => {
+                assert_eq!(unusable.working_directory(), PathBuf::from("/gone"));
+            }
             other => panic!("expected an unusable working directory, got {other:?}"),
         }
         assert!(
@@ -2932,7 +2933,7 @@ async fn status_classifies_each_dependency_it_could_not_look_up() {
             assert!(
                 matches!(
                     spec.failure().kind(),
-                    selfie::package::port::PackageParseKind::Yaml { source }
+                    selfie::package::port::PackageParseKind::Yaml { cause: source }
                         if source.location().is_some()
                 ),
                 "{spec:?}"

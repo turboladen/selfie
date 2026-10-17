@@ -100,6 +100,25 @@ fn styled_text(
 mod tests {
     use super::*;
 
+    // A check that timed out on a long command shows a bounded sentence in its
+    // status cell, though the cell unwraps the timeout to print it.
+    #[test]
+    fn a_timed_out_check_status_is_bounded() {
+        use selfie::commands::runner::TimedOut;
+        use selfie::package::event::{CheckFailure, CheckResult};
+
+        let long = "Z".repeat(30_000);
+        let status = CheckResult::CouldNotRun(CheckFailure::TimedOut(TimedOut::new(
+            long,
+            std::time::Duration::from_secs(1),
+        )));
+
+        let cell = format_check_result(Some(&status), false);
+
+        assert!(cell.contains("bytes elided"), "{}", &cell[..80]);
+        assert!(cell.matches('Z').count() < 3_000, "{}", &cell[..80]);
+    }
+
     #[test]
     fn test_format_installed_with_colors() {
         let result = format_installed(true);

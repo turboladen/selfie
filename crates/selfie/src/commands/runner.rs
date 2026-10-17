@@ -386,6 +386,65 @@ impl std::fmt::Display for OutputStream {
     }
 }
 
+/// A command that could not enter the directory it was to run in: it is
+/// missing, not a directory, or not searchable. No part of the command ran.
+///
+/// [`Display`](std::fmt::Display) names the command, the directory and why.
+#[derive(Debug, Clone)]
+pub struct UnusableDirectory {
+    command: String,
+    working_directory: PathBuf,
+    cause: Arc<std::io::Error>,
+}
+
+impl UnusableDirectory {
+    /// Records that `command` could not enter `working_directory`, for `cause`.
+    #[must_use]
+    pub fn new(
+        command: impl Into<String>,
+        working_directory: impl Into<PathBuf>,
+        cause: Arc<std::io::Error>,
+    ) -> Self {
+        Self {
+            command: command.into(),
+            working_directory: working_directory.into(),
+            cause,
+        }
+    }
+
+    /// The command that could not run.
+    #[must_use]
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    /// The directory it could not enter.
+    #[must_use]
+    pub fn working_directory(&self) -> &Path {
+        &self.working_directory
+    }
+
+    /// Why the directory could not be entered, such as a missing directory or
+    /// a denied search.
+    #[must_use]
+    pub fn cause(&self) -> &std::io::Error {
+        &self.cause
+    }
+}
+
+impl std::fmt::Display for UnusableDirectory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Bounded here for the reason `timed_out_sentence` is.
+        let sentence = format!(
+            "Cannot run '{}' in {}: {}",
+            self.command,
+            self.working_directory.display(),
+            self.cause
+        );
+        f.write_str(BoundedText::of(&sentence).as_str())
+    }
+}
+
 /// A command selfie stopped because it ran past `command_timeout`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimedOut {
@@ -436,7 +495,12 @@ fn timed_out_sentence(command: &str, timeout: Duration) -> String {
         )
     };
     let plural = if amount == 1 { "" } else { "s" };
-    format!("`{command}` timed out after {amount} {unit}{plural}, the limit `command_timeout` sets")
+    let sentence = format!(
+        "`{command}` timed out after {amount} {unit}{plural}, the limit `command_timeout` sets"
+    );
+    // Bounded here, inside the type, because the sentence embeds the spec's own
+    // `command:` string, which is unbounded, and every adapter renders it.
+    BoundedText::of(&sentence).into_string()
 }
 
 /// Errors that can occur during command execution
@@ -454,34 +518,27 @@ pub enum CommandError {
     },
 
     /// IO error occurred while running the command
-    #[error("IO Error executing command '{command}': {source}")]
+    #[error("IO Error executing command '{command}': {cause}")]
     IoError {
         command: String,
         working_directory: PathBuf,
-        #[source]
-        source: Arc<std::io::Error>,
+        cause: Arc<std::io::Error>,
     },
 
     /// The program that runs the command, normally a shell, could not be
     /// started. No part of the command ran.
-    #[error("Could not start '{program}' to run '{command}': {source}")]
+    #[error("Could not start '{program}' to run '{command}': {cause}")]
     SpawnFailed {
         command: String,
         program: String,
         working_directory: PathBuf,
-        #[source]
-        source: Arc<std::io::Error>,
+        cause: Arc<std::io::Error>,
     },
 
-    /// The directory the command was to run in could not be entered: it is
-    /// missing, not a directory, or not searchable. No part of the command ran.
-    #[error("Cannot run '{command}' in {}: {source}", working_directory.display())]
-    WorkingDirectoryUnusable {
-        command: String,
-        working_directory: PathBuf,
-        #[source]
-        source: Arc<std::io::Error>,
-    },
+    /// The directory the command was to run in could not be entered. No part of
+    /// the command ran.
+    #[error("{0}")]
+    WorkingDirectoryUnusable(UnusableDirectory),
 
     /// One of the command's output pipes could not be read to the end.
     ///
@@ -502,13 +559,12 @@ pub enum CommandError {
     // Carries no output bytes by construction, which
     // `OperationFailure::from(CommandError)` depends on and this variant's
     // `Display` has to satisfy.
-    #[error("Failed reading {stream} of command '{command}': {source}")]
+    #[error("Failed reading {stream} of command '{command}': {cause}")]
     OutputReadFailed {
         command: String,
         working_directory: PathBuf,
         stream: OutputStream,
-        #[source]
-        source: Arc<std::io::Error>,
+        cause: Arc<std::io::Error>,
     },
 
     /// Command was cancelled via a cancellation token
@@ -638,6 +694,12 @@ impl BoundedText {
         }
     }
 
+    /// `text` rendered and bounded, as [`bound`](Self::bound) bounds its bytes.
+    #[must_use]
+    pub fn of(text: &impl std::fmt::Display) -> Self {
+        Self::bound(text.to_string().as_bytes())
+    }
+
     /// Borrow the bounded text.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -660,6 +722,20 @@ impl std::fmt::Display for BoundedText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Rendering then bounding is the same bound as on the bytes.
+    #[test]
+    fn of_bounds_what_it_renders() {
+        let long = "Z".repeat(MAX_BOUNDED_BYTES * 3);
+
+        let bounded = BoundedText::of(&long);
+
+        assert_eq!(
+            bounded.as_str(),
+            BoundedText::bound(long.as_bytes()).as_str()
+        );
+        assert!(bounded.as_str().contains("bytes elided"));
+    }
 
     #[test]
     fn bound_does_not_split_a_multibyte_character_at_the_head_cut() {

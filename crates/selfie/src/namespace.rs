@@ -25,23 +25,76 @@ pub struct NamespaceConflict {
     pub name: String,
     /// Where the name was found
     pub found_in: NameLocation,
+    // Never empty: `new` is the only way to build one.
+    paths: Vec<std::path::PathBuf>,
 }
 
-/// The sentence [`spec_name_taken`] gives for this name and location.
-impl fmt::Display for NamespaceConflict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&spec_name_taken(&self.name, &self.found_in))
+impl NamespaceConflict {
+    /// The conflict for `name`, claimed in `found_in` by the spec files at
+    /// `paths`, or `None` when `paths` is empty and nothing claims it.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        found_in: NameLocation,
+        paths: Vec<std::path::PathBuf>,
+    ) -> Option<Self> {
+        (!paths.is_empty()).then(|| Self {
+            name: name.into(),
+            found_in,
+            paths,
+        })
+    }
+
+    /// Every spec file that claims the name, in the order the lookup found
+    /// them. Never empty.
+    #[must_use]
+    pub fn paths(&self) -> &[std::path::PathBuf] {
+        &self.paths
+    }
+
+    /// The files that claim the name, for a sentence: the path itself for one
+    /// file, and each path quoted for several, so a comma or a space in a path
+    /// cannot be mistaken for the separator.
+    #[must_use]
+    pub fn claimants(&self) -> String {
+        match self.paths.as_slice() {
+            [only] => only.display().to_string(),
+            [rest @ .., last] => {
+                let quoted =
+                    |path: &std::path::PathBuf| format!("{:?}", path.display().to_string());
+                let rest = rest.iter().map(quoted).collect::<Vec<_>>().join(", ");
+                format!("{rest} and {}", quoted(last))
+            }
+            // `new` refuses an empty list, so no conflict reaches this arm.
+            [] => String::new(),
+        }
     }
 }
 
-/// The fact that `name` is already taken in `found_in`, as one sentence. It
-/// carries no remedy: what to do about it depends on what the caller was
-/// trying to do.
-#[must_use]
-pub fn spec_name_taken(name: &str, found_in: &NameLocation) -> String {
-    match found_in {
-        NameLocation::Dotfiles => format!("A dotfile spec named '{name}' already exists."),
-        NameLocation::Packages => format!("'{name}' is already a package."),
+/// The fact that the name is already taken, and by which files, as one
+/// sentence. It carries no remedy: what to do about it depends on what the
+/// caller was trying to do.
+impl fmt::Display for NamespaceConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (name, files, count) = (&self.name, self.claimants(), self.paths.len());
+        match (self.found_in.clone(), count) {
+            (NameLocation::Dotfiles, 1) => {
+                write!(f, "A dotfile spec named '{name}' already exists ({files}).")
+            }
+            (NameLocation::Packages, 1) => write!(f, "'{name}' is already a package ({files})."),
+            // Several files claiming one name is itself a problem: every command
+            // that looks the name up refuses it until all but one are gone.
+            (NameLocation::Dotfiles, _) => write!(
+                f,
+                "{count} dotfile specs claim the name '{name}', {files}; all but one must be \
+                 removed."
+            ),
+            (NameLocation::Packages, _) => write!(
+                f,
+                "{count} package specs claim the name '{name}', {files}; all but one must be \
+                 removed."
+            ),
+        }
     }
 }
 
@@ -119,12 +172,8 @@ pub fn validate_unique_name(
         Err(error) if error.may_be_created() => Vec::new(),
         Err(error) => return Err(NamespaceValidationError::PackageDirectoryUnreadable(error)),
     };
-    if !files.is_empty() {
-        return Err(NamespaceConflict {
-            name: name.to_string(),
-            found_in: NameLocation::Packages,
-        }
-        .into());
+    if let Some(conflict) = NamespaceConflict::new(name, NameLocation::Packages, files) {
+        return Err(conflict.into());
     }
 
     // The dotfiles directory. A failed listing here must not be swallowed: answering
@@ -132,14 +181,12 @@ pub fn validate_unique_name(
     // a spec beside one that may already carry the name.
     if let Some(dotfiles) = dotfiles_repo {
         match dotfiles.find_package_files(name) {
-            Ok(files) if !files.is_empty() => {
-                return Err(NamespaceConflict {
-                    name: name.to_string(),
-                    found_in: NameLocation::Dotfiles,
+            Ok(files) => {
+                if let Some(conflict) = NamespaceConflict::new(name, NameLocation::Dotfiles, files)
+                {
+                    return Err(conflict.into());
                 }
-                .into());
             }
-            Ok(_) => {}
             Err(error) => {
                 // Nothing that can hold a spec is at the path, so it holds no names
                 // and this one is free. Every other state may be hiding a spec that
@@ -187,18 +234,27 @@ mod tests {
     #[test]
     fn test_conflict_in_packages() {
         let mut package_repo = MockPackageRepository::new();
-        package_repo
-            .expect_find_package_files()
-            .returning(|_| Ok(vec![PathBuf::from("/packages/existing.yaml")]));
+        package_repo.expect_find_package_files().returning(|_| {
+            Ok(vec![
+                PathBuf::from("/packages/Existing.yaml"),
+                PathBuf::from("/packages/existing.yml"),
+            ])
+        });
 
         let result =
             validate_unique_name("existing", &package_repo, None::<&MockPackageRepository>);
+        // Every file claiming the name is named, so removing one does not lead
+        // to a second refusal for a file never mentioned.
         assert!(matches!(
             result,
             Err(NamespaceValidationError::Conflict(NamespaceConflict {
                 found_in: NameLocation::Packages,
+                ref paths,
                 ..
-            }))
+            })) if *paths == [
+                PathBuf::from("/packages/Existing.yaml"),
+                PathBuf::from("/packages/existing.yml"),
+            ]
         ));
     }
 
@@ -219,8 +275,9 @@ mod tests {
             result,
             Err(NamespaceValidationError::Conflict(NamespaceConflict {
                 found_in: NameLocation::Dotfiles,
+                ref paths,
                 ..
-            }))
+            })) if *paths == [PathBuf::from("/dotfiles/existing.yaml")]
         ));
     }
 
@@ -488,22 +545,60 @@ mod tests {
         assert!(!rendered.contains("already exists"), "{rendered}");
     }
 
+    // A path with a comma in it stays one path when several files are listed.
+    #[test]
+    fn several_claimants_are_each_quoted() {
+        let conflict = NamespaceConflict::new(
+            "rc",
+            NameLocation::Dotfiles,
+            vec![
+                "/d/a, b/rc.yml".into(),
+                "/d/Rc.yaml".into(),
+                "/d/rc.yaml".into(),
+            ],
+        )
+        .expect("three claimants");
+
+        assert_eq!(
+            conflict.to_string(),
+            "3 dotfile specs claim the name 'rc', \"/d/a, b/rc.yml\", \"/d/Rc.yaml\" and \
+             \"/d/rc.yaml\"; all but one must be removed."
+        );
+    }
+
+    // A name no file claims is no conflict, so no sentence can list nothing.
+    #[test]
+    fn a_conflict_needs_a_claimant() {
+        assert_eq!(
+            NamespaceConflict::new("starship", NameLocation::Packages, Vec::new()),
+            None
+        );
+    }
+
     // A conflict reads as the fact for its location, with no remedy: that is
     // the caller's to add.
     #[test]
     fn a_conflict_reads_as_the_taken_name_sentence() {
-        let package = NamespaceConflict {
-            name: "starship".to_string(),
-            found_in: NameLocation::Packages,
-        };
-        assert_eq!(package.to_string(), "'starship' is already a package.");
-        let dotfile = NamespaceConflict {
-            name: "starship".to_string(),
-            found_in: NameLocation::Dotfiles,
-        };
+        let package = NamespaceConflict::new(
+            "starship",
+            NameLocation::Packages,
+            vec!["/p/Starship.yaml".into(), "/p/starship.yml".into()],
+        )
+        .expect("two claimants");
+        assert_eq!(
+            package.to_string(),
+            "2 package specs claim the name 'starship', \"/p/Starship.yaml\" and \
+             \"/p/starship.yml\"; all but one must be removed."
+        );
+        let dotfile = NamespaceConflict::new(
+            "starship",
+            NameLocation::Dotfiles,
+            vec!["/d/starship.yaml".into()],
+        )
+        .expect("one claimant");
         assert_eq!(
             dotfile.to_string(),
-            "A dotfile spec named 'starship' already exists."
+            "A dotfile spec named 'starship' already exists (/d/starship.yaml)."
         );
     }
 }

@@ -290,7 +290,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate would before it is written: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way."
+        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate would before it is written: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\")."
     )]
     async fn spec_create(
         &self,
@@ -360,7 +360,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update",
-        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved."
+        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved. An update that would leave the spec with validation errors writes nothing: the call fails, and the result carries every issue under `issues`, each with `level`, `category`, `field`, `message`, `suggestion`, `line` and `column`, as selfie_spec_create's does; `line` and `column` are null for an issue on a field the update changed, which has no place in the file yet."
     )]
     async fn spec_update(
         &self,
@@ -406,7 +406,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update_batch",
-        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update. Prefer this over calling selfie_spec_update repeatedly."
+        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. Prefer this over calling selfie_spec_update repeatedly."
     )]
     async fn spec_update_batch(
         &self,
@@ -548,7 +548,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_audit",
-        description = "Audit a package's installation sources and detect conflicts (e.g., installed via both npm and homebrew). A conflict, or a package nothing provides, is a successful call with status 'found'. An audit command that fails, or a package with no audit command, comes back as an ERROR result with status 'failed'; a blank audit command (empty, whitespace, or only a comment) counts as none. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
+        description = "Audit a package's installation sources and detect conflicts (e.g., installed via both npm and homebrew). A conflict, or a package nothing provides, is a successful call with status 'found'. An audit command that fails, or a package with no audit command, comes back as an ERROR result with status 'failed'; a blank audit command (empty, whitespace, or only a comment) counts as none. An `audit_result` row for an audit whose command could not run keeps `status` \"with errors\" and adds why: `kind` is \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\" or \"result_unreadable\"; `reason` says it in prose, and `working_directory` names the directory for \"working_directory_unusable\". All three are null otherwise, including a row for a spec selfie could not load or an environment the spec does not configure, whose `details.error` says why; branch on `kind`. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call."
     )]
     async fn package_audit(
         &self,
@@ -561,7 +561,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_audit_all",
-        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A package with no audit command is skipped. A conflict, or a package nothing provides, anywhere in the run is a successful call with status 'found'. An audit that could not run comes back as an ERROR result with status 'failed', and a spec left out (one that could not be loaded, or that selfie will not read) as an ERROR result with status 'refused' and a `refused` count. A spec selfie will not read is reported, before any audit runs, as a `package_refused` row per package, with `package`, `paths` (its spec file), `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\" or \"no_environments\"; branch on it) and `reason` (prose, shared by every package refused for it). Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
+        description = "Audit all packages for the current environment for installation source conflicts. Returns per-package audit results. A package with no audit command is skipped. An `audit_result` row for an audit whose command could not run keeps `status` \"with errors\" and adds why: `kind` is \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\" or \"result_unreadable\"; `reason` says it in prose, and `working_directory` names the directory for \"working_directory_unusable\". All three are null otherwise, including a row for a spec selfie could not load or an environment the spec does not configure, whose `details.error` says why; branch on `kind`. A conflict, or a package nothing provides, anywhere in the run is a successful call with status 'found'. An audit that could not run comes back as an ERROR result with status 'failed', and a spec left out (one that could not be loaded, or that selfie will not read) as an ERROR result with status 'refused' and a `refused` count. A spec selfie will not read is reported, before any audit runs, as a `package_refused` row per package, with `package`, `paths` (its spec file), `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\" or \"no_environments\"; branch on it) and `reason` (prose, shared by every package refused for it). Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"cancelled\" for a cancelled call. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching."
     )]
     async fn package_audit_all(&self) -> Result<CallToolResult, McpError> {
         let stream = self.service.audit_all().await;
@@ -975,7 +975,7 @@ mod tests {
         // Only `package list` runs checks in tasks of their own, so only its
         // description offers an internal failure, a check task that panicked.
         let internal = CheckFailure::Internal {
-            message: String::new(),
+            message: selfie::commands::BoundedText::bound(b""),
         }
         .kind();
         let quoted = |description: &str, label: &str| description.contains(&format!("\"{label}\""));
@@ -1000,6 +1000,54 @@ mod tests {
                 let offered = *label != internal || name == "package_list";
                 assert_eq!(quoted(text, label), offered, "{name} and {label}");
             }
+        }
+    }
+
+    // The spec_create description lists exactly the refusal labels MCP can
+    // produce. It builds every spec at `<package_directory>/<name>.yml`, so only a
+    // bad name can be refused; the other two cannot arise from it.
+    #[test]
+    fn the_spec_create_description_lists_its_refusal_labels() {
+        use selfie::package::event::Uncreatable;
+
+        let description = SelfieServer::spec_create_tool_attr()
+            .description
+            .unwrap_or_default();
+        assert_eq!(
+            labels_after(&description, "A name that breaks the spec-name rule"),
+            [Uncreatable::InvalidName.kind()]
+        );
+    }
+
+    // Both audit descriptions list exactly the labels an audit that gave no
+    // answer can take: every check failure's but `internal`, which only a check
+    // task in `package list` can produce.
+    #[test]
+    fn the_audit_descriptions_list_every_failure_label() {
+        use selfie::package::event::CheckFailure;
+        use strum::VariantNames;
+
+        let internal = CheckFailure::Internal {
+            message: selfie::commands::BoundedText::bound(b""),
+        }
+        .kind();
+        let expected: Vec<&str> = CheckFailure::VARIANTS
+            .iter()
+            .copied()
+            .filter(|label| *label != internal)
+            .collect();
+        for tool in [
+            SelfieServer::package_audit_tool_attr(),
+            SelfieServer::package_audit_all_tool_attr(),
+        ] {
+            let description = tool.description.unwrap_or_default();
+            let mut listed = labels_after(&description, "`kind` is \"canceled\"");
+            // The sentence names `working_directory_unusable` twice.
+            listed.sort_unstable();
+            listed.dedup();
+            let mut expected = expected.clone();
+            expected.sort_unstable();
+            assert_eq!(listed, expected, "{}", tool.name);
         }
     }
 
@@ -1122,10 +1170,12 @@ mod tests {
     #[test]
     fn a_name_conflict_is_the_taken_name_sentence() {
         let error = selfie::namespace::NamespaceValidationError::Conflict(
-            selfie::namespace::NamespaceConflict {
-                name: "rc".to_string(),
-                found_in: selfie::namespace::NameLocation::Dotfiles,
-            },
+            selfie::namespace::NamespaceConflict::new(
+                "rc",
+                selfie::namespace::NameLocation::Dotfiles,
+                vec!["/d/rc.yml".into()],
+            )
+            .expect("one claimant"),
         );
 
         let Err(refusal) = namespace_refusal(error, NameCheck::DotfilesTrack) else {
@@ -1134,7 +1184,8 @@ mod tests {
 
         assert_eq!(
             refusal.message,
-            "A dotfile spec named 'rc' already exists. Remove it first or choose a different name."
+            "A dotfile spec named 'rc' already exists (/d/rc.yml). Remove it first or choose a \
+             different name."
         );
     }
 
@@ -1144,10 +1195,12 @@ mod tests {
     fn a_package_name_conflict_offers_the_calling_tools_remedy() {
         let conflict = || {
             selfie::namespace::NamespaceValidationError::Conflict(
-                selfie::namespace::NamespaceConflict {
-                    name: "bat".to_string(),
-                    found_in: selfie::namespace::NameLocation::Packages,
-                },
+                selfie::namespace::NamespaceConflict::new(
+                    "bat",
+                    selfie::namespace::NameLocation::Packages,
+                    vec!["/p/bat.yml".into()],
+                )
+                .expect("one claimant"),
             )
         };
 
@@ -1158,7 +1211,11 @@ mod tests {
             panic!("a conflict is an error");
         };
 
-        assert!(create.message.starts_with("'bat' is already a package."));
+        assert!(
+            create
+                .message
+                .starts_with("'bat' is already a package (/p/bat.yml).")
+        );
         assert!(create.message.contains("selfie_spec_update"), "{create:?}");
         assert!(
             track.message.contains("selfie_package_track_dotfile"),

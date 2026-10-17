@@ -297,11 +297,8 @@ pub(crate) fn is_valid_spec_name(name: &str) -> bool {
 /// breaks the rule every spec's name follows.
 #[must_use]
 pub fn spec_name_refusal(name: &str) -> Option<String> {
-    (!is_valid_spec_name(name)).then(|| {
-        format!(
-            "Refusing to create '{name}': it is not a valid spec name. Rename it: {SPEC_NAME_RULE}."
-        )
-    })
+    (!is_valid_spec_name(name))
+        .then(|| crate::package::event::Uncreatable::InvalidName.refusal(name))
 }
 
 /// The rule [`is_valid_spec_name`] applies, worded as a remedy for a refusal.
@@ -1759,7 +1756,7 @@ mod package_tests {
         let entry: DotfileEntry =
             crate::yaml::parse("source: creds.tpl\ntarget: ~/.creds\n").unwrap();
 
-        let yaml = serde_saphyr::to_string(&entry).unwrap();
+        let yaml = crate::yaml::serialize(&entry).unwrap();
 
         assert!(yaml.contains("source: creds.tpl"), "got: {yaml}");
         assert!(yaml.contains("target: ~/.creds"), "got: {yaml}");
@@ -2201,7 +2198,7 @@ vars: {}
     #[test]
     fn a_plain_entry_round_trips_without_gaining_empty_fields() {
         let entry = DotfileEntry::new("bat/config", "~/.config/bat/config");
-        let yaml = serde_saphyr::to_string(&entry).unwrap();
+        let yaml = crate::yaml::serialize(&entry).unwrap();
 
         assert!(!yaml.contains("command"), "got: {yaml}");
         assert!(!yaml.contains("vars"), "got: {yaml}");
@@ -2211,7 +2208,7 @@ vars: {}
     #[test]
     fn a_provider_entry_round_trips() {
         let entry = entry_from_yaml("command: op read x\ntarget: ~/.x");
-        let yaml = serde_saphyr::to_string(&entry).unwrap();
+        let yaml = crate::yaml::serialize(&entry).unwrap();
 
         assert!(!yaml.contains("source"), "got: {yaml}");
         assert_eq!(entry, crate::yaml::parse(&yaml).unwrap());
@@ -2255,7 +2252,7 @@ vars: {}
         // dropped rather than round-tripped into the user's file. Asserted so the
         // capture field cannot start leaking into saved packages unnoticed.
         let entry = entry_from_yaml("source: a\ntarget: ~/.x\nvar:\n  k: v\n");
-        let yaml = serde_saphyr::to_string(&entry).unwrap();
+        let yaml = crate::yaml::serialize(&entry).unwrap();
 
         assert!(!yaml.contains("var"), "got: {yaml}");
         assert!(
@@ -2469,7 +2466,7 @@ environments:
 
         let mut seen = std::collections::BTreeSet::new();
         for entry in [&template, &provider] {
-            let yaml = serde_saphyr::to_string(entry).unwrap();
+            let yaml = crate::yaml::serialize(entry).unwrap();
             let raw: HashMap<String, serde_json::Value> = crate::yaml::parse(&yaml).unwrap();
             seen.extend(raw.into_keys());
         }
@@ -2784,7 +2781,7 @@ environments:
         let parse_error = PackageParseError::new(
             PathBuf::from("/packages/broken.yml"),
             crate::package::port::PackageParseKind::Yaml {
-                source: crate::yaml::parse::<serde_json::Value>("invalid: yaml: [unclosed")
+                cause: crate::yaml::parse::<serde_json::Value>("invalid: yaml: [unclosed")
                     .unwrap_err(),
             },
         );
@@ -2793,7 +2790,7 @@ environments:
             name: "broken-package".to_string(),
             packages_path: PathBuf::from("/packages"),
             failed_file: PathBuf::from("/packages/broken.yml"),
-            source: parse_error,
+            cause: parse_error,
         };
 
         // Test that file context is available
@@ -2802,7 +2799,7 @@ environments:
                 name,
                 packages_path,
                 failed_file,
-                source,
+                cause: source,
             } => {
                 assert_eq!(name, "broken-package");
                 assert_eq!(packages_path, PathBuf::from("/packages"));

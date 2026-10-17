@@ -495,7 +495,7 @@ impl FileSystem for RealFileSystem {
             .err()
             .map(|errno| FileSystemError::CannotCreateIn {
                 path: directory.to_path_buf(),
-                source: Arc::new(io::Error::from(errno)),
+                cause: Arc::new(io::Error::from(errno)),
             })
     }
 
@@ -2569,11 +2569,11 @@ mod directory_state_tests {
         for directory in [file.clone(), file.join("state")] {
             let refusal = RealFileSystem.file_creation_refusal(&directory);
 
-            let Some(FileSystemError::CannotCreateIn { path, source }) = refusal else {
+            let Some(FileSystemError::CannotCreateIn { path, cause }) = refusal else {
                 panic!("a file in the way must be refused: {refusal:?}");
             };
             assert_eq!(path, file);
-            assert_eq!(source.kind(), io::ErrorKind::NotADirectory);
+            assert_eq!(cause.kind(), io::ErrorKind::NotADirectory);
         }
     }
 }
