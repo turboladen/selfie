@@ -6,6 +6,8 @@ edition = "2024"
 [[bin]]
 name = "selfie"
 path = "src/main.rs"
+# The library crate is also named selfie, and both would document into target/doc/selfie.
+doc = false
 
 [dependencies]
 anyhow.workspace = true
