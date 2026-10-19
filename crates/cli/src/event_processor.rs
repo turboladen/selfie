@@ -234,6 +234,14 @@ impl EventProcessor {
                 // Warnings don't set failure exit code by default
             }
 
+            // The run's result counts each, so the exit code comes from there.
+            PackageEvent::DotfileRefused { refusal, .. } => {
+                self.display.print_warning(refusal.message);
+            }
+            PackageEvent::DotfileFailed { failure, .. } => {
+                self.display.print_error(failure.message);
+            }
+
             PackageEvent::Completed {
                 operation_info,
                 result: op_result,
@@ -1101,19 +1109,19 @@ mod tests {
     // cannot print between the prompt's heading and its line.
     #[tokio::test]
     async fn a_source_line_waits_for_the_prompts_block() {
-        use selfie::package::event::{BaseKind, DotfileSource, SourceBase};
+        use selfie::package::event::{BaseKind, DotfileSource, RepoPath, SourceBase};
 
         let display = DisplayManager::new(false);
         let processor = EventProcessor::new(display.clone());
         let skipped = PackageEvent::DotfileSkipped {
             operation_info: make_operation_info("bat"),
-            source: DotfileSource::File {
+            source: DotfileSource::File(RepoPath {
                 base: Some(SourceBase {
                     kind: BaseKind::PackageDirectory,
                     directory: "/r/p".into(),
                 }),
                 path: "bat/config".into(),
-            },
+            }),
             target: "/h/.config/bat/config".to_string(),
             reason: selfie::package::event::SkipReason::DryRun,
         };
@@ -1152,6 +1160,7 @@ mod tests {
                     skipped_count: 0,
                     conflict_count: 0,
                     refused_count: 1,
+                    failed_count: 0,
                     orphan_count: 0,
                     environment: "test".to_string(),
                     steps_completed: (1, 1).into(),
@@ -1168,6 +1177,47 @@ mod tests {
             "{lines:?}"
         );
         assert!(!lines.iter().any(|l| l.starts_with('✓')), "{lines:?}");
+    }
+
+    // A refused or failed entry prints the library's sentence on stderr.
+    #[tokio::test]
+    async fn a_refused_or_failed_entry_prints_its_sentence_on_stderr() {
+        use crate::display_manager::Channel;
+        use selfie::package::event::{Condition, EntryOperation, Failure, Location, Refusal};
+
+        let refused = PackageEvent::DotfileRefused {
+            operation_info: make_operation_info("bat"),
+            package: "bat".to_string(),
+            spec_target: "~/.batrc".to_string(),
+            refusal: Refusal {
+                condition: Condition::Symlink,
+                at: Location::Target,
+                message: "Skipping 'bat/config': a symlink is there".to_string(),
+            },
+        };
+        let failed = PackageEvent::DotfileFailed {
+            operation_info: make_operation_info("bat"),
+            package: "bat".to_string(),
+            spec_target: "~/.creds".to_string(),
+            failure: Failure {
+                operation: EntryOperation::Resolve,
+                error: "no session".to_string(),
+                message: "Failed to resolve '~/.creds': no session".to_string(),
+            },
+        };
+        let printed = printed_for(DisplayManager::new(false), vec![refused, failed]).await;
+
+        for sentence in [
+            "Skipping 'bat/config': a symlink is there",
+            "Failed to resolve '~/.creds': no session",
+        ] {
+            assert!(
+                printed
+                    .iter()
+                    .any(|(stream, line)| *stream == Channel::Stderr && line.contains(sentence)),
+                "{sentence}: {printed:?}"
+            );
+        }
     }
 
     // A summary is the answer at every outcome, so it goes to stdout; an error
@@ -1515,6 +1565,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 1,
+                failed_count: 0,
                 orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),
@@ -1550,6 +1601,7 @@ mod tests {
                 skipped_count: 0,
                 conflict_count: 0,
                 refused_count: 0,
+                failed_count: 0,
                 orphan_count: 0,
                 environment: "test".to_string(),
                 steps_completed: StepCount::new(1, 1),

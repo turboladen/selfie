@@ -21,13 +21,20 @@ use crate::{
     },
     package::{
         DotfileEntry,
-        event::{ConflictReport, EventSender, LinkAtTarget, SkipReason, StepEnding},
+        event::{
+            ConflictReport, EntryOperation, EventSender, Failure, LinkAtTarget, Refusal,
+            SkipReason, StepEnding,
+        },
     },
 };
 
 use super::classify::{SecretEntry, secret_target_link};
+use super::deploy_entry::write_failure;
 use super::port::ApplyOptions;
-use super::refusal::{Link, TargetState, classify_link, read_target_state, readable_or_refusal};
+use super::refusal::{
+    Link, TargetState, classify_link, classify_write, read_target_state, readable_or_refusal,
+    refusal_for,
+};
 
 /// The program a command runs: its first word after any leading `NAME=value`
 /// assignments, as the shell reads it, or `None` for a command the shell would
@@ -83,16 +90,23 @@ pub(super) enum SecretOutcome {
     Deployed,
     Skipped,
     Conflicted,
-    /// Refused or failed without a command failing; the caller decides whether
-    /// to abort based on `stop_on_error`.
+    /// Refused for a condition at its target or its template, and already
+    /// reported. The caller decides whether to abort based on `stop_on_error`.
+    Refused,
+    /// An operation failed without a command failing, and was already reported.
+    /// The caller decides whether to abort based on `stop_on_error`.
     Failed,
-    /// A command the entry ran failed. Refused like `Failed`, and carries the
+    /// A command the entry ran failed. A failure like `Failed`, and carries the
     /// failed command's program so the caller can hold back that program's later
     /// commands in this run.
     CommandFailed(String),
     /// The caller's write-back before the write failed, so nothing was written.
     /// Carries why, already worded.
     StateNotWritable(String),
+    /// The run was canceled while the entry's commands ran. Neither refused nor
+    /// failed, and nothing was reported: the entry was not finished, and the run
+    /// ends canceled.
+    Canceled,
 }
 
 /// What [`SecretApply::apply`] calls before it writes a target or asks about a
@@ -119,7 +133,7 @@ enum Found {
 ///
 /// Worded as what happened, and sent only after the write succeeds, so it can
 /// never precede a refusal or a failed write.
-// Deliberately not `refusal_warning`: nothing was refused. The entry deployed, and
+// Deliberately not `refusal_for`: nothing was refused. The entry deployed, and
 // wording it as a refusal would have the user looking for a failure that is not
 // there.
 //
@@ -150,6 +164,8 @@ pub(super) struct SecretApply<'a, F, CR> {
     /// The package file's directory. Repository sources resolve against it and
     /// provider commands run in it.
     pub(super) base_dir: &'a Path,
+    /// The name of the package the entries belong to, for a refusal to name.
+    pub(super) package: &'a str,
     pub(super) filesystem: &'a F,
     pub(super) runner: &'a CR,
     pub(super) config: &'a SelfieConfig,
@@ -266,10 +282,7 @@ where
         // changes under every look is refused rather than chased.
         match readable_or_refusal(source, &target.path, state) {
             Ok(current) => Ok(Found::Current(current)),
-            Err(refusal) => {
-                self.sender.send_warning(refusal).await;
-                Err(SecretOutcome::Failed)
-            }
+            Err(refusal) => Err(self.refuse(source, refusal).await),
         }
     }
 
@@ -279,9 +292,40 @@ where
     async fn look(&self, source: &str, path: &TargetPath) -> Phase<Option<Link>> {
         match secret_target_link(self.filesystem, source, path) {
             Ok(link) => Ok(link),
-            Err(refusal) => {
-                self.sender.send_warning(refusal).await;
-                Err(SecretOutcome::Failed)
+            Err(refusal) => Err(self.refuse(source, refusal).await),
+        }
+    }
+
+    /// Report `refusal` of the entry whose target the package file spells
+    /// `entry_target`, and return the outcome it is.
+    async fn refuse(&self, entry_target: &str, refusal: Refusal) -> SecretOutcome {
+        self.sender
+            .send_dotfile_refused(self.package, entry_target, refusal)
+            .await;
+        SecretOutcome::Refused
+    }
+
+    /// Report `failure` of `target`'s entry.
+    async fn fail(&self, target: &SecretEntry<'_>, failure: Failure) {
+        self.sender
+            .send_dotfile_failed(self.package, target.entry.target(), failure)
+            .await;
+    }
+
+    /// The outcome of a failed write to `target`: a refusal when the write met a
+    /// condition the checks refuse, else `failure`.
+    async fn write_failed(
+        &self,
+        target: &SecretEntry<'_>,
+        error: &FileSystemError,
+        failure: Failure,
+    ) -> SecretOutcome {
+        let entry_target = target.entry.target();
+        match classify_write(entry_target, &target.path, error) {
+            Some(refusal) => self.refuse(entry_target, refusal).await,
+            None => {
+                self.fail(target, failure).await;
+                SecretOutcome::Failed
             }
         }
     }
@@ -345,24 +389,45 @@ where
             self.token,
         )
         .await;
+        // A template that escapes or cannot be read is refused before any binding
+        // runs, so the step ran nothing.
+        let refusal = resolved
+            .as_ref()
+            .err()
+            .and_then(|e| e.as_refusal(target.entry.target()));
+        // Asked once, so the step's ending and the entry's outcome cannot disagree
+        // about a cancel that lands between them. A refusal is checked ahead of
+        // it: the resolve refuses before any binding runs, so a cancel cannot
+        // have caused one.
+        let cancelled = self.token.is_cancelled();
         let ending = match &resolved {
             Ok(_) => StepEnding::Succeeded,
-            Err(_) if self.token.is_cancelled() => StepEnding::Cancelled,
+            Err(_) if refusal.is_some() => StepEnding::NotRun,
+            Err(_) if cancelled => StepEnding::Cancelled,
             Err(_) => StepEnding::Failed,
         };
         self.sender.send_step_ended(step, ending).await;
         match resolved {
             Ok(resolved) => Ok(resolved),
+            // A template that escapes or cannot be read is a condition of the
+            // entry's files, and is refused as classify refuses it. The resolve
+            // reads the template before any binding runs, so no command ran.
+            Err(_) if let Some(refusal) = refusal => {
+                Err(self.refuse(target.entry.target(), refusal).await)
+            }
+            // A command killed by the cancel failed only because the user asked
+            // to stop, so the entry is reported as neither refused nor failed.
+            Err(_) if cancelled => Err(SecretOutcome::Canceled),
             Err(e) => {
                 // Safe to surface: `ResolveError`'s Display names commands, var
                 // names, and — on failure only — truncated stderr. It never
                 // carries resolved content.
-                self.sender
-                    .send_warning(format!(
-                        "Failed to resolve '{}': {e}",
-                        target.entry.target()
-                    ))
-                    .await;
+                let failure = Failure::new(
+                    EntryOperation::Resolve,
+                    format_args!("Failed to resolve '{}'", target.entry.target()),
+                    &e,
+                );
+                self.fail(target, failure).await;
                 Err(match e.failed_command(target.entry).and_then(program_of) {
                     Some(program) => SecretOutcome::CommandFailed(program),
                     None => SecretOutcome::Failed,
@@ -422,11 +487,28 @@ where
                     return Err(outcome);
                 }
             }
-            Ok(true) | Err(_) => {
+            // The content read above succeeded, so a mode that cannot be read is
+            // close to unreachable, and is not a reason to rewrite on a guess. None of
+            // these errors says anything about what is at the target.
+            Ok(true)
+            | Err(
+                FileSystemError::IoError(_)
+                | FileSystemError::HomeDirNotFound
+                | FileSystemError::CannotCreateIn { .. },
+            ) => {
                 self.sender
                     .send_dotfile_skipped(&target.source, target.path.display(), SkipReason::InSync)
                     .await;
                 return Err(SecretOutcome::Skipped);
+            }
+            // What is at the target bars the write, as a guard would have found.
+            Err(
+                refusal @ (FileSystemError::IrregularTarget { .. }
+                | FileSystemError::BelowNonDirectory { .. }
+                | FileSystemError::DirectoryTarget { .. }),
+            ) => {
+                let refusal = refusal_for(target.entry.target(), &refusal);
+                return Err(self.refuse(target.entry.target(), refusal).await);
             }
             Ok(false) => {}
         }
@@ -437,12 +519,14 @@ where
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
         {
-            // The error already names the target; naming it here too would print
-            // the path twice.
-            self.sender
-                .send_warning(format!("Failed to tighten permissions: {e}"))
-                .await;
-            return Err(SecretOutcome::Failed);
+            // The error already names the target; naming it in the head too
+            // would print the path twice.
+            let failure = Failure::new(
+                EntryOperation::PermissionFix,
+                "Failed to tighten permissions",
+                &e,
+            );
+            return Err(self.write_failed(target, &e, failure).await);
         }
 
         self.sender
@@ -550,12 +634,7 @@ where
             .filesystem
             .write_file_private(&target.path, &resolved.bytes)
         {
-            // The error already names the target; naming it here too would print
-            // the path twice.
-            self.sender
-                .send_warning(format!("Failed to write: {e}"))
-                .await;
-            return SecretOutcome::Failed;
+            return self.write_failed(target, &e, write_failure(&e)).await;
         }
 
         self.sender

@@ -68,6 +68,9 @@ pub enum StepEnding {
     Failed,
     /// The run was cancelled while it waited.
     Cancelled,
+    /// Nothing it was waiting to run ran: what the step was for was refused
+    /// before any command started.
+    NotRun,
 }
 
 /// Which configured directory a dotfile's source is read from.
@@ -89,24 +92,42 @@ pub struct SourceBase {
     pub directory: std::path::PathBuf,
 }
 
-/// Where a dotfile's content comes from, as events report it.
+/// A file in the user's repository, placed under the configured directory it
+/// lies in.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoPath {
+    /// The directory `path` is relative to, or `None` when the file lies under
+    /// neither configured directory, and `path` is then the full path.
+    pub base: Option<SourceBase>,
+    /// The file, relative to `base`.
+    pub path: std::path::PathBuf,
+}
+
+impl RepoPath {
+    /// The file's full path.
+    #[must_use]
+    pub fn absolute(&self) -> std::path::PathBuf {
+        match &self.base {
+            Some(base) => base.directory.join(&self.path),
+            None => self.path.clone(),
+        }
+    }
+}
+
+/// Where a dotfile's content comes from, as events report it.
+///
+/// Converts to its kind as a label for an adapter: `file`, `template`,
+/// `command` or `recorded`.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr, strum::EnumDiscriminants)]
+#[strum(serialize_all = "snake_case")]
+#[strum_discriminants(derive(strum::EnumIter))]
 pub enum DotfileSource {
     /// A repository file, copied as it is.
-    File {
-        /// The directory `path` is relative to, or `None` when the file lies under
-        /// neither configured directory, and `path` is then the full path.
-        base: Option<SourceBase>,
-        /// The file, relative to `base`.
-        path: std::path::PathBuf,
-    },
+    File(RepoPath),
     /// A repository file rendered by substituting named values.
     Template {
-        /// The directory `path` is relative to, or `None` when the template lies
-        /// under neither configured directory, and `path` is then the full path.
-        base: Option<SourceBase>,
-        /// The template, relative to `base`.
-        path: std::path::PathBuf,
+        /// The template.
+        file: RepoPath,
         /// The names of the values it substitutes.
         vars: Vec<String>,
     },
@@ -117,60 +138,27 @@ pub enum DotfileSource {
     Recorded(String),
 }
 
-/// What kind of source a [`DotfileSource`] is, without its details.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceKind {
-    /// [`DotfileSource::File`].
-    File,
-    /// [`DotfileSource::Template`].
-    Template,
-    /// [`DotfileSource::Command`].
-    Command,
-    /// [`DotfileSource::Recorded`].
-    Recorded,
-}
-
 impl DotfileSource {
+    /// The repository file, when the source is a file or a template.
+    #[must_use]
+    pub fn repo_path(&self) -> Option<&RepoPath> {
+        match self {
+            Self::File(file) | Self::Template { file, .. } => Some(file),
+            Self::Command(_) | Self::Recorded(_) => None,
+        }
+    }
+
     /// The file's full path, when the source is a file or a template.
     #[must_use]
     pub fn absolute(&self) -> Option<std::path::PathBuf> {
-        match self {
-            Self::File {
-                base: Some(base),
-                path,
-            }
-            | Self::Template {
-                base: Some(base),
-                path,
-                ..
-            } => Some(base.directory.join(path)),
-            Self::File { base: None, path }
-            | Self::Template {
-                base: None, path, ..
-            } => Some(path.clone()),
-            Self::Command(_) | Self::Recorded(_) => None,
-        }
+        self.repo_path().map(RepoPath::absolute)
     }
 
     /// The directory a file or template is read from, when it lies under a
     /// configured one.
     #[must_use]
     pub fn base(&self) -> Option<&SourceBase> {
-        match self {
-            Self::File { base, .. } | Self::Template { base, .. } => base.as_ref(),
-            Self::Command(_) | Self::Recorded(_) => None,
-        }
-    }
-
-    /// What kind of source this is.
-    #[must_use]
-    pub fn kind(&self) -> SourceKind {
-        match self {
-            Self::File { .. } => SourceKind::File,
-            Self::Template { .. } => SourceKind::Template,
-            Self::Command(_) => SourceKind::Command,
-            Self::Recorded(_) => SourceKind::Recorded,
-        }
+        self.repo_path().and_then(|file| file.base.as_ref())
     }
 }
 
@@ -191,21 +179,10 @@ impl DotfileSource {
         struct Relative<'a>(&'a DotfileSource);
         impl fmt::Display for Relative<'_> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                self.0.write(f, |source| match source {
-                    DotfileSource::File {
-                        base: Some(_),
-                        path,
-                    }
-                    | DotfileSource::Template {
-                        base: Some(_),
-                        path,
-                        ..
-                    } => Some(path.clone()),
-                    DotfileSource::File { base: None, .. }
-                    | DotfileSource::Template { base: None, .. }
-                    | DotfileSource::Command(_)
-                    | DotfileSource::Recorded(_) => source.absolute(),
-                })
+                // A file with no base already holds its full path, so `path` is
+                // right whether or not there is one.
+                self.0
+                    .write(f, |source| source.repo_path().map(|file| file.path.clone()))
             }
         }
         Relative(self)
@@ -217,7 +194,7 @@ impl DotfileSource {
         path_of: impl Fn(&Self) -> Option<std::path::PathBuf>,
     ) -> fmt::Result {
         match self {
-            Self::File { .. } => {
+            Self::File(_) => {
                 let path = path_of(self).unwrap_or_default();
                 crate::package::write_file_source(f, &path.display(), &[])
             }
@@ -802,6 +779,59 @@ impl EventSender {
         .await;
     }
 
+    /// Report a dotfile entry refused in `package`, whose target the package file
+    /// spells `spec_target`.
+    pub(crate) async fn send_dotfile_refused(
+        &self,
+        package: &str,
+        spec_target: &str,
+        refusal: Refusal,
+    ) {
+        let operation_info = self.touch_operation_info();
+        tracing::warn!(
+            operation_type = operation_info.operation_type.to_string(),
+            environment = &operation_info.environment,
+            package,
+            spec_target,
+            condition = ?refusal.condition,
+            at = ?refusal.at,
+            message = &refusal.message,
+        );
+        self.send(PackageEvent::DotfileRefused {
+            operation_info,
+            package: package.to_string(),
+            spec_target: spec_target.to_string(),
+            refusal,
+        })
+        .await;
+    }
+
+    /// Report a dotfile entry in `package`, whose target the package file spells
+    /// `spec_target`, where an operation selfie ran failed.
+    pub(crate) async fn send_dotfile_failed(
+        &self,
+        package: &str,
+        spec_target: &str,
+        failure: Failure,
+    ) {
+        let operation_info = self.touch_operation_info();
+        tracing::warn!(
+            operation_type = operation_info.operation_type.to_string(),
+            environment = &operation_info.environment,
+            package,
+            spec_target,
+            operation = ?failure.operation,
+            message = &failure.message,
+        );
+        self.send(PackageEvent::DotfileFailed {
+            operation_info,
+            package: package.to_string(),
+            spec_target: spec_target.to_string(),
+            failure,
+        })
+        .await;
+    }
+
     /// Send a dotfile-conflict event
     pub(crate) async fn send_dotfile_conflict(
         &self,
@@ -1102,8 +1132,8 @@ pub enum OperationSuccess {
         /// which is not the same as one selfie declined to touch.
         skipped_count: usize,
         conflict_count: usize,
-        /// What selfie was asked to deploy and did not — refusals and failures
-        /// alike.
+        /// What selfie was asked to deploy and declined to, for a condition it
+        /// found. A failed operation is counted in `failed_count` instead.
         ///
         /// Usually an entry, but **not always one**: a package refused whole for
         /// a top-level key that hides a real field contributes 1 here and no
@@ -1113,10 +1143,13 @@ pub enum OperationSuccess {
         /// `steps_completed`, and does not equal a number of dotfile entries.
         ///
         /// Non-zero makes [`outcome`](OperationSuccess::outcome) Failed: the run
-        /// did not do what was asked. Named for the common case: most of what lands here was
-        /// *declined* by selfie rather than failing, and `perform_deploy` is
-        /// explicit that a refusal is not a failure.
+        /// did not do what was asked.
         refused_count: usize,
+        /// Entries selfie tried to deploy where an operation it ran failed: the
+        /// resolve, the backup, the write or the permission fix.
+        ///
+        /// Non-zero makes [`outcome`](OperationSuccess::outcome) Failed too.
+        failed_count: usize,
         /// Recorded targets no entry deploys to any more whose files are still
         /// there. Reported, never removed, and not a refusal.
         orphan_count: usize,
@@ -1764,14 +1797,22 @@ impl std::fmt::Display for OperationSuccess {
                 skipped_count,
                 conflict_count,
                 refused_count,
+                failed_count,
                 orphan_count,
                 environment,
                 ..
             } => {
+                // The summary names failed entries only when there are some.
+                let failed = if *failed_count == 0 {
+                    String::new()
+                } else {
+                    format!(", {failed_count} failed")
+                };
                 write!(
                     f,
                     "Dotfiles applied in environment '{environment}': {deployed_count} deployed, \
-                     {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} refused{}",
+                     {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} \
+                     refused{failed}{}",
                     orphaned_clause(*orphan_count)
                 )
             }
@@ -2176,6 +2217,48 @@ impl OperationSuccess {
         self.refused_count().is_some_and(|count| count > 0)
     }
 
+    /// Whether an operation this success ran on part of its work failed.
+    ///
+    /// Like [`had_refusals`](Self::had_refusals), it makes
+    /// [`outcome`](Self::outcome) Failed. True only for the variants
+    /// [`failed_count`](Self::failed_count) answers for.
+    #[must_use]
+    pub fn had_failures(&self) -> bool {
+        self.failed_count().is_some_and(|count| count > 0)
+    }
+
+    /// How many parts of its work this success tried and failed, for operations
+    /// that count them apart from refusals. `None` where the question does not
+    /// apply; only [`DotfilesApplied`](Self::DotfilesApplied) answers it.
+    #[must_use]
+    pub fn failed_count(&self) -> Option<usize> {
+        // Every variant listed, as in `refused_count`, so an operation that gains
+        // failures has to say so here rather than reach an adapter reporting none.
+        match self {
+            OperationSuccess::DotfilesApplied { failed_count, .. } => Some(*failed_count),
+            OperationSuccess::DotfileDriftChecked { .. }
+            | OperationSuccess::PackagesAudited { .. }
+            | OperationSuccess::PackageChecked { .. }
+            | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackageInstalled { .. }
+            | OperationSuccess::PackageValidated { .. }
+            | OperationSuccess::PackageRemoved { .. }
+            | OperationSuccess::PackageCreated { .. }
+            | OperationSuccess::SpecInfoRetrieved { .. }
+            | OperationSuccess::PackageStatusChecked { .. }
+            | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::PackageUpdated { .. }
+            | OperationSuccess::DotfileTracked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_)
+            | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::SpecListGenerated { .. } => None,
+        }
+    }
+
     /// How many refusals this success carries, for operations that count them.
     ///
     /// `None` where the question does not apply. Three variants answer it:
@@ -2294,8 +2377,9 @@ impl OperationSuccess {
     /// complete answer, whatever else it found.
     #[must_use]
     pub fn outcome(&self) -> Outcome {
-        // Refusals are answered once, by `had_refusals`, for every variant.
-        if self.had_refusals() {
+        // Refusals and failures are answered once, by `had_refusals` and
+        // `had_failures`, for every variant.
+        if self.had_refusals() || self.had_failures() {
             return Outcome::Failed;
         }
         // Every variant listed, as in `refused_count`, so a variant added later has
@@ -2930,6 +3014,31 @@ pub enum PackageEvent {
         reason: SkipReason,
     },
 
+    /// A dotfile entry selfie found a condition in and did not deploy or
+    /// compare. Nothing was written for it. Most refusals come before anything
+    /// runs; a secret-bearing entry's commands can run first, when the condition
+    /// appears at its target while they run.
+    DotfileRefused {
+        operation_info: OperationInfo,
+        /// The package the entry belongs to.
+        package: String,
+        /// The entry's target as the package file spells it, before `~` is
+        /// expanded, since a refusal can come before the target is expanded.
+        spec_target: String,
+        refusal: Refusal,
+    },
+
+    /// A dotfile entry selfie tried to deploy, where an operation it ran failed.
+    DotfileFailed {
+        operation_info: OperationInfo,
+        /// The package the entry belongs to.
+        package: String,
+        /// The entry's target as the package file spells it, before `~` is
+        /// expanded.
+        spec_target: String,
+        failure: Failure,
+    },
+
     /// A conflict was detected between repo and deployed version
     DotfileConflict {
         operation_info: OperationInfo,
@@ -2963,7 +3072,7 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         target: String,
         /// How the target and its source have moved since selfie last deployed
-        /// it. Never [`DriftType::None`]: a target with no drift sends no event.
+        /// it.
         drift_type: DriftType,
     },
 
@@ -3287,12 +3396,11 @@ pub struct RefusedPackage {
 /// How a deployed target and its source have moved since selfie last deployed
 /// it.
 ///
-/// [`Display`](fmt::Display) words it for a person: "repo changed".
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`Display`](fmt::Display) words it for a person: "repo changed". It
+/// converts to a label for an adapter: `"repo_changed"`.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
 pub enum DriftType {
-    /// The target holds what selfie last deployed, and the source has not
-    /// changed since.
-    None,
     /// The source changed since the last deploy; the target did not.
     RepoChanged,
     /// The target changed since the last deploy; the source did not.
@@ -3306,7 +3414,6 @@ pub enum DriftType {
 impl std::fmt::Display for DriftType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DriftType::None => write!(f, "none"),
             DriftType::RepoChanged => write!(f, "repo changed"),
             DriftType::TargetChanged => write!(f, "target changed"),
             DriftType::BothChanged => write!(f, "both changed"),
@@ -3367,8 +3474,11 @@ impl fmt::Display for ConflictReport {
 
 /// Why a dotfile was left as it is.
 ///
-/// [`Display`](fmt::Display) words the reason as a clause for a person.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// [`Display`](fmt::Display) words the reason as a clause for a person. It
+/// converts to a label for an adapter: `"up_to_date"`.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr, strum::EnumDiscriminants)]
+#[strum(serialize_all = "snake_case")]
+#[strum_discriminants(derive(strum::EnumIter))]
 pub enum SkipReason {
     /// The target holds what selfie last deployed, and the source has not
     /// changed since.
@@ -3391,6 +3501,134 @@ pub enum SkipReason {
     /// A secret-bearing entry `dotfiles drift` reports without checking, since
     /// checking would run its commands.
     Unverifiable,
+}
+
+/// Why selfie did not deploy or compare a dotfile entry: what it found, where,
+/// and the sentence that says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    /// What selfie found. One state on disk is one condition, whichever check
+    /// found it.
+    pub condition: Condition,
+    /// Where it was found.
+    pub at: Location,
+    /// The refusal as a sentence for a person, with its remedy where it has one.
+    pub message: String,
+}
+
+impl Refusal {
+    /// A refusal for `condition` found `at`, worded by `message`.
+    pub(crate) fn found((condition, at): (Condition, Location), message: String) -> Self {
+        Self {
+            condition,
+            at,
+            message,
+        }
+    }
+}
+
+/// A condition under which selfie will not deploy or compare a dotfile entry.
+///
+/// Converts to a label for an adapter: `"not_a_directory"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum Condition {
+    /// Two or more of the package's entries deploy to one target here.
+    Collision,
+    /// The package file spells the entry wrongly: an unknown key, a wrong
+    /// combination of keys, or a var name that cannot be substituted.
+    InvalidEntry,
+    /// The target is not one selfie deploys to: relative, or `~user/...`.
+    TargetRule,
+    /// The source or template lies outside the package directory.
+    Escapes,
+    /// A symlink is there.
+    Symlink,
+    /// A fifo, socket or device node is there, or behind a symlink there.
+    Irregular,
+    /// A directory is there.
+    Directory,
+    /// A component above the target is not a directory, so nothing can be
+    /// written there.
+    NotADirectory,
+    /// Nothing is there.
+    Absent,
+    /// Something is there and could not be read.
+    Unreadable,
+    /// selfie could not find out what is there.
+    Undetermined,
+    /// An earlier command of the same program failed in this run, so this
+    /// entry's commands were not run.
+    EarlierProgramFailed,
+}
+
+/// An operation selfie ran on a dotfile entry that failed: what it was, the
+/// error, and the sentence that says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    /// What selfie was doing.
+    pub operation: EntryOperation,
+    /// The error the operation returned, as a sentence fragment.
+    pub error: String,
+    /// The failure as a sentence for a person, naming the operation.
+    pub message: String,
+}
+
+impl Failure {
+    /// A failure of `operation` with `error`, worded as `head` followed by the
+    /// error.
+    pub(crate) fn new(
+        operation: EntryOperation,
+        head: impl fmt::Display,
+        error: impl fmt::Display,
+    ) -> Self {
+        let error = error.to_string();
+        Self {
+            operation,
+            message: format!("{head}: {error}"),
+            error,
+        }
+    }
+
+    /// The same failure with `remedy`, one or more sentences, after the error.
+    pub(crate) fn with_remedy(mut self, remedy: &str) -> Self {
+        self.message = format!("{}. {remedy}", self.message);
+        self
+    }
+}
+
+/// An operation selfie runs on a dotfile entry, which can fail.
+///
+/// Converts to a label for an adapter: `"permission_fix"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum EntryOperation {
+    /// Running the commands that produce a secret-bearing entry's content.
+    Resolve,
+    /// Keeping a copy of the target before overwriting it.
+    Backup,
+    /// Writing the target.
+    Write,
+    /// Narrowing an in-sync secret-bearing target's permissions to owner-only.
+    PermissionFix,
+}
+
+/// Where selfie found a [`Condition`].
+///
+/// Converts to a label for an adapter: `"above_target"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub enum Location {
+    /// The entry as the package file spells it.
+    Entry,
+    /// The repository file a repository-file entry copies.
+    Source,
+    /// The template a template entry renders.
+    Template,
+    /// The target.
+    Target,
+    /// A directory above the target.
+    AboveTarget,
 }
 
 /// Whether a symlink is at a secret-bearing entry's target, which its deploy
@@ -4340,6 +4578,7 @@ mod tests {
                     skipped_count: 2,
                     conflict_count: 3,
                     refused_count: 4,
+                    failed_count: 0,
                     orphan_count: 5,
                     environment: env(),
                     steps_completed: steps,
@@ -4470,6 +4709,7 @@ mod tests {
             skipped_count: 0,
             conflict_count: conflict,
             refused_count: refused,
+            failed_count: 0,
             orphan_count: orphan,
             environment: "test".to_string(),
             steps_completed: StepCount::new(1, 1),
@@ -4803,5 +5043,39 @@ mod tests {
         assert_eq!(groups.len(), 2, "{groups:?}");
         assert_eq!(groups[0].0, RefusalKind::UnknownTopLevelKeys);
         assert_eq!(groups[1].0, RefusalKind::NoEnvironments);
+    }
+
+    fn applied_with(refused_count: usize, failed_count: usize) -> OperationSuccess {
+        OperationSuccess::DotfilesApplied {
+            deployed_count: 1,
+            skipped_count: 0,
+            conflict_count: 0,
+            refused_count,
+            failed_count,
+            orphan_count: 0,
+            environment: "test".to_string(),
+            steps_completed: StepCount::new(2, 2),
+        }
+    }
+
+    // A failure alone makes an apply Failed, as a refusal alone does, and neither
+    // makes a clean run anything but Clean.
+    #[test]
+    fn a_failed_entry_alone_makes_an_apply_failed() {
+        assert_eq!(applied_with(0, 1).outcome(), Outcome::Failed);
+        assert_eq!(applied_with(1, 0).outcome(), Outcome::Failed);
+        assert_eq!(applied_with(0, 0).outcome(), Outcome::Clean);
+        assert!(applied_with(0, 1).had_failures() && !applied_with(0, 1).had_refusals());
+    }
+
+    // The summary names failed entries only when there are some.
+    #[test]
+    fn the_apply_summary_names_failures_only_when_there_are_some() {
+        let none = applied_with(1, 0).to_string();
+        let one = applied_with(0, 1).to_string();
+
+        assert!(!none.contains("failed"), "{none}");
+        assert!(none.ends_with("1 refused"), "{none}");
+        assert!(one.contains("0 refused, 1 failed"), "{one}");
     }
 }

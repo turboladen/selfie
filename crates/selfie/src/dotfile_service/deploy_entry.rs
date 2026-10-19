@@ -13,10 +13,12 @@ use crate::{
         filesystem::{FileSystem, FileSystemError},
         target::TargetPath,
     },
-    package::event::{DotfileSource, EventSender},
+    package::event::{DotfileSource, EntryOperation, EventSender, Failure, Refusal, RepoPath},
 };
 
-use super::refusal::{guard_refusal, read_target_state, readable_or_refusal, refusal_warning};
+use super::refusal::{
+    classify_write, guard_refusal, read_target_state, readable_or_refusal, refusal_for,
+};
 use super::state_file::{
     LoadedState, Recorder, WritableState, save_deploy_state, stopped_before_writing,
 };
@@ -35,6 +37,10 @@ pub(super) struct DeployUnit<'a> {
     /// The spec name of the package the entry belongs to, recorded beside the
     /// checksum. `None` for a package with no spec file behind it.
     pub(super) package: Option<&'a str>,
+    /// The name of the package the entry belongs to, for a refusal to name.
+    pub(super) package_name: &'a str,
+    /// The entry's target as the package file spells it, for a refusal to name.
+    pub(super) entry_target: &'a str,
     /// Where copies of overwritten targets go, or `None` if there is nowhere to
     /// put one. `Some` does not mean a copy will be made.
     // A dry run can have a root here and writes nothing: under a preview ledger
@@ -60,9 +66,10 @@ pub(super) enum DeployOutcome {
     Deployed,
     /// A dry run: reported as what it would do, and nothing written.
     Previewed,
-    /// Refused or failed, and already reported as whichever it was. Nothing was
-    /// written or recorded.
+    /// Refused, and already reported. Nothing was written or recorded.
     Refused,
+    /// An operation failed, and was already reported. Nothing was recorded.
+    Failed,
     /// The deploy state could not be written: before the target, so nothing was
     /// written, or after it, so the target is unrecorded. Carries why the run
     /// stops.
@@ -132,14 +139,17 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
             }
         }
         Wrote::Refused => DeployOutcome::Refused,
+        Wrote::Failed => DeployOutcome::Failed,
     }
 }
 
 /// What a write did, before anything is recorded.
 enum Wrote {
     Written,
-    /// Refused or failed, and already reported as whichever it was.
+    /// Refused, and already reported.
     Refused,
+    /// The copy or the write failed, and was already reported.
+    Failed,
 }
 
 /// Deploy a single config file to its target path and emit events. Records
@@ -177,11 +187,19 @@ async fn perform_deploy<F: FileSystem>(
                 backed_up.insert(unit.target_key.to_string(), path.clone());
                 (path, kept)
             }
-            Err(warning) => {
-                sender.send_warning(warning).await;
-                // Left out of `backed_up`, so a refused entry does not mark the
-                // target as settled for a later one.
+            // Left out of `backed_up`, so an entry that kept no copy does not mark
+            // the target as settled for a later one.
+            Err(NotKept::Refused(refusal)) => {
+                sender
+                    .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
+                    .await;
                 return Wrote::Refused;
+            }
+            Err(NotKept::Failed(failure)) => {
+                sender
+                    .send_dotfile_failed(unit.package_name, unit.entry_target, failure)
+                    .await;
+                return Wrote::Failed;
             }
         },
     };
@@ -192,29 +210,29 @@ async fn perform_deploy<F: FileSystem>(
     if let Err(e) =
         filesystem.write_file_no_follow(unit.target_path, unit.source_content.as_bytes())
     {
-        // A refusal is not a failure. "Failed to write" would read as something
-        // going wrong rather than as selfie declining. The error names the target
-        // in both arms, so neither repeats it.
-        //
-        // Reaching the refusal arm here means the link or fifo appeared between
-        // `classify_entry`'s checks and this write. It is exercised by
-        // `the_writer_refuses_even_when_the_check_is_blinded`, which asserts only
-        // that the message names a symlink — not the `Skipping '{source}': `
-        // wrapper. Share `refusal_warning` rather than repeating the wording, or
-        // that unpinned half can drift.
-        let message = match &e {
-            FileSystemError::SymlinkedTarget { .. } | FileSystemError::IrregularTarget { .. } => {
-                refusal_warning(unit.source, &e)
+        // Either way nothing is recorded as deployed that was not. An entry already
+        // in the state keeps its previous checksum and is stale rather than
+        // untracked, which is the honest record: a refusal writes nothing, and a
+        // failed write leaves the target as it was, so the previous checksum still
+        // describes it. The error names the target in both arms, so neither
+        // repeats it.
+        return match classify_write(unit.source, unit.target_path, &e) {
+            // A refusal is not a failure: "Failed to write" would read as something
+            // going wrong rather than as selfie declining. Reaching this arm means
+            // what refused the write appeared after `classify_entry`'s checks.
+            Some(refusal) => {
+                sender
+                    .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
+                    .await;
+                Wrote::Refused
             }
-            _ => format!("Failed to write: {e}"),
+            None => {
+                sender
+                    .send_dotfile_failed(unit.package_name, unit.entry_target, write_failure(&e))
+                    .await;
+                Wrote::Failed
+            }
         };
-        sender.send_warning(message).await;
-        // `Refused` has the caller count this as refused and record nothing, so
-        // nothing is recorded as deployed that was not. An entry already in the
-        // state keeps its previous checksum and is stale rather than untracked,
-        // which is the honest record: a refusal writes nothing, and a failed write
-        // leaves the target as it was, so the previous checksum still describes it.
-        return Wrote::Refused;
     }
 
     // Only now that the overwrite has landed is an earlier copy redundant. Before
@@ -247,13 +265,13 @@ async fn perform_deploy<F: FileSystem>(
 ///
 /// # Errors
 ///
-/// The warning to report, when the target cannot be read or the copy cannot be
+/// Why no copy was kept: the target cannot be read, or the copy cannot be
 /// written. Nothing has been written to the target in either case.
 fn keep_current<F: FileSystem>(
     filesystem: &F,
     unit: &DeployUnit<'_>,
     decided: Decided<'_>,
-) -> Result<Option<backup::Kept>, String> {
+) -> Result<Option<backup::Kept>, NotKept> {
     let Some(root) = unit.backups else {
         return Ok(None);
     };
@@ -268,13 +286,14 @@ fn keep_current<F: FileSystem>(
             // The guard first, as before every read of a target: a fifo or device
             // node put in place during the prompt must not be opened at all.
             if let Some(refusal) = guard_refusal(filesystem, unit.target_path) {
-                return Err(refusal_warning(unit.source, &refusal));
+                return Err(NotKept::Refused(refusal_for(unit.source, &refusal)));
             }
             readable_or_refusal(
                 unit.source,
                 unit.target_path,
                 read_target_state(filesystem, unit.target_path),
-            )?
+            )
+            .map_err(NotKept::Refused)?
         }
     };
     // Nothing there: nothing to keep, and the write creates it.
@@ -292,7 +311,22 @@ fn keep_current<F: FileSystem>(
 
     backup::keep(filesystem, root, unit.target_key, &current)
         .map(Some)
-        .map_err(|e| backup::refusal(unit.source, unit.target_path.path(), &e))
+        .map_err(|e| NotKept::Failed(backup::failure(unit.target_path.path(), &e)))
+}
+
+/// Why [`keep_current`] kept no copy.
+enum NotKept {
+    /// What is at the target bars the entry.
+    Refused(Refusal),
+    /// The copy could not be written.
+    Failed(Failure),
+}
+
+/// The failure of a write to a target, named by `error`.
+pub(super) fn write_failure(error: &FileSystemError) -> Failure {
+    // The error already names the target; naming it in the head too would print
+    // the path twice.
+    Failure::new(EntryOperation::Write, "Failed to write", error)
 }
 
 /// What an apply just recorded about a target.
@@ -333,12 +367,12 @@ pub(super) async fn record_and_save<F: FileSystem>(
     // With a base, the record holds the path relative to it, which is what the
     // base means; the spec's spelling is relative to the spec file instead.
     let (source, base) = match unit.event_source {
-        DotfileSource::File {
+        DotfileSource::File(RepoPath {
             base: Some(base),
             path,
-        } => (path.to_string_lossy(), Some(base.kind)),
+        }) => (path.to_string_lossy(), Some(base.kind)),
         // A template is never recorded; it takes the secret-bearing path.
-        DotfileSource::File { base: None, .. }
+        DotfileSource::File(RepoPath { base: None, .. })
         | DotfileSource::Template { .. }
         | DotfileSource::Command(_)
         | DotfileSource::Recorded(_) => (std::borrow::Cow::Borrowed(unit.source), None),

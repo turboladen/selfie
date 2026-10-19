@@ -227,7 +227,7 @@ takes the next free value from `3` to `63`; `64` to `78` (the `sysexits.h` codes
 
 | Command               | Clean (`0`)                                                             | Found (`3`)                                                               | Failed (`1`)                                                                                              |
 | --------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `apply`               | deployed, up to date, or conflicts skipped                              | never                                                                     | a refused entry; an error; a write that could not be recorded                                             |
+| `apply`               | deployed, up to date, or conflicts skipped                              | never                                                                     | a refused entry; a failed entry; an error; a write that could not be recorded                             |
 | `dotfiles drift`      | in sync; nothing deploys on this machine                                | drift; an orphaned target; the orphan check could not finish and said why | a refused entry; an error                                                                                 |
 | `package check`       | the check command exited 0                                              | the check command exited non-zero, for any reason (not installed)         | no check command; selfie's own timeout; the command could not be started                                  |
 | `package audit`       | no conflict                                                             | a conflict; not installed                                                 | the audit command exited non-zero; no audit command                                                       |
@@ -260,13 +260,19 @@ there is nothing to apply on this machine.
 `selfie apply` exits `1` when it declines to deploy an entry, even though the rest of the run
 succeeded and the command reports itself as completed. Selfie refuses an entry when it cannot deploy
 it safely or unambiguously — an unrecognized key in the entry, a target it will not write to (a
-symlink, whether or not its content already matches, or a path outside your home directory), a
-target it cannot read, or a source file it cannot read. Each refusal is named in the output, and the
-summary line counts them:
+symlink, whether or not its content already matches, a path outside your home directory, or a path
+below something that is not a directory), a target it cannot read, or a source file that is missing
+or that it cannot read. Each refusal is named in the output, and the summary line counts them:
 
 ```
 Dotfiles applied in environment 'macos': 2 deployed, 1 skipped, 0 conflict(s), 1 refused
 ```
+
+An entry whose deploy selfie started and could not finish fails rather than being refused: the
+commands that produce a secret-bearing entry failed, the copy of the old target could not be kept,
+the write failed, or narrowing an in-sync secret's permissions failed. Each failure names what it
+was doing, and the summary counts failures after refusals, only when there are some
+(`1 refused, 1 failed`). A failure also exits `1`.
 
 Whole packages are refused too, when the problem is in the file rather than in one entry: any
 unrecognized key at the top level or in the environment being used, a package file selfie could not
@@ -280,16 +286,16 @@ nothing to do.
 
 `selfie dotfiles drift` follows the same rule for an entry it did not compare: an entry apply would
 refuse, a source that escapes the package directory or cannot be read, and a target that is a
-symlink, a fifo, socket or device node, a directory, or that it cannot read are refusals, and the
-check exits `1`. A secret-bearing entry is not a refusal: drift reports it as not verifiable, since
-checking it would run its commands, and counts it apart. That includes one whose target is a
-symlink. A dotfiles directory that exists but cannot be listed counts as one refusal for
-`selfie apply` with no package name, and for `selfie dotfiles drift`. Every standalone dotfile in it
-was part of the run and none could be read, while the package dotfiles still deploy or are still
-checked. A package file that cannot be loaded counts the same way, one refusal each, since nothing
-it declares was deployed or checked: every such file in the package directory, and one in the
-dotfiles directory unless the package directory already has a spec of that name, which it only warns
-about.
+symlink, a fifo, socket or device node, a directory, below something that is not a directory, or
+that it cannot read are refusals, and the check exits `1`. A secret-bearing entry is not a refusal:
+drift reports it as not verifiable, since checking it would run its commands, and counts it apart.
+That includes one whose target is a symlink. A dotfiles directory that exists but cannot be listed
+counts as one refusal for `selfie apply` with no package name, and for `selfie dotfiles drift`.
+Every standalone dotfile in it was part of the run and none could be read, while the package
+dotfiles still deploy or are still checked. A package file that cannot be loaded counts the same
+way, one refusal each, since nothing it declares was deployed or checked: every such file in the
+package directory, and one in the dotfiles directory unless the package directory already has a spec
+of that name, which it only warns about.
 
 Two things are deliberately **not** refusals, and neither of them makes the exit code non-zero:
 

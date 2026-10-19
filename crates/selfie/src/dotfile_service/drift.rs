@@ -13,7 +13,7 @@ use crate::{
     dotfile_service::{deploy::compute_checksum, state::DeployState},
     fs::filesystem::FileSystem,
     package::{
-        event::{DriftType, EventSender, OperationResult, OperationSuccess, StepCount},
+        event::{EventSender, OperationResult, OperationSuccess, StepCount},
         refusal::refuse_up_front,
     },
 };
@@ -151,8 +151,10 @@ where
                     tally.unverified += 1;
                     continue;
                 }
-                Err(refused) => {
-                    refused.send(sender).await;
+                Err(refusal) => {
+                    sender
+                        .send_dotfile_refused(package.name(), scoped.entry.target(), refusal)
+                        .await;
                     tally.refused += 1;
                     continue;
                 }
@@ -162,8 +164,10 @@ where
                 current,
             } = match read_repo_file(filesystem, &repo) {
                 Ok(read) => read,
-                Err(refused) => {
-                    refused.send(sender).await;
+                Err(refusal) => {
+                    sender
+                        .send_dotfile_refused(package.name(), scoped.entry.target(), refusal)
+                        .await;
                     tally.refused += 1;
                     continue;
                 }
@@ -177,7 +181,7 @@ where
                 &source_checksum,
                 &target_checksum,
             );
-            if drift != DriftType::None {
+            if let Some(drift) = drift {
                 sender
                     .send_dotfile_drift_detected(repo.target.display(), drift)
                     .await;

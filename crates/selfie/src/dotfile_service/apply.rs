@@ -23,7 +23,8 @@ use crate::{
     package::{
         Package,
         event::{
-            DriftType, EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount,
+            Condition, DriftType, EventSender, Location, OperationFailure, OperationResult,
+            OperationSuccess, Refusal, StepCount,
         },
         refusal::refuse_up_front,
     },
@@ -118,8 +119,12 @@ enum EntryOutcome {
     /// In sync, or only previewed by a dry run.
     Skipped,
     Conflicted,
-    /// Refused or failed, and already reported as whichever it was.
+    /// Refused, and already reported.
     Refused,
+    /// An operation on it failed, and was already reported.
+    Failed,
+    /// The run was canceled before the entry finished. Counted as nothing.
+    Canceled,
     /// The deploy state could not be written, before the entry's write or after
     /// it. Carries why the run stops.
     Unrecorded(String),
@@ -133,27 +138,41 @@ struct ApplyTally {
     /// previewed.
     skipped: usize,
     conflicts: usize,
-    /// Entries, packages and directories this run was asked to deploy and did
-    /// not.
+    /// Entries, packages and directories this run was asked to deploy and
+    /// declined to.
     refused: usize,
+    /// Entries where an operation this run tried failed.
+    failed: usize,
     /// Orphaned targets whose files are still there. Not an outcome of any entry,
     /// so no part of the step count.
     orphaned: usize,
 }
 
+/// How an entry, package or directory the run did not finish ended.
+#[derive(Clone, Copy)]
+enum Unfinished {
+    Refused,
+    Failed,
+}
+
 impl ApplyTally {
-    /// Count one refusal, and return the stop it calls for, if any: a cancelled
-    /// run stops, and otherwise `stop_on_error` decides.
-    // Cancellation is asked first. Ctrl+C kills a provider command, which then
-    // fails, and blaming `stop_on_error` for that sends the user looking for a
-    // problem in the package file that is not there.
-    fn refuse(
+    /// Count one refusal or failure, and return the stop it calls for, if any: a
+    /// cancelled run stops, and otherwise `stop_on_error` decides.
+    // One method for both kinds, so a failure cannot get past `stop_on_error` by a
+    // path of its own. Cancellation is asked first. Ctrl+C kills a provider
+    // command, which then fails, and blaming `stop_on_error` for that sends the
+    // user looking for a problem in the package file that is not there.
+    fn unfinished(
         &mut self,
+        kind: Unfinished,
         config: &SelfieConfig,
         token: &CancellationToken,
         cause: Stop,
     ) -> Option<Stop> {
-        self.refused += 1;
+        match kind {
+            Unfinished::Refused => self.refused += 1,
+            Unfinished::Failed => self.failed += 1,
+        }
         if token.is_cancelled() {
             Some(Stop::Cancelled)
         } else if config.stop_on_error() {
@@ -164,20 +183,21 @@ impl ApplyTally {
     }
 
     fn into_success(self, environment: &str) -> OperationSuccess {
-        // `refused` belongs in the total: leaving it out would shrink the step
-        // count by exactly the number of refusals, so a run that refused two of
+        // `refused` and `failed` belong in the total: leaving either out would
+        // shrink the step count by exactly that many, so a run that refused two of
         // three entries would report (1/1) and the two refusals would vanish from
         // the summary as well as from the counters.
         //
         // That makes this "outcomes recorded" rather than "entries seen": a package
         // refused whole for a top-level unknown key contributes one outcome and no
         // entries.
-        let total = self.deployed + self.skipped + self.conflicts + self.refused;
+        let total = self.deployed + self.skipped + self.conflicts + self.refused + self.failed;
         OperationSuccess::DotfilesApplied {
             deployed_count: self.deployed,
             skipped_count: self.skipped,
             conflict_count: self.conflicts,
             refused_count: self.refused,
+            failed_count: self.failed,
             orphan_count: self.orphaned,
             environment: environment.to_string(),
             steps_completed: StepCount::new(total, total),
@@ -294,8 +314,8 @@ where
     // Set when the run stops early. Held rather than returned so every stop
     // reports through the one failure below.
     //
-    // Every refusal goes through `ApplyTally::refuse`, which decides whether it
-    // stops the run. A failed state record stops the run whatever
+    // Every refusal and failure goes through `ApplyTally::unfinished`, which
+    // decides whether it stops the run. A failed state record stops the run whatever
     // `stop_on_error` says, because the next entry would fail the same way.
     let mut stopped: Option<Stop> = None;
 
@@ -307,7 +327,12 @@ where
         Scope::Named(_) => &[],
     };
     for refusal in refusals {
-        stopped = tally.refuse(config, token, Stop::Collection(refusal.clone()));
+        stopped = tally.unfinished(
+            Unfinished::Refused,
+            config,
+            token,
+            Stop::Collection(refusal.clone()),
+        );
         if stopped.is_some() {
             break;
         }
@@ -324,7 +349,12 @@ where
     } else {
         let (packages, refused) = refuse_up_front(packages, config.environment(), sender).await;
         for package in &refused {
-            stopped = tally.refuse(config, token, Stop::Package(package.name().to_string()));
+            stopped = tally.unfinished(
+                Unfinished::Refused,
+                config,
+                token,
+                Stop::Package(package.name().to_string()),
+            );
             if stopped.is_some() {
                 break;
             }
@@ -381,6 +411,7 @@ where
 
         let secret_apply = SecretApply {
             base_dir: &base_dir,
+            package: package.name(),
             filesystem,
             runner,
             config,
@@ -393,8 +424,8 @@ where
             let entry = scoped.entry;
             // Between entries: refuse to start another entry's commands once the
             // user has asked to stop. The *mid-command* case cannot be caught
-            // here: a killed command fails, and `ApplyTally::refuse` reports the
-            // cancellation when that failure is counted.
+            // here: the resolve of a command the cancel killed returns
+            // `SecretOutcome::Canceled`, which stops the run without counting the entry.
             if token.is_cancelled() {
                 stopped = Some(Stop::Cancelled);
                 break 'packages;
@@ -415,8 +446,10 @@ where
                     Purpose::Deploy,
                 ) {
                     Ok(classified) => classified,
-                    Err(refused) => {
-                        refused.send(sender).await;
+                    Err(refusal) => {
+                        sender
+                            .send_dotfile_refused(package.name(), entry.target(), refusal)
+                            .await;
                         break 'entry EntryOutcome::Refused;
                     }
                 };
@@ -430,12 +463,16 @@ where
                             .into_iter()
                             .find(|program| failed_programs.contains(program))
                         {
-                            sender
-                                .send_warning(format!(
+                            let refusal = Refusal::found(
+                                (Condition::EarlierProgramFailed, Location::Entry),
+                                format!(
                                     "Skipping '{}': an earlier `{program}` command failed; no \
                                      command was run",
                                     entry.target()
-                                ))
+                                ),
+                            );
+                            sender
+                                .send_dotfile_refused(package.name(), entry.target(), refusal)
                                 .await;
                             break 'entry EntryOutcome::Refused;
                         }
@@ -452,14 +489,16 @@ where
                             SecretOutcome::Deployed => EntryOutcome::Deployed,
                             SecretOutcome::Skipped => EntryOutcome::Skipped,
                             SecretOutcome::Conflicted => EntryOutcome::Conflicted,
-                            SecretOutcome::Failed => EntryOutcome::Refused,
+                            SecretOutcome::Refused => EntryOutcome::Refused,
+                            SecretOutcome::Failed => EntryOutcome::Failed,
                             SecretOutcome::CommandFailed(program) => {
                                 failed_programs.insert(program);
-                                EntryOutcome::Refused
+                                EntryOutcome::Failed
                             }
                             SecretOutcome::StateNotWritable(reason) => {
                                 EntryOutcome::Unrecorded(reason)
                             }
+                            SecretOutcome::Canceled => EntryOutcome::Canceled,
                         };
                     }
                 };
@@ -469,8 +508,10 @@ where
                     current,
                 } = match read_repo_file(filesystem, &repo) {
                     Ok(read) => read,
-                    Err(refused) => {
-                        refused.send(sender).await;
+                    Err(refusal) => {
+                        sender
+                            .send_dotfile_refused(package.name(), entry.target(), refusal)
+                            .await;
                         break 'entry EntryOutcome::Refused;
                     }
                 };
@@ -496,6 +537,8 @@ where
                     source_checksum: &source_checksum,
                     source,
                     package: package_name.as_deref(),
+                    package_name: package.name(),
+                    entry_target: entry.target(),
                     backups: backups_root.as_deref(),
                 };
 
@@ -503,8 +546,12 @@ where
                     .loaded()
                     .map_or(&empty, LoadedState::state)
                     .detect_drift(&target_key, &source_checksum, &target_checksum);
-                let decision =
-                    deploy_decision(&drift, target_exists, &source_checksum, &target_checksum);
+                let decision = deploy_decision(
+                    drift.as_ref(),
+                    target_exists,
+                    &source_checksum,
+                    &target_checksum,
+                );
 
                 // Every arm that writes names what the target held when it decided, and
                 // the one write below carries it out, so the two ways to reach a write
@@ -512,10 +559,10 @@ where
                 let decided = match decision {
                     DeployDecision::Deploy => Decided::Now(current.as_deref()),
                     DeployDecision::Skip(reason) => {
-                        // Record an untracked but in-sync entry so future runs see
-                        // `DriftType::None`. A symlinked target never reaches here: the
+                        // Record an untracked but in-sync entry so future runs see no
+                        // drift. A symlinked target never reaches here: the
                         // guard above refused it before the read.
-                        if drift == DriftType::NotTracked
+                        if drift == Some(DriftType::NotTracked)
                             && let Ledger::Record(recorder) = &mut ledger
                         {
                             let mut loaded = match recorder.writable(filesystem) {
@@ -542,10 +589,12 @@ where
                         // it later becomes can be shown against it. Only in memory:
                         // the run saves once at its end, and a failure to save it
                         // costs nothing but the location, so it never stops the run.
-                        if let crate::package::event::DotfileSource::File {
-                            base: Some(base),
-                            path,
-                        } = &event_source
+                        if let crate::package::event::DotfileSource::File(
+                            crate::package::event::RepoPath {
+                                base: Some(base),
+                                path,
+                            },
+                        ) = &event_source
                             && let Ledger::Record(recorder) = &mut ledger
                             && recorder
                                 .loaded()
@@ -666,9 +715,8 @@ where
                 {
                     DeployOutcome::Deployed => EntryOutcome::Deployed,
                     DeployOutcome::Previewed => EntryOutcome::Skipped,
-                    // A refusal or a write failure, already reported as whichever it
-                    // was. Here they are the same thing: asked to deploy, did not.
                     DeployOutcome::Refused => EntryOutcome::Refused,
+                    DeployOutcome::Failed => EntryOutcome::Failed,
                     DeployOutcome::Unrecorded(reason) => EntryOutcome::Unrecorded(reason),
                 }
             };
@@ -678,13 +726,27 @@ where
                 EntryOutcome::Skipped => tally.skipped += 1,
                 EntryOutcome::Conflicted => tally.conflicts += 1,
                 EntryOutcome::Refused => {
-                    if let Some(stop) = tally.refuse(config, token, failed()) {
+                    if let Some(stop) =
+                        tally.unfinished(Unfinished::Refused, config, token, failed())
+                    {
+                        stopped = Some(stop);
+                        break 'packages;
+                    }
+                }
+                EntryOutcome::Failed => {
+                    if let Some(stop) =
+                        tally.unfinished(Unfinished::Failed, config, token, failed())
+                    {
                         stopped = Some(stop);
                         break 'packages;
                     }
                 }
                 EntryOutcome::Unrecorded(reason) => {
                     stopped = Some(Stop::Unrecorded(reason));
+                    break 'packages;
+                }
+                EntryOutcome::Canceled => {
+                    stopped = Some(Stop::Cancelled);
                     break 'packages;
                 }
             }

@@ -65,6 +65,39 @@ fn apply_yes_refuses_a_secret_target_it_cannot_read_before_running_anything() {
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
 }
 
+// A failed operation is printed as an error, not as a warning the way a refusal
+// is: the run counts it as failed and exits 1. The marker is what tells the two
+// apart on a terminal.
+#[test]
+fn apply_prints_a_failed_resolve_as_an_error() {
+    let temp = setup_default_test_config();
+    let target = temp.path().join("credentials");
+    std::fs::write(
+        temp.path().join("packages/creds.yaml"),
+        format!(
+            "name: creds\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  \
+             - command: \"exit 1\"\n    target: \"{}\"\n",
+            target.display()
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&temp).arg("apply").output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("Failed to resolve"))
+        .collect();
+    assert_eq!(lines.len(), 1, "one line names the failure:\n{stderr}");
+    assert!(
+        lines[0].contains('✗') && !lines[0].contains('⚠'),
+        "a failed resolve is an error, not a warning:\n{stderr}"
+    );
+    assert!(!target.exists(), "nothing is written for a failed resolve");
+}
+
 // A secret-bearing conflict with no terminal to ask on is left alone, and the run
 // says only a terminal can accept it: `--yes` does not.
 #[test]
