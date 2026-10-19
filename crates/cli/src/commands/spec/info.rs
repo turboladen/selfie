@@ -16,7 +16,7 @@ use crate::{
     git_style, status_style,
 };
 
-use crate::commands::common;
+use crate::commands::presentation;
 
 pub(crate) async fn handle_info(
     service: &impl SpecService,
@@ -68,13 +68,13 @@ pub(crate) async fn handle_info(
 }
 
 fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig) -> Table {
-    let mut table = common::create_formatted_table();
+    let mut table = presentation::create_formatted_table();
 
     // Helper functions for formatting
     let format_key_fn = |name: &str| -> String { format_key(name, config.use_colors()) };
 
     let format_value =
-        |value: &str| -> String { common::format_field_value(value, config.use_colors()) };
+        |value: &str| -> String { presentation::format_field_value(value, config.use_colors()) };
 
     // Add the basic package info rows
     table.add_row(vec![
@@ -105,7 +105,7 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
         };
         table.add_row(vec![format_key_fn("Refused"), value]);
     } else {
-        let env_names = common::format_environment_names(
+        let env_names = presentation::format_environment_names(
             &package_info.environments,
             &package_info.current_environment,
             config,
@@ -133,7 +133,7 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
         return;
     }
 
-    let mut table = common::create_formatted_table();
+    let mut table = presentation::create_formatted_table();
     table.set_header(vec!["Environment", "Content", "Target"]);
     for dotfile in &package_info.dotfiles {
         table.add_row(vec![
@@ -164,7 +164,7 @@ pub(crate) fn create_environment_table(
     env_status: &EnvironmentStatusData,
     config: &CliConfig,
 ) -> Table {
-    let mut env_table = common::create_formatted_table();
+    let mut env_table = presentation::create_formatted_table();
 
     // Create a header for the environment table
     let env_header = if env_status.is_current {
@@ -188,10 +188,10 @@ pub(crate) fn create_environment_table(
 
     // Format environment detail keys
     let format_env_key =
-        |key: &str| -> String { common::format_field_key(key, config.use_colors()) };
+        |key: &str| -> String { presentation::format_field_key(key, config.use_colors()) };
 
     let format_env_value =
-        |value: &str| -> String { common::format_field_value(value, config.use_colors()) };
+        |value: &str| -> String { presentation::format_field_value(value, config.use_colors()) };
 
     // Add installation status if this is the current environment and we have status
     if env_status.is_current
@@ -285,7 +285,7 @@ mod tests {
     fn test_format_environment_names() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![TEST_ENV.to_string(), "alt-test-env".to_string()];
-        let result = common::format_environment_names(&environments, TEST_ENV, &config);
+        let result = presentation::format_environment_names(&environments, TEST_ENV, &config);
         assert!(!result.is_empty());
     }
 

@@ -9,7 +9,7 @@ use crate::{
 };
 use selfie::package::event::BaseKind;
 
-use crate::commands::common;
+use crate::commands::presentation;
 
 /// Result variant for a formatted list item, determining which finish method to call.
 enum ListItemResult {
@@ -96,7 +96,11 @@ fn format_list_item(
     };
 
     let environments = show_all.then(|| {
-        common::format_environment_names(&package_item.environments, config.environment(), config)
+        presentation::format_environment_names(
+            &package_item.environments,
+            config.environment(),
+            config,
+        )
     });
 
     ListRow {
@@ -165,7 +169,7 @@ fn handle_list_event(
             // One table, the answer: each package's status, and its environments
             // under `--all`, in their own columns.
             state.buffered_rows.sort_by(|a, b| a.name.cmp(&b.name));
-            let mut table = common::create_formatted_table();
+            let mut table = presentation::create_formatted_table();
             let mut header = vec!["", "Package", "Status"];
             if show_all {
                 header.push("Environments");
@@ -286,7 +290,7 @@ fn display_environment_stats(
         .collect();
     env_counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    let mut table = common::create_formatted_table();
+    let mut table = presentation::create_formatted_table();
     table.set_header(vec!["Environment", "Package Count"]);
 
     for (env_name, count) in env_counts {
@@ -369,7 +373,7 @@ mod tests {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let environments = vec![TEST_ENV.to_string(), ALT_TEST_ENV.to_string()];
 
-        let result = common::format_environment_names(&environments, TEST_ENV, &config);
+        let result = presentation::format_environment_names(&environments, TEST_ENV, &config);
 
         // Just test that it doesn't panic and returns something
         assert!(!result.is_empty());

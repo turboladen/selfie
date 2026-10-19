@@ -5,7 +5,7 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::common,
+    commands::presentation,
     config::CliConfig,
     display_manager::{DisplayManager, INDENT},
     event_processor::{EventProcessor, Exit},
@@ -86,7 +86,7 @@ fn display_environment_error(
         ..
     }) = failure
     {
-        common::display_environment_summary(
+        presentation::display_environment_summary(
             package_name,
             config.environment(),
             available_environments,
@@ -95,7 +95,7 @@ fn display_environment_error(
             "audit",
         );
     } else {
-        common::display_generic_environment_suggestion(
+        presentation::display_generic_environment_suggestion(
             package_name,
             config.environment(),
             config,

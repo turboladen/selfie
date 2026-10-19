@@ -6,7 +6,7 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::common::format_environment_names,
+    commands::presentation::format_environment_names,
     config::CliConfig,
     display_manager::DisplayManager,
     event_processor::{EventProcessor, Exit},

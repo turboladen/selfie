@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
-    commands::common::{create_dotfile_service, create_formatted_table},
+    commands::{common::create_dotfile_service, presentation::create_formatted_table},
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
     event_processor::{EventProcessor, Exit},

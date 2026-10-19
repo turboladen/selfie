@@ -9,6 +9,7 @@ pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod dotfiles;
 pub(crate) mod package;
+pub(crate) mod presentation;
 pub(crate) mod spec;
 pub(crate) mod sync;
 pub(crate) mod track;

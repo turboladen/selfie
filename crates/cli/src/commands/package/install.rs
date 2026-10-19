@@ -6,7 +6,7 @@ use selfie::package::{
 use tracing::info;
 
 use crate::{
-    commands::common,
+    commands::presentation,
     config::CliConfig,
     display_manager::DisplayManager,
     event_processor::{EventProcessor, Exit},
@@ -63,7 +63,7 @@ fn display_environment_error(
             required_by,
             ..
         }) => {
-            common::display_environment_summary(
+            presentation::display_environment_summary(
                 failing,
                 config.environment(),
                 available_environments,
@@ -80,7 +80,7 @@ fn display_environment_error(
             required_by,
             ..
         }) => {
-            common::display_missing_command(
+            presentation::display_missing_command(
                 display,
                 "install",
                 failing,
@@ -90,7 +90,7 @@ fn display_environment_error(
             display_required_by(display, required_by.as_deref());
         }
         _ => {
-            common::display_generic_environment_suggestion(
+            presentation::display_generic_environment_suggestion(
                 package_name,
                 config.environment(),
                 config,
