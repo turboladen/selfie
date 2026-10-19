@@ -20,7 +20,7 @@ use crate::{
     commands::common::create_dotfile_service,
     config::CliConfig,
     display_manager::{Channel, DisplayManager, PromptFailure, shorten_path},
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
     source_paths::{force_heading, relative_text},
 };
 
@@ -334,7 +334,7 @@ pub(crate) async fn handle_apply(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     let unasked = Arc::new(Mutex::new(Unasked::default()));
     let options = ApplyOptions {
         dry_run: args.dry_run,
@@ -394,7 +394,7 @@ pub(crate) async fn handle_apply(
         unasked.report(display);
     }
 
-    result.exit_code
+    result.exit
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@ use selfie::package::{
 use crate::{
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
     formatters::format_key,
     git_style, status_style,
 };
@@ -23,7 +23,7 @@ pub(crate) async fn handle_info(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Getting package definition for: {package_name}");
 
     // Status message:
@@ -64,7 +64,7 @@ pub(crate) async fn handle_info(
             }
         })
         .await;
-    result.exit_code
+    result.exit
 }
 
 fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig) -> Table {

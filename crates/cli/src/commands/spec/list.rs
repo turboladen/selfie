@@ -6,8 +6,11 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::common::format_environment_names, config::CliConfig, display_manager::DisplayManager,
-    event_processor::EventProcessor, git_style,
+    commands::common::format_environment_names,
+    config::CliConfig,
+    display_manager::DisplayManager,
+    event_processor::{EventProcessor, Exit},
+    git_style,
 };
 
 pub(crate) async fn handle_list(
@@ -15,7 +18,7 @@ pub(crate) async fn handle_list(
     config: &CliConfig,
     display: &DisplayManager,
     show_all: bool,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Running spec list command (show_all={show_all})");
 
     display.print_status("Loading specs...");
@@ -28,7 +31,7 @@ pub(crate) async fn handle_list(
             handle_spec_list_event(event, config, display)
         })
         .await;
-    result.exit_code
+    result.exit
 }
 
 pub(super) fn handle_spec_list_event(

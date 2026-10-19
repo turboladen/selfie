@@ -8,7 +8,7 @@ use crate::{
     commands::validation_display::{ValidationGroup, ValidationRow, display_validation_groups},
     config::CliConfig,
     display_manager::DisplayManager,
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
     status_style,
 };
 
@@ -17,7 +17,7 @@ pub(crate) async fn handle_validate(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Running validate command for package: {}", package_name);
 
     display.print_status(format!("Validating {package_name}..."));
@@ -30,14 +30,14 @@ pub(crate) async fn handle_validate(
             handle_validate_event(event, config, display)
         })
         .await;
-    result.exit_code
+    result.exit
 }
 
 pub(crate) async fn handle_validate_all(
     service: &impl SpecService,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Running validate --all command");
 
     display.print_status("Validating all packages...");
@@ -50,7 +50,7 @@ pub(crate) async fn handle_validate_all(
             handle_validate_event(event, config, display)
         })
         .await;
-    result.exit_code
+    result.exit
 }
 
 fn handle_validate_event(

@@ -4,8 +4,10 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::spec::info::create_environment_table, config::CliConfig,
-    display_manager::DisplayManager, event_processor::EventProcessor,
+    commands::spec::info::create_environment_table,
+    config::CliConfig,
+    display_manager::DisplayManager,
+    event_processor::{EventProcessor, Exit},
 };
 
 pub(crate) async fn handle_status(
@@ -13,7 +15,7 @@ pub(crate) async fn handle_status(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Getting runtime status for: {package_name}");
 
     let event_stream = service.status(package_name).await;
@@ -36,5 +38,5 @@ pub(crate) async fn handle_status(
             _ => false,
         })
         .await;
-    result.exit_code
+    result.exit
 }

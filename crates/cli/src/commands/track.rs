@@ -49,14 +49,14 @@ pub(crate) async fn handle_track(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     info!("Interactive track for '{}'", file);
 
     // Before the prompt, not after it. Every path out of `prompt_track_choice`
     // ends in a service call the library refuses, so asking first would collect
     // a package choice and a spec name and then throw both away.
-    if let Some(code) = common::refuse_under_sudo(config, display) {
-        return code;
+    if let Some(exit) = common::refuse_under_sudo(config, display) {
+        return exit;
     }
 
     let repo = create_package_repository(config);
@@ -87,7 +87,7 @@ pub(crate) async fn handle_track(
         Ok(loaded) => loaded,
         Err(msg) => {
             display.print_error(msg);
-            return 1;
+            return Exit::Failed;
         }
     };
 
@@ -109,15 +109,13 @@ pub(crate) async fn handle_track(
     let choice = match prompt_track_choice(&package_names, file, display) {
         Ok(choice) => choice,
         Err(failure) => {
-            return display
-                .refuse_prompt(
-                    &failure,
-                    "Choosing where to track a file",
-                    "Name the destination instead: `selfie package track-dotfile <package> <file>` \
+            return display.refuse_prompt(
+                &failure,
+                "Choosing where to track a file",
+                "Name the destination instead: `selfie package track-dotfile <package> <file>` \
                      to add it to an existing package, or `selfie dotfiles track <name> <file>` to \
                      make it a standalone dotfile.",
-                )
-                .code();
+            );
         }
     };
 
@@ -129,27 +127,28 @@ pub(crate) async fn handle_track(
             // Validate namespace before creating
             if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
                 display.print_error(common::name_check_message(name, &e));
-                return 1;
+                return Exit::Failed;
             }
             common::handle_track_standalone(name, file, config, display, cancellation_token).await
         }
         // Nothing was tracked, so the run did not do what it was asked.
         TrackChoice::Declined => {
             display.print_run_note("Cancelled.");
-            Exit::Failed.code()
+            Exit::Failed
         }
     }
 }
 
-/// Report every spec that already tracks a file, and the exit code for them:
-/// the worst of each one's.
-fn report_existing_trackers(trackers: &[ExistingTracker], display: &DisplayManager) -> i32 {
+/// Report every spec that already tracks a file, and the [`Exit`] for them: the
+/// highest of each one's.
+fn report_existing_trackers(trackers: &[ExistingTracker], display: &DisplayManager) -> Exit {
     let mut warned = HashSet::new();
-    let worst = trackers
+    // A fold visits every tracker, so each is reported even after one fails: an
+    // `any` would stop printing at the first.
+    let exit = trackers
         .iter()
         .map(|tracked| report_existing_tracker(tracked, display, &mut warned))
-        .max()
-        .unwrap_or(Exit::Clean.code());
+        .fold(Exit::Clean, Exit::max);
 
     // Two specs deploying one file overwrite each other on every apply, so the
     // file is not handled, whatever each entry says on its own.
@@ -160,21 +159,21 @@ fn report_existing_trackers(trackers: &[ExistingTracker], display: &DisplayManag
             trackers.len(),
             names.join(", ")
         ));
-        return worst.max(Exit::Failed.code());
+        return exit.max(Exit::Failed);
     }
-    worst
+    exit
 }
 
-/// Report a file some spec already tracks, and the exit code for it.
+/// Report a file some spec already tracks, and the [`Exit`] for it.
 ///
-/// Returns 1 for an entry no apply can ever deploy, 0 otherwise. A warning
-/// about the target is printed once, however many specs track it: `warned`
-/// holds the ones already printed.
+/// Returns [`Exit::Failed`] for an entry no apply can ever deploy, and
+/// [`Exit::Clean`] otherwise. A warning about the target is printed once,
+/// however many specs track it: `warned` holds the ones already printed.
 fn report_existing_tracker(
     tracked: &ExistingTracker,
     display: &DisplayManager,
     warned: &mut HashSet<String>,
-) -> i32 {
+) -> Exit {
     let ExistingTracker {
         spec_name,
         spec_path,
@@ -211,7 +210,7 @@ fn report_existing_tracker(
                     spec_path.display()
                 ));
             }
-            return 1;
+            return Exit::Failed;
         }
     };
 
@@ -227,7 +226,7 @@ fn report_existing_tracker(
     }
 
     display.print_info(format!("Already tracking '{target}' in spec '{spec_name}'"));
-    0
+    Exit::Clean
 }
 
 /// Present the interactive selection prompt and return the user's choice.
@@ -515,6 +514,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn one_undeployable_tracker_fails_the_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let display = DisplayManager::new(false);
+
+        let exit = report_existing_trackers(
+            &[ExistingTracker {
+                spec_name: "only".to_string(),
+                spec_path: temp.path().join("only.yml"),
+                target: "relative/rc".to_string(),
+            }],
+            &display,
+        );
+
+        assert_eq!(exit, Exit::Failed, "{:?}", display.printed());
+    }
+
+    // Every tracker is reported even when the first one fails, so a fold that
+    // stops at the first failure would leave the second spec unnamed.
+    #[test]
+    fn every_tracker_is_reported_after_an_undeployable_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("rc");
+        std::fs::write(&file, "x").unwrap();
+        let tracker = |spec_name: &str, target: &str| ExistingTracker {
+            spec_name: spec_name.to_string(),
+            spec_path: temp.path().join(format!("{spec_name}.yml")),
+            target: target.to_string(),
+        };
+        let display = DisplayManager::new(false);
+
+        let exit = report_existing_trackers(
+            &[
+                tracker("first", "relative/rc"),
+                tracker("second", &file.display().to_string()),
+            ],
+            &display,
+        );
+
+        assert_eq!(exit, Exit::Failed);
+        let printed: Vec<String> = display
+            .printed()
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
+        let count = |needle: &str| printed.iter().filter(|line| line.contains(needle)).count();
+        assert_eq!(
+            count("'relative/rc' is tracked in spec 'first', but"),
+            1,
+            "{printed:?}"
+        );
+        assert_eq!(count("in spec 'second'"), 1, "{printed:?}");
+        assert_eq!(count("2 specs track this file"), 1, "{printed:?}");
+    }
+
+    #[test]
     fn suggest_name_strips_leading_dot_and_extension() {
         assert_eq!(suggest_name("~/.dprint.jsonc"), "dprint");
         assert_eq!(suggest_name("/home/user/.config/starship.toml"), "starship");
@@ -777,9 +831,9 @@ mod tests {
         let display = DisplayManager::new(false)
             .answering(vec![crate::display_manager::answer(None::<usize>)]);
 
-        let code = handle_track(&file, &config, &display, CancellationToken::new()).await;
+        let exit = handle_track(&file, &config, &display, CancellationToken::new()).await;
 
-        assert_eq!(code, 1);
+        assert_eq!(exit, Exit::Failed);
     }
 
     // A blank name is a decline too. dialoguer asks again on an empty line, so
@@ -793,9 +847,9 @@ mod tests {
         let display = DisplayManager::new(false)
             .answering(vec![answer(Some(1_usize)), answer("  ".to_string())]);
 
-        let code = handle_track(&file, &config, &display, CancellationToken::new()).await;
+        let exit = handle_track(&file, &config, &display, CancellationToken::new()).await;
 
-        assert_eq!(code, 1);
+        assert_eq!(exit, Exit::Failed);
     }
 
     // Ctrl+C at the destination picker ends the run canceled.

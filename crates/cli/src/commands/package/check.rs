@@ -8,7 +8,7 @@ use crate::{
     commands::common,
     config::CliConfig,
     display_manager::{DisplayManager, INDENT},
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
     formatters::format_key,
     status_style,
 };
@@ -18,7 +18,7 @@ pub(crate) async fn handle_check(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Running check command for package: {}", package_name);
 
     let event_stream = service.check(package_name).await;
@@ -56,7 +56,7 @@ pub(crate) async fn handle_check(
         })
         .await;
 
-    result.exit_code
+    result.exit
 }
 
 /// Display environment error with helpful suggestions from the typed failure data

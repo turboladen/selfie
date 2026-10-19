@@ -12,14 +12,14 @@ use crate::{
     commands::common::create_sync_service,
     config::CliConfig,
     display_manager::{DisplayManager, INDENT, shorten_path},
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
 };
 
 pub(crate) async fn handle_status(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     let service = create_sync_service(config, cancellation_token);
 
     let event_stream = service.status().await;
@@ -33,7 +33,7 @@ pub(crate) async fn handle_status(
         })
         .await;
 
-    result.exit_code
+    result.exit
 }
 
 fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_colors: bool) -> bool {

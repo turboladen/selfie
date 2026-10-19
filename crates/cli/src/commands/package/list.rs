@@ -4,7 +4,9 @@ use console::style;
 use selfie::package::{event, service::PackageService};
 
 use crate::source_paths::base_directory_line;
-use crate::{config::CliConfig, display_manager::DisplayManager, status_style};
+use crate::{
+    config::CliConfig, display_manager::DisplayManager, event_processor::Exit, status_style,
+};
 use selfie::package::event::BaseKind;
 
 use crate::commands::common;
@@ -51,7 +53,7 @@ impl<'a> ListCommand<'a> {
 }
 
 impl ListCommand<'_> {
-    pub(crate) async fn handle_command(&self, service: &impl PackageService) -> i32 {
+    pub(crate) async fn handle_command(&self, service: &impl PackageService) -> Exit {
         let event_stream = service.list(self.show_all).await;
 
         let processor = crate::event_processor::EventProcessor::new(self.display.clone());
@@ -67,7 +69,7 @@ impl ListCommand<'_> {
                 handle_list_event(event, config, display, use_colors, show_all, &mut state)
             })
             .await;
-        result.exit_code
+        result.exit
     }
 }
 

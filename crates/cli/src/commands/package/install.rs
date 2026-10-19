@@ -6,8 +6,10 @@ use selfie::package::{
 use tracing::info;
 
 use crate::{
-    commands::common, config::CliConfig, display_manager::DisplayManager,
-    event_processor::EventProcessor,
+    commands::common,
+    config::CliConfig,
+    display_manager::DisplayManager,
+    event_processor::{EventProcessor, Exit},
 };
 
 pub(crate) async fn handle_install(
@@ -16,7 +18,7 @@ pub(crate) async fn handle_install(
     options: InstallOptions,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     info!("Installing package: {}", package_name);
 
     let event_stream = service.install(package_name, options).await;
@@ -39,7 +41,7 @@ pub(crate) async fn handle_install(
         })
         .await;
 
-    result.exit_code
+    result.exit
 }
 
 /// Display environment error with helpful suggestions from the typed failure data

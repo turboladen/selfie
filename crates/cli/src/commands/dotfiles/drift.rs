@@ -9,8 +9,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
-    commands::common::create_dotfile_service, config::CliConfig, display_manager::DisplayManager,
-    event_processor::EventProcessor,
+    commands::common::create_dotfile_service,
+    config::CliConfig,
+    display_manager::DisplayManager,
+    event_processor::{EventProcessor, Exit},
 };
 
 /// Handle the `selfie dotfiles drift` command
@@ -22,7 +24,7 @@ pub(crate) async fn handle_drift(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     info!("Checking dotfile drift");
 
     let service = create_dotfile_service(config, cancellation_token);
@@ -33,5 +35,5 @@ pub(crate) async fn handle_drift(
     let processor = EventProcessor::new(display.clone());
     let result = processor.process_events(event_stream, |_event| false).await;
 
-    result.exit_code
+    result.exit
 }

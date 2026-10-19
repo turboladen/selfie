@@ -8,7 +8,7 @@ use crate::{
     commands::common,
     config::CliConfig,
     display_manager::{DisplayManager, INDENT},
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
     formatters::format_key,
     status_style,
 };
@@ -18,7 +18,7 @@ pub(crate) async fn handle_audit(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Running audit command for package: {}", package_name);
 
     let event_stream = service.audit(package_name).await;
@@ -47,14 +47,14 @@ pub(crate) async fn handle_audit(
         })
         .await;
 
-    result.exit_code
+    result.exit
 }
 
 pub(crate) async fn handle_audit_all(
     service: &impl PackageService,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Running audit command for all packages");
 
     let event_stream = service.audit_all().await;
@@ -70,7 +70,7 @@ pub(crate) async fn handle_audit_all(
         })
         .await;
 
-    result.exit_code
+    result.exit
 }
 
 fn display_environment_error(

@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         init_tracing(verbose);
         debug!("CLI arguments: {:#?}", &args);
         let display = DisplayManager::new(use_colors).with_verbosity(Verbosity::from(verbose));
-        process::exit(commands::config::handle_validate(&display, &fs));
+        process::exit(commands::config::handle_validate(&display, &fs).code());
     }
 
     // Logged once tracing is up, which waits for the config: `cli: verbose` in
@@ -201,12 +201,11 @@ async fn main() -> anyhow::Result<()> {
 
         // Second signal: force exit
         wait_for_shutdown_signal().await;
-        process::exit(130);
+        process::exit(event_processor::Exit::Cancelled.code());
     });
 
     // Dispatch and execute the requested command
-    let exit_code =
-        dispatch_command(&args.command, &config, display, cancellation_token, &fs).await;
+    let exit = dispatch_command(&args.command, &config, display, cancellation_token, &fs).await;
 
-    process::exit(exit_code)
+    process::exit(exit.code())
 }

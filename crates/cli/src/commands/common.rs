@@ -24,7 +24,10 @@ use selfie::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{config::CliConfig, event_processor::EventProcessor};
+use crate::{
+    config::CliConfig,
+    event_processor::{EventProcessor, Exit},
+};
 use std::{path::Path, process::Command};
 
 use crate::display_manager::{DisplayManager, INDENT};
@@ -192,11 +195,11 @@ fn sudo_policy(config: &CliConfig) -> SudoPolicy<RealPrivilege> {
 /// the "Started" message the service would otherwise print ahead of its own
 /// refusal. `selfie track` calls it before its interactive prompts as well,
 /// whose answers a refusal afterward would discard.
-pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<i32> {
+pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<Exit> {
     let refusal = sudo_policy(config).refusal(WriteScope::Dotfiles)?;
     display.print_error(refusal.message());
     display.print_suggestion(refusal.suggestion());
-    Some(1)
+    Some(Exit::Failed)
 }
 
 /// The message for a name the namespace check refused, for a command tracking a
@@ -236,11 +239,11 @@ pub(crate) async fn handle_track_standalone(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     // Ahead of building the service, so a run under sudo prints only the
     // refusal, not the "Started" message the service would emit first.
-    if let Some(code) = refuse_under_sudo(config, display) {
-        return code;
+    if let Some(exit) = refuse_under_sudo(config, display) {
+        return exit;
     }
 
     let service = create_dotfile_service(config, cancellation_token);
@@ -253,7 +256,7 @@ pub(crate) async fn handle_track_standalone(
             handle_already_tracked(event, &display_for_handler)
         })
         .await;
-    result.exit_code
+    result.exit
 }
 
 /// Track a file for an existing package via `DotfileServiceImpl::track_for_package`.
@@ -265,12 +268,12 @@ pub(crate) async fn handle_track_for_package(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     // Ahead of building the service, as `handle_track_standalone` does, so a run
     // under sudo prints only the refusal and not the "Started" message the
     // service emits before its own.
-    if let Some(code) = refuse_under_sudo(config, display) {
-        return code;
+    if let Some(exit) = refuse_under_sudo(config, display) {
+        return exit;
     }
 
     let service = create_dotfile_service(config, cancellation_token);
@@ -283,7 +286,7 @@ pub(crate) async fn handle_track_for_package(
             handle_already_tracked(event, &display_for_handler)
         })
         .await;
-    result.exit_code
+    result.exit
 }
 
 /// Custom event handler that renders already-tracked results as info (ℹ) instead
@@ -320,10 +323,10 @@ pub(crate) fn open_editor(
     file_path: &Path,
     display: &DisplayManager,
     success_message: Option<String>,
-) -> i32 {
+) -> Exit {
     let Ok(editor) = std::env::var("EDITOR") else {
         report_missing_editor(display);
-        return 1;
+        return Exit::Failed;
     };
 
     let mut cmd = Command::new(&editor);
@@ -339,15 +342,15 @@ pub(crate) fn open_editor(
             if let Some(message) = success_message {
                 display.print_success(message);
             }
-            0
+            Exit::Clean
         }
         Ok(_) => {
             display.print_warning("Editor exited with non-zero status.");
-            1
+            Exit::Failed
         }
         Err(e) => {
             display.print_error(format!("Failed to start editor '{editor}': {e}"));
-            1
+            Exit::Failed
         }
     }
 }

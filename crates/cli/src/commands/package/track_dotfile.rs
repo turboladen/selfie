@@ -6,7 +6,9 @@
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{commands::common, config::CliConfig, display_manager::DisplayManager};
+use crate::{
+    commands::common, config::CliConfig, display_manager::DisplayManager, event_processor::Exit,
+};
 
 /// Handle the `selfie package track-dotfile` command
 pub(crate) async fn handle_track_dotfile(
@@ -15,7 +17,7 @@ pub(crate) async fn handle_track_dotfile(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     info!("Adding '{}' to package '{}' dotfiles", file, package_name);
     common::handle_track_for_package(package_name, file, config, display, cancellation_token).await
 }

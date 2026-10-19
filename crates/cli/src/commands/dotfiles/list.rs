@@ -16,7 +16,7 @@ use crate::{
     commands::common::{create_dotfile_service, create_formatted_table},
     config::CliConfig,
     display_manager::{DisplayManager, shorten_path},
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
     source_paths::base_directory_line,
 };
 
@@ -30,7 +30,7 @@ pub(crate) async fn handle_list(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     info!("Listing dotfiles");
 
     let service = create_dotfile_service(config, cancellation_token);
@@ -58,7 +58,7 @@ pub(crate) async fn handle_list(
         })
         .await;
 
-    result.exit_code
+    result.exit
 }
 
 /// Render the table, or say there is nothing to put in one.
