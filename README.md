@@ -216,7 +216,9 @@ rather than on output text.
 A command that has to ask a question and has no terminal to ask on, as in a script, a pipe or a CI
 job, does not wait for an answer: it exits `2` and names on stderr the flag or command that does the
 same thing without asking. The one exception is `apply`'s conflict prompt, which without a terminal
-skips the conflict and reports it. Ctrl+C at a prompt exits `130`.
+skips the conflict and reports it. Ctrl+C at a prompt exits `130`. `spec create --interactive` asks
+last whether to open the editor, after the spec is written: if the terminal fails before you answer,
+the run exits as the create did.
 
 A failure outranks a finding: a command that refused part of its work exits `1` even if it also
 found something, since its answer has a hole in it. A code is never renumbered or reused. A new one

@@ -59,23 +59,24 @@ pub(crate) async fn handle_edit(
     // An existing file is opened exactly as the user wrote it, never saved
     // first: a serde round trip flattens YAML anchors, drops every comment and
     // reorders keys, and would refuse the very file a typo guard just rejected.
-    let (path, created) = if let Some(pkg) = existing_package {
+    let (path, created, created_exit) = if let Some(pkg) = existing_package {
         display.print_run_note(format!(
             "Opening existing package '{package_name}' for editing"
         ));
-        (pkg.file_path().to_path_buf(), false)
+        (pkg.file_path().to_path_buf(), false, Exit::Clean)
     } else {
         match create_for_edit(service, &repo, package_name, config, display).await {
-            Ok(path) => (path, true),
+            Ok((path, created_exit)) => (path, true, created_exit),
             Err(exit) => return exit,
         }
     };
 
-    common::open_editor(
+    // A create's own score survives the edit, as `spec create` keeps it.
+    created_exit.max(common::open_editor(
         &path,
         display,
         editor_success_message(package_name, &path, created),
-    )
+    ))
 }
 
 /// The line to print once the editor closes: one for an existing spec, and
@@ -94,7 +95,8 @@ fn editor_success_message(
 }
 
 /// Create `package_name` for `spec edit`, once the user confirms, the way
-/// `spec create` creates one, and return where it was written.
+/// `spec create` creates one, and return where it was written with how the
+/// create scored.
 ///
 /// # Errors
 ///
@@ -106,7 +108,7 @@ async fn create_for_edit(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<std::path::PathBuf, Exit> {
+) -> Result<(std::path::PathBuf, Exit), Exit> {
     let package = create_basic_package(package_name, config);
 
     // Before offering to create, ask the file system whether the path is
@@ -162,7 +164,7 @@ async fn create_for_edit(
 
     write_spec(service, package, display)
         .await
-        .map(|(_, path)| path)
+        .map(|(_, path, created_exit)| (path, created_exit))
 }
 
 /// Why `spec edit` will not create `package_name` at `path`: something is already
@@ -299,11 +301,12 @@ mod tests {
         let display =
             DisplayManager::new(false).answering(vec![crate::display_manager::answer(true)]);
 
-        let path = create_for_edit(&service, &repo, "fresh", &config, &display)
+        let (path, created_exit) = create_for_edit(&service, &repo, "fresh", &config, &display)
             .await
             .unwrap();
 
         assert_eq!(path, packages.join("fresh.yml"));
+        assert_eq!(created_exit, Exit::Clean);
         let spec = fs::read_to_string(&path).unwrap();
         assert!(spec.contains("work:"), "{spec}");
         assert!(!spec.contains("default:"), "{spec}");
@@ -396,10 +399,11 @@ mod tests {
         let display =
             DisplayManager::new(false).answering(vec![crate::display_manager::answer(true)]);
 
-        create_for_edit(&service, &repo, "fresh", &config, &display)
+        let (_, created_exit) = create_for_edit(&service, &repo, "fresh", &config, &display)
             .await
             .unwrap();
 
+        assert_eq!(created_exit, Exit::Clean);
         assert!(
             display
                 .printed()

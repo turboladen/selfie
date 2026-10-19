@@ -137,6 +137,11 @@ pub(crate) enum PromptFailure {
     Unreadable(std::io::Error),
 }
 
+/// What a terminal that failed while the user answered is reported as.
+fn unreadable_answer(error: &std::io::Error) -> String {
+    format!("Could not read the answer: {error}")
+}
+
 impl PromptFailure {
     /// How a command that needed the answer ends.
     pub(crate) fn exit(&self) -> Exit {
@@ -951,11 +956,18 @@ impl DisplayManager {
                 self.print_suggestion(without_terminal);
             }
             PromptFailure::Interrupted => {}
-            PromptFailure::Unreadable(error) => {
-                self.print_error(format!("Could not read the answer: {error}"));
-            }
+            PromptFailure::Unreadable(error) => self.print_error(unreadable_answer(error)),
         }
         failure.exit()
+    }
+
+    /// Report a prompt that got no answer when the command carries on without
+    /// it: a terminal that failed is a warning, and no terminal or Ctrl+C prints
+    /// nothing.
+    pub(crate) fn note_unanswered_prompt(&self, failure: &PromptFailure) {
+        if let PromptFailure::Unreadable(error) = failure {
+            self.print_warning(unreadable_answer(error));
+        }
     }
 
     #[cfg(not(test))]
