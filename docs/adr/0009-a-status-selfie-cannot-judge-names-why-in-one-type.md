@@ -6,7 +6,9 @@ Date: 2026-10-06
 
 Accepted 2026-10-14. Refines [0006](0006-command-output-contract.md), whose verdicts and exit codes
 this record does not change, and applies the labeling rule of ADR 0008, "A dotfile entry is refused
-or failed, and its kind names the condition", (d) to a second family of labels.
+or failed, and its kind names the condition", (d) to a second family of labels. Refined by
+[0010](0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md), which decides what a
+reason it types means for a run's exit code.
 
 ## Context
 
@@ -114,9 +116,9 @@ reports it through its own resolve error.
 
 A check that could not run reaches its row as `CouldNotRun` in `package check`, `package list` and
 `package status`. `package check` then fails as the error does. `package list` and `package status`
-report the row and exit 0, as for any row they cannot judge. The CLI shows a canceled check as
-canceled. `package status` turns each dependency's lookup into its status in one pass, so every
-dependency has exactly one. **Recommended.**
+report the row, and [0010](0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md) sets
+the exit code. The CLI shows a canceled check as canceled. `package status` turns each dependency's
+lookup into its status in one pass, so every dependency has exactly one. **Recommended.**
 
 Rejected: one `CheckResult::Error(String)` with a sentence per cause. The label is the contract, and
 one label for five causes is the defect.

@@ -8,7 +8,9 @@ Accepted. Refined by
 [0008](0008-a-dotfile-entry-is-refused-or-failed-and-its-kind-names-the-condition.md), which says
 what a dotfile entry that does not deploy reports, and by
 [0009](0009-a-status-selfie-cannot-judge-names-why-in-one-type.md), which types the reason a status
-is unknown. Neither changes any verdict or exit code.
+is unknown, and by [0010](0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md), which
+decides which packages a listing, a status and an install could not answer for, and so when those
+runs are Found. 0008 and 0009 change no verdict or exit code.
 
 ## Context
 
