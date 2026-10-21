@@ -26,7 +26,10 @@ fn setup_optional_test_config(config_yaml: Option<&str>) -> TempDir {
     let config_dir = temp_dir.path().join(".config").join("selfie");
     fs::create_dir_all(&config_dir).unwrap();
 
-    // Create package directory
+    // Create package directory. selfie runs install and check commands here, so a
+    // fixture's relative `touch installed` writes only inside this throwaway
+    // sandbox. A fixture needs that state when its check has to say not installed
+    // before the install and installed after it.
     let package_dir = temp_dir.path().join("packages");
     fs::create_dir_all(&package_dir).unwrap();
 

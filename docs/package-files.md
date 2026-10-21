@@ -393,6 +393,11 @@ Optional command to verify the package is installed correctly. Should exit with 
 non-zero if not. If not given, executing the `check` command will always behave as if the package is
 not yet installed.
 
+`selfie package install` runs the check again right after a successful install command, in the same
+session, to confirm the install took. If the check still says the package is not installed, the
+install fails (exit `1`), and no package that depends on it is installed. So the check has to pass
+as soon as the install command returns.
+
 **Simple binary check:**
 
 ```yaml
@@ -419,6 +424,10 @@ check: |
 ```yaml
 check: systemctl is-active --quiet docker
 ```
+
+A service-state check like this one can fail right after the install, before the service has
+started, and so fail the install. Where that can happen, check the installed binary instead, as in
+`check: command -v docker`.
 
 ### `dependencies`
 

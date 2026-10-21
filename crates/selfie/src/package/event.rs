@@ -1286,6 +1286,17 @@ pub enum OperationFailure {
         name: String,
         reason: NoSuchPackageReason,
     },
+    /// An install command succeeded and the package's check command, run
+    /// afterwards, still says it is not installed.
+    NotInstalledAfterInstall {
+        package_name: String,
+        check_command: String,
+        /// The check's exit code, `None` when it reported none.
+        exit_code: Option<i32>,
+        /// The package that needs this one, when it is a dependency of the
+        /// package being installed.
+        required_by: Option<String>,
+    },
     /// Generic failure with a freeform message
     Generic(String),
 }
@@ -1506,6 +1517,25 @@ impl std::fmt::Display for OperationFailure {
                     &crate::package::port::ambiguous_files_sentence(name, conflicting_paths),
                 ),
             },
+            OperationFailure::NotInstalledAfterInstall {
+                package_name,
+                check_command,
+                exit_code,
+                required_by,
+            } => {
+                // The clause is a parenthetical, so it closes with a comma.
+                let by = crate::package::port::required_by_clause(required_by.as_deref());
+                let close = if by.is_empty() { "" } else { "," };
+                write!(
+                    f,
+                    "The install command for '{package_name}'{by}{close} succeeded, but its check \
+                     command `{check_command}` still says it is not installed"
+                )?;
+                match exit_code {
+                    Some(code) => write!(f, " (exit {code})"),
+                    None => Ok(()),
+                }
+            }
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }

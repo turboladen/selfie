@@ -820,7 +820,7 @@ impl PackageError {
     }
 }
 
-fn required_by_clause(required_by: Option<&str>) -> String {
+pub(crate) fn required_by_clause(required_by: Option<&str>) -> String {
     required_by.map_or_else(String::new, |by| format!(", which `{by}` requires"))
 }
 
