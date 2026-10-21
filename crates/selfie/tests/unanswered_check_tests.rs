@@ -420,3 +420,194 @@ async fn a_status_of_a_refused_package_fails() {
         "{events:?}"
     );
 }
+
+// Installs `pkg`, which depends on `dep` and recommends `rec`; each installs
+// with `true`. Only `slow` has a check, and the runner fails it with `error`
+// every time, so every package installs and only `slow`'s turn is in question.
+// The runner gives one answer per command, so a check that failed before an
+// install could not pass after it; the other packages have none.
+async fn install_pkg_with_a_failing_check(slow: &str, error: CommandError) -> Vec<PackageEvent> {
+    let temp = TempDir::new().unwrap();
+    for (name, extra) in [
+        (
+            "pkg",
+            "    dependencies:\n      - dep\n    recommends:\n      - rec\n",
+        ),
+        ("dep", ""),
+        ("rec", ""),
+    ] {
+        let check = if name == slow {
+            format!("    check: \"check-{name}\"\n")
+        } else {
+            String::new()
+        };
+        write_spec(temp.path(), name, &format!("{check}{extra}"));
+    }
+    let check = format!("check-{slow}");
+    let runner = FakeCommandRunner::new()
+        .succeeding("true", b"")
+        .erroring(&check, error);
+    collect_events(
+        service(temp.path(), runner)
+            .install("pkg", selfie::package::service::InstallOptions::default())
+            .await,
+    )
+    .await
+}
+
+async fn install_pkg_with_a_slow_check(slow: &str) -> Vec<PackageEvent> {
+    let check = format!("check-{slow}");
+    install_pkg_with_a_failing_check(slow, timed_out(&check)).await
+}
+
+// Counts the warnings whose message starts with `prefix`.
+fn warnings_starting(events: &[PackageEvent], prefix: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                PackageEvent::Warning { message, .. } if message.starts_with(prefix)
+            )
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn a_post_install_check_that_times_out_is_found() {
+    let events = install_pkg_with_a_slow_check("pkg").await;
+
+    let success = completed(&events);
+    assert_eq!(gaps(success), [("pkg".to_string(), Coverage::Unanswered)]);
+    assert_eq!(success.outcome(), Outcome::Found);
+    let summary = success.to_string();
+    assert!(
+        summary
+            .contains("Package 'pkg' installed in environment 'test'; could not answer for: pkg ("),
+        "{summary}"
+    );
+    assert!(!summary.contains("successfully"), "{summary}");
+}
+
+// Only the root's result reaches the caller, so a dependency's unconfirmed
+// install has to be carried into it.
+#[tokio::test]
+async fn a_dependency_whose_post_install_check_times_out_makes_the_run_found() {
+    let events = install_pkg_with_a_slow_check("dep").await;
+
+    let success = completed(&events);
+    assert_eq!(gaps(success), [("dep".to_string(), Coverage::Unanswered)]);
+    assert_eq!(success.outcome(), Outcome::Found);
+}
+
+// A root found already installed keeps saying so, and where it is, beside the
+// dependency no check confirmed.
+#[tokio::test]
+async fn an_already_installed_root_names_its_unconfirmed_dependency() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    check: \"check-pkg\"\n    dependencies:\n      - dep\n",
+    );
+    write_spec(temp.path(), "dep", "    check: \"check-dep\"\n");
+    let runner = FakeCommandRunner::new()
+        .succeeding("true", b"")
+        .succeeding("check-pkg", b"")
+        .succeeding("which pkg", b"/opt/bin/pkg\n")
+        .erroring("check-dep", timed_out("check-dep"));
+
+    let events = collect_events(
+        service(temp.path(), runner)
+            .install("pkg", selfie::package::service::InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    let success = completed(&events);
+    assert_eq!(gaps(success), [("dep".to_string(), Coverage::Unanswered)]);
+    assert_eq!(success.outcome(), Outcome::Found);
+    let summary = success.to_string();
+    assert!(
+        summary.starts_with(
+            "Package 'pkg' was already installed in environment 'test', at /opt/bin/pkg; \
+             could not answer for: dep ("
+        ),
+        "{summary}"
+    );
+    assert!(!summary.contains("successfully"), "{summary}");
+}
+
+// A recommend leaves the run clean whatever happens to it, so one its check
+// could not confirm is a warning naming it.
+#[tokio::test]
+async fn a_recommend_whose_post_install_check_times_out_leaves_the_run_clean() {
+    let events = install_pkg_with_a_slow_check("rec").await;
+
+    let success = completed(&events);
+    assert!(gaps(success).is_empty(), "{success:?}");
+    assert_eq!(success.outcome(), Outcome::Clean);
+    assert_eq!(
+        warnings_starting(
+            &events,
+            "Recommended package 'rec' installed, but its check gave no answer"
+        ),
+        1,
+        "{events:?}"
+    );
+}
+
+// A recommend's own dependency is named as installed for the recommend, not
+// as a recommended package itself.
+#[tokio::test]
+async fn a_recommends_dependency_is_named_for_the_recommend() {
+    let temp = TempDir::new().unwrap();
+    write_spec(temp.path(), "pkg", "    recommends:\n      - rec\n");
+    write_spec(temp.path(), "rec", "    dependencies:\n      - lib\n");
+    write_spec(temp.path(), "lib", "    check: \"check-lib\"\n");
+    let runner = FakeCommandRunner::new()
+        .succeeding("true", b"")
+        .erroring("check-lib", timed_out("check-lib"));
+
+    let events = collect_events(
+        service(temp.path(), runner)
+            .install("pkg", selfie::package::service::InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    assert_eq!(completed(&events).outcome(), Outcome::Clean);
+    assert_eq!(
+        warnings_starting(
+            &events,
+            "'lib', a dependency of recommended package 'rec', installed, but its check gave no answer"
+        ),
+        1,
+        "{events:?}"
+    );
+}
+
+// A check that never ran fails the install, whatever path its failure took:
+// one the runner reports as the check's result counts as well as one it
+// returns as an error.
+#[tokio::test]
+async fn a_post_install_check_that_could_not_start_fails_the_install() {
+    let events =
+        install_pkg_with_a_failing_check("pkg", CommandError::StdoutSpawn("check-pkg".to_string()))
+            .await;
+
+    let failure = events
+        .iter()
+        .find_map(|event| match event {
+            PackageEvent::Completed {
+                result: OperationResult::Failure(failure),
+                ..
+            } => Some(failure),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the install must fail: {events:?}"));
+    assert!(
+        failure.to_string().contains("check-pkg"),
+        "the failure must name the check: {failure}"
+    );
+}

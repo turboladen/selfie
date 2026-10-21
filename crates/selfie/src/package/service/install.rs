@@ -8,8 +8,8 @@ use crate::{
     package::{
         EnvironmentConfig,
         event::{
-            CheckResult, CheckResultData, EventSender, OperationFailure, OperationResult,
-            OperationSuccess,
+            AfterInstall, CheckResult, CheckResultData, EventSender, Gap, OperationFailure,
+            OperationResult, OperationSuccess, after_install,
         },
         port::PackageRepository,
         service::{InstallOptions, ProgressTracker},
@@ -73,14 +73,17 @@ where
 
     // Install each package in dependency order.
     // The last package is always the root (the one the user requested).
-    let mut last_result = None;
+    let mut root = None;
+    // Every package's gap, attached once to the root's result: only that result
+    // reaches the caller, so a dependency's would otherwise be lost.
+    let mut gaps = Vec::new();
     for pkg_name in &dep_graph.install_order {
         // Check for cancellation between packages
         if token.is_cancelled() {
             return OperationResult::Failure("Installation cancelled".into());
         }
 
-        let result = install_single_package(
+        let turn = install_single_package(
             pkg_name,
             repo,
             config,
@@ -93,11 +96,12 @@ where
         )
         .await;
 
-        match result {
-            OperationResult::Success(_) => {
-                last_result = Some(result);
+        match turn.result {
+            Ok(installed) => {
+                gaps.extend(turn.gap);
+                root = Some((pkg_name.as_str(), installed));
             }
-            OperationResult::Failure(_) => return result,
+            Err(failure) => return OperationResult::Failure(failure),
         }
     }
 
@@ -115,15 +119,52 @@ where
         .await;
     }
 
-    last_result.unwrap_or_else(|| {
-        OperationResult::Success(OperationSuccess::package_installed(
-            package_name.to_string(),
-            config.environment().to_string(),
-            false,
-            None,
-            (progress.current_step(), progress.total_steps()).into(),
-        ))
-    })
+    let (name, installed) = root.unwrap_or((
+        package_name,
+        Installed {
+            was_already_installed: false,
+            executable_path: None,
+        },
+    ));
+    OperationResult::Success(OperationSuccess::package_installed(
+        name.to_string(),
+        config.environment().to_string(),
+        installed.was_already_installed,
+        installed.executable_path,
+        gaps,
+        (progress.current_step(), progress.total_steps()).into(),
+    ))
+}
+
+/// A package that a turn installed, or found already installed.
+#[derive(Debug, Clone)]
+struct Installed {
+    was_already_installed: bool,
+    executable_path: Option<String>,
+}
+
+/// What one package's turn ended with: installed, with the gap its check left
+/// when it gave no answer, or the failure to end the run with.
+#[derive(Debug, Clone)]
+struct Turn {
+    result: Result<Installed, OperationFailure>,
+    gap: Option<Gap>,
+}
+
+impl Turn {
+    fn installed(installed: Installed, gap: Option<Gap>) -> Self {
+        Self {
+            result: Ok(installed),
+            gap,
+        }
+    }
+
+    fn ended(failure: OperationFailure) -> Self {
+        Self {
+            result: Err(failure),
+            gap: None,
+        }
+    }
 }
 
 /// Refuse a package in `graph` that cannot be installed here, before any install
@@ -207,7 +248,7 @@ async fn install_single_package<PR, CR>(
     token: &CancellationToken,
     pre_checked: Option<CheckResultData>,
     required_by: Option<&str>,
-) -> OperationResult
+) -> Turn
 where
     PR: PackageRepository,
     CR: CommandRunner,
@@ -216,7 +257,7 @@ where
     let package_blob = match steps::fetch_package(repo, package_name, sender, progress).await {
         Ok(pkg) => pkg,
         Err(err) => {
-            return OperationResult::Failure(err.into());
+            return Turn::ended(err.into());
         }
     };
 
@@ -231,7 +272,7 @@ where
     .await
     {
         Ok(config) => config,
-        Err(result) => return *result,
+        Err(failure) => return Turn::ended(*failure),
     };
 
     // Check if package is already installed. A check that could not start,
@@ -254,12 +295,12 @@ where
         .await
         {
             Ok(check) => check,
-            Err(err) => return OperationResult::Failure(err.into()),
+            Err(err) => return Turn::ended(err.into()),
         },
     };
 
     // If package is already installed, exit early
-    if let Some(result) = handle_already_installed_package(
+    if let Some(installed) = handle_already_installed_package(
         package_name,
         &pre_install_check,
         command_runner,
@@ -270,7 +311,7 @@ where
     )
     .await
     {
-        return result;
+        return Turn::installed(installed, None);
     }
 
     // Log that we're proceeding with installation
@@ -288,7 +329,7 @@ where
     else {
         // Resolution refuses a blank install before any package installs, so this
         // is reached only if the spec changed in between.
-        return OperationResult::Failure(OperationFailure::no_install_command(
+        return Turn::ended(OperationFailure::no_install_command(
             package_name.to_string(),
             config.environment().to_string(),
             package_blob.package.path().clone(),
@@ -319,7 +360,7 @@ async fn handle_already_installed_package<CR>(
     progress: &mut ProgressTracker,
     config: &SelfieConfig,
     token: &CancellationToken,
-) -> Option<OperationResult>
+) -> Option<Installed>
 where
     CR: CommandRunner,
 {
@@ -341,15 +382,10 @@ where
         )
         .await;
 
-        return Some(OperationResult::Success(
-            OperationSuccess::package_installed(
-                package_name.to_string(),
-                config.environment().to_string(),
-                true, // was_already_installed
-                executable_path,
-                (progress.current_step(), progress.total_steps()).into(),
-            ),
-        ));
+        return Some(Installed {
+            was_already_installed: true,
+            executable_path,
+        });
     }
     None
 }
@@ -453,7 +489,7 @@ async fn execute_installation_and_verification<CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
-) -> OperationResult
+) -> Turn
 where
     CR: CommandRunner,
 {
@@ -471,7 +507,7 @@ where
     .await
     {
         Ok(output) => output,
-        Err(err) => return OperationResult::Failure(err.into()),
+        Err(err) => return Turn::ended(err.into()),
     };
 
     if !install_output.is_success() {
@@ -483,29 +519,34 @@ where
             .await;
         // The install command's stdout has already been streamed to the caller
         // line by line as it ran; it is deliberately not repeated here.
-        return OperationResult::Failure(OperationFailure::command_failed(
+        return Turn::ended(OperationFailure::command_failed(
             context.install_cmd.to_string(),
             Some(install_output.exit_code()),
             install_output.stderr_str().as_ref(),
         ));
     }
 
-    // Verify installation if check command is available. A check that could not
-    // run means nothing else can run there either, so the install fails rather
-    // than reporting a success it never verified, and so does a check that says
-    // the package is still not installed.
-    match verify_installation(&context, command_runner, sender, progress, token).await {
-        Ok(Verification::Confirmed) => {}
-        Ok(Verification::NotInstalled { exit_code }) => {
-            return OperationResult::Failure(OperationFailure::NotInstalledAfterInstall {
+    // The post-install check decides the install by ADR 0010's table: one that
+    // says not installed, or that never ran, fails it; one that started and gave
+    // no answer leaves it unconfirmed, a gap. A check that could not start in
+    // the package directory, or was canceled, arrives as the error instead, and
+    // keeps that error's own failure and wording.
+    let gap = match verify_installation(&context, command_runner, sender, progress, token).await {
+        Ok(AfterInstall::Confirmed) => None,
+        Ok(AfterInstall::Unconfirmed(gap)) => Some(gap),
+        Ok(AfterInstall::NotInstalled { exit_code }) => {
+            return Turn::ended(OperationFailure::NotInstalledAfterInstall {
                 package_name: context.package_name.to_string(),
                 check_command: context.env_config.check().unwrap_or_default().to_string(),
                 exit_code,
                 required_by: context.required_by.map(str::to_string),
             });
         }
-        Err(err) => return OperationResult::Failure(err.into()),
-    }
+        Ok(AfterInstall::Failed(failure)) => {
+            return Turn::ended(OperationFailure::from(&failure));
+        }
+        Err(err) => return Turn::ended(err.into()),
+    };
 
     let executable_path = find_executable_path(
         context.package_name,
@@ -532,13 +573,13 @@ where
         .next(sender, "Package installation completed")
         .await;
 
-    OperationResult::Success(OperationSuccess::package_installed(
-        context.package_name.to_string(),
-        context.config.environment().to_string(),
-        false, // was_already_installed
-        executable_path,
-        (progress.current_step(), progress.total_steps()).into(),
-    ))
+    Turn::installed(
+        Installed {
+            was_already_installed: false,
+            executable_path,
+        },
+        gap,
+    )
 }
 
 async fn get_environment_config<'a>(
@@ -547,12 +588,14 @@ async fn get_environment_config<'a>(
     current_env: &str,
     sender: &EventSender,
     progress: &mut ProgressTracker,
-) -> Result<&'a EnvironmentConfig, Box<OperationResult>> {
+) -> Result<&'a EnvironmentConfig, Box<OperationFailure>> {
     progress.next(sender, "Checking package environment").await;
 
     // Get environment configuration
     let Some(env_config) = package_blob.package.environments().get(current_env) else {
-        return steps::handle_missing_environment(package_name, package_blob, current_env);
+        return Err(Box::new(
+            steps::missing_environment(package_name, package_blob, current_env).into(),
+        ));
     };
 
     sender
@@ -561,14 +604,6 @@ async fn get_environment_config<'a>(
         ))
         .await;
     Ok(env_config)
-}
-
-/// What the post-install check said about an install whose command succeeded.
-enum Verification {
-    /// It confirmed the install, or there was no check to run.
-    Confirmed,
-    /// It ran and said the package is not installed.
-    NotInstalled { exit_code: Option<i32> },
 }
 
 /// Run the post-install check and report its verdict.
@@ -584,7 +619,7 @@ async fn verify_installation<CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
-) -> Result<Verification, CommandError>
+) -> Result<AfterInstall, CommandError>
 where
     CR: CommandRunner,
 {
@@ -602,31 +637,10 @@ where
         )
         .await?;
 
-        match post_install_check.result {
-            CheckResult::Success { .. } => {
-                sender
-                    .send_debug(format!(
-                        "Package '{}' installation verified successfully",
-                        context.package_name
-                    ))
-                    .await;
-            }
-            CheckResult::Failed { exit_code, .. } => {
-                return Ok(Verification::NotInstalled { exit_code });
-            }
-            CheckResult::CouldNotRun(_) => {
-                sender
-                    .send_warning(
-                        "Post-installation check failed, but installation command completed",
-                    )
-                    .await;
-            }
-            CheckResult::NoCheckCommand => {
-                sender
-                    .send_debug("Unexpected: no check command in post-install verification")
-                    .await;
-            }
-        }
+        return Ok(after_install(
+            &post_install_check.result,
+            context.package_name,
+        ));
     } else {
         progress
             .next(
@@ -635,7 +649,7 @@ where
             )
             .await;
     }
-    Ok(Verification::Confirmed)
+    Ok(AfterInstall::Confirmed)
 }
 
 /// Install recommended (soft) dependencies for a package.
@@ -797,7 +811,7 @@ where
             return Err(RecommendError::Interrupted);
         }
 
-        let result = install_single_package(
+        let turn = install_single_package(
             pkg_name,
             repo,
             config,
@@ -810,8 +824,27 @@ where
         )
         .await;
 
-        if let OperationResult::Failure(failure) = result {
+        if let Err(failure) = turn.result {
             return Err(RecommendError::Failed(failure.to_string()));
+        }
+        // A recommend leaves the run clean whatever happens to it, so a check
+        // that gave no answer for it, or for one of its own dependencies, is a
+        // warning, never one of the run's gaps.
+        if let Some(gap) = turn.gap {
+            let whose = if gap.package_name() == recommend_name {
+                format!("Recommended package '{recommend_name}'")
+            } else {
+                format!(
+                    "'{}', a dependency of recommended package '{recommend_name}',",
+                    gap.package_name()
+                )
+            };
+            sender
+                .send_warning(format!(
+                    "{whose} installed, but its check gave no answer: {}",
+                    gap.reason()
+                ))
+                .await;
         }
     }
 

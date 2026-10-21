@@ -1900,6 +1900,40 @@ mod tests {
         assert!(rows.iter().all(|r| r.get("status").is_none()), "{rows:?}");
     }
 
+    // An install its own check could not confirm is a finding, naming the
+    // package and why.
+    #[tokio::test]
+    async fn an_unconfirmed_install_is_found_naming_the_package() {
+        use selfie::commands::runner::TimedOut;
+        use selfie::package::event::{
+            CheckFailure, EnvironmentStatus, OperationSuccess, StepCount, UnknownStatus,
+        };
+
+        let gap = EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(
+            TimedOut::new("check-dep", std::time::Duration::from_secs(1)),
+        )))
+        .gap("dep")
+        .expect("a check that timed out is a gap");
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::PackageInstalled {
+                package_name: "pkg".to_string(),
+                environment: "test".to_string(),
+                was_already_installed: false,
+                executable_path: None,
+                gaps: vec![gap],
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["result"]["status"], "found");
+        assert_eq!(result.data["result"]["unanswered"][0]["package"], "dep");
+        assert_eq!(result.data["result"]["unanswered"][0]["kind"], "timed_out");
+    }
+
     // An install its own check says did not take is a failure with a label,
     // the package and the package that needs it.
     #[test]

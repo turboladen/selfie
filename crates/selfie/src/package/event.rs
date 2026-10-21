@@ -1035,6 +1035,9 @@ pub enum OperationSuccess {
         environment: String,
         was_already_installed: bool,
         executable_path: Option<String>,
+        /// Each package in the run, this one or a dependency, that installed and
+        /// whose check then gave no answer. Recommends are never covered.
+        gaps: Vec<Gap>,
         steps_completed: StepCount,
     },
     /// Package validation operation completed
@@ -1715,22 +1718,25 @@ impl std::fmt::Display for OperationSuccess {
                 environment,
                 was_already_installed,
                 executable_path,
+                gaps,
                 ..
             } => {
-                // The path goes last, so the environment clause does not read as
-                // part of it.
-                let (status, at) = if *was_already_installed {
-                    (
+                // The path follows the environment, so the environment clause
+                // does not read as part of it. A run with gaps never says
+                // "successfully".
+                let (status, at) = match (*was_already_installed, gaps.is_empty()) {
+                    (true, _) => (
                         "was already installed",
                         executable_path.as_ref().map(|path| format!(", at {path}")),
-                    )
-                } else {
-                    ("installation completed successfully", None)
+                    ),
+                    (false, true) => ("installation completed successfully", None),
+                    (false, false) => ("installed", None),
                 };
                 write!(
                     f,
-                    "Package '{package_name}' {status} in environment '{environment}'{}",
-                    at.unwrap_or_default()
+                    "Package '{package_name}' {status} in environment '{environment}'{}{}",
+                    at.unwrap_or_default(),
+                    gap_clauses(gaps)
                 )
             }
             OperationSuccess::PackageValidated {
@@ -2045,6 +2051,7 @@ impl OperationSuccess {
         environment: String,
         was_already_installed: bool,
         executable_path: Option<String>,
+        gaps: Vec<Gap>,
         steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageInstalled {
@@ -2052,6 +2059,7 @@ impl OperationSuccess {
             environment,
             was_already_installed,
             executable_path,
+            gaps,
             steps_completed,
         }
     }
@@ -2458,7 +2466,6 @@ impl OperationSuccess {
             OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
             | OperationSuccess::PackagesAudited { .. }
-            | OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
             | OperationSuccess::PackageRemoved { .. }
             | OperationSuccess::PackageCreated { .. }
@@ -2475,7 +2482,8 @@ impl OperationSuccess {
             | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_) => None,
             OperationSuccess::PackageStatusChecked { gaps, .. }
-            | OperationSuccess::PackageListGenerated { gaps, .. } => Some(gaps),
+            | OperationSuccess::PackageListGenerated { gaps, .. }
+            | OperationSuccess::PackageInstalled { gaps, .. } => Some(gaps),
         }
     }
 
@@ -3398,6 +3406,57 @@ impl Gap {
     }
 }
 
+/// What a package's check, run right after its install command succeeded,
+/// says about the install (ADR 0010 §3).
+#[derive(Debug, Clone)]
+pub(crate) enum AfterInstall {
+    /// It exited 0, or there is no check to run.
+    Confirmed,
+    /// It exited non-zero: the package is still not installed.
+    NotInstalled { exit_code: Option<i32> },
+    /// It started and gave no answer, timing out or leaving its result
+    /// unreadable, so the install may have worked: a gap.
+    Unconfirmed(Gap),
+    /// It could not answer at all: it could not start, its working directory
+    /// was unusable, it was canceled, or selfie failed running it. The install
+    /// fails with this.
+    Failed(CheckFailure),
+}
+
+/// Decide the install by its post-install check's `result` for
+/// `package_name`.
+pub(crate) fn after_install(result: &CheckResult, package_name: &str) -> AfterInstall {
+    // This is ADR 0010 §3's table, not the coverage classifier list and status
+    // use. The two disagree on purpose: a check that could not start leaves a
+    // listed package unanswered, and it fails an install, whose own
+    // verification could not run where the install ran.
+    let failure = match result {
+        CheckResult::Success { .. } | CheckResult::NoCheckCommand => {
+            return AfterInstall::Confirmed;
+        }
+        CheckResult::Failed { exit_code, .. } => {
+            return AfterInstall::NotInstalled {
+                exit_code: *exit_code,
+            };
+        }
+        CheckResult::CouldNotRun(failure) => failure,
+    };
+    match failure {
+        CheckFailure::TimedOut(_) | CheckFailure::ResultUnreadable { .. } => {
+            AfterInstall::Unconfirmed(Gap {
+                package_name: package_name.to_string(),
+                reason: UnknownStatus::CheckFailed(failure.clone()),
+            })
+        }
+        // A canceled run ends Canceled through the stream, so its verdict here
+        // never decides an exit.
+        CheckFailure::CouldNotStart { .. }
+        | CheckFailure::WorkingDirectoryUnusable(_)
+        | CheckFailure::Canceled { .. }
+        | CheckFailure::Internal { .. } => AfterInstall::Failed(failure.clone()),
+    }
+}
+
 /// Why selfie could not tell whether a package is installed.
 ///
 /// [`Display`](fmt::Display) words the reason for a person. [`kind`](Self::kind)
@@ -4221,6 +4280,77 @@ pub struct AddEnvironment {
 mod tests {
     use super::*;
 
+    // Each way a post-install check can end decides the install by ADR 0010's
+    // table: confirmed, not installed, unconfirmed with a gap, or failed.
+    #[test]
+    fn after_install_decides_the_install_table() {
+        use crate::commands::BoundedText;
+
+        let ran = |code: i32| CheckResult::Failed {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(code),
+        };
+        let gave_none = |failure| CheckResult::CouldNotRun(failure);
+        let message = || BoundedText::of(&"m");
+        let verdict = |result: &CheckResult| match after_install(result, "p") {
+            AfterInstall::Confirmed => "confirmed",
+            AfterInstall::NotInstalled { .. } => "not installed",
+            AfterInstall::Unconfirmed(gap) => {
+                assert_eq!(gap.package_name(), "p");
+                "unconfirmed"
+            }
+            AfterInstall::Failed(_) => "failed",
+        };
+        let cases = [
+            (
+                CheckResult::Success {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                "confirmed",
+            ),
+            (CheckResult::NoCheckCommand, "confirmed"),
+            (ran(1), "not installed"),
+            (
+                gave_none(CheckFailure::TimedOut(TimedOut::new(
+                    "c",
+                    std::time::Duration::from_secs(1),
+                ))),
+                "unconfirmed",
+            ),
+            (
+                gave_none(CheckFailure::ResultUnreadable { message: message() }),
+                "unconfirmed",
+            ),
+            (
+                gave_none(CheckFailure::CouldNotStart { message: message() }),
+                "failed",
+            ),
+            (
+                gave_none(CheckFailure::WorkingDirectoryUnusable(
+                    crate::commands::runner::UnusableDirectory::new(
+                        "c",
+                        "/nowhere",
+                        std::sync::Arc::new(std::io::Error::other("gone")),
+                    ),
+                )),
+                "failed",
+            ),
+            (
+                gave_none(CheckFailure::Canceled { message: message() }),
+                "failed",
+            ),
+            (
+                gave_none(CheckFailure::Internal { message: message() }),
+                "failed",
+            ),
+        ];
+        for (result, expected) in cases {
+            assert_eq!(verdict(&result), expected, "{result:?}");
+        }
+    }
+
     // Every reason a status can carry, and every way a check can give no
     // answer, has exactly one coverage, and only an answered reason leaves no
     // gap.
@@ -4712,6 +4842,7 @@ mod tests {
             environment: "mac".to_string(),
             was_already_installed: true,
             executable_path: Some("/opt/bin/bat".to_string()),
+            gaps: Vec::new(),
             steps_completed: StepCount::new(4, 4),
         }
         .to_string();
@@ -4769,6 +4900,7 @@ mod tests {
                     environment: env(),
                     was_already_installed: true,
                     executable_path: Some("/bin/pkg".to_string()),
+                    gaps: Vec::new(),
                     steps_completed: steps,
                 },
                 true,
@@ -4966,6 +5098,7 @@ mod tests {
             environment: "test".to_string(),
             was_already_installed: false,
             executable_path: None,
+            gaps: Vec::new(),
             steps_completed: step_count,
         };
 
