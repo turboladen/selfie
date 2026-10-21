@@ -828,6 +828,13 @@ mod tests {
         // …and so an ambient proxy cannot turn this loopback request into real
         // network egress, which in a security test is the worse failure.
         run_git(&path, &["config", "http.proxy", ""]).unwrap();
+        // A libcurl that strips credentials from CURLINFO_EFFECTIVE_URL makes
+        // git treat every response as a redirect and rebuild its credential
+        // from the stripped URL, losing the username. Configured here as well,
+        // git applies it to the rebuilt credential and still names the token.
+        // On an unpatched libcurl the URL's own userinfo is the token too, so
+        // both routes give the same text.
+        run_git(&path, &["config", "credential.username", FIXTURE_TOKEN]).unwrap();
 
         // `git push` refuses before contacting the remote without an upstream,
         // so set one without needing a fetch to succeed first.
@@ -877,7 +884,9 @@ mod tests {
              this machine for something that answered the credential prompt or \
              rewrote the request: GIT_ASKPASS, SSH_ASKPASS, core.askPass, a \
              global or system credential.helper, url.*.insteadOf, or \
-             http_proxy/https_proxy.\n\ngit said: {stderr}",
+             http_proxy/https_proxy. A libcurl that strips credentials from \
+             the effective URL drops the URL's username, which \
+             credential.username in the fixture is there to restore.\n\ngit said: {stderr}",
             args.join(" ")
         );
     }
