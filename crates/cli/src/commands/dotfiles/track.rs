@@ -12,6 +12,7 @@ use crate::{
     commands::common::{self, create_dotfiles_repository, create_package_repository},
     config::CliConfig,
     display_manager::DisplayManager,
+    event_processor::Exit,
 };
 
 /// Handle the `selfie dotfiles track` command
@@ -21,14 +22,14 @@ pub(crate) async fn handle_track(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     info!("Tracking dotfile '{}' as '{}'", file, name);
 
     // The sudo refusal runs ahead of the name check, which would otherwise read
     // the package and dotfiles repositories only for the service to refuse the
     // track under sudo.
-    if let Some(code) = common::refuse_under_sudo(config, display) {
-        return code;
+    if let Some(exit) = common::refuse_under_sudo(config, display) {
+        return exit;
     }
 
     // A dotfiles directory that is genuinely not there holds no names, and the
@@ -38,7 +39,7 @@ pub(crate) async fn handle_track(
     let dotfiles_repo = create_dotfiles_repository(config);
     if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
         display.print_error(common::name_check_message(name, &e));
-        return 1;
+        return Exit::Failed;
     }
 
     common::handle_track_standalone(name, file, config, display, cancellation_token).await

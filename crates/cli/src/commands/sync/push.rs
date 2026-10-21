@@ -16,7 +16,7 @@ use crate::{
     },
     config::CliConfig,
     display_manager::{DisplayManager, PromptFailure},
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
 };
 
 pub(crate) struct PushArgs {
@@ -31,7 +31,7 @@ pub(crate) async fn handle_push(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     let service = create_sync_service(config, cancellation_token);
     let use_colors = config.use_colors();
 
@@ -76,7 +76,7 @@ pub(crate) async fn handle_push(
                 .collect();
 
             display_validation_groups(&groups, use_colors, display, Channel::Stderr);
-            return 1;
+            return Exit::Failed;
         }
         // Its own arm so the suggestion lands in the suggestion channel, as it
         // does for the same refusal on the apply path. The `Display` impl joins
@@ -84,11 +84,11 @@ pub(crate) async fn handle_push(
         Err(SyncError::Privilege(refusal)) => {
             display.print_error(refusal.message());
             display.print_suggestion(refusal.suggestion());
-            return 1;
+            return Exit::Failed;
         }
         Err(e) => {
             display.print_error(e.to_string());
-            return 1;
+            return Exit::Failed;
         }
     };
 
@@ -98,7 +98,7 @@ pub(crate) async fn handle_push(
 
     if pending_commits.is_empty() && ahead == 0 {
         display.print_info("Nothing to push — working tree is clean");
-        return 0;
+        return Exit::Clean;
     }
 
     // No new commits but unpushed local commits exist — push them directly
@@ -113,13 +113,11 @@ pub(crate) async fn handle_push(
     // Refused before the preview, which is printed only to be confirmed: a run
     // that cannot ask would leave the list on stdout as if it were an answer.
     if !args.yes && !display.can_prompt() {
-        return display
-            .refuse_prompt(
-                &PromptFailure::NoTerminal,
-                "Editing the commit messages",
-                "Pass --yes to commit with the generated messages.",
-            )
-            .code();
+        return display.refuse_prompt(
+            &PromptFailure::NoTerminal,
+            "Editing the commit messages",
+            "Pass --yes to commit with the generated messages.",
+        );
     }
 
     // Phase 1.5: Preview and confirm commit messages
@@ -128,13 +126,11 @@ pub(crate) async fn handle_push(
     let confirmed_commits = match confirm_commits(pending_commits, args.yes, display) {
         Ok(commits) => commits,
         Err(failure) => {
-            return display
-                .refuse_prompt(
-                    &failure,
-                    "Editing the commit messages",
-                    "Pass --yes to commit with the messages shown above.",
-                )
-                .code();
+            return display.refuse_prompt(
+                &failure,
+                "Editing the commit messages",
+                "Pass --yes to commit with the messages shown above.",
+            );
         }
     };
 
@@ -216,7 +212,7 @@ async fn execute_push(
     commits: Vec<ConfirmedCommit>,
     display: &DisplayManager,
     use_colors: bool,
-) -> i32 {
+) -> Exit {
     let event_stream = service.execute_push(commits).await;
     let display_for_handler = display.clone();
     let processor = EventProcessor::new(display.clone());
@@ -225,7 +221,7 @@ async fn execute_push(
             handle_push_event(event, &display_for_handler, use_colors)
         })
         .await
-        .exit_code
+        .exit
 }
 
 fn handle_push_event(event: &PackageEvent, display: &DisplayManager, use_colors: bool) -> bool {
@@ -473,7 +469,7 @@ mod tests {
         });
 
         let display = DisplayManager::new(false);
-        let exit_code = execute_push(&mock_service, vec![], &display, false).await;
-        assert_eq!(exit_code, 0);
+        let exit = execute_push(&mock_service, vec![], &display, false).await;
+        assert_eq!(exit, Exit::Clean);
     }
 }

@@ -5,10 +5,10 @@ use selfie::package::{
 };
 
 use crate::{
-    commands::common,
+    commands::presentation,
     config::CliConfig,
     display_manager::{DisplayManager, INDENT},
-    event_processor::EventProcessor,
+    event_processor::{EventProcessor, Exit},
     formatters::format_key,
     status_style,
 };
@@ -18,7 +18,7 @@ pub(crate) async fn handle_check(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Running check command for package: {}", package_name);
 
     let event_stream = service.check(package_name).await;
@@ -56,7 +56,7 @@ pub(crate) async fn handle_check(
         })
         .await;
 
-    result.exit_code
+    result.exit
 }
 
 /// Display environment error with helpful suggestions from the typed failure data
@@ -73,7 +73,7 @@ fn display_environment_error(
         ..
     }) = failure
     {
-        common::display_environment_summary(
+        presentation::display_environment_summary(
             package_name,
             config.environment(),
             available_environments,
@@ -89,7 +89,7 @@ fn display_environment_error(
     {
         // The environment is there; only its check command is missing, so the
         // environment advice below would be false.
-        common::display_missing_command(
+        presentation::display_missing_command(
             display,
             "check",
             package_name,
@@ -97,7 +97,7 @@ fn display_environment_error(
             other_envs_with_check,
         );
     } else {
-        common::display_generic_environment_suggestion(
+        presentation::display_generic_environment_suggestion(
             package_name,
             config.environment(),
             config,

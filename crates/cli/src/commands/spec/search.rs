@@ -1,7 +1,11 @@
 use selfie::package::event::{OperationResult, PackageEvent};
 use selfie::package::service::SpecService;
 
-use crate::{config::CliConfig, display_manager::DisplayManager, event_processor::EventProcessor};
+use crate::{
+    config::CliConfig,
+    display_manager::DisplayManager,
+    event_processor::{EventProcessor, Exit},
+};
 
 use super::list::handle_spec_list_event;
 
@@ -10,7 +14,7 @@ pub(crate) async fn handle_search(
     pattern: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     tracing::debug!("Running spec search command (pattern={pattern:?})");
 
     display.print_status(format!("Searching specs for \"{pattern}\"..."));
@@ -36,7 +40,7 @@ pub(crate) async fn handle_search(
             false
         })
         .await;
-    result.exit_code
+    result.exit
 }
 
 #[cfg(test)]
@@ -119,7 +123,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit, Exit::Clean);
     }
 
     #[tokio::test]
@@ -160,7 +164,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit, Exit::Clean);
     }
 
     #[tokio::test]
@@ -183,7 +187,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit, Exit::Failed);
     }
 
     #[test]

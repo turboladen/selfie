@@ -34,7 +34,7 @@ pub(crate) async fn handle_create(
     config: &CliConfig,
     display: &DisplayManager,
     interactive: bool,
-) -> i32 {
+) -> Exit {
     info!("Creating package: {}", package_name);
 
     // Refused before the name check, so a run that cannot ask prints only why.
@@ -52,7 +52,7 @@ pub(crate) async fn handle_create(
         display.print_run_note("Creating package interactively...");
         asked_name = match prompt_package_name(package_name, display) {
             Ok(name) => name,
-            Err(code) => return code,
+            Err(exit) => return exit,
         };
         asked_name.as_str()
     } else {
@@ -74,29 +74,30 @@ pub(crate) async fn handle_create(
         // must not read it as success.
         Ok(PackageNameResult::Cancelled) => {
             display.print_run_note("Package creation cancelled.");
-            return Exit::Failed.code();
+            return Exit::Failed;
         }
-        Err(exit_code) => return exit_code,
+        Err(exit) => return exit,
     };
 
     // Build the Package (CLI handles interactive prompting)
     let package = if interactive {
         match create_package_interactive(&package_name, config, display) {
             Ok(pkg) => pkg,
-            Err(exit_code) => return exit_code,
+            Err(exit) => return exit,
         }
     } else {
         create_basic_package(&package_name, config)
     };
 
-    let (created_name, file_path) = match write_spec(service, package, display).await {
+    let (created_name, file_path, created_exit) = match write_spec(service, package, display).await
+    {
         Ok(created) => created,
-        Err(exit_code) => return exit_code,
+        Err(exit) => return exit,
     };
 
     if !interactive {
         display.print_info("Package created. Use 'selfie spec edit' to customize it.");
-        return Exit::Clean.code();
+        return created_exit;
     }
 
     let edit_now = display.prompt(
@@ -105,43 +106,59 @@ pub(crate) async fn handle_create(
             .default(true),
     );
 
+    let edit_later = || {
+        display.print_info(format!(
+            "Package created. You can edit it later with `selfie spec edit {}`.",
+            name_argument(&created_name)
+        ));
+    };
     match edit_now {
+        // Asked for, so the editor's failure is the run's; a create's own score
+        // survives a successful edit.
         Ok(true) => {
             let success_message = format!(
                 "Package '{created_name}' created and saved at {}",
                 file_path.display()
             );
-            common::open_editor(&file_path, display, Some(success_message))
+            created_exit.max(common::open_editor(
+                &file_path,
+                display,
+                Some(success_message),
+            ))
         }
         Ok(false) => {
             display.print_info("Package created. You can edit it later with 'selfie spec edit'.");
-            Exit::Clean.code()
+            created_exit
         }
-        Err(failure) => display
-            .refuse_prompt(
-                &failure,
-                "Asking whether to open the editor",
-                format!(
-                    "Open it later with `selfie spec edit {}`.",
-                    name_argument(&created_name)
-                )
-                .as_str(),
-            )
-            .code(),
+        // The spec is already written, so only Ctrl+C changes how the run ends: a
+        // question that could not be asked or answered was not needed. Either
+        // way the user hears that the spec exists.
+        Err(PromptFailure::Interrupted) => {
+            edit_later();
+            Exit::Cancelled
+        }
+        Err(failure) => {
+            display.note_unanswered_prompt(&failure);
+            edit_later();
+            created_exit
+        }
     }
 }
 
 /// Write `package` through the service, printing what the run reports, and
-/// return the name and path the spec was created under.
+/// return the name and path the spec was created under, with how the create
+/// scored.
 ///
 /// # Errors
 ///
-/// The exit code when the spec was not created.
+/// The [`Exit`] when the spec was not created: [`Exit::Failed`],
+/// [`Exit::Cancelled`] or [`Exit::Usage`]. A create that scored
+/// [`Exit::Clean`] or [`Exit::Found`] returns `Ok` with that score.
 pub(super) async fn write_spec(
     service: &impl SpecService,
     package: selfie::package::Package,
     display: &DisplayManager,
-) -> Result<(String, PathBuf), i32> {
+) -> Result<(String, PathBuf, Exit), Exit> {
     let event_stream = service.create(package).await;
 
     // The name and path the library created the spec under. The name is the
@@ -177,10 +194,13 @@ pub(super) async fn write_spec(
         })
         .await;
 
-    if result.exit_code != 0 {
-        return Err(result.exit_code);
+    match result.exit {
+        Exit::Failed | Exit::Cancelled | Exit::Usage => return Err(result.exit),
+        Exit::Clean | Exit::Found => {}
     }
-    created.ok_or(Exit::Failed.code())
+    created
+        .map(|(name, path)| (name, path, result.exit))
+        .ok_or(Exit::Failed)
 }
 
 /// Why a spec cannot be created under `name`, given the namespace check's
@@ -199,15 +219,13 @@ pub(super) fn name_check_refusal(name: &str, error: &NamespaceValidationError) -
 }
 
 /// Report a prompt of `spec create --interactive` that got no answer, and return
-/// the exit code.
-fn refuse_interactive(display: &DisplayManager, failure: &PromptFailure) -> i32 {
-    display
-        .refuse_prompt(
-            failure,
-            "spec create --interactive",
-            "Leave off --interactive to write a template, then edit it with 'selfie spec edit'.",
-        )
-        .code()
+/// the [`Exit`].
+fn refuse_interactive(display: &DisplayManager, failure: &PromptFailure) -> Exit {
+    display.refuse_prompt(
+        failure,
+        "spec create --interactive",
+        "Leave off --interactive to write a template, then edit it with 'selfie spec edit'.",
+    )
 }
 
 fn get_valid_package_name(
@@ -215,7 +233,7 @@ fn get_valid_package_name(
     repo: &impl PackageRepository,
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<PackageNameResult, i32> {
+) -> Result<PackageNameResult, Exit> {
     let mut current_name = initial_name.to_string();
     let mut retry_count = 0;
 
@@ -235,7 +253,7 @@ fn get_valid_package_name(
                 | NamespaceValidationError::DotfilesDirectoryUnreadable(_)),
             ) => {
                 display.print_error(name_check_refusal(&current_name, &error));
-                return Err(Exit::Failed.code());
+                return Err(Exit::Failed);
             }
             Err(NamespaceValidationError::Conflict(conflict)) => {
                 // Only a package the check found, and this command can load, is
@@ -271,18 +289,16 @@ fn get_valid_package_name(
                         }
                         Ok(_) => return Ok(PackageNameResult::Cancelled),
                         Err(failure) => {
-                            return Err(display
-                                .refuse_prompt(
-                                    &failure,
-                                    "Choosing what to do about an existing package",
-                                    format!(
-                                        "Edit it with `selfie spec edit {}`, or run `selfie spec \
+                            return Err(display.refuse_prompt(
+                                &failure,
+                                "Choosing what to do about an existing package",
+                                format!(
+                                    "Edit it with `selfie spec edit {}`, or run `selfie spec \
                                          create` with a different name.",
-                                        name_argument(&current_name)
-                                    )
-                                    .as_str(),
+                                    name_argument(&current_name)
                                 )
-                                .code());
+                                .as_str(),
+                            ));
                         }
                     }
                 } else {
@@ -303,7 +319,7 @@ fn get_valid_package_name(
                     display.print_error(format!(
                         "Too many retry attempts ({MAX_NAME_RETRIES}). Please try again later."
                     ));
-                    return Err(Exit::Failed.code());
+                    return Err(Exit::Failed);
                 }
 
                 current_name = loop {
@@ -313,13 +329,11 @@ fn get_valid_package_name(
                         ))) {
                             Ok(name) => name,
                             Err(failure) => {
-                                return Err(display
-                                    .refuse_prompt(
-                                        &failure,
-                                        "Choosing a different name",
-                                        "Run 'selfie spec create' again with a different name.",
-                                    )
-                                    .code());
+                                return Err(display.refuse_prompt(
+                                    &failure,
+                                    "Choosing a different name",
+                                    "Run 'selfie spec create' again with a different name.",
+                                ));
                             }
                         };
                     // As the first name prompt does: a name the rule refuses would
@@ -376,7 +390,7 @@ fn create_package_interactive(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<selfie::package::Package, i32> {
+) -> Result<selfie::package::Package, Exit> {
     let homepage = prompt_package_homepage(display)?;
     let description = prompt_package_description(display)?;
     let environments = prompt_environments(package_name, config, display)?;
@@ -397,7 +411,7 @@ fn create_package_interactive(
     ))
 }
 
-fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<String, i32> {
+fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<String, Exit> {
     loop {
         let name = display
             .prompt(
@@ -416,7 +430,7 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
     }
 }
 
-fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i32> {
+fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, Exit> {
     let homepage: String = display
         .prompt(
             Input::with_theme(&SimpleTheme)
@@ -432,7 +446,7 @@ fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, i
     })
 }
 
-fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>, i32> {
+fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>, Exit> {
     let description: String = display
         .prompt(
             Input::with_theme(&SimpleTheme)
@@ -452,7 +466,7 @@ fn prompt_environments(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<Environments, i32> {
+) -> Result<Environments, Exit> {
     let mut environments = Environments::new();
 
     loop {
@@ -491,7 +505,7 @@ fn prompt_environment_name(
     existing_environments: &Environments,
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<String, i32> {
+) -> Result<String, Exit> {
     let default_env = default_environment_name(existing_environments, config);
 
     loop {
@@ -513,7 +527,7 @@ fn prompt_environment_name(
     }
 }
 
-fn prompt_install_command(display: &DisplayManager) -> Result<String, i32> {
+fn prompt_install_command(display: &DisplayManager) -> Result<String, Exit> {
     loop {
         let cmd: String = display
             .prompt(Input::with_theme(&SimpleTheme).with_prompt("Install command (required)"))
@@ -530,7 +544,7 @@ fn prompt_install_command(display: &DisplayManager) -> Result<String, i32> {
 fn prompt_check_command(
     package_name: &str,
     display: &DisplayManager,
-) -> Result<Option<String>, i32> {
+) -> Result<Option<String>, Exit> {
     let default_check = format!("command -v {package_name}");
     let check_cmd: String = display
         .prompt(
@@ -575,12 +589,12 @@ fn available_dependency_names(
     }
 }
 
-fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<Vec<String>, i32> {
+fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<Vec<String>, Exit> {
     let repo = common::create_package_repository(config);
 
     let (available_packages, skipped) = available_dependency_names(&repo).map_err(|msg| {
         display.print_error(msg);
-        Exit::Failed.code()
+        Exit::Failed
     })?;
 
     // A spec selfie could not read is not offered: nothing says it would load
@@ -608,7 +622,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         .collect())
 }
 
-fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, i32> {
+fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, Exit> {
     display
         .prompt(
             Confirm::with_theme(&SimpleTheme)
@@ -666,9 +680,9 @@ mod tests {
             answer("fresh".to_string()),
         ]);
 
-        let code = handle_create(&service, "tool", &config, &display, false).await;
+        let exit = handle_create(&service, "tool", &config, &display, false).await;
 
-        assert_eq!(code, 0, "{:?}", display.printed());
+        assert_eq!(exit, Exit::Clean, "{:?}", display.printed());
         assert!(packages.join("fresh.yml").exists());
         assert!(
             display
@@ -686,9 +700,9 @@ mod tests {
         let (_temp, packages, config, service) = packages_holding(&["tool"]);
         let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
 
-        let code = handle_create(&service, "tool", &config, &display, false).await;
+        let exit = handle_create(&service, "tool", &config, &display, false).await;
 
-        assert_eq!(code, 130);
+        assert_eq!(exit, Exit::Cancelled);
         assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 1);
     }
 
@@ -699,9 +713,9 @@ mod tests {
         let (_temp, packages, config, service) = packages_holding(&[]);
         let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
 
-        let code = handle_create(&service, "fresh", &config, &display, true).await;
+        let exit = handle_create(&service, "fresh", &config, &display, true).await;
 
-        assert_eq!(code, 130);
+        assert_eq!(exit, Exit::Cancelled);
         assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
     }
 
@@ -732,9 +746,9 @@ mod tests {
             answer(false),              // open the editor now?
         ]);
 
-        let code = handle_create(&service, "arg", &config, &display, true).await;
+        let exit = handle_create(&service, "arg", &config, &display, true).await;
 
-        assert_eq!(code, 0, "{:?}", display.printed());
+        assert_eq!(exit, Exit::Clean, "{:?}", display.printed());
         let written: Vec<String> = std::fs::read_dir(&packages)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -763,9 +777,9 @@ mod tests {
             answer(false),              // open the editor now?
         ]);
 
-        let code = handle_create(&service, "arg", &config, &display, true).await;
+        let exit = handle_create(&service, "arg", &config, &display, true).await;
 
-        assert_eq!(code, 0, "{:?}", display.printed());
+        assert_eq!(exit, Exit::Clean, "{:?}", display.printed());
         assert!(packages.join("fresh.yml").exists());
         assert!(
             display
@@ -775,6 +789,255 @@ mod tests {
             "{:?}",
             display.printed()
         );
+    }
+
+    // Answers every prompt of an interactive create, in order, up to and including
+    // "Add another environment?": the name, homepage, description, environment,
+    // install command and check command.
+    fn answers_through_the_last_environment() -> Vec<crate::display_manager::Scripted> {
+        use crate::display_manager::answer;
+        vec![
+            answer("fresh".to_string()),
+            answer(String::new()), // homepage
+            answer(String::new()), // description
+            answer(test_common::TEST_ENV.to_string()),
+            answer("true".to_string()), // install
+            answer(String::new()),      // check
+            answer(false),              // another environment?
+        ]
+    }
+
+    fn lines_containing(display: &DisplayManager, needle: &str) -> usize {
+        display
+            .printed()
+            .iter()
+            .filter(|(_, line)| line.contains(needle))
+            .count()
+    }
+
+    // With no terminal at the editor question the spec is already written, so
+    // the run reports the create and does not refuse the question.
+    #[tokio::test]
+    async fn no_terminal_at_the_editor_question_reports_the_create() {
+        let (_temp, packages, config, service) = packages_holding(&[]);
+        let display = DisplayManager::new(false).answering(answers_through_the_last_environment());
+
+        let exit = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(exit, Exit::Clean, "{:?}", display.printed());
+        assert!(packages.join("fresh.yml").exists());
+        assert_eq!(
+            display.printed().last().map(|(_, line)| line.as_str()),
+            Some("Package created. You can edit it later with `selfie spec edit fresh`.")
+        );
+        assert_eq!(lines_containing(&display, "needs a terminal"), 0);
+    }
+
+    // Ctrl+C at the editor question ends the run canceled, with the spec
+    // written.
+    #[tokio::test]
+    async fn ctrl_c_at_the_editor_question_is_canceled_with_the_spec_written() {
+        let (_temp, packages, config, service) = packages_holding(&[]);
+        let mut answers = answers_through_the_last_environment();
+        answers.push(crate::display_manager::ctrl_c());
+        let display = DisplayManager::new(false).answering(answers);
+
+        let exit = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(exit, Exit::Cancelled);
+        assert!(packages.join("fresh.yml").exists());
+        assert_eq!(
+            display.printed().last().map(|(_, line)| line.as_str()),
+            Some("Package created. You can edit it later with `selfie spec edit fresh`.")
+        );
+    }
+
+    // A terminal that fails at the editor question leaves the spec written, so
+    // the run reports the create, and says the answer could not be read.
+    #[tokio::test]
+    async fn an_unreadable_answer_at_the_editor_question_reports_the_create() {
+        let (_temp, packages, config, service) = packages_holding(&[]);
+        let mut answers = answers_through_the_last_environment();
+        answers.push(Err(std::io::Error::other("the terminal went away").into()));
+        let display = DisplayManager::new(false).answering(answers);
+
+        let exit = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(exit, Exit::Clean, "{:?}", display.printed());
+        assert!(packages.join("fresh.yml").exists());
+        assert_eq!(
+            lines_containing(
+                &display,
+                "Could not read the answer: the terminal went away"
+            ),
+            1,
+            "{:?}",
+            display.printed()
+        );
+        assert_eq!(
+            display.printed().last().map(|(_, line)| line.as_str()),
+            Some("Package created. You can edit it later with `selfie spec edit fresh`.")
+        );
+    }
+
+    // A create that ends canceled before the spec is reported written exits
+    // canceled, not as a failure.
+    #[tokio::test]
+    async fn a_canceled_create_exits_canceled() {
+        use selfie::package::{
+            event::{EventStream, OperationContext, OperationInfo, metadata::OperationType},
+            service::MockSpecService,
+        };
+
+        let mut service = MockSpecService::new();
+        service.expect_create().returning(|_| {
+            Box::pin(async {
+                let events = vec![PackageEvent::Canceled {
+                    operation_info: OperationInfo {
+                        id: uuid::Uuid::new_v4(),
+                        operation_type: OperationType::PackageCreate,
+                        package_name: "fresh".to_string(),
+                        environment: "test".to_string(),
+                        context: OperationContext::default(),
+                        timestamp: std::time::Instant::now(),
+                    },
+                    reason: "Ctrl+C".to_string(),
+                }];
+                Box::pin(futures::stream::iter(events)) as EventStream
+            })
+        });
+        let (_temp, _packages, config, _service) = packages_holding(&[]);
+        let display = DisplayManager::new(false);
+
+        let exit = handle_create(&service, "fresh", &config, &display, false).await;
+
+        assert_eq!(exit, Exit::Cancelled, "{:?}", display.printed());
+    }
+
+    // Cancel at the "already exists" menu writes nothing and exits as a
+    // decline does.
+    #[tokio::test]
+    async fn cancel_at_the_taken_name_menu_exits_as_a_decline() {
+        use crate::display_manager::{Channel, answer};
+
+        let (_temp, packages, config, service) = packages_holding(&["tool"]);
+        let display = DisplayManager::new(false).answering(vec![answer(2_usize)]);
+
+        let exit = handle_create(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(exit, Exit::Failed);
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 1);
+        let stderr: Vec<String> = display
+            .printed()
+            .into_iter()
+            .filter(|(channel, _)| *channel == Channel::Stderr)
+            .map(|(_, line)| line)
+            .collect();
+        // Stderr holds the warning naming the taken name, then the note, and no
+        // error.
+        assert_eq!(
+            stderr,
+            [
+                format!(
+                    "'tool' is already a package ({}). Edit it, or choose a different name.",
+                    packages.join("tool.yml").display()
+                ),
+                "Package creation cancelled.".to_string(),
+            ],
+        );
+    }
+
+    // No terminal partway through the interactive prompts is a usage error,
+    // and nothing is written.
+    #[tokio::test]
+    async fn no_terminal_partway_through_is_a_usage_error() {
+        let (_temp, packages, config, service) = packages_holding(&[]);
+        let mut answers = answers_through_the_last_environment();
+        answers.truncate(3); // keeps name, homepage and description; then the script runs out
+        let display = DisplayManager::new(false).answering(answers);
+
+        let exit = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(exit, Exit::Usage);
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
+        assert_eq!(
+            lines_containing(&display, "spec create --interactive needs a terminal"),
+            1,
+            "{:?}",
+            display.printed()
+        );
+        assert_eq!(lines_containing(&display, "Leave off --interactive"), 1);
+    }
+
+    // Ctrl+C at the dependency picker, which is asked only when another spec
+    // exists, ends the run canceled.
+    #[tokio::test]
+    async fn ctrl_c_at_the_dependency_picker_is_canceled() {
+        let (_temp, packages, config, service) = packages_holding(&["other"]);
+        let mut answers = answers_through_the_last_environment();
+        answers.truncate(6); // keeps the answers up to the check command
+        answers.push(crate::display_manager::ctrl_c());
+        let display = DisplayManager::new(false).answering(answers);
+
+        let exit = handle_create(&service, "arg", &config, &display, true).await;
+
+        assert_eq!(exit, Exit::Cancelled, "{:?}", display.printed());
+        let written: Vec<String> = std::fs::read_dir(&packages)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(written, vec!["other.yml".to_string()]);
+    }
+
+    // No terminal at the prompt for a different name is a usage error, with the
+    // way to choose one without a prompt.
+    #[tokio::test]
+    async fn no_terminal_at_the_replacement_name_is_a_usage_error() {
+        use crate::display_manager::answer;
+
+        let (_temp, packages, config, service) = packages_holding(&["tool"]);
+        let display = DisplayManager::new(false).answering(vec![answer(1_usize)]);
+
+        let exit = handle_create(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(exit, Exit::Usage);
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 1);
+        assert_eq!(
+            lines_containing(
+                &display,
+                "Run 'selfie spec create' again with a different name."
+            ),
+            1,
+            "{:?}",
+            display.printed()
+        );
+    }
+
+    // A name a standalone spec holds goes straight to the prompt for another;
+    // a fourth taken name ends the run.
+    #[tokio::test]
+    async fn a_fourth_taken_name_is_too_many() {
+        use crate::display_manager::answer;
+
+        let (temp, packages, config, service) = packages_holding(&[]);
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir(&dotfiles).unwrap();
+        std::fs::write(
+            dotfiles.join("other.yml"),
+            "name: other\ndotfiles:\n  - source: other\n    target: ~/.other\n",
+        )
+        .unwrap();
+        let display = DisplayManager::new(false).answering(vec![
+            answer("other".to_string()),
+            answer("other".to_string()),
+            answer("other".to_string()),
+        ]);
+
+        let exit = handle_create(&service, "other", &config, &display, false).await;
+
+        assert_eq!(exit, Exit::Failed, "{:?}", display.printed());
+        assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
+        assert_eq!(lines_containing(&display, "Too many retry attempts"), 1);
     }
 
     // A repeated environment name is refused and asked again, so the first

@@ -27,10 +27,18 @@ use crate::source_paths;
 /// | 2    | usage error: a bad command line, or a prompt with no terminal |
 /// | 3    | found what it was asked to look for |
 /// | 130  | cancelled (128 + SIGINT) |
+///
+/// Exits compare by how much they say about the run, so the `max` of several
+/// results is the one a run made of them reports: clean, then found, failed,
+/// usage, and cancelled highest. A failure outranks a finding and a finding a
+/// clean result. A usage error ranks above a failure because it stopped the
+/// run before it could fail or finish, and a cancel above everything because it
+/// is how the run ended.
 // A new code takes the next free value in 3-63, never 64-78 (`sysexits.h`) or
 // 126 and up (reserved by the shell), and no code is renumbered or reused. The
 // README's exit-code table is the public contract and changes with this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
 pub(crate) enum Exit {
     /// Did everything asked, and found nothing to report.
     Clean,
@@ -45,6 +53,17 @@ pub(crate) enum Exit {
 }
 
 impl Exit {
+    // No wildcard, so a new variant has to be ranked here.
+    fn rank(self) -> u8 {
+        match self {
+            Exit::Clean => 0,
+            Exit::Found => 1,
+            Exit::Failed => 2,
+            Exit::Usage => 3,
+            Exit::Cancelled => 4,
+        }
+    }
+
     /// The process exit code.
     pub(crate) fn code(self) -> i32 {
         match self {
@@ -55,6 +74,18 @@ impl Exit {
             // 128 + 2 (SIGINT), the Unix convention for Ctrl+C termination.
             Exit::Cancelled => 130,
         }
+    }
+}
+
+impl Ord for Exit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl PartialOrd for Exit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -71,8 +102,8 @@ impl From<Outcome> for Exit {
 /// What processing a stream decided.
 #[derive(Debug, Clone)]
 pub struct EventProcessingResult {
-    /// The exit code for the operation
-    pub exit_code: i32,
+    /// How the run ended.
+    pub exit: Exit,
 }
 
 /// A reusable event processor for handling package operation events
@@ -154,9 +185,7 @@ impl EventProcessor {
 
         self.display.finish();
 
-        EventProcessingResult {
-            exit_code: exit.code(),
-        }
+        EventProcessingResult { exit }
     }
 
     /// Render one event the default way.
@@ -664,6 +693,27 @@ mod tests {
     use futures::stream;
     use selfie::package::event::{StepEnding, StepId};
 
+    // A cancel outranks a usage error, a usage error a failure, a failure a
+    // finding, and a finding a clean result. Each pair is compared in both
+    // orders, so a tie in the ranking fails one of them whichever way `max`
+    // breaks it.
+    #[test]
+    fn exits_rank_cancelled_usage_failed_found_clean() {
+        let ranked = [
+            Exit::Cancelled,
+            Exit::Usage,
+            Exit::Failed,
+            Exit::Found,
+            Exit::Clean,
+        ];
+        for (i, higher) in ranked.iter().enumerate() {
+            for lower in &ranked[i + 1..] {
+                assert_eq!(higher.max(lower), higher, "{higher:?} over {lower:?}");
+                assert_eq!(lower.max(higher), higher, "{higher:?} over {lower:?}");
+            }
+        }
+    }
+
     #[test]
     fn test_to_title_case() {
         assert_eq!("check".to_title_case(), "Check");
@@ -691,7 +741,7 @@ mod tests {
         let result = processor.process_events(event_stream, |_event| false).await;
 
         // Nothing reported a result, so nothing reported success either.
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit, Exit::Failed);
     }
 
     // A stream that starts and then stops, as one does when the task running the
@@ -707,7 +757,7 @@ mod tests {
             .process_events(Box::pin(stream::iter(events)), |_event| false)
             .await;
 
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit, Exit::Failed);
     }
 
     fn drift_checked(drift: usize, refused: usize) -> PackageEvent {
@@ -733,15 +783,15 @@ mod tests {
     #[tokio::test]
     async fn a_claimed_completion_still_exits_with_its_outcome() {
         for (event, expected) in [
-            (drift_checked(0, 0), 0),
-            (drift_checked(1, 0), 3),
-            (drift_checked(1, 1), 1),
+            (drift_checked(0, 0), Exit::Clean),
+            (drift_checked(1, 0), Exit::Found),
+            (drift_checked(1, 1), Exit::Failed),
         ] {
             let processor = EventProcessor::new(DisplayManager::new(false));
             let result = processor
                 .process_events(Box::pin(stream::iter(vec![event])), |_event| true)
                 .await;
-            assert_eq!(result.exit_code, expected);
+            assert_eq!(result.exit, expected);
         }
     }
 
@@ -768,7 +818,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.exit_code, 130);
+        assert_eq!(result.exit, Exit::Cancelled);
         assert_eq!(completions_seen, 0);
     }
 
@@ -788,7 +838,7 @@ mod tests {
             .process_events(Box::pin(stream::iter(events)), |_event| true)
             .await;
 
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit, Exit::Clean);
     }
 
     #[tokio::test]
@@ -808,7 +858,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit, Exit::Failed);
         // Handler should not be called for empty stream
         assert!(!handler_called);
     }
@@ -1363,7 +1413,7 @@ mod tests {
         let event_stream = Box::pin(stream::iter(events));
         let result = processor.process_events(event_stream, |_event| false).await;
 
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit, Exit::Failed);
     }
 
     // The CLI half of the sudo refusal: exit non-zero, and put the two halves of
@@ -1399,7 +1449,7 @@ mod tests {
         let event_stream = Box::pin(stream::iter(events));
         let result = processor.process_events(event_stream, |_event| false).await;
 
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit, Exit::Failed);
 
         // The collected detail carries both halves, so `--verbose` summaries and
         // the MCP server's JSON still say what to do about it.
@@ -1470,7 +1520,7 @@ mod tests {
         assert_eq!(started_events_seen, 1);
         assert_eq!(progress_events_seen, 2);
         assert_eq!(completed_events_seen, 1);
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit, Exit::Failed);
     }
 
     #[tokio::test]
@@ -1514,7 +1564,7 @@ mod tests {
             .await;
 
         // Should use exit code 130 (128 + SIGINT)
-        assert_eq!(result.exit_code, 130);
+        assert_eq!(result.exit, Exit::Cancelled);
         // Completed event after Canceled should not have been processed
         assert_eq!(events_after_cancel, 0);
     }
@@ -1578,7 +1628,7 @@ mod tests {
         let event_stream = Box::pin(stream::iter(events));
         let result = processor.process_events(event_stream, |_event| false).await;
 
-        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.exit, Exit::Failed);
         assert_eq!(
             display_clone.collected_errors().len(),
             1,
@@ -1613,7 +1663,7 @@ mod tests {
         let event_stream = Box::pin(stream::iter(events));
         let result = processor.process_events(event_stream, |_event| false).await;
 
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.exit, Exit::Clean);
     }
 
     #[tokio::test]

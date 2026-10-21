@@ -19,7 +19,7 @@ pub(crate) async fn handle_edit(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> i32 {
+) -> Exit {
     info!("Editing package: {}", package_name);
 
     // Create repository to look up the package
@@ -36,14 +36,14 @@ pub(crate) async fn handle_edit(
         // false. The error names the directory and what is at it.
         Err(e @ selfie::package::port::PackageRepoError::PackageListError(_)) => {
             display.print_error(format!("Cannot edit '{package_name}': {e}"));
-            return 1;
+            return Exit::Failed;
         }
         Err(e) => {
             display.print_error(format!(
                 "Cannot edit '{package_name}': a file is already there and selfie could not use \
                  it, so opening it as a new package would overwrite it. Edit it directly. {e}"
             ));
-            return 1;
+            return Exit::Failed;
         }
     };
     let package_exists = existing_package.is_some();
@@ -53,29 +53,30 @@ pub(crate) async fn handle_edit(
     let Some(_editor) =
         common::check_editor_available(display, package_name, package_exists, package_path)
     else {
-        return 1;
+        return Exit::Failed;
     };
 
     // An existing file is opened exactly as the user wrote it, never saved
     // first: a serde round trip flattens YAML anchors, drops every comment and
     // reorders keys, and would refuse the very file a typo guard just rejected.
-    let (path, created) = if let Some(pkg) = existing_package {
+    let (path, created, created_exit) = if let Some(pkg) = existing_package {
         display.print_run_note(format!(
             "Opening existing package '{package_name}' for editing"
         ));
-        (pkg.file_path().to_path_buf(), false)
+        (pkg.file_path().to_path_buf(), false, Exit::Clean)
     } else {
         match create_for_edit(service, &repo, package_name, config, display).await {
-            Ok(path) => (path, true),
-            Err(code) => return code,
+            Ok((path, created_exit)) => (path, true, created_exit),
+            Err(exit) => return exit,
         }
     };
 
-    common::open_editor(
+    // A create's own score survives the edit, as `spec create` keeps it.
+    created_exit.max(common::open_editor(
         &path,
         display,
         editor_success_message(package_name, &path, created),
-    )
+    ))
 }
 
 /// The line to print once the editor closes: one for an existing spec, and
@@ -94,11 +95,12 @@ fn editor_success_message(
 }
 
 /// Create `package_name` for `spec edit`, once the user confirms, the way
-/// `spec create` creates one, and return where it was written.
+/// `spec create` creates one, and return where it was written with how the
+/// create scored.
 ///
 /// # Errors
 ///
-/// The exit code when the spec was not created: its path is taken, its name
+/// The [`Exit`] when the spec was not created: its path is taken, its name
 /// is, the user did not confirm, or the create failed.
 async fn create_for_edit(
     service: &impl SpecService,
@@ -106,7 +108,7 @@ async fn create_for_edit(
     package_name: &str,
     config: &CliConfig,
     display: &DisplayManager,
-) -> Result<std::path::PathBuf, i32> {
+) -> Result<(std::path::PathBuf, Exit), Exit> {
     let package = create_basic_package(package_name, config);
 
     // Before offering to create, ask the file system whether the path is
@@ -118,11 +120,11 @@ async fn create_for_edit(
     // that is about to be refused wastes the answer.
     if let Some(refusal) = selfie::package::spec_name_refusal(package_name) {
         display.print_error(refusal);
-        return Err(Exit::Failed.code());
+        return Err(Exit::Failed);
     }
     if repo.path_is_occupied(package.path()) {
         display.print_error(occupied_path_refusal(package_name, package.path()));
-        return Err(Exit::Failed.code());
+        return Err(Exit::Failed);
     }
 
     // The dotfiles directory as well: a standalone spec may hold the name.
@@ -153,7 +155,7 @@ async fn create_for_edit(
             ),
             _ => name_check_refusal(package_name, &error),
         });
-        return Err(Exit::Failed.code());
+        return Err(Exit::Failed);
     }
 
     display.print_run_note(format!("Package '{package_name}' does not exist."));
@@ -162,7 +164,7 @@ async fn create_for_edit(
 
     write_spec(service, package, display)
         .await
-        .map(|(_, path)| path)
+        .map(|(_, path, created_exit)| (path, created_exit))
 }
 
 /// Why `spec edit` will not create `package_name` at `path`: something is already
@@ -179,8 +181,8 @@ fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> String {
 ///
 /// # Errors
 ///
-/// The exit code when the user did not confirm.
-fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(), i32> {
+/// The [`Exit`] when the user did not confirm.
+fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(), Exit> {
     let confirm = display.prompt(
         Confirm::with_theme(&SimpleTheme)
             .with_prompt(format!("Create new package '{package_name}'?"))
@@ -192,19 +194,17 @@ fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(
         // A create that wrote nothing did not do what it was asked.
         Ok(false) => {
             display.print_run_note("Package creation cancelled.");
-            Err(Exit::Failed.code())
+            Err(Exit::Failed)
         }
-        Err(failure) => Err(display
-            .refuse_prompt(
-                &failure,
-                "Confirming a new package",
-                format!(
-                    "Create it with `selfie spec create {}`, then edit it.",
-                    name_argument(package_name)
-                )
-                .as_str(),
+        Err(failure) => Err(display.refuse_prompt(
+            &failure,
+            "Confirming a new package",
+            format!(
+                "Create it with `selfie spec create {}`, then edit it.",
+                name_argument(package_name)
             )
-            .code()),
+            .as_str(),
+        )),
     }
 }
 
@@ -254,7 +254,7 @@ mod tests {
     fn ctrl_c_at_the_create_confirmation_is_canceled() {
         let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
 
-        assert_eq!(confirm_new_package("fresh", &display), Err(130));
+        assert_eq!(confirm_new_package("fresh", &display), Err(Exit::Cancelled));
     }
 
     // No at the confirmation is a decline: nothing was created, so the run fails.
@@ -263,7 +263,7 @@ mod tests {
         let display =
             DisplayManager::new(false).answering(vec![crate::display_manager::answer(false)]);
 
-        assert_eq!(confirm_new_package("fresh", &display), Err(1));
+        assert_eq!(confirm_new_package("fresh", &display), Err(Exit::Failed));
     }
 
     // An empty package directory with a dotfiles directory beside it, a config
@@ -301,11 +301,12 @@ mod tests {
         let display =
             DisplayManager::new(false).answering(vec![crate::display_manager::answer(true)]);
 
-        let path = create_for_edit(&service, &repo, "fresh", &config, &display)
+        let (path, created_exit) = create_for_edit(&service, &repo, "fresh", &config, &display)
             .await
             .unwrap();
 
         assert_eq!(path, packages.join("fresh.yml"));
+        assert_eq!(created_exit, Exit::Clean);
         let spec = fs::read_to_string(&path).unwrap();
         assert!(spec.contains("work:"), "{spec}");
         assert!(!spec.contains("default:"), "{spec}");
@@ -325,11 +326,11 @@ mod tests {
         // No scripted answer: a prompt here would find no terminal and exit 2.
         let display = DisplayManager::new(false);
 
-        let code = create_for_edit(&service, &repo, "other", &config, &display)
+        let exit = create_for_edit(&service, &repo, "other", &config, &display)
             .await
             .unwrap_err();
 
-        assert_eq!(code, 1, "{:?}", display.printed());
+        assert_eq!(exit, Exit::Failed, "{:?}", display.printed());
         assert!(
             display
                 .printed()
@@ -366,11 +367,11 @@ mod tests {
         let repo = common::create_package_repository(&config);
         let display = DisplayManager::new(false);
 
-        let code = create_for_edit(&service, &repo, "other", &config, &display)
+        let exit = create_for_edit(&service, &repo, "other", &config, &display)
             .await
             .unwrap_err();
 
-        assert_eq!(code, 1, "{:?}", display.printed());
+        assert_eq!(exit, Exit::Failed, "{:?}", display.printed());
         let printed = display.printed();
         let refusal = printed
             .iter()
@@ -398,10 +399,11 @@ mod tests {
         let display =
             DisplayManager::new(false).answering(vec![crate::display_manager::answer(true)]);
 
-        create_for_edit(&service, &repo, "fresh", &config, &display)
+        let (_, created_exit) = create_for_edit(&service, &repo, "fresh", &config, &display)
             .await
             .unwrap();
 
+        assert_eq!(created_exit, Exit::Clean);
         assert!(
             display
                 .printed()
@@ -421,11 +423,11 @@ mod tests {
         // No scripted answer: a prompt here would find no terminal and exit 2.
         let display = DisplayManager::new(false);
 
-        let code = create_for_edit(&service, &repo, "my app", &config, &display)
+        let exit = create_for_edit(&service, &repo, "my app", &config, &display)
             .await
             .unwrap_err();
 
-        assert_eq!(code, 1, "{:?}", display.printed());
+        assert_eq!(exit, Exit::Failed, "{:?}", display.printed());
         assert!(
             display
                 .printed()
@@ -464,7 +466,7 @@ mod tests {
         ));
 
         // Should fail with exit code 1 due to missing EDITOR
-        assert_eq!(result, 1);
+        assert_eq!(result, Exit::Failed);
 
         // Restore EDITOR if it was set
         if let Some(editor) = old_editor {

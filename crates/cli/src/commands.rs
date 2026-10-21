@@ -1,7 +1,7 @@
 //! Routing a parsed command line to the handler that serves it.
 //!
-//! Handlers return a Unix exit code: `0` success, `1` a general error, `2` a
-//! validation or usage error.
+//! Every handler returns the [`Exit`] its run ended with; `main` turns it into
+//! the process's exit code.
 
 pub(crate) mod apply;
 pub(crate) mod common;
@@ -9,6 +9,7 @@ pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod dotfiles;
 pub(crate) mod package;
+pub(crate) mod presentation;
 pub(crate) mod spec;
 pub(crate) mod sync;
 pub(crate) mod track;
@@ -27,6 +28,7 @@ use crate::{
         SyncSubcommands,
     },
     display_manager::DisplayManager,
+    event_processor::Exit,
 };
 use apply::handle_apply;
 
@@ -39,7 +41,7 @@ pub(crate) async fn dispatch_command(
     display: DisplayManager,
     cancellation_token: CancellationToken,
     fs: &impl selfie::fs::FileSystem,
-) -> i32 {
+) -> Exit {
     debug!("Dispatching command: {:?}", command);
 
     match command {
@@ -66,7 +68,7 @@ pub(crate) async fn dispatch_command(
         }
         ClapCommands::Completion { shell } => {
             generate_completion(*shell);
-            0
+            Exit::Clean
         }
     }
 }
@@ -80,7 +82,7 @@ async fn dispatch_spec_command(
     config: &CliConfig,
     display: DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     debug!("Handling spec command: {:?}", command);
 
     let service = create_package_service(config, cancellation_token);
@@ -128,7 +130,7 @@ async fn dispatch_package_command(
     config: &CliConfig,
     display: DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     debug!("Handling package command: {:?}", command);
 
     let service = create_package_service(config, cancellation_token.clone());
@@ -183,7 +185,7 @@ async fn dispatch_dotfiles_command(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     debug!("Handling dotfiles command: {:?}", command);
 
     match command {
@@ -205,7 +207,7 @@ async fn dispatch_sync_command(
     config: &CliConfig,
     display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> i32 {
+) -> Exit {
     debug!("Handling sync command: {:?}", command);
 
     match command {
@@ -235,7 +237,7 @@ fn dispatch_config_command(
     command: &ConfigSubcommands,
     display: DisplayManager,
     fs: &impl selfie::fs::FileSystem,
-) -> i32 {
+) -> Exit {
     debug!("Handling config command: {:?}", command);
 
     match command {

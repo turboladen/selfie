@@ -14,7 +14,7 @@ use crate::{
 ///
 /// Takes no `CliConfig`, deliberately: every value reported here comes from a
 /// fresh load of the file, so a flag cannot mask a problem in it.
-pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) -> i32 {
+pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) -> Exit {
     info!("Validating configuration");
 
     // Load the raw on-disk config (without CLI overrides) so that validation
@@ -23,7 +23,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         Ok(c) => c,
         Err(e) => {
             display.print_error(format!("Failed to load configuration: {e}"));
-            return Exit::Failed.code();
+            return Exit::Failed;
         }
     };
 
@@ -62,7 +62,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
             .add_validation_warnings(&result.issues().warnings())
             .print(display);
         crate::config::print_config_notices(&cli_notices, display);
-        Exit::Failed.code()
+        Exit::Failed
     } else {
         if result.issues().has_warnings() {
             let mut table_reporter = ValidationTableReporter::new(display.use_colors());
@@ -133,7 +133,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         report_with_style(display, "verbose:", cli_load.section.verbose);
         report_with_style(display, "use_colors:", cli_load.section.use_colors);
 
-        Exit::from(outcome).code()
+        Exit::from(outcome)
     }
 }
 
@@ -194,7 +194,7 @@ mod tests {
         let fs = mock_fs_with_valid_config();
 
         let result = handle_validate(&display, &fs);
-        assert!(result == 0 || result == 1);
+        assert!(result == Exit::Clean || result == Exit::Failed);
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod tests {
         let fs = mock_fs_with_valid_config();
 
         let result = handle_validate(&display, &fs);
-        assert!(result == 0 || result == 1);
+        assert!(result == Exit::Clean || result == Exit::Failed);
     }
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
         let fs = mock_fs_with_valid_config();
 
         let result = handle_validate(&display, &fs);
-        assert!(result == 0 || result == 1);
+        assert!(result == Exit::Clean || result == Exit::Failed);
     }
 
     #[test]
@@ -242,7 +242,7 @@ mod tests {
             });
 
         let result = handle_validate(&display, &fs);
-        assert_eq!(result, 1);
+        assert_eq!(result, Exit::Failed);
     }
 
     #[test]
@@ -260,6 +260,6 @@ mod tests {
         fs.expect_symlink_refusal().returning(|_| None);
 
         let result = handle_validate(&display, &fs);
-        assert_eq!(result, 1);
+        assert_eq!(result, Exit::Failed);
     }
 }

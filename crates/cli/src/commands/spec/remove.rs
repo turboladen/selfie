@@ -18,7 +18,7 @@ pub(crate) async fn handle_remove(
     config: &CliConfig,
     display: &DisplayManager,
     skip_confirm: bool,
-) -> i32 {
+) -> Exit {
     info!("Removing package: {}", package_name);
 
     // Pre-flight: verify the package exists and check dependencies for the confirmation prompt.
@@ -36,13 +36,13 @@ pub(crate) async fn handle_remove(
         Ok(pkg) => pkg,
         Err(e) if e.means_no_such_package() => {
             display.print_error(format!("Package '{package_name}' not found."));
-            return 1;
+            return Exit::Failed;
         }
         // Not about a file at this name, so "could not load that spec" would be false:
         // there may be no spec at all. The error names the directory and what is at it.
         Err(e @ selfie::package::port::PackageRepoError::PackageListError(_)) => {
             display.print_error(format!("Cannot remove '{package_name}': {e}"));
-            return 1;
+            return Exit::Failed;
         }
         // Everything else the repository can answer here: a file that will not
         // parse, one selfie declined to open, several files claiming the name,
@@ -54,7 +54,7 @@ pub(crate) async fn handle_remove(
                 "Cannot remove '{package_name}': selfie could not load that spec, so it cannot \
                  tell what depends on it. Resolve what is reported below, then try again. {e}"
             ));
-            return 1;
+            return Exit::Failed;
         }
     };
 
@@ -121,16 +121,14 @@ pub(crate) async fn handle_remove(
             // A remove that removed nothing did not do what it was asked.
             Ok(false) => {
                 display.print_run_note("Package removal cancelled.");
-                return Exit::Failed.code();
+                return Exit::Failed;
             }
             Err(failure) => {
-                return display
-                    .refuse_prompt(
-                        &failure,
-                        "Confirming the removal",
-                        format!("Pass --yes to remove '{package_name}' without asking.").as_str(),
-                    )
-                    .code();
+                return display.refuse_prompt(
+                    &failure,
+                    "Confirming the removal",
+                    format!("Pass --yes to remove '{package_name}' without asking.").as_str(),
+                );
             }
         }
     }
@@ -181,7 +179,7 @@ pub(crate) async fn handle_remove(
         })
         .await;
 
-    result.exit_code
+    result.exit
 }
 
 #[cfg(test)]
@@ -191,6 +189,7 @@ mod tests {
     use test_common::test_config_with_dir;
 
     use crate::config::CliConfig;
+    use crate::event_processor::Exit;
 
     use crate::commands::common;
 
@@ -227,9 +226,9 @@ mod tests {
         let (_temp, spec, config, service) = one_spec();
         let display = DisplayManager::new(false).answering(vec![ctrl_c()]);
 
-        let code = super::handle_remove(&service, "tool", &config, &display, false).await;
+        let exit = super::handle_remove(&service, "tool", &config, &display, false).await;
 
-        assert_eq!(code, 130);
+        assert_eq!(exit, Exit::Cancelled);
         assert!(spec.exists());
     }
 
@@ -241,9 +240,9 @@ mod tests {
         let (_temp, spec, config, service) = one_spec();
         let display = DisplayManager::new(false).answering(vec![answer(false)]);
 
-        let code = super::handle_remove(&service, "tool", &config, &display, false).await;
+        let exit = super::handle_remove(&service, "tool", &config, &display, false).await;
 
-        assert_eq!(code, 1);
+        assert_eq!(exit, Exit::Failed);
         assert!(spec.exists());
         // Everything before the question, and the decline, is about the run;
         // a run that removed nothing has no answer for stdout.
