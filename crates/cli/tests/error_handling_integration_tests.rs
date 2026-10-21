@@ -3,8 +3,8 @@ pub mod common;
 use std::{fs, io::Write};
 
 use common::{
-    SELFIE_ENV, add_package, get_command, sandboxed_command, setup_default_test_config,
-    setup_test_config,
+    SELFIE_ENV, add_package, get_command, sandboxed_command, set_one_second_timeout,
+    setup_default_test_config, setup_test_config,
 };
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
@@ -155,7 +155,7 @@ fn test_package_file_invalid_yaml_error() {
     cmd.args(["package", "list"]);
 
     cmd.assert()
-        .success() // List continues but reports errors inline
+        .code(3) // the list continues, names the file, and exits 3 for it
         .stdout(predicate::str::contains("invalid-package"));
 }
 
@@ -176,9 +176,9 @@ name: "incomplete-package"
     cmd.args(["package", "list"]);
 
     // The package parses, and apply refuses it for declaring no environment.
-    // The listing says so rather than leaving it out, and still succeeds.
+    // The listing says so rather than leaving it out, and exits 3 for it.
     cmd.assert()
-        .success()
+        .code(3)
         .stdout(predicate::str::contains(
             "incomplete-package ┆ refused (incomplete-package.yaml)",
         ))
@@ -256,11 +256,8 @@ fn test_package_check_command_failure() {
 #[test]
 fn test_package_check_command_timeout() {
     let temp_dir = setup_default_test_config();
-    // One second is the shortest timeout the config accepts; the check sleeps past it.
-    let config_path = temp_dir.path().join(".config/selfie/config.yaml");
-    let mut config = fs::read_to_string(&config_path).unwrap();
-    config.push_str("command_timeout: 1\n");
-    fs::write(&config_path, config).unwrap();
+    // The check sleeps past the timeout.
+    set_one_second_timeout(&temp_dir);
 
     let package = PackageBuilder::default()
         .name("timeout-package")
@@ -517,7 +514,7 @@ fn test_large_number_of_invalid_packages() {
 
     // Should handle all invalid packages gracefully
     cmd.assert()
-        .success()
+        .code(3)
         .stdout(predicate::str::contains("invalid-"));
 }
 
@@ -586,7 +583,7 @@ fn test_partial_package_directory_corruption() {
 
     // Should list valid packages and report errors for invalid ones
     cmd.assert()
-        .success()
+        .code(3)
         .stdout(predicate::str::contains("valid-package"))
         .stdout(predicate::str::contains("corrupted"));
 }
@@ -629,6 +626,6 @@ environments:
 
     // Should show the working package and report all errors
     cmd.assert()
-        .success()
+        .code(3)
         .stdout(predicate::str::contains("working-package"));
 }

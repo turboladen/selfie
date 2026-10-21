@@ -1,9 +1,9 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, BaseKind, CheckResult, ConflictReport, DotfileSource, EventStream, LinkAtTarget,
-    NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent, RefusalKind,
-    SkipReason,
+    AuditResult, BaseKind, CheckResult, ConflictReport, Coverage, DotfileSource, EventStream, Gap,
+    LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
+    RefusalKind, SkipReason,
 };
 use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
@@ -93,6 +93,16 @@ pub(crate) fn failure_payload(failure: &OperationFailure) -> Value {
     let mut result = failure_json(failure);
     result["outcome"] = outcome_label(Outcome::Failed).into();
     serde_json::json!({ "result": result, "data": [] })
+}
+
+/// One package selfie did not answer for: its name, the reason's label (null
+/// for an error no lookup is expected to return), and the reason as prose.
+fn gap_json(gap: &Gap) -> Value {
+    serde_json::json!({
+        "package": gap.package_name(),
+        "kind": gap.reason().kind(),
+        "reason": gap.reason().to_string(),
+    })
 }
 
 /// The `outcome` field's value.
@@ -195,6 +205,19 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
         && let Some(count) = s.orphan_count()
     {
         result_data["orphan_count"] = count.into();
+    }
+    // Each package the operation covers that selfie did not answer for, as
+    // fields, so an assistant need not parse them out of `message`.
+    if let Some(OperationResult::Success(s)) = &final_result
+        && let Some(gaps) = s.gaps()
+    {
+        let rows = |coverage| {
+            Gap::with_coverage(gaps, coverage)
+                .map(gap_json)
+                .collect::<Vec<_>>()
+        };
+        result_data["unanswered"] = rows(Coverage::Unanswered).into();
+        result_data["errors"] = rows(Coverage::Error).into();
     }
     // What made a drift check with no drift and no orphan a finding.
     if let Some(OperationResult::Success(
@@ -1916,6 +1939,86 @@ mod tests {
         assert_eq!(row["relative_path"], "git/config");
         assert_eq!(row["target"], "/home/u/.gitconfig");
         assert_eq!(row["package"], "git");
+    }
+
+    // A listing names, as fields, each package selfie could not answer for and
+    // each it failed for, and a failure among them fails the call.
+    #[tokio::test]
+    async fn a_list_with_gaps_carries_unanswered_and_errors() {
+        use selfie::commands::BoundedText;
+        use selfie::package::event::{
+            CheckFailure, EnvironmentStatus, OperationSuccess, StepCount, UnknownStatus,
+        };
+
+        let failed = |failure| EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(failure));
+        let gaps = vec![
+            failed(CheckFailure::CouldNotStart {
+                message: BoundedText::of(&"no shell"),
+            })
+            .gap("slow")
+            .expect("a check that could not start is a gap"),
+            failed(CheckFailure::Internal {
+                message: BoundedText::of(&"task failed"),
+            })
+            .gap("crashed")
+            .expect("an internal failure is a gap"),
+        ];
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::PackageListGenerated {
+                valid_count: 2,
+                invalid_count: 0,
+                refused_specs: 0,
+                gaps,
+                environment: "test".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(!result.success);
+        assert_eq!(result.data["result"]["outcome"], "failed");
+        let unanswered = &result.data["result"]["unanswered"];
+        assert_eq!(unanswered[0]["package"], "slow");
+        assert_eq!(unanswered[0]["kind"], "could_not_start");
+        assert_eq!(unanswered.as_array().map(Vec::len), Some(1));
+        let errors = &result.data["result"]["errors"];
+        assert_eq!(errors[0]["package"], "crashed");
+        assert_eq!(errors[0]["kind"], "internal");
+        assert_eq!(errors.as_array().map(Vec::len), Some(1));
+    }
+
+    // A status with a gap is a finding, naming the package in `unanswered`.
+    #[tokio::test]
+    async fn a_status_with_a_gap_carries_unanswered() {
+        use selfie::package::event::{
+            EnvironmentStatus, OperationSuccess, RefusalKind, StepCount, UnknownStatus,
+        };
+
+        let gap = EnvironmentStatus::Unknown(UnknownStatus::Refused {
+            kind: RefusalKind::UnknownTopLevelKeys,
+            reason: "an unknown key".to_string(),
+        })
+        .gap("dep")
+        .expect("a refused spec is a gap");
+        let events = vec![PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::PackageStatusChecked {
+                package_name: "pkg".to_string(),
+                environment: "test".to_string(),
+                gaps: vec![gap],
+                steps_completed: StepCount::new(1, 1),
+            }),
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert!(result.success);
+        assert_eq!(result.data["result"]["status"], "found");
+        assert_eq!(result.data["result"]["unanswered"][0]["package"], "dep");
+        assert_eq!(result.data["result"]["unanswered"][0]["kind"], "refused");
+        assert_eq!(result.data["result"]["errors"], serde_json::json!([]));
     }
 
     // Control: an apply with nothing refused is still a success result.

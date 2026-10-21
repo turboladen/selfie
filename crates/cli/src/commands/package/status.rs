@@ -1,5 +1,5 @@
 use selfie::package::{
-    event::{OperationResult, PackageEvent},
+    event::{OperationResult, Outcome, PackageEvent},
     service::PackageService,
 };
 
@@ -30,10 +30,12 @@ pub(crate) async fn handle_status(
                 display.println(format!("\n{table}"));
                 true
             }
+            // The table is the answer for a clean status. A status with gaps also
+            // needs its summary, which names each package it could not answer for.
             PackageEvent::Completed {
-                result: OperationResult::Success(_),
+                result: OperationResult::Success(success),
                 ..
-            } => true,
+            } => success.outcome() == Outcome::Clean,
             PackageEvent::Completed { .. } => false,
             _ => false,
         })

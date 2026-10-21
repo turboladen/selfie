@@ -261,12 +261,15 @@ anyway. A command about the current environment asks what `selfie apply` asks he
 key at the top level or in this environment, or a package spec that declares no environment at all.
 A command that shows every environment refuses a file with an unrecognized key in any of them.
 
-- `selfie package list` and `selfie spec list` list such a package as refused, with the reason, and
-  exit `0`. With `--all` they show every environment and take the second rule.
+- `selfie package list` lists such a package as refused, with the reason, and exits `3`
+  ([ADR 0010](adr/0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md));
+  `selfie spec list` lists it the same way and exits `0`. With `--all` they show every environment
+  and take the second rule.
 - `selfie spec search` shows every environment, so it takes the second rule, and lists a refused
   package when its file name matches.
-- `selfie package status` fails on a package apply would refuse and exits `1`, and reports a
-  dependency apply would refuse as unknown, with the reason.
+- `selfie package status` fails on a package apply would refuse and exits `1`. It reports a
+  dependency apply would refuse as unknown, with the reason, and exits `3`
+  ([ADR 0010](adr/0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md)).
 - `selfie spec info` describes a package apply would refuse but shows the reason in place of its
   environments and dotfiles, and exits `0`. When apply would refuse the package only in another
   environment, it shows everything, marks that environment's dotfile entries as refused, and adds a
