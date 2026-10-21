@@ -838,3 +838,26 @@ fn install_exits_clean_when_its_check_confirms_it() {
     let (code, stdout) = stdout_of(&temp, &["package", "install", "tool"]);
     assert_eq!(code, Some(CLEAN), "{stdout}");
 }
+
+// An install whose check gave no answer afterwards may have worked, but
+// nothing confirmed it: a finding, named on stdout. The check fails fast before
+// the install, which creates the marker, and times out after it.
+#[test]
+fn install_exits_three_when_its_check_times_out() {
+    let temp = setup_default_test_config();
+    set_one_second_timeout(&temp);
+    write_package(
+        &temp,
+        "tool",
+        "touch started",
+        Some("test -e started && exec sleep 30"),
+        &[],
+    );
+
+    let (code, stdout) = stdout_of(&temp, &["package", "install", "tool"]);
+    assert_eq!(code, Some(FOUND), "{stdout}");
+    assert!(
+        stdout.contains("; could not answer for: tool ("),
+        "{stdout}"
+    );
+}

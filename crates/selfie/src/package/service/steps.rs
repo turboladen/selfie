@@ -70,7 +70,18 @@ pub(super) fn handle_missing_environment<T>(
     package_blob: &GetPackage,
     current_env: &str,
 ) -> Result<T, Box<OperationResult>> {
-    let err = PackageError::EnvironmentNotFound {
+    let err = missing_environment(package_name, package_blob, current_env);
+    Err(Box::new(OperationResult::Failure(err.into())))
+}
+
+/// The `EnvironmentNotFound` error for a package file that does not define
+/// `current_env`.
+pub(super) fn missing_environment(
+    package_name: &str,
+    package_blob: &GetPackage,
+    current_env: &str,
+) -> PackageError {
+    PackageError::EnvironmentNotFound {
         package_name: package_name.to_string(),
         environment: current_env.to_string(),
         available_environments: package_blob
@@ -81,8 +92,7 @@ pub(super) fn handle_missing_environment<T>(
             .collect(),
         package_file: package_blob.package.path().clone(),
         required_by: None,
-    };
-    Err(Box::new(OperationResult::Failure(err.into())))
+    }
 }
 
 /// Step to get a specific command from environment config

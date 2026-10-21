@@ -399,7 +399,9 @@ not yet installed.
 `selfie package install` runs the check again right after a successful install command, in the same
 session, to confirm the install took. If the check still says the package is not installed, the
 install fails (exit `1`), and no package that depends on it is installed. So the check has to pass
-as soon as the install command returns.
+as soon as the install command returns. If the check then gives no answer, because it timed out or
+its result could not be read, the install is reported as unconfirmed and exits `3`. A check that
+could not start at all fails the install.
 
 **Simple binary check:**
 

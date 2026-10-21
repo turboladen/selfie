@@ -1035,6 +1035,9 @@ pub enum OperationSuccess {
         environment: String,
         was_already_installed: bool,
         executable_path: Option<String>,
+        /// Each package in the run, this one or a dependency, that installed and
+        /// whose check then gave no answer. Recommends are never covered.
+        gaps: Vec<Gap>,
         steps_completed: StepCount,
     },
     /// Package validation operation completed
@@ -1717,22 +1720,25 @@ impl std::fmt::Display for OperationSuccess {
                 environment,
                 was_already_installed,
                 executable_path,
+                gaps,
                 ..
             } => {
-                // The path goes last, so the environment clause does not read as
-                // part of it.
-                let (status, at) = if *was_already_installed {
-                    (
+                // The path follows the environment, so the environment clause
+                // does not read as part of it. A run with gaps never says
+                // "successfully".
+                let (status, at) = match (*was_already_installed, gaps.is_empty()) {
+                    (true, _) => (
                         "was already installed",
                         executable_path.as_ref().map(|path| format!(", at {path}")),
-                    )
-                } else {
-                    ("installation completed successfully", None)
+                    ),
+                    (false, true) => ("installation completed successfully", None),
+                    (false, false) => ("installed", None),
                 };
                 write!(
                     f,
-                    "Package '{package_name}' {status} in environment '{environment}'{}",
-                    at.unwrap_or_default()
+                    "Package '{package_name}' {status} in environment '{environment}'{}{}",
+                    at.unwrap_or_default(),
+                    gap_clauses(gaps)
                 )
             }
             OperationSuccess::PackageValidated {
@@ -2045,6 +2051,7 @@ impl OperationSuccess {
         environment: String,
         was_already_installed: bool,
         executable_path: Option<String>,
+        gaps: Vec<Gap>,
         steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageInstalled {
@@ -2052,6 +2059,7 @@ impl OperationSuccess {
             environment,
             was_already_installed,
             executable_path,
+            gaps,
             steps_completed,
         }
     }
@@ -2458,7 +2466,6 @@ impl OperationSuccess {
             OperationSuccess::PackageChecked { .. }
             | OperationSuccess::PackageAudited { .. }
             | OperationSuccess::PackagesAudited { .. }
-            | OperationSuccess::PackageInstalled { .. }
             | OperationSuccess::PackageValidated { .. }
             | OperationSuccess::PackageRemoved { .. }
             | OperationSuccess::PackageCreated { .. }
@@ -2475,7 +2482,8 @@ impl OperationSuccess {
             | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_) => None,
             OperationSuccess::PackageStatusChecked { gaps, .. }
-            | OperationSuccess::PackageListGenerated { gaps, .. } => Some(gaps),
+            | OperationSuccess::PackageListGenerated { gaps, .. }
+            | OperationSuccess::PackageInstalled { gaps, .. } => Some(gaps),
         }
     }
 
@@ -4364,7 +4372,8 @@ mod tests {
 
     // Every reason a status can carry, and every way a check can give no
     // answer, has exactly one coverage, and only an answered reason leaves no
-    // gap.
+    // gap. The install table's unconfirmed rows rely on this: a timed-out check
+    // and an unreadable result are unanswered, so each gives a gap.
     #[test]
     fn every_reason_has_one_coverage() {
         use crate::package::port::{PackageError, PackageRepoError};
@@ -4831,6 +4840,7 @@ mod tests {
             environment: "mac".to_string(),
             was_already_installed: true,
             executable_path: Some("/opt/bin/bat".to_string()),
+            gaps: Vec::new(),
             steps_completed: StepCount::new(4, 4),
         }
         .to_string();
@@ -4888,6 +4898,7 @@ mod tests {
                     environment: env(),
                     was_already_installed: true,
                     executable_path: Some("/bin/pkg".to_string()),
+                    gaps: Vec::new(),
                     steps_completed: steps,
                 },
                 true,
@@ -5085,6 +5096,7 @@ mod tests {
             environment: "test".to_string(),
             was_already_installed: false,
             executable_path: None,
+            gaps: Vec::new(),
             steps_completed: step_count,
         };
 
