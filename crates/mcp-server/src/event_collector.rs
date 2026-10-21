@@ -25,6 +25,18 @@ fn failure_json(failure: &OperationFailure) -> Value {
     if let OperationFailure::Uncreatable { reason, .. } = failure {
         payload["kind"] = reason.kind().into();
     }
+    // A label, the package and what needs it, so an assistant can tell this
+    // from an install command that failed without parsing `error`.
+    if let OperationFailure::NotInstalledAfterInstall {
+        package_name,
+        required_by,
+        ..
+    } = failure
+    {
+        payload["kind"] = failure.kind().into();
+        payload["package"] = package_name.clone().into();
+        payload["required_by"] = required_by.clone().into();
+    }
     // A field, so an assistant can tell a typo from a spec that failed to load
     // without matching the sentence in `error`.
     if let OperationFailure::NoSuchPackage { reason, .. } = failure {
@@ -1885,6 +1897,23 @@ mod tests {
         let outcomes: Vec<&Value> = rows.iter().map(|r| &r["outcome"]).collect();
         assert_eq!(outcomes, ["clean", "found", "failed"]);
         assert!(rows.iter().all(|r| r.get("status").is_none()), "{rows:?}");
+    }
+
+    // An install its own check says did not take is a failure with a label,
+    // the package and the package that needs it.
+    #[test]
+    fn an_install_its_check_says_did_not_take_carries_its_kind() {
+        let payload = failure_json(&OperationFailure::NotInstalledAfterInstall {
+            package_name: "dep".to_string(),
+            check_command: "check-dep".to_string(),
+            exit_code: Some(1),
+            required_by: Some("pkg".to_string()),
+        });
+
+        assert_eq!(payload["status"], "failure");
+        assert_eq!(payload["kind"], "not_installed_after_install");
+        assert_eq!(payload["package"], "dep");
+        assert_eq!(payload["required_by"], "pkg");
     }
 
     // A refused spec create says why as a label.

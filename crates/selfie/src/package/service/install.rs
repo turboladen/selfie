@@ -89,6 +89,7 @@ where
             progress,
             token,
             confirmed.remove(pkg_name),
+            dep_graph.required_by.get(pkg_name).map(String::as_str),
         )
         .await;
 
@@ -205,6 +206,7 @@ async fn install_single_package<PR, CR>(
     progress: &mut ProgressTracker,
     token: &CancellationToken,
     pre_checked: Option<CheckResultData>,
+    required_by: Option<&str>,
 ) -> OperationResult
 where
     PR: PackageRepository,
@@ -303,6 +305,7 @@ where
         config,
         pre_install_check: &pre_install_check,
         post_install_note: package_blob.package.post_install_note(),
+        required_by,
     };
 
     execute_installation_and_verification(context, command_runner, sender, progress, token).await
@@ -441,6 +444,7 @@ struct InstallationContext<'a> {
     config: &'a SelfieConfig,
     pre_install_check: &'a CheckResultData,
     post_install_note: Option<&'a str>,
+    required_by: Option<&'a str>,
 }
 
 async fn execute_installation_and_verification<CR>(
@@ -488,9 +492,19 @@ where
 
     // Verify installation if check command is available. A check that could not
     // run means nothing else can run there either, so the install fails rather
-    // than reporting a success it never verified.
-    if let Err(err) = verify_installation(&context, command_runner, sender, progress, token).await {
-        return OperationResult::Failure(err.into());
+    // than reporting a success it never verified, and so does a check that says
+    // the package is still not installed.
+    match verify_installation(&context, command_runner, sender, progress, token).await {
+        Ok(Verification::Confirmed) => {}
+        Ok(Verification::NotInstalled { exit_code }) => {
+            return OperationResult::Failure(OperationFailure::NotInstalledAfterInstall {
+                package_name: context.package_name.to_string(),
+                check_command: context.env_config.check().unwrap_or_default().to_string(),
+                exit_code,
+                required_by: context.required_by.map(str::to_string),
+            });
+        }
+        Err(err) => return OperationResult::Failure(err.into()),
     }
 
     let executable_path = find_executable_path(
@@ -549,21 +563,28 @@ async fn get_environment_config<'a>(
     Ok(env_config)
 }
 
+/// What the post-install check said about an install whose command succeeded.
+enum Verification {
+    /// It confirmed the install, or there was no check to run.
+    Confirmed,
+    /// It ran and said the package is not installed.
+    NotInstalled { exit_code: Option<i32> },
+}
+
 /// Run the post-install check and report its verdict.
 ///
 /// # Errors
 ///
 /// The [`CommandError`] that kept the check from starting when nothing can run
 /// in the package directory: it cannot be entered, the shell cannot start, or
-/// the install was cancelled. A check that ran and failed is a warning, not an
-/// error.
+/// the install was cancelled.
 async fn verify_installation<CR>(
     context: &InstallationContext<'_>,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
-) -> Result<(), CommandError>
+) -> Result<Verification, CommandError>
 where
     CR: CommandRunner,
 {
@@ -590,13 +611,8 @@ where
                     ))
                     .await;
             }
-            CheckResult::Failed { .. } => {
-                sender
-                    .send_warning(format!(
-                        "Package '{}' installation verification failed - package may not have installed correctly",
-                        context.package_name
-                    ))
-                    .await;
+            CheckResult::Failed { exit_code, .. } => {
+                return Ok(Verification::NotInstalled { exit_code });
             }
             CheckResult::CouldNotRun(_) => {
                 sender
@@ -619,7 +635,7 @@ where
             )
             .await;
     }
-    Ok(())
+    Ok(Verification::Confirmed)
 }
 
 /// Install recommended (soft) dependencies for a package.
@@ -790,6 +806,7 @@ where
             progress,
             token,
             confirmed.remove(pkg_name),
+            dep_graph.required_by.get(pkg_name).map(String::as_str),
         )
         .await;
 

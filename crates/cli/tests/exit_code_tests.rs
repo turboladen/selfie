@@ -802,3 +802,39 @@ fn status_exits_one_for_a_refused_package() {
     let (code, stdout) = stdout_of(&temp, &["package", "status", "noenv"]);
     assert_eq!(code, Some(FAILED), "{stdout}");
 }
+
+// An install command that succeeded did not install the package when its check
+// still says it is not installed.
+#[test]
+fn install_exits_one_when_its_check_still_says_not_installed() {
+    let temp = setup_default_test_config();
+    write_package(&temp, "tool", "true", Some("false"), &[]);
+
+    let output = sandboxed_command(&temp)
+        .args(["package", "install", "tool"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(FAILED), "{stderr}");
+    assert!(
+        stderr.contains("its check command `false` still says it is not installed"),
+        "{stderr}"
+    );
+}
+
+// Control: an install its check confirms is clean. The check fails before the
+// install, which creates the marker it then finds.
+#[test]
+fn install_exits_clean_when_its_check_confirms_it() {
+    let temp = setup_default_test_config();
+    write_package(
+        &temp,
+        "tool",
+        "touch installed",
+        Some("test -e installed"),
+        &[],
+    );
+
+    let (code, stdout) = stdout_of(&temp, &["package", "install", "tool"]);
+    assert_eq!(code, Some(CLEAN), "{stdout}");
+}
