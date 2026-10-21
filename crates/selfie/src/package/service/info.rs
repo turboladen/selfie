@@ -344,7 +344,7 @@ fn look_up_dependency<PR: PackageRepository>(
 
     match env_config.check() {
         Some(command) => DependencyLookup::Check(command.to_string()),
-        None => DependencyLookup::Known(check_result_to_status(CheckResult::NoCheckCommand)),
+        None => DependencyLookup::Known(EnvironmentStatus::from(&CheckResult::NoCheckCommand)),
     }
 }
 
@@ -382,24 +382,13 @@ async fn check_dependency_statuses<CR: CommandRunner>(
                         token,
                     )
                     .await;
-                    check_result_to_status(result.result)
+                    EnvironmentStatus::from(&result.result)
                 }
             };
             DependencyStatus { name, status }
         }
     });
     futures::future::join_all(statuses).await
-}
-
-fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
-    match result {
-        CheckResult::Success { .. } => EnvironmentStatus::Installed,
-        CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
-        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand),
-        CheckResult::CouldNotRun(failure) => {
-            EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(failure))
-        }
-    }
 }
 
 async fn get_installation_status(
@@ -420,7 +409,7 @@ async fn get_installation_status(
         token,
     )
     .await;
-    Some(check_result_to_status(result.result))
+    Some(EnvironmentStatus::from(&result.result))
 }
 
 #[cfg(test)]

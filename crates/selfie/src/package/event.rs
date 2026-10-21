@@ -2369,6 +2369,35 @@ impl OperationSuccess {
         }
     }
 
+    /// The packages this operation covers that selfie did not answer for.
+    #[must_use]
+    pub fn gaps(&self) -> &[Gap] {
+        // Every variant listed, as in `refused_count`.
+        match self {
+            OperationSuccess::PackageChecked { .. }
+            | OperationSuccess::PackageAudited { .. }
+            | OperationSuccess::PackagesAudited { .. }
+            | OperationSuccess::PackageInstalled { .. }
+            | OperationSuccess::PackageValidated { .. }
+            | OperationSuccess::PackageRemoved { .. }
+            | OperationSuccess::PackageCreated { .. }
+            | OperationSuccess::SpecInfoRetrieved { .. }
+            | OperationSuccess::PackageStatusChecked { .. }
+            | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::SpecListGenerated { .. }
+            | OperationSuccess::SpecsValidated { .. }
+            | OperationSuccess::PackageUpdated { .. }
+            | OperationSuccess::DotfileTracked { .. }
+            | OperationSuccess::DotfilesApplied { .. }
+            | OperationSuccess::DotfileDriftChecked { .. }
+            | OperationSuccess::SyncPushComplete { .. }
+            | OperationSuccess::SyncPullComplete { .. }
+            | OperationSuccess::SyncPullUpToDate { .. }
+            | OperationSuccess::SyncNothingToPush { .. }
+            | OperationSuccess::Generic(_) => &[],
+        }
+    }
+
     /// How this success scores; see [`Outcome`].
     ///
     /// [`Outcome::Failed`] when the operation refused part of its work, and
@@ -3199,6 +3228,90 @@ pub enum EnvironmentStatus {
     Unknown(UnknownStatus),
 }
 
+impl EnvironmentStatus {
+    /// The gap this status leaves for `package_name`, or `None` when selfie
+    /// answered for it.
+    #[must_use]
+    pub fn gap(&self, package_name: &str) -> Option<Gap> {
+        // Installed and not installed are answers, and carry no reason to
+        // classify. Every other status is decided by its reason's coverage,
+        // the one classifier.
+        let EnvironmentStatus::Unknown(reason) = self else {
+            return None;
+        };
+        Gap::new(package_name, reason.clone())
+    }
+}
+
+impl From<&CheckResult> for EnvironmentStatus {
+    fn from(result: &CheckResult) -> Self {
+        match result {
+            CheckResult::Success { .. } => EnvironmentStatus::Installed,
+            CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
+            CheckResult::NoCheckCommand => {
+                EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand)
+            }
+            CheckResult::CouldNotRun(failure) => {
+                EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(failure.clone()))
+            }
+        }
+    }
+}
+
+/// Whether selfie answered for a package a command covers, ordered by severity:
+/// answered, then unanswered, then an error.
+// The derived order follows declaration order, so the variants are declared
+// least severe first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Coverage {
+    /// selfie established the package's state, or its spec decides there is
+    /// nothing to check.
+    Answered,
+    /// selfie could not establish the package's state; the reason says why.
+    Unanswered,
+    /// Something went wrong in selfie itself.
+    Error,
+}
+
+/// A package a command covers that selfie did not answer for, and why. Its
+/// coverage is never [`Coverage::Answered`].
+// Every gap comes from `Gap::new`, which refuses a reason that leaves the
+// package answered, so no gap is answered by construction.
+#[derive(Debug, Clone)]
+pub struct Gap {
+    package_name: String,
+    reason: UnknownStatus,
+}
+
+impl Gap {
+    /// The gap `reason` leaves for `package_name`, or `None` when the reason
+    /// leaves the package answered.
+    pub(crate) fn new(package_name: &str, reason: UnknownStatus) -> Option<Self> {
+        (reason.coverage() != Coverage::Answered).then(|| Self {
+            package_name: package_name.to_string(),
+            reason,
+        })
+    }
+
+    /// The package selfie did not answer for.
+    #[must_use]
+    pub fn package_name(&self) -> &str {
+        &self.package_name
+    }
+
+    /// Why selfie did not answer for it.
+    #[must_use]
+    pub fn reason(&self) -> &UnknownStatus {
+        &self.reason
+    }
+
+    /// Whether the gap is unanswered or an error; never answered.
+    #[must_use]
+    pub fn coverage(&self) -> Coverage {
+        self.reason.coverage()
+    }
+}
+
 /// Why selfie could not tell whether a package is installed.
 ///
 /// [`Display`](fmt::Display) words the reason for a person. [`kind`](Self::kind)
@@ -3239,6 +3352,31 @@ impl UnknownStatus {
             Self::NoCheckCommand => "no_check_command",
             Self::Error(_) => return None,
         })
+    }
+
+    /// Whether this reason leaves the package answered, unanswered, or is an
+    /// error in selfie.
+    #[must_use]
+    pub fn coverage(&self) -> Coverage {
+        // One reason per line, so each classification is its own line to
+        // change and to test.
+        match self {
+            Self::NoCheckCommand => Coverage::Answered,
+            Self::NotInEnvironment => Coverage::Answered,
+            Self::LookupFailed(_) => Coverage::Unanswered,
+            Self::Refused { .. } => Coverage::Unanswered,
+            Self::Error(_) => Coverage::Error,
+            Self::CheckFailed(failure) => match failure {
+                CheckFailure::TimedOut(_) => Coverage::Unanswered,
+                CheckFailure::CouldNotStart { .. } => Coverage::Unanswered,
+                CheckFailure::WorkingDirectoryUnusable(_) => Coverage::Unanswered,
+                CheckFailure::ResultUnreadable { .. } => Coverage::Unanswered,
+                // A canceled run ends Canceled through the stream, so this
+                // class never decides an exit.
+                CheckFailure::Canceled { .. } => Coverage::Unanswered,
+                CheckFailure::Internal { .. } => Coverage::Error,
+            },
+        }
     }
 }
 
@@ -3993,9 +4131,93 @@ pub struct AddEnvironment {
     pub recommends: Vec<String>,
 }
 
+// One of each way a check can give no answer, in declaration order, for the
+// tests that table them.
+#[cfg(test)]
+pub(crate) fn every_check_failure() -> [CheckFailure; 6] {
+    let message = || crate::commands::BoundedText::of(&"m");
+    [
+        CheckFailure::TimedOut(TimedOut::new("c", std::time::Duration::from_secs(1))),
+        CheckFailure::CouldNotStart { message: message() },
+        CheckFailure::WorkingDirectoryUnusable(crate::commands::runner::UnusableDirectory::new(
+            "c",
+            "/nowhere",
+            std::sync::Arc::new(std::io::Error::other("gone")),
+        )),
+        CheckFailure::ResultUnreadable { message: message() },
+        CheckFailure::Canceled { message: message() },
+        CheckFailure::Internal { message: message() },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Every reason a status can carry, and every way a check can give no
+    // answer, has exactly one coverage, and only an answered reason leaves no
+    // gap.
+    #[test]
+    fn every_reason_has_one_coverage() {
+        use crate::package::port::{PackageError, PackageRepoError};
+
+        let not_found = PackageRepoError::from(PackageError::PackageNotFound {
+            name: "p".to_string(),
+            packages_path: "/packages".into(),
+            files_examined: 0,
+            search_patterns: Vec::new(),
+        })
+        .into_lookup_failure()
+        .expect("a lookup returns this error");
+        let cases = [
+            (UnknownStatus::NoCheckCommand, Coverage::Answered),
+            (UnknownStatus::NotInEnvironment, Coverage::Answered),
+            (UnknownStatus::LookupFailed(not_found), Coverage::Unanswered),
+            (
+                UnknownStatus::Refused {
+                    kind: RefusalKind::UnknownTopLevelKeys,
+                    reason: "r".to_string(),
+                },
+                Coverage::Unanswered,
+            ),
+            (
+                UnknownStatus::Error(PackageRepoError::IoError(std::sync::Arc::new(
+                    std::io::Error::other("e"),
+                ))),
+                Coverage::Error,
+            ),
+        ];
+        // In `every_check_failure`'s order.
+        let check_coverage = [
+            Coverage::Unanswered,
+            Coverage::Unanswered,
+            Coverage::Unanswered,
+            Coverage::Unanswered,
+            Coverage::Unanswered,
+            Coverage::Error,
+        ];
+        let checks = every_check_failure()
+            .into_iter()
+            .map(UnknownStatus::CheckFailed)
+            .zip(check_coverage);
+
+        for (reason, expected) in cases.into_iter().chain(checks) {
+            assert_eq!(reason.coverage(), expected, "{reason:?}");
+            let status = EnvironmentStatus::Unknown(reason);
+            let gap = status.gap("p");
+            assert_eq!(gap.is_none(), expected == Coverage::Answered, "{status:?}");
+            if let Some(gap) = gap {
+                assert_eq!(gap.package_name(), "p");
+                assert_eq!(gap.coverage(), expected);
+            }
+        }
+        for status in [
+            EnvironmentStatus::Installed,
+            EnvironmentStatus::NotInstalled,
+        ] {
+            assert!(status.gap("p").is_none());
+        }
+    }
 
     // The one sentence for a timeout: it says the command timed out, how long it
     // had in whole units, and which setting to raise.
