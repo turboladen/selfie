@@ -48,6 +48,45 @@ fn setup_optional_test_config(config_yaml: Option<&str>) -> TempDir {
     temp_dir
 }
 
+/// Set `command_timeout` to one second, the shortest the config accepts, so a
+/// check that sleeps past it gives no answer.
+///
+/// # Panics
+///
+/// Panics if the config file cannot be read or written.
+pub fn set_one_second_timeout(base_dir: &TempDir) {
+    let config_path = base_dir.path().join(".config/selfie/config.yaml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("command_timeout: 1\n");
+    fs::write(&config_path, config).unwrap();
+}
+
+/// Write `<name>.yaml` into the package directory, with `install` and an
+/// optional `check` for [`SELFIE_ENV`], and `extra` appended to that
+/// environment's entry as written (such as a `dependencies:` block).
+///
+/// # Panics
+///
+/// Panics if the package directory cannot be created or the file written.
+pub fn write_package(
+    base_dir: &TempDir,
+    name: &str,
+    install: &str,
+    check: Option<&str>,
+    extra: &str,
+) {
+    let packages = base_dir.path().join("packages");
+    fs::create_dir_all(&packages).unwrap();
+    let check = check.map_or_else(String::new, |check| format!("    check: \"{check}\"\n"));
+    fs::write(
+        packages.join(format!("{name}.yaml")),
+        format!(
+            "name: {name}\nenvironments:\n  {SELFIE_ENV}:\n    install: \"{install}\"\n{check}{extra}"
+        ),
+    )
+    .unwrap();
+}
+
 /// # Panics
 ///
 /// Panics if:

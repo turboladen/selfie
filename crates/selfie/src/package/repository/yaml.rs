@@ -325,37 +325,10 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
         let package_file = &package_files[0];
 
-        // A file that was never parsed gets its own variant. `ParseError` renders
-        // as "Parse error in package `ghost`", which would send the user to
-        // inspect YAML in a file selfie could not open -- whether it declined to
-        // open it or the open failed. A file refused for its name gets another,
-        // since it was not opened and the remedy is a rename.
-        //
-        // Exhaustive, so a new kind has to say which of these it is here.
         let package = self
             .load_package_from_file(package_file)
-            .map_err(|source| match source.kind() {
-                PackageParseKind::IrregularFile { .. }
-                | PackageParseKind::Refused { .. }
-                | PackageParseKind::Unreadable { .. }
-                | PackageParseKind::Io { .. } => PackageError::UnreadableFile {
-                    name: name.to_string(),
-                    packages_path: self.package_dir.clone(),
-                    failed_file: package_file.clone(),
-                    cause: source,
-                },
-                PackageParseKind::InvalidName { .. } => PackageError::UnusableName {
-                    name: name.to_string(),
-                    packages_path: self.package_dir.clone(),
-                    failed_file: package_file.clone(),
-                    cause: source,
-                },
-                PackageParseKind::Yaml { .. } => PackageError::ParseError {
-                    name: name.to_string(),
-                    packages_path: self.package_dir.clone(),
-                    failed_file: package_file.clone(),
-                    cause: source,
-                },
+            .map_err(|source| {
+                PackageError::unloadable(name, &self.package_dir, package_file, source)
             })?;
 
         Ok(GetPackage::from_existing(package, package_file.clone()))

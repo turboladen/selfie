@@ -13,10 +13,10 @@ use crate::{
     config::SelfieConfig,
     package::{
         event::{
-            EventSender, OperationResult, OperationSuccess, PackageListData, PackageListItem,
-            RefusedSpec, StepEnding,
+            EnvironmentStatus, EventSender, Gap, OperationResult, OperationSuccess,
+            PackageListData, PackageListItem, RefusedSpec, StepEnding, UnknownStatus,
         },
-        port::PackageRepository,
+        port::{PackageError, PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
 };
@@ -271,6 +271,15 @@ where
         .map(|invalid| (*invalid).clone())
         .collect();
 
+    // Every row the listing prints is covered, and each one selfie did not
+    // answer for is a gap, classified by the one rule every command uses.
+    let gaps = listing_gaps(
+        &valid_package_items,
+        &invalid_package_items,
+        &refused,
+        config.package_directory(),
+    );
+
     // Calculate the counts before moving the vectors
     let valid_count = valid_package_items.len();
     let refused_count = refused.len();
@@ -295,9 +304,57 @@ where
         valid_count,
         invalid_packages.len(),
         refused_count,
+        gaps,
         config.environment().to_string(),
         (progress.current_step(), progress.total_steps()).into(),
     ))
+}
+
+/// The gaps among a listing's rows: valid rows by their check, specs that do
+/// not parse by the lookup failure 0009 types for them, and refused specs.
+fn listing_gaps(
+    valid: &[PackageListItem],
+    invalid: &[crate::package::port::PackageParseError],
+    refused: &[RefusedSpec],
+    package_directory: &std::path::Path,
+) -> Vec<Gap> {
+    let valid_rows = valid.iter().map(|item| {
+        // A row with no check result is one not in this environment, shown
+        // under `--all`: the spec decides there is nothing to check here.
+        let status = item.status.as_ref().map_or(
+            EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment),
+            EnvironmentStatus::from,
+        );
+        status.gap(&item.name)
+    });
+    let invalid_rows = invalid.iter().map(|failure| {
+        let name = failure.display_name();
+        let error = PackageRepoError::from(PackageError::unloadable(
+            &name,
+            package_directory,
+            failure.package_path(),
+            failure.clone(),
+        ));
+        // Every unloadable error is a lookup failure; an error that somehow is
+        // not is reported as itself rather than trusted to be one.
+        let reason = match error.into_lookup_failure() {
+            Ok(lookup) => UnknownStatus::LookupFailed(lookup),
+            Err(error) => UnknownStatus::Error(error),
+        };
+        EnvironmentStatus::Unknown(reason).gap(&name)
+    });
+    let refused_rows = refused.iter().map(|spec| {
+        EnvironmentStatus::Unknown(UnknownStatus::Refused {
+            kind: spec.kind,
+            reason: spec.reason.clone(),
+        })
+        .gap(&spec.package_name)
+    });
+    valid_rows
+        .chain(invalid_rows)
+        .chain(refused_rows)
+        .flatten()
+        .collect()
 }
 
 #[cfg(test)]
@@ -412,10 +469,10 @@ mod tests {
         (sender, rx)
     }
 
-    // A check task that panics is listed and counted like any check that gave
-    // no answer, and its item says the fault is selfie's.
+    // A check task that panics is listed, its item says the fault is selfie's,
+    // and the listing fails: a selfie bug never reads as a finding.
     #[tokio::test]
-    async fn a_panicked_check_task_is_listed_and_counted() {
+    async fn a_panicked_check_task_is_listed_and_fails_the_listing() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -455,14 +512,20 @@ mod tests {
 
         assert!(
             matches!(
-                result,
+                &result,
                 OperationResult::Success(OperationSuccess::PackageListGenerated {
                     valid_count: 1,
+                    gaps,
                     ..
-                })
+                }) if matches!(
+                    &gaps[..],
+                    [gap] if gap.package_name() == "pkg"
+                        && gap.coverage() == crate::package::event::Coverage::Error
+                )
             ),
             "{result:?}"
         );
+        assert_eq!(result.outcome(), crate::package::event::Outcome::Failed);
         let mut listed = None;
         while let Some(event) = rx.recv().await {
             if let crate::package::event::PackageEvent::PackageListLoaded { package_list, .. } =

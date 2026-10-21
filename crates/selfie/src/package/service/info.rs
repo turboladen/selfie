@@ -196,6 +196,9 @@ where
         Some(progress.next_waiting(sender, checks_label(&checked)).await)
     };
 
+    // The package and each dependency selfie did not answer for. Recommends are
+    // never covered.
+    let mut gaps = Vec::new();
     if let (Some(env_config), Some((dependencies, recommends))) = (env_config, looked_up) {
         let package_dir = config.package_directory();
         let status = get_installation_status(
@@ -238,6 +241,13 @@ where
             sender.send_step_ended(step, ending).await;
         }
 
+        gaps.extend(status.as_ref().and_then(|status| status.gap(package_name)));
+        gaps.extend(
+            dependency_statuses
+                .iter()
+                .filter_map(|dependency| dependency.status.gap(&dependency.name)),
+        );
+
         let environment_status = EnvironmentStatusData {
             environment_name: current_env.to_string(),
             is_current: true,
@@ -266,6 +276,7 @@ where
     OperationResult::Success(OperationSuccess::package_status_checked(
         package_name.to_string(),
         config.environment().to_string(),
+        gaps,
         (progress.current_step(), progress.total_steps()).into(),
     ))
 }

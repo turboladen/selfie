@@ -986,8 +986,9 @@ impl OperationResult {
 pub enum Outcome {
     /// Did everything it was asked, and found nothing to report.
     Clean,
-    /// Finished, and its answer is a finding: something it was asked to look
-    /// for, such as drift or an audit conflict, is there.
+    /// Finished with something to report: something it was asked to look for,
+    /// such as drift or an audit conflict, or a package it could not answer
+    /// for.
     Found,
     /// Did not do everything it was asked: it failed, or refused part of the
     /// work.
@@ -1058,16 +1059,24 @@ pub enum OperationSuccess {
     PackageStatusChecked {
         package_name: String,
         environment: String,
+        /// The package and each dependency selfie did not answer for.
+        /// Recommends are never covered.
+        gaps: Vec<Gap>,
         steps_completed: StepCount,
     },
     /// Package list generation operation completed
     PackageListGenerated {
         valid_count: usize,
         invalid_count: usize,
-        /// Specs the listing reported as refused. Reported, not failed: a listing
-        /// that shows a refused spec has done what it was asked, so these are
-        /// not counted by [`refused_count`](OperationSuccess::refused_count).
+        /// Specs the listing reported as refused. Each is also a gap, which makes
+        /// the listing Found; none is counted by
+        /// [`refused_count`](OperationSuccess::refused_count), which is for work
+        /// an operation refused to do.
         refused_specs: usize,
+        /// Every listed package selfie did not answer for: a check that gave no
+        /// answer, a spec that does not parse, a refused spec, or an error in
+        /// selfie.
+        gaps: Vec<Gap>,
         environment: String,
         steps_completed: StepCount,
     },
@@ -1580,6 +1589,30 @@ impl From<&str> for OperationFailure {
     }
 }
 
+/// The clauses naming a run's gaps: "; could not answer for: a (why)" for the
+/// unanswered, and "; selfie failed for: b (why)" for the errors. Empty when
+/// there are none.
+fn gap_clauses(gaps: &[Gap]) -> String {
+    let named = |coverage| {
+        gaps.iter()
+            .filter(|gap| gap.coverage() == coverage)
+            .map(|gap| format!("{} ({})", gap.package_name(), gap.reason()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut clauses = String::new();
+    for (coverage, lead) in [
+        (Coverage::Unanswered, "could not answer for"),
+        (Coverage::Error, "selfie failed for"),
+    ] {
+        let named = named(coverage);
+        if !named.is_empty() {
+            clauses.push_str(&format!("; {lead}: {named}"));
+        }
+    }
+    clauses
+}
+
 /// A listing's counts as "3 valid package(s) and 1 refused package(s)", naming
 /// the invalid and refused counts only when either is not zero.
 #[must_use]
@@ -1700,15 +1733,27 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::PackageStatusChecked {
                 package_name,
                 environment,
+                gaps,
                 ..
-            } => write!(
-                f,
-                "Package '{package_name}' status checked successfully in environment '{environment}'"
-            ),
+            } => {
+                if gaps.is_empty() {
+                    write!(
+                        f,
+                        "Package '{package_name}' status checked successfully in environment '{environment}'"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Package '{package_name}' status in environment '{environment}'{}",
+                        gap_clauses(gaps)
+                    )
+                }
+            }
             OperationSuccess::PackageListGenerated {
                 valid_count,
                 invalid_count,
                 refused_specs,
+                gaps,
                 environment,
                 ..
             } => {
@@ -1716,7 +1761,8 @@ impl std::fmt::Display for OperationSuccess {
                     listing_counts(*valid_count, *invalid_count, *refused_specs, "package");
                 write!(
                     f,
-                    "Package listing completed with {status} in environment '{environment}'"
+                    "Package listing completed with {status} in environment '{environment}'{}",
+                    gap_clauses(gaps)
                 )
             }
             OperationSuccess::PackageCreated {
@@ -2019,11 +2065,13 @@ impl OperationSuccess {
     pub fn package_status_checked(
         package_name: String,
         environment: String,
+        gaps: Vec<Gap>,
         steps_completed: StepCount,
     ) -> Self {
         OperationSuccess::PackageStatusChecked {
             package_name,
             environment,
+            gaps,
             steps_completed,
         }
     }
@@ -2077,6 +2125,7 @@ impl OperationSuccess {
         valid_count: usize,
         invalid_count: usize,
         refused_specs: usize,
+        gaps: Vec<Gap>,
         environment: String,
         steps_completed: StepCount,
     ) -> Self {
@@ -2084,6 +2133,7 @@ impl OperationSuccess {
             valid_count,
             invalid_count,
             refused_specs,
+            gaps,
             environment,
             steps_completed,
         }
@@ -2296,9 +2346,9 @@ impl OperationSuccess {
             | OperationSuccess::SyncPullUpToDate { .. }
             | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_) => None,
-            // A listing reports the specs it refuses and still did what it was
-            // asked, so they are not refusals of work: counting them here would
-            // exit a listing non-zero for showing a broken file.
+            // A spec a listing refuses is not work refused: `package list` reports
+            // it as a gap, and `spec list` shows it. Counting it here would fail a
+            // listing for showing a broken file.
             OperationSuccess::PackageListGenerated { .. }
             | OperationSuccess::SpecListGenerated { .. } => None,
         }
@@ -2369,9 +2419,10 @@ impl OperationSuccess {
         }
     }
 
-    /// The packages this operation covers that selfie did not answer for.
+    /// The packages this operation covers that selfie did not answer for, or
+    /// `None` for an operation that covers no packages.
     #[must_use]
-    pub fn gaps(&self) -> &[Gap] {
+    pub fn gaps(&self) -> Option<&[Gap]> {
         // Every variant listed, as in `refused_count`.
         match self {
             OperationSuccess::PackageChecked { .. }
@@ -2382,8 +2433,6 @@ impl OperationSuccess {
             | OperationSuccess::PackageRemoved { .. }
             | OperationSuccess::PackageCreated { .. }
             | OperationSuccess::SpecInfoRetrieved { .. }
-            | OperationSuccess::PackageStatusChecked { .. }
-            | OperationSuccess::PackageListGenerated { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::PackageUpdated { .. }
@@ -2394,16 +2443,18 @@ impl OperationSuccess {
             | OperationSuccess::SyncPullComplete { .. }
             | OperationSuccess::SyncPullUpToDate { .. }
             | OperationSuccess::SyncNothingToPush { .. }
-            | OperationSuccess::Generic(_) => &[],
+            | OperationSuccess::Generic(_) => None,
+            OperationSuccess::PackageStatusChecked { gaps, .. }
+            | OperationSuccess::PackageListGenerated { gaps, .. } => Some(gaps),
         }
     }
 
     /// How this success scores; see [`Outcome`].
     ///
-    /// [`Outcome::Failed`] when the operation refused part of its work, and
-    /// [`Outcome::Found`] when it finished and found what it was asked to look
-    /// for. A refusal outranks a finding: an answer with a hole in it is not a
-    /// complete answer, whatever else it found.
+    /// [`Outcome::Failed`] when the operation refused part of its work or
+    /// selfie failed for a package it covers, and [`Outcome::Found`] when it
+    /// finished with something to report: a finding, or a package it could not
+    /// answer for. A failure outranks a finding.
     #[must_use]
     pub fn outcome(&self) -> Outcome {
         // Refusals and failures are answered once, by `had_refusals` and
@@ -2411,6 +2462,20 @@ impl OperationSuccess {
         if self.had_refusals() || self.had_failures() {
             return Outcome::Failed;
         }
+        // The gaps are totaled once, for every variant, from their coverage.
+        let gaps = self.gaps().unwrap_or_default();
+        if gaps.iter().any(|gap| gap.coverage() == Coverage::Error) {
+            return Outcome::Failed;
+        }
+        let own = self.own_outcome();
+        if own == Outcome::Clean && !gaps.is_empty() {
+            return Outcome::Found;
+        }
+        own
+    }
+
+    /// How the variant scores on its own, before its gaps.
+    fn own_outcome(&self) -> Outcome {
         // Every variant listed, as in `refused_count`, so a variant added later has
         // to say how it scores rather than inherit `Clean`.
         match self {
@@ -4724,6 +4789,7 @@ mod tests {
                 OperationSuccess::PackageStatusChecked {
                     package_name: name(),
                     environment: env(),
+                    gaps: Vec::new(),
                     steps_completed: steps,
                 },
                 true,
@@ -4733,6 +4799,7 @@ mod tests {
                     valid_count: 1,
                     invalid_count: 2,
                     refused_specs: 3,
+                    gaps: Vec::new(),
                     environment: env(),
                     steps_completed: steps,
                 },

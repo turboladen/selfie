@@ -6,8 +6,8 @@
 pub mod common;
 
 use common::{
-    SELFIE_ENV, sandboxed_command, setup_default_test_config,
-    setup_test_config_with_state_directory as sandbox,
+    SELFIE_ENV, sandboxed_command, set_one_second_timeout, setup_default_test_config,
+    setup_test_config_with_state_directory as sandbox, write_package,
 };
 
 const CLEAN: i32 = 0;
@@ -425,13 +425,7 @@ fn install_names_the_dependency_that_cannot_be_installed() {
 // ── package check ───────────────────────────────────────────────────────────
 
 fn write_checked_package(temp: &tempfile::TempDir, check: &str) {
-    write_spec(
-        temp,
-        "tool",
-        &format!(
-            "name: tool\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    check: \"{check}\"\n"
-        ),
-    );
+    write_package(temp, "tool", "true", Some(check), "");
 }
 
 #[test]
@@ -722,4 +716,95 @@ fn spec_create_exits_two_when_it_cannot_ask_about_a_taken_name() {
     assert_eq!(code, Some(USAGE), "{output}");
     assert!(output.contains("'tool' is already a package"), "{output}");
     assert!(output.contains("selfie spec edit tool"), "{output}");
+}
+
+fn stdout_of(temp: &tempfile::TempDir, args: &[&str]) -> (Option<i32>, String) {
+    let output = sandboxed_command(temp).args(args).output().unwrap();
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+// A listing that could not answer for a package has a gap in its answer, and
+// its summary on stdout names the package and why.
+#[test]
+fn list_exits_three_when_a_check_timed_out() {
+    let temp = setup_default_test_config();
+    set_one_second_timeout(&temp);
+    write_package(&temp, "slow", "true", Some("exec sleep 30"), "");
+    write_package(&temp, "fast", "true", Some("true"), "");
+
+    let (code, stdout) = stdout_of(&temp, &["package", "list"]);
+    assert_eq!(code, Some(FOUND), "{stdout}");
+    assert!(stdout.contains("could not answer for: slow ("), "{stdout}");
+}
+
+// A spec that does not parse is a row the listing could not answer for.
+#[test]
+fn list_exits_three_for_a_broken_spec() {
+    let temp = setup_default_test_config();
+    write_package(&temp, "fine", "true", Some("true"), "");
+    write_spec(&temp, "broken", "name: [unterminated\n");
+
+    let (code, stdout) = stdout_of(&temp, &["package", "list"]);
+    assert_eq!(code, Some(FOUND), "{stdout}");
+    assert!(
+        stdout.contains("could not answer for: broken ("),
+        "{stdout}"
+    );
+}
+
+// Installed, not installed and no check command are all answers.
+#[test]
+fn list_exits_clean_when_every_check_answered() {
+    let temp = setup_default_test_config();
+    write_package(&temp, "present", "true", Some("true"), "");
+    write_package(&temp, "absent", "true", Some("false"), "");
+    write_package(&temp, "unchecked", "true", None, "");
+
+    let (code, stdout) = stdout_of(&temp, &["package", "list"]);
+    assert_eq!(code, Some(CLEAN), "{stdout}");
+}
+
+// A status that could not answer for a dependency says which on stdout, in
+// one line beside the table.
+#[test]
+fn status_exits_three_for_a_missing_dependency_and_names_it() {
+    let temp = setup_default_test_config();
+    write_package(
+        &temp,
+        "app",
+        "true",
+        Some("true"),
+        "    dependencies:\n      - missing\n",
+    );
+
+    let (code, stdout) = stdout_of(&temp, &["package", "status", "app"]);
+    assert_eq!(code, Some(FOUND), "{stdout}");
+    let naming = stdout
+        .lines()
+        .filter(|line| line.contains("could not answer for: missing ("))
+        .count();
+    assert_eq!(naming, 1, "{stdout}");
+}
+
+// A package named on the command line that selfie cannot look up fails the
+// run: the request itself failed.
+#[test]
+fn status_exits_one_for_a_missing_package() {
+    let temp = setup_default_test_config();
+
+    let (code, stdout) = stdout_of(&temp, &["package", "status", "nosuch"]);
+    assert_eq!(code, Some(FAILED), "{stdout}");
+}
+
+// A named package selfie refuses fails the run, as it does in every command.
+#[test]
+fn status_exits_one_for_a_refused_package() {
+    let temp = setup_default_test_config();
+    write_spec(&temp, "noenv", "name: noenv\n");
+
+    let (code, stdout) = stdout_of(&temp, &["package", "status", "noenv"]);
+    assert_eq!(code, Some(FAILED), "{stdout}");
 }
