@@ -16,9 +16,11 @@ use crate::{
     },
 };
 
+use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use super::{
     check,
@@ -57,8 +59,10 @@ where
     let total_steps = 1 + (7 * num_packages);
     progress.set_total_steps(total_steps);
 
+    let ledger = Ledger::default();
     let mut confirmed = match confirm_installable(
         &dep_graph,
+        &ledger,
         config,
         command_runner,
         sender,
@@ -83,8 +87,11 @@ where
             return OperationResult::Failure("Installation cancelled".into());
         }
 
-        let turn = install_single_package(
+        // The root graph runs first and reaches each name once, so every cell it
+        // opens is empty and this always runs the turn.
+        let (turn, _) = take_turn(
             pkg_name,
+            &ledger,
             repo,
             config,
             command_runner,
@@ -92,7 +99,6 @@ where
             progress,
             token,
             confirmed.remove(pkg_name),
-            dep_graph.required_by.get(pkg_name).map(String::as_str),
         )
         .await;
 
@@ -101,7 +107,10 @@ where
                 gaps.extend(turn.gap);
                 root = Some((pkg_name.as_str(), installed));
             }
-            Err(failure) => return OperationResult::Failure(failure),
+            Err(failure) => {
+                let required_by = dep_graph.required_by.get(pkg_name).map(String::as_str);
+                return OperationResult::Failure(failure.with_required_by(required_by));
+            }
         }
     }
 
@@ -110,6 +119,8 @@ where
         install_recommends(
             package_name,
             &dep_graph.root_recommends,
+            &dep_graph.install_order,
+            &ledger,
             repo,
             config,
             command_runner,
@@ -136,6 +147,45 @@ where
     ))
 }
 
+/// Each package's work in one install run, done at most once whatever graph
+/// reaches it (ADR 0010 §5): the root's graph first, then every recommend's,
+/// which run concurrently.
+// Each name has two cells: the pre-check `confirm_installable` runs for a
+// package installable only by already being installed, and the package's turn.
+// A second graph reaching a filled cell reuses its value, and one reaching a
+// cell being filled waits for it. That cannot deadlock: a cell's init runs one
+// pre-check or one turn and awaits no other cell, graphs walk install order, so
+// a package's dependencies' cells are set before its own turn starts, and
+// install order holds each name once, so no graph waits on a cell it is
+// filling. The map's lock is held only to fetch an entry, never across an
+// await. Every outcome is stored, failures included, so no graph retries one.
+#[derive(Default)]
+struct Ledger {
+    entries: std::sync::Mutex<HashMap<String, LedgerEntry>>,
+}
+
+// A cell holds the package's own outcome and nothing about the graph that
+// filled it: each graph names which of its packages needs this one itself.
+#[derive(Default, Clone)]
+struct LedgerEntry {
+    /// The package's check, as it ran, or the error that kept it from running.
+    pre_check: Arc<OnceCell<Result<CheckResultData, Box<OperationFailure>>>>,
+    turn: Arc<OnceCell<Turn>>,
+}
+
+impl Ledger {
+    /// The cells for `name`, created empty the first time it is asked for.
+    fn entry(&self, name: &str) -> LedgerEntry {
+        // A poisoned lock means another graph panicked holding it; the map is
+        // still whole, since no code holding it can leave it half written.
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.entry(name.to_string()).or_default().clone()
+    }
+}
+
 /// A package that a turn installed, or found already installed.
 #[derive(Debug, Clone)]
 struct Installed {
@@ -149,6 +199,9 @@ struct Installed {
 struct Turn {
     result: Result<Installed, OperationFailure>,
     gap: Option<Gap>,
+    /// The progress steps the turn took on the tracker of the graph that took
+    /// it.
+    steps: usize,
 }
 
 impl Turn {
@@ -156,6 +209,7 @@ impl Turn {
         Self {
             result: Ok(installed),
             gap,
+            steps: 0,
         }
     }
 
@@ -163,8 +217,77 @@ impl Turn {
         Self {
             result: Err(failure),
             gap: None,
+            steps: 0,
         }
     }
+}
+
+/// `name`'s turn in this run, and whether this graph took it. The first graph
+/// to reach `name` takes the turn; any later one reuses it, and its `progress`
+/// advances past the steps the turn took, so every graph's progress ends at
+/// its total.
+///
+/// `pre_checked` is the package's check result when this graph already ran it.
+#[allow(clippy::too_many_arguments)]
+async fn take_turn<PR, CR>(
+    name: &str,
+    ledger: &Ledger,
+    repo: &PR,
+    config: &SelfieConfig,
+    command_runner: &CR,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+    token: &CancellationToken,
+    pre_checked: Option<CheckResultData>,
+) -> (Turn, bool)
+where
+    PR: PackageRepository,
+    CR: CommandRunner,
+{
+    let mut took = false;
+    let tracker = &mut *progress;
+    let turn = ledger
+        .entry(name)
+        .turn
+        .get_or_init(|| {
+            took = true;
+            async move {
+                let first_step = tracker.current_step();
+                let turn = install_single_package(
+                    name,
+                    repo,
+                    config,
+                    command_runner,
+                    sender,
+                    tracker,
+                    token,
+                    pre_checked,
+                )
+                .await;
+                Turn {
+                    steps: tracker.current_step() - first_step,
+                    ..turn
+                }
+            }
+        })
+        .await
+        .clone();
+    if !took && let Ok(installed) = &turn.result {
+        // A package found already installed skips four of its seven steps, on
+        // every graph.
+        if installed.was_already_installed {
+            progress.reduce_total_steps(4);
+        }
+        progress
+            .skip(sender, turn.steps, reused_message(name))
+            .await;
+    }
+    (turn, took)
+}
+
+/// The progress message for a step another graph in the run already took.
+fn reused_message(name: &str) -> String {
+    format!("Using the earlier result for {name}")
 }
 
 /// Refuse a package in `graph` that cannot be installed here, before any install
@@ -180,6 +303,7 @@ impl Turn {
 /// does not say it is installed, naming that package.
 async fn confirm_installable<CR: CommandRunner>(
     graph: &deps::DependencyGraph,
+    ledger: &Ledger,
     config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
@@ -203,22 +327,41 @@ async fn confirm_installable<CR: CommandRunner>(
         let Some(Installability::CheckFirst(check, otherwise)) = verdict(name) else {
             continue;
         };
-        let result = check::execute_check_command(
-            name,
-            config.environment(),
-            Some(check),
-            config.package_directory(),
-            command_runner,
-            sender,
-            progress,
-            &format!("Checking whether {name} is already installed"),
-            token,
-        )
-        .await
-        .map_err(|err| Box::new(OperationFailure::from(err)))?;
-        // A check that ran and said "not installed" leaves no way to install the
-        // package. One that could not answer says why, so the user is not sent to
-        // write an install command when the fix is elsewhere.
+        // Another graph in the run may have checked this package already; its
+        // check stands, whichever way it went.
+        let mut checked_here = false;
+        let tracker = &mut *progress;
+        let result = ledger
+            .entry(name)
+            .pre_check
+            .get_or_init(|| {
+                checked_here = true;
+                async move {
+                    check::execute_check_command(
+                        name,
+                        config.environment(),
+                        Some(check),
+                        config.package_directory(),
+                        command_runner,
+                        sender,
+                        tracker,
+                        &format!("Checking whether {name} is already installed"),
+                        token,
+                    )
+                    .await
+                    .map_err(|err| Box::new(OperationFailure::from(err)))
+                }
+            })
+            .await
+            .clone();
+        if !checked_here {
+            progress.skip(sender, 1, reused_message(name)).await;
+        }
+        let result = result?;
+        // A check that ran and said "not installed" leaves no way to install
+        // the package. One that could not answer says why, so the user is not
+        // sent to write an install command when the fix is elsewhere. The
+        // refusal is this graph's own, naming the package that needs this one.
         match &result.result {
             CheckResult::Success { .. } => {}
             CheckResult::CouldNotRun(failure) => {
@@ -247,7 +390,6 @@ async fn install_single_package<PR, CR>(
     progress: &mut ProgressTracker,
     token: &CancellationToken,
     pre_checked: Option<CheckResultData>,
-    required_by: Option<&str>,
 ) -> Turn
 where
     PR: PackageRepository,
@@ -346,7 +488,6 @@ where
         config,
         pre_install_check: &pre_install_check,
         post_install_note: package_blob.package.post_install_note(),
-        required_by,
     };
 
     execute_installation_and_verification(context, command_runner, sender, progress, token).await
@@ -480,7 +621,6 @@ struct InstallationContext<'a> {
     config: &'a SelfieConfig,
     pre_install_check: &'a CheckResultData,
     post_install_note: Option<&'a str>,
-    required_by: Option<&'a str>,
 }
 
 async fn execute_installation_and_verification<CR>(
@@ -539,7 +679,8 @@ where
                 package_name: context.package_name.to_string(),
                 check_command: context.env_config.check().unwrap_or_default().to_string(),
                 exit_code,
-                required_by: context.required_by.map(str::to_string),
+                // Each graph that reports the failure names its own.
+                required_by: None,
             });
         }
         Ok(AfterInstall::Failed(failure)) => {
@@ -661,10 +802,14 @@ where
 /// them all.
 ///
 /// `recommends` must be the root package's list for `config.environment()`, as
-/// `DependencyGraph::root_recommends` holds it.
+/// `DependencyGraph::root_recommends` holds it, and `root_packages` the root
+/// graph's install order.
+#[allow(clippy::too_many_arguments)]
 async fn install_recommends<PR, CR>(
     package_name: &str,
     recommends: &[String],
+    root_packages: &[String],
+    ledger: &Ledger,
     repo: &PR,
     config: &SelfieConfig,
     command_runner: &CR,
@@ -693,22 +838,32 @@ async fn install_recommends<PR, CR>(
     // trying, in this chunk and every later one. All of them are named, so a
     // canceled install never reads as one that tried every recommend.
     let mut untried: Vec<String> = Vec::new();
+    // A recommend leaves the run clean whatever happens to it, so a check that
+    // gave no answer for one of its packages is a warning, never one of the
+    // run's gaps. A package the root installed already counts in the run's
+    // gaps. Any other is warned about once, for the first recommend in the
+    // root's declared order that reaches it. That is decided here, after the
+    // chunk joins, because which graph took a shared turn depends on scheduling.
+    let mut warned: HashSet<String> = root_packages.iter().cloned().collect();
     for chunk in recommends.chunks(max_concurrent) {
         let futures: Vec<_> = chunk
             .iter()
             .map(|name| {
-                install_recommend_in_bulk(name, repo, config, command_runner, sender, token)
+                install_recommend_in_bulk(name, ledger, repo, config, command_runner, sender, token)
             })
             .collect();
 
-        let started = futures::future::join_all(futures).await;
-        untried.extend(
-            chunk
-                .iter()
-                .zip(started)
-                .filter(|(_, started)| !started)
-                .map(|(name, _)| name.clone()),
-        );
+        let attempts = futures::future::join_all(futures).await;
+        for (name, (tried, gaps)) in chunk.iter().zip(attempts) {
+            if !tried {
+                untried.push(name.clone());
+            }
+            for gap in gaps {
+                if warned.insert(gap.package_name().to_string()) {
+                    warn_unconfirmed(sender, name, &gap).await;
+                }
+            }
+        }
     }
 
     if !untried.is_empty() {
@@ -716,42 +871,69 @@ async fn install_recommends<PR, CR>(
     }
 }
 
-/// Install a single recommend within a bulk operation, and say whether it was
-/// tried: `false` when a cancel came before it started, or before it installed
-/// the next of its packages.
+/// Warn that `gap`'s package, which `recommend_name` installs, was installed
+/// and its check gave no answer.
+async fn warn_unconfirmed(sender: &EventSender, recommend_name: &str, gap: &Gap) {
+    let whose = if gap.package_name() == recommend_name {
+        format!("Recommended package '{recommend_name}'")
+    } else {
+        format!(
+            "'{}', a dependency of recommended package '{recommend_name}',",
+            gap.package_name()
+        )
+    };
+    sender
+        .send_warning(format!(
+            "{whose} installed, but its check gave no answer: {}",
+            gap.reason()
+        ))
+        .await;
+}
+
+/// Install a single recommend within a bulk operation. Returns whether it was
+/// tried, and the gaps its packages' checks left.
+///
+/// It was not tried when a cancel came before it started, before it installed
+/// the next of its packages, or while it waited on another graph's turn for
+/// one of them.
 ///
 /// A tried recommend emits started, then succeeded or failed; one the cancel
 /// stopped part way emits only started. Failures are reported but never
 /// propagate — recommends are soft dependencies.
 async fn install_recommend_in_bulk<PR, CR>(
     recommend_name: &str,
+    ledger: &Ledger,
     repo: &PR,
     config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     token: &CancellationToken,
-) -> bool
+) -> (bool, Vec<Gap>)
 where
     PR: PackageRepository + Sync,
     CR: CommandRunner,
 {
+    let mut gaps = Vec::new();
     if token.is_cancelled() {
-        return false;
+        return (false, gaps);
     }
 
     sender.send_recommend_started(recommend_name).await;
 
-    // Each recommend gets its own progress tracker (7 steps per package)
+    // Each recommend gets its own progress tracker, sized once its graph is
+    // resolved.
     let mut rec_progress = ProgressTracker::new(7);
 
     match install_single_recommend(
         recommend_name,
+        ledger,
         repo,
         config,
         command_runner,
         sender,
         &mut rec_progress,
         token,
+        &mut gaps,
     )
     .await
     {
@@ -760,7 +942,7 @@ where
         }
         // Stopped between its packages, so nothing of it failed: it is named
         // with the untried ones.
-        Err(RecommendError::Interrupted) => return false,
+        Err(RecommendError::Interrupted) => return (false, gaps),
         // Everything else is a failure, decided by what happened and never by
         // the token: a command that failed, one the cancel interrupted, and one
         // the cancel stopped just before it spawned, which the runner reports
@@ -769,26 +951,31 @@ where
             sender.send_recommend_failed(recommend_name, &error).await;
         }
     }
-    true
+    (true, gaps)
 }
 
 /// Why a recommend was not installed.
 enum RecommendError {
-    /// A cancel came before it installed the next of its packages.
+    /// A cancel came before it installed the next of its packages, or while it
+    /// waited on another graph's turn for one of them.
     Interrupted,
     /// Resolving or installing one of its packages failed.
     Failed(String),
 }
 
-/// Try to install a single recommended package (with its hard dependencies).
+/// Try to install a single recommended package (with its hard dependencies),
+/// adding to `gaps` each of its packages whose check gave no answer.
+#[allow(clippy::too_many_arguments)]
 async fn install_single_recommend<PR, CR>(
     recommend_name: &str,
+    ledger: &Ledger,
     repo: &PR,
     config: &SelfieConfig,
     command_runner: &CR,
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
+    gaps: &mut Vec<Gap>,
 ) -> Result<(), RecommendError>
 where
     PR: PackageRepository + Sync,
@@ -798,12 +985,22 @@ where
     let dep_graph = deps::resolve_dependencies(recommend_name, repo, config.environment(), sender)
         .await
         .map_err(|f| RecommendError::Failed(f.to_string()))?;
+    // Seven steps per package, as the root counts them; a recommend's
+    // resolution takes no step of its own.
+    progress.set_total_steps(7 * dep_graph.install_order.len());
     // A recommend that cannot be installed is refused before its dependencies
     // install, exactly as the package that recommends it would be.
-    let mut confirmed =
-        confirm_installable(&dep_graph, config, command_runner, sender, progress, token)
-            .await
-            .map_err(|f| RecommendError::Failed(f.to_string()))?;
+    let mut confirmed = confirm_installable(
+        &dep_graph,
+        ledger,
+        config,
+        command_runner,
+        sender,
+        progress,
+        token,
+    )
+    .await
+    .map_err(|f| RecommendError::Failed(f.to_string()))?;
 
     // Install each package in dependency order
     for pkg_name in &dep_graph.install_order {
@@ -811,8 +1008,12 @@ where
             return Err(RecommendError::Interrupted);
         }
 
-        let turn = install_single_package(
+        // A package another graph already took its turn for, or is taking it
+        // for, is not installed or checked again: its turn stands for this
+        // recommend too.
+        let (turn, took_turn) = take_turn(
             pkg_name,
+            ledger,
             repo,
             config,
             command_runner,
@@ -820,31 +1021,22 @@ where
             progress,
             token,
             confirmed.remove(pkg_name),
-            dep_graph.required_by.get(pkg_name).map(String::as_str),
         )
         .await;
-
-        if let Err(failure) = turn.result {
-            return Err(RecommendError::Failed(failure.to_string()));
+        // A cancel that came while this recommend waited on another graph's
+        // turn stops it untried, as one before its next package does.
+        if !took_turn && token.is_cancelled() {
+            return Err(RecommendError::Interrupted);
         }
-        // A recommend leaves the run clean whatever happens to it, so a check
-        // that gave no answer for it, or for one of its own dependencies, is a
-        // warning, never one of the run's gaps.
-        if let Some(gap) = turn.gap {
-            let whose = if gap.package_name() == recommend_name {
-                format!("Recommended package '{recommend_name}'")
-            } else {
-                format!(
-                    "'{}', a dependency of recommended package '{recommend_name}',",
-                    gap.package_name()
-                )
-            };
-            sender
-                .send_warning(format!(
-                    "{whose} installed, but its check gave no answer: {}",
-                    gap.reason()
-                ))
-                .await;
+
+        match turn.result {
+            Ok(_) => gaps.extend(turn.gap),
+            Err(failure) => {
+                let required_by = dep_graph.required_by.get(pkg_name).map(String::as_str);
+                return Err(RecommendError::Failed(
+                    failure.with_required_by(required_by).to_string(),
+                ));
+            }
         }
     }
 

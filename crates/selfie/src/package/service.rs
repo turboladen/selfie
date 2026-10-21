@@ -125,6 +125,22 @@ impl ProgressTracker {
             .await
     }
 
+    /// Advance past `steps` steps that another operation in the same run
+    /// already took, and emit one progress event, carrying `message`, at the
+    /// step reached. Nothing is emitted for zero steps.
+    pub(crate) async fn skip(
+        &mut self,
+        sender: &EventSender,
+        steps: usize,
+        message: impl std::fmt::Display,
+    ) {
+        let Some(before_last) = steps.checked_sub(1) else {
+            return;
+        };
+        self.current_step += before_last;
+        self.advance(sender, StepKind::Local, message).await;
+    }
+
     async fn advance(
         &mut self,
         sender: &EventSender,

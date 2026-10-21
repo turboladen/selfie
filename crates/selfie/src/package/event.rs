@@ -2699,6 +2699,48 @@ impl OperationSuccess {
 }
 
 impl OperationFailure {
+    /// This failure, naming `required_by` as the package that needs the one it
+    /// is about, for a failure of an install that names one. Any other failure
+    /// is returned as it is.
+    #[must_use]
+    pub(crate) fn with_required_by(mut self, required_by: Option<&str>) -> Self {
+        use crate::package::port::PackageError;
+
+        match &mut self {
+            OperationFailure::NotInstalledAfterInstall {
+                required_by: named, ..
+            }
+            | OperationFailure::Package(
+                PackageError::EnvironmentNotFound {
+                    required_by: named, ..
+                }
+                | PackageError::NoInstallCommand {
+                    required_by: named, ..
+                },
+            ) => *named = required_by.map(str::to_string),
+            OperationFailure::Package(
+                PackageError::PackageNotFound { .. }
+                | PackageError::MultiplePackagesFound { .. }
+                | PackageError::ParseError { .. }
+                | PackageError::UnreadableFile { .. }
+                | PackageError::UnusableName { .. }
+                | PackageError::NoCheckCommand { .. }
+                | PackageError::PackageAlreadyExists { .. }
+                | PackageError::PackagePathOccupied { .. },
+            )
+            | OperationFailure::CommandError(_)
+            | OperationFailure::DependencyError(_)
+            | OperationFailure::PackageList(_)
+            | OperationFailure::Privilege(_)
+            | OperationFailure::UnreadableSpec { .. }
+            | OperationFailure::InvalidSpec { .. }
+            | OperationFailure::Uncreatable { .. }
+            | OperationFailure::NoSuchPackage { .. }
+            | OperationFailure::Generic(_) => {}
+        }
+        self
+    }
+
     /// Creates an environment not found error
     #[must_use]
     pub fn environment_not_found(
