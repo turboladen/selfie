@@ -1755,7 +1755,7 @@ mod tests {
         );
     }
 
-    // A cancelled step is cleared with no result line.
+    // A canceled step is cleared with no result line.
     #[test]
     fn a_canceled_step_prints_nothing() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();

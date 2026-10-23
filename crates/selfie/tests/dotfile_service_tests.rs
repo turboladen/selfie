@@ -227,7 +227,7 @@ fn unverified(events: &[PackageEvent]) -> usize {
 // `None` for a timeout, and a panic in `work` raised again here.
 //
 // For a test whose failure mode is a read blocked on a fifo. That read cannot be
-// cancelled, and a runtime whose worker is stuck in it never finishes dropping, so a
+// canceled, and a runtime whose worker is stuck in it never finishes dropping, so a
 // `tokio::time::timeout` inside the test's own runtime fires and then hangs the test
 // at teardown: the deadline turns a hang into a later hang, not a failure. Here the
 // blocked thread is abandoned instead, and the process ends with the test binary.
@@ -645,8 +645,8 @@ impl TestDirs {
 // Cancels a token the moment a named file is read, then behaves exactly like the
 // real filesystem.
 //
-// Drift's event stream buffers, so a consumer cancelling on the first event it sees
-// is already too late — the run has finished. Cancelling from inside the run, on the
+// Drift's event stream buffers, so a consumer canceling on the first event it sees
+// is already too late — the run has finished. Canceling from inside the run, on the
 // read that the first entry performs, is what places the cancellation between two
 // entries, which is the position the guard has to hold.
 #[derive(Clone, Debug)]
@@ -3666,8 +3666,8 @@ environments:
 // package the outer guard catches the cancel before the inner one is reached, so no
 // single fixture pins both.
 //
-// Cancelled on the read the first entry performs, so the cancellation lands inside
-// the run. Cancelling from the consumer cannot: the event stream buffers, so the run
+// Canceled on the read the first entry performs, so the cancellation lands inside
+// the run. Canceling from the consumer cannot: the event stream buffers, so the run
 // has already finished by the time the first event is read, and drift reaches no
 // command runner for the `cancellation` module's trigger to work through.
 #[tokio::test]
@@ -3721,7 +3721,7 @@ async fn a_canceled_drift_check_stops_between_entries_of_one_package() {
 async fn a_canceled_drift_check_over_no_packages_reports_the_cancellation() {
     let dirs = TestDirs::new();
 
-    // Deliberately no packages, and the token is cancelled before the run so the
+    // Deliberately no packages, and the token is canceled before the run so the
     // cancel cannot depend on anything the run does.
     let token = CancellationToken::new();
     token.cancel();
@@ -3792,7 +3792,7 @@ fn assert_canceled_without_counts(events: &[PackageEvent], operation: &str) {
         !events
             .iter()
             .any(|e| matches!(e, PackageEvent::Completed { .. })),
-        "a cancelled run must not also report counts: {events:?}"
+        "a canceled run must not also report counts: {events:?}"
     );
 }
 
@@ -6875,7 +6875,7 @@ mod secret_bearing {
         //
         // Those being two different things is the entire mechanism.
         // `resolve_content` reuses one `&CancellationToken` for every command of
-        // an entry, so a fake that cancelled the token it was handed would cancel
+        // an entry, so a fake that canceled the token it was handed would cancel
         // a placeholder just as readily, and every assertion below would hold with
         // the bug in place. An independent clone of the real token makes
         // `observed` differ between the two worlds.
@@ -6889,7 +6889,7 @@ mod secret_bearing {
             calls: Arc<Mutex<Vec<String>>>,
             // Indexed by call number.
             effects: Vec<CallEffect>,
-            // Refuse any call handed an already-cancelled token, as
+            // Refuse any call handed an already-canceled token, as
             // `ShellCommandRunner::run_buffered` does in its pre-spawn check.
             //
             // Off by default so the other tests observe the token without the
@@ -6913,7 +6913,7 @@ mod secret_bearing {
                 }
             }
 
-            // Behave like the real shell runner: refuse a pre-cancelled token.
+            // Behave like the real shell runner: refuse a pre-canceled token.
             fn refusing_a_canceled_token(mut self) -> Self {
                 self.refuse_when_handed_canceled = true;
                 self
@@ -7097,7 +7097,7 @@ mod secret_bearing {
             assert_eq!(
                 runner.observed(),
                 vec![false, true],
-                "the second command must be handed the token the first one cancelled; \
+                "the second command must be handed the token the first one canceled; \
                  [false, false] means a fresh token was passed to the resolve path"
             );
         }
@@ -7109,7 +7109,7 @@ mod secret_bearing {
         // `resolve_content` iterates `vars` with no cancellation check.
         //
         // What closes it is the runner: `run_buffered` checks the token before
-        // spawning and returns `Cancelled`, which becomes a resolve failure and
+        // spawning and returns `Canceled`, which becomes a resolve failure and
         // lands in the `Failed` arm. The fake models that pre-spawn refusal
         // explicitly, so it cannot show the window closed when it is not.
         #[tokio::test]
@@ -7126,7 +7126,7 @@ mod secret_bearing {
 
             let token = CancellationToken::new();
             // Cancels after the first binding succeeds; the second is then handed
-            // an already-cancelled token and is refused, as the real runner would.
+            // an already-canceled token and is refused, as the real runner would.
             let runner = TokenObservingRunner::new(
                 &token,
                 vec![CallEffect {
@@ -7178,7 +7178,7 @@ mod secret_bearing {
             assert_eq!(
                 runner.calls(),
                 Vec::<String>::new(),
-                "a cancelled run must not start a provider command"
+                "a canceled run must not start a provider command"
             );
             assert!(
                 !target.exists(),
@@ -7218,7 +7218,7 @@ mod secret_bearing {
 
         // A command killed by Ctrl+C must not be blamed on the package file.
         //
-        // `stop_on_error` is set here, and a cancelled command fails -- so a
+        // `stop_on_error` is set here, and a canceled command fails -- so a
         // refusal that asked `stop_on_error` before the token would report
         // "Stopped after failing to apply dotfile 'X' (stop_on_error is enabled)".
         // That names the user's own interrupt as a spec problem and sends them
@@ -7241,7 +7241,7 @@ mod secret_bearing {
             assert_eq!(runner.calls(), vec!["op read x".to_string()]);
 
             // The terminal event exists and names cancellation — this is also the
-            // assertion that a cancelled run still completes its stream rather
+            // assertion that a canceled run still completes its stream rather
             // than dropping it.
             assert_canceled(&events);
 
@@ -7272,7 +7272,7 @@ mod secret_bearing {
         // `Success` for a run the user interrupted, which for a provider entry
         // means a credential on disk with nothing mentioning Ctrl+C.
         //
-        // The target is asserted present on purpose: cancelling does not unwrite.
+        // The target is asserted present on purpose: canceling does not unwrite.
         #[tokio::test]
         async fn a_cancellation_during_the_last_entry_is_still_reported() {
             let dirs = TestDirs::new();
@@ -7305,15 +7305,15 @@ mod secret_bearing {
             assert_canceled(&events);
         }
 
-        // ── What a cancelled run leaves behind ───────────────────────────────
+        // ── What a canceled run leaves behind ───────────────────────────────
 
-        // Cancelling must not discard the record of what was already deployed.
+        // Canceling must not discard the record of what was already deployed.
         //
         // The run breaks out of the loop rather than returning, so deploy state
         // still reaches disk. Returning early would leave files in place with no
         // record, and the next drift check would report them as untracked.
         //
-        // Three entries, because the invariant needs one *after* the cancelling
+        // Three entries, because the invariant needs one *after* the canceling
         // entry. Not a dry run, because dry runs skip saving state entirely --
         // which would make the assertion pass for an unrelated reason.
         #[tokio::test]
@@ -7362,7 +7362,7 @@ mod secret_bearing {
             );
 
             let state = std::fs::read_to_string(state_file(&dirs))
-                .expect("deploy state must survive a cancelled run");
+                .expect("deploy state must survive a canceled run");
             assert!(
                 state.contains("creds/first"),
                 "what was deployed before the cancellation has to stay recorded, \

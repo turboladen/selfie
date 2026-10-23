@@ -192,7 +192,7 @@ impl AuditTally {
 ///
 /// Errors are emitted as events rather than propagated, so the bulk
 /// operation can continue with remaining packages. `None` when the run was
-/// cancelled before this package was audited.
+/// canceled before this package was audited.
 async fn audit_single_in_bulk<PR, CR>(
     package_name: &str,
     repo: &PR,

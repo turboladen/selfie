@@ -2,7 +2,7 @@
 //!
 //! Walks the packages an operation covers and sends each entry down the path its
 //! content source calls for. Three things stop the run before the end: the caller
-//! cancelling, the deploy state failing to write, and any refusal or failure while
+//! canceling, the deploy state failing to write, and any refusal or failure while
 //! `stop_on_error` is on.
 
 use std::collections::{BTreeSet, HashMap};
@@ -56,7 +56,7 @@ pub(super) enum Scope {
     Named(String),
 }
 
-/// The reason a cancelled apply gives.
+/// The reason a canceled apply gives.
 pub(super) const APPLY_CANCELED: &str = "Apply canceled";
 
 /// Why an apply stopped before its last entry.
@@ -64,7 +64,7 @@ pub(super) const APPLY_CANCELED: &str = "Apply canceled";
 /// Each cause is worded once, in `Display`, so no two sites that stop a run can
 /// describe the same stop differently.
 enum Stop {
-    /// The caller cancelled the run.
+    /// The caller canceled the run.
     Canceled,
     /// An entry was refused or failed while `stop_on_error` is on. Carries the
     /// entry's target as the package file spells it.
@@ -157,7 +157,7 @@ enum Unfinished {
 
 impl ApplyTally {
     /// Count one refusal or failure, and return the stop it calls for, if any: a
-    /// cancelled run stops, and otherwise `stop_on_error` decides.
+    /// canceled run stops, and otherwise `stop_on_error` decides.
     // One method for both kinds, so a failure cannot get past `stop_on_error` by a
     // path of its own. Cancellation is asked first. Ctrl+C kills a provider
     // command, which then fails, and blaming `stop_on_error` for that sends the
@@ -224,7 +224,7 @@ pub(super) struct ApplyContext<'a, F, CR> {
 /// Core logic for applying config files
 ///
 /// Applies every package in `packages`, over the scope `scope` says. `None`
-/// when the run was cancelled part way, so the caller reports a cancellation
+/// when the run was canceled part way, so the caller reports a cancellation
 /// rather than a result.
 pub(super) async fn handle_apply<F, CR>(
     packages: &[Package],

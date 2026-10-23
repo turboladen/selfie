@@ -17,7 +17,7 @@ pub const USAGE: i32 = 2;
 /// Exit code of a command that finished with something to report: a finding, or a package it could
 /// not answer for.
 pub const FOUND: i32 = 3;
-/// Exit code of a run cancelled with Ctrl+C, the usual `128 + SIGINT` value.
+/// Exit code of a run canceled with Ctrl+C, the usual `128 + SIGINT` value.
 pub const CANCELED: i32 = 130;
 
 // Helper to create a temporary config environment

@@ -26,11 +26,11 @@ use crate::source_paths;
 /// | 1    | failed, or refused part of its work; for `package check` and `package audit`, also a command that timed out or could not be started |
 /// | 2    | usage error: a bad command line, or a prompt with no terminal |
 /// | 3    | finished with something to report: a finding, or a package it could not answer for |
-/// | 130  | cancelled (128 + SIGINT) |
+/// | 130  | canceled (128 + SIGINT) |
 ///
 /// Exits compare by how much they say about the run, so the `max` of several
 /// results is the one a run made of them reports: clean, then found, failed,
-/// usage, and cancelled highest. A failure outranks a finding and a finding a
+/// usage, and canceled highest. A failure outranks a finding and a finding a
 /// clean result. A usage error ranks above a failure because it stopped the
 /// run before it could fail or finish, and a cancel above everything because it
 /// is how the run ended.

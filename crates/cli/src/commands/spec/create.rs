@@ -25,7 +25,7 @@ const MAX_NAME_RETRIES: usize = 3;
 enum PackageNameResult {
     CreateNew(String),     // Use this name to create a new package
     EditExisting(PathBuf), // User wants to edit the existing package at this path
-    Canceled,              // User cancelled the operation
+    Canceled,              // User canceled the operation
 }
 
 pub(crate) async fn handle_create(

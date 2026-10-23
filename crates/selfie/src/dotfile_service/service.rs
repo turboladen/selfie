@@ -258,7 +258,7 @@ where
             };
 
             // A collection failure is a failure however the token stands; only the
-            // handler says whether the run itself was cancelled, as drift's does.
+            // handler says whether the run itself was canceled, as drift's does.
             match result {
                 Some(result) => sender.send_completed(result).await,
                 None => sender.send_canceled(APPLY_CANCELED).await,
@@ -336,7 +336,7 @@ where
 
             // The handler says whether it stopped part way; the token is not asked
             // again here. A run that finished is a whole answer even if the token
-            // was cancelled after it, and a collection failure is a failure however
+            // was canceled after it, and a collection failure is a failure however
             // the token stands.
             match outcome {
                 Some(result) => sender.send_completed(result).await,

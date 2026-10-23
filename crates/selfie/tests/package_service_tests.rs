@@ -1361,13 +1361,13 @@ async fn a_cancel_during_the_recommends_ends_the_stream_canceled() {
         events
             .iter()
             .any(|e| matches!(e, PackageEvent::Canceled { .. })),
-        "a cancelled install must say so: {events:?}"
+        "a canceled install must say so: {events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|e| matches!(e, PackageEvent::Completed { .. })),
-        "a cancelled install must not also report a result: {events:?}"
+        "a canceled install must not also report a result: {events:?}"
     );
 }
 

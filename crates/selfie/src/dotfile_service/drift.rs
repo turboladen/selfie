@@ -1,7 +1,7 @@
 //! Reporting how far every tracked target has drifted from its source.
 //!
 //! Reads and compares; writes nothing, records nothing and resolves no conflict.
-//! A cancelled run stops between entries and says so to its caller, so a partial
+//! A canceled run stops between entries and says so to its caller, so a partial
 //! count is never read as a clean result.
 
 use std::path::Path;
@@ -24,11 +24,11 @@ use super::classify::{
 use super::orphan::{self, Catalog};
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 
-/// Core logic for checking drift, or `None` if the run was cancelled part way.
+/// Core logic for checking drift, or `None` if the run was canceled part way.
 ///
 /// `None` says the run was left early and the counts are partial. Only the
 /// caller can report that, and it must not infer it from the token: a run that
-/// finished its orphan check is a whole answer even if the token was cancelled
+/// finished its orphan check is a whole answer even if the token was canceled
 /// after it, and a collection failure is not a cancellation whatever the token
 /// says.
 ///

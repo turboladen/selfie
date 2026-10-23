@@ -188,7 +188,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     }
     // An apply result that completed carries both counts whatever its status, so a
     // caller never reads a missing field as zero. A run that stopped or was
-    // cancelled has no counts to give. `refused` wins the status when both are set:
+    // canceled has no counts to give. `refused` wins the status when both are set:
     // a refusal names a condition the user can act on.
     if let Some(OperationResult::Success(s)) = &final_result
         && let (Some(refused), Some(failed)) = (s.refused_count(), s.failed_count())
@@ -2305,7 +2305,7 @@ mod tests {
         assert_eq!(result.data["result"]["unjudged_count"], 2);
     }
 
-    // A cancelled operation says so instead of reporting a missing completion.
+    // A canceled operation says so instead of reporting a missing completion.
     #[tokio::test]
     async fn a_canceled_operation_is_reported_as_canceled() {
         let events = vec![PackageEvent::Canceled {

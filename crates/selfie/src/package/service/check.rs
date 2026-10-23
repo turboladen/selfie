@@ -226,7 +226,7 @@ fn create_operation_result(
 ///
 /// A failure that stops every command in `package_dir` is returned as the error
 /// instead of recorded as the check's result: the directory cannot be entered,
-/// the shell cannot start, or the operation was cancelled.
+/// the shell cannot start, or the operation was canceled.
 ///
 /// # Errors
 ///

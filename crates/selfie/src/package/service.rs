@@ -364,7 +364,7 @@ where
             )
             .await;
 
-            // If cancelled during execution, emit Canceled instead of Completed
+            // If canceled during execution, emit Canceled instead of Completed
             if token.is_cancelled() {
                 sender.send_canceled("Operation canceled").await;
             } else {

@@ -40,7 +40,7 @@ fn service<CR: CommandRunner + Clone + std::fmt::Debug + 'static>(
     service_with_token(spec_dir, package_dir, runner, CancellationToken::new())
 }
 
-// `service`, cancelled through `token`.
+// `service`, canceled through `token`.
 fn service_with_token<CR: CommandRunner + Clone + std::fmt::Debug + 'static>(
     spec_dir: &Path,
     package_dir: &Path,
@@ -692,7 +692,7 @@ async fn a_recommend_not_installed_after_install_does_not_fail_the_call() {
 }
 
 // A runner that answers as `FakeCommandRunner` does, and refuses every command
-// once `token` is cancelled, as the shell runner does.
+// once `token` is canceled, as the shell runner does.
 #[derive(Debug, Clone)]
 struct CancelAware {
     inner: FakeCommandRunner,
@@ -797,13 +797,13 @@ async fn a_cancel_before_the_post_install_check_ends_the_install_canceled() {
         events
             .iter()
             .any(|e| matches!(e, PackageEvent::Canceled { .. })),
-        "a cancelled install must say so: {events:?}"
+        "a canceled install must say so: {events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|e| matches!(e, PackageEvent::Completed { .. })),
-        "a cancelled install must not also report a result: {events:?}"
+        "a canceled install must not also report a result: {events:?}"
     );
     assert!(
         !events
@@ -825,6 +825,6 @@ async fn a_cancel_before_the_post_install_check_ends_the_install_canceled() {
             e,
             PackageEvent::Progress { message, .. } if message.contains("installation completed")
         )),
-        "the install carried on past the cancelled check: {events:?}"
+        "the install carried on past the canceled check: {events:?}"
     );
 }

@@ -66,7 +66,7 @@ pub enum StepEnding {
     Succeeded,
     /// What was waited on failed, timed out or could not start.
     Failed,
-    /// The run was cancelled while it waited.
+    /// The run was canceled while it waited.
     Canceled,
     /// Nothing it was waiting to run ran: what the step was for was refused
     /// before any command started.
@@ -998,7 +998,7 @@ impl OperationResult {
 
 /// How an operation ended: clean, a finding, or a failure.
 ///
-/// A cancelled operation has no outcome: it ends with
+/// A canceled operation has no outcome: it ends with
 /// [`PackageEvent::Canceled`] rather than a result.
 ///
 /// Converts to a label for an adapter: `clean`, `found` or `failed`.

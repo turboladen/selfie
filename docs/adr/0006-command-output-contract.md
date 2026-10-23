@@ -61,7 +61,7 @@ ends.
 | 1    | Failed, including a refusal, the user declining a confirmation, and a run that ends without a result |
 | 2    | Usage: a bad command line, or a prompt with no terminal to ask on                                    |
 | 3    | Found                                                                                                |
-| 130  | Cancelled (128 + SIGINT)                                                                             |
+| 130  | Canceled (128 + SIGINT)                                                                              |
 
 A new code takes the next free value from 3 to 63. It never takes 64-78 (`sysexits.h`) or 126 and
 above (the shell reserves them), and no code is ever renumbered or reused.

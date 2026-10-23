@@ -219,7 +219,7 @@ where
                 }
             }
 
-            // A cancelled drift check ends the status run as cancelled. Reporting a
+            // A canceled drift check ends the status run as canceled. Reporting a
             // summary and a completion would put a zero-count drift report and
             // "Sync status complete" in front of someone who pressed Ctrl+C, and the
             // CLI maps this event to exit 130.
@@ -1319,7 +1319,7 @@ fn extract_package_name_from_message(message: &str) -> String {
 }
 
 // How a waiting step that ran a git network call ended. Sync is not
-// cancellable, so a step either finished or failed.
+// cancelable, so a step either finished or failed.
 fn git_ending<T, E>(result: &Result<T, E>) -> StepEnding {
     match result {
         Ok(_) => StepEnding::Succeeded,
@@ -1372,9 +1372,9 @@ struct DriftSummary {
     outcome: Option<Outcome>,
     /// The failure message, when the check failed.
     error: Option<String>,
-    /// Why the check was cancelled, when it was.
+    /// Why the check was canceled, when it was.
     ///
-    /// Distinct from `error`: a cancelled check did not fail, it did not finish, and
+    /// Distinct from `error`: a canceled check did not fail, it did not finish, and
     /// its counts describe only what it reached.
     canceled: Option<String>,
     /// Warnings, refused packages and entries, and skipped specs, in the order
@@ -2451,7 +2451,7 @@ mod tests {
     // and a second warning ahead of its completion, so `status()`'s relay
     // order can be pinned end to end rather than only inside
     // `collect_drift_summary`.
-    // A DotfileService whose drift check reports itself cancelled, the way an
+    // A DotfileService whose drift check reports itself canceled, the way an
     // interrupted one does.
     #[derive(Clone)]
     struct DriftCanceled;
@@ -2474,7 +2474,7 @@ mod tests {
         }
 
         async fn check_drift(&self) -> EventStream {
-            // No Completed event: a cancelled run reports the cancellation instead,
+            // No Completed event: a canceled run reports the cancellation instead,
             // which is exactly what the collector used to drop.
             Box::pin(futures::stream::iter(vec![PackageEvent::Canceled {
                 operation_info: test_operation_info(),
@@ -2563,7 +2563,7 @@ mod tests {
     // that does this in `status()` could be deleted with
     // `collect_drift_summary`'s own order test still green, because that
     // test calls `collect_drift_summary` directly rather than `status()`.
-    // A drift check that reports itself cancelled ends the status run as cancelled.
+    // A drift check that reports itself canceled ends the status run as canceled.
     // The collector's catch-all used to drop `Canceled`, so the run went on to emit a
     // zero-count drift summary and "Sync status complete" to someone who had pressed
     // Ctrl+C, and the exit code said success (found by Copilot on PR #185).
@@ -2604,13 +2604,13 @@ mod tests {
             !events
                 .iter()
                 .any(|e| matches!(e, PackageEvent::SyncDriftSummary { .. })),
-            "a cancelled check must not report a drift summary: {events:?}"
+            "a canceled check must not report a drift summary: {events:?}"
         );
         assert!(
             !events
                 .iter()
                 .any(|e| matches!(e, PackageEvent::Completed { .. })),
-            "a cancelled run must not also complete: {events:?}"
+            "a canceled run must not also complete: {events:?}"
         );
     }
 

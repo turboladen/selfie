@@ -302,8 +302,8 @@ impl CommandRunner for ShellCommandRunner {
         let outcome = tokio::select! {
             // Biased so a command that finished within its budget is reported as
             // finished. Unbiased, `select!` picks at random when both arms are
-            // ready at once, and a token cancelled in the same instant a package
-            // finished installing would report it as cancelled about half the
+            // ready at once, and a token canceled in the same instant a package
+            // finished installing would report it as canceled about half the
             // time. The old shape could not do that: its cancellation arm was
             // guarded `if !process_done`, so a completed command always won.
             biased;
@@ -2139,10 +2139,10 @@ mod tests {
 
     // NOTE: the `biased;` on the outer `select!` has no test, deliberately.
     // Asserting it needs both arms ready within one poll, and nothing the
-    // adapter exposes lets a caller arrange that: cancelling early is a genuine
-    // cancellation, and cancelling late cannot reach the select at all. A loop
+    // adapter exposes lets a caller arrange that: canceling early is a genuine
+    // cancellation, and canceling late cannot reach the select at all. A loop
     // racing the two would flake in the *false failure* direction, since a token
-    // cancelled while the command is still running makes `Cancelled` the correct
+    // canceled while the command is still running makes `Canceled` the correct
     // answer. Left untested rather than covered by a test that cannot fail.
 }
 
