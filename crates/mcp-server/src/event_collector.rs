@@ -1,9 +1,9 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, BaseKind, CheckResult, ConflictReport, Coverage, DotfileSource, EventStream, Gap,
-    LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
-    SkipReason,
+    AuditResult, BaseKind, ConflictReport, Coverage, DotfileSource, EnvironmentStatus, EventStream,
+    Gap, LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome,
+    PackageEvent, SkipReason,
 };
 use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
@@ -421,16 +421,19 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                 })
                 .collect();
         }
-        PackageEvent::CheckResultCompleted { check_result, .. } => Some(with_fields(
-            serde_json::json!({
-                "type": "check_result",
-                "package": &check_result.package_name,
-                "environment": &check_result.environment,
-                "command": &check_result.check_command,
-                "status": check_status_label(&check_result.result),
-            }),
-            check_failure_fields(Some(&check_result.result)),
-        )),
+        PackageEvent::CheckResultCompleted { check_result, .. } => {
+            let status = EnvironmentStatus::from(&check_result.result);
+            Some(with_fields(
+                serde_json::json!({
+                    "type": "check_result",
+                    "package": &check_result.package_name,
+                    "environment": &check_result.environment,
+                    "command": &check_result.check_command,
+                    "status": check_status_label(&status),
+                }),
+                check_failure_fields(&status),
+            ))
+        }
         PackageEvent::AuditResultCompleted { audit_result, .. } => Some(with_fields(
             serde_json::json!({
                 "type": "audit_result",
@@ -501,9 +504,9 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                 "name": &package_item.name,
                 "environments": &package_item.environments,
                 "command": &package_item.check_command,
-                "status": package_item.status.as_ref().map(check_status_label),
+                "status": check_status_label(&package_item.status),
             }),
-            check_failure_fields(package_item.status.as_ref()),
+            check_failure_fields(&package_item.status),
         )),
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
@@ -958,14 +961,21 @@ pub(crate) fn validation_category_label(category: ValidationErrorCategory) -> &'
     }
 }
 
-fn check_status_label(result: &CheckResult) -> &'static str {
-    match result {
-        CheckResult::Success { .. } => "installed",
-        CheckResult::Failed { .. } => "not installed",
-        CheckResult::NoCheckCommand => "no check command defined",
-        CheckResult::CouldNotRun(selfie::package::event::CheckFailure::TimedOut(_)) => "timed out",
-        CheckResult::CouldNotRun(_) => "error",
-    }
+/// Labels a check or listing row's status, or `None` for a package with no
+/// entry in this environment.
+fn check_status_label(status: &EnvironmentStatus) -> Option<&'static str> {
+    use selfie::package::event::{CheckFailure, UnknownStatus};
+
+    Some(match status {
+        EnvironmentStatus::Installed => "installed",
+        EnvironmentStatus::NotInstalled => "not installed",
+        EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment) => return None,
+        EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand) => "no check command defined",
+        EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(_))) => {
+            "timed out"
+        }
+        EnvironmentStatus::Unknown(_) => "error",
+    })
 }
 
 /// Adds `fields` to the JSON object `row`.
@@ -979,9 +989,11 @@ fn with_fields(mut row: Value, fields: serde_json::Map<String, Value>) -> Value 
 /// Renders why a check gave no answer as `kind` (the label), `reason` (prose)
 /// and `working_directory`, which is set only for a directory that could not be
 /// entered. All three are null for a check that answered.
-fn check_failure_fields(result: Option<&CheckResult>) -> serde_json::Map<String, Value> {
-    failure_fields(match result {
-        Some(CheckResult::CouldNotRun(failure)) => Some(failure),
+fn check_failure_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
+    failure_fields(match status {
+        EnvironmentStatus::Unknown(selfie::package::event::UnknownStatus::CheckFailed(failure)) => {
+            Some(failure)
+        }
         _ => None,
     })
 }
@@ -2446,11 +2458,53 @@ mod tests {
         );
     }
 
+    // A listing row for a package with no entry in this environment, shown
+    // under `all`, has a null status and no reason, while one with no check
+    // command says so.
+    #[tokio::test]
+    async fn a_row_not_in_this_environment_has_no_status() {
+        use selfie::package::event::{PackageListItem, UnknownStatus};
+
+        let row = |name: &str, status| PackageEvent::PackageListItemCompleted {
+            operation_info: test_op_info(),
+            package_item: PackageListItem {
+                check_command: None,
+                name: name.to_string(),
+                environments: vec!["other".to_string()],
+                status: EnvironmentStatus::Unknown(status),
+            },
+        };
+        let events = vec![
+            row("elsewhere", UnknownStatus::NotInEnvironment),
+            row("unchecked", UnknownStatus::NoCheckCommand),
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows: Vec<(&Value, &Value, &Value)> = result.data["data"]
+            .as_array()
+            .expect("data is an array")
+            .iter()
+            .map(|row| (&row["status"], &row["kind"], &row["reason"]))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (&Value::Null, &Value::Null, &Value::Null),
+                (
+                    &Value::from("no check command defined"),
+                    &Value::Null,
+                    &Value::Null
+                ),
+            ]
+        );
+    }
+
     // A listing row names its check command for every check that gave no
     // answer, as a check row does.
     #[tokio::test]
     async fn a_listing_row_names_its_command() {
-        use selfie::package::event::{CheckFailure, PackageListItem};
+        use selfie::package::event::{CheckFailure, PackageListItem, UnknownStatus};
 
         let events = vec![PackageEvent::PackageListItemCompleted {
             operation_info: test_op_info(),
@@ -2458,12 +2512,12 @@ mod tests {
                 check_command: Some("sleep 5".to_string()),
                 name: "slow".to_string(),
                 environments: vec!["test".to_string()],
-                status: Some(CheckResult::CouldNotRun(CheckFailure::TimedOut(
-                    selfie::commands::runner::TimedOut::new(
+                status: EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
+                    CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
                         "sleep 5",
                         std::time::Duration::from_secs(1),
-                    ),
-                ))),
+                    )),
+                )),
             },
         }];
 
@@ -2508,7 +2562,7 @@ mod tests {
                     check_command: Some("check-p".to_string()),
                     name: "p".to_string(),
                     environments: vec!["test".to_string()],
-                    status: Some(failure()),
+                    status: EnvironmentStatus::from(&failure()),
                 },
             },
         ];
@@ -3191,10 +3245,7 @@ mod tests {
                     name: "ripgrep".to_string(),
 
                     environments: vec!["macos".to_string()],
-                    status: Some(CheckResult::Success {
-                        stdout: "/opt/homebrew/bin/rg".to_string(),
-                        stderr: String::new(),
-                    }),
+                    status: EnvironmentStatus::Installed,
                 },
             },
             PackageEvent::PackageListItemCompleted {
@@ -3204,11 +3255,7 @@ mod tests {
                     name: "missing-pkg".to_string(),
 
                     environments: vec!["macos".to_string()],
-                    status: Some(CheckResult::Failed {
-                        stdout: String::new(),
-                        stderr: "not found".to_string(),
-                        exit_code: Some(1),
-                    }),
+                    status: EnvironmentStatus::NotInstalled,
                 },
             },
             PackageEvent::Completed {

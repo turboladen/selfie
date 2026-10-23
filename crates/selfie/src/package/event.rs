@@ -583,7 +583,7 @@ impl EventSender {
     }
 
     /// Send sorted filtered package list ready for display
-    pub(crate) async fn send_package_list_ready(&self, packages: Vec<PackageListItem>) {
+    pub(crate) async fn send_package_list_ready(&self, packages: Vec<String>) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::PackageListReady {
             operation_info,
@@ -3031,10 +3031,11 @@ pub enum PackageEvent {
         environment_status: EnvironmentStatusData,
     },
 
-    /// Sorted filtered package list ready for display (before status checks begin)
+    /// The names of the packages the listing will check, sorted and filtered,
+    /// sent before any check begins.
     PackageListReady {
         operation_info: OperationInfo,
-        packages: Vec<PackageListItem>,
+        packages: Vec<String>,
     },
 
     /// Every dotfile entry selfie could read across both directories.
@@ -3646,7 +3647,7 @@ pub struct PackageListItem {
     pub environments: Vec<String>,
     /// The check command run for this item, when there is one.
     pub check_command: Option<String>,
-    pub status: Option<CheckResult>,
+    pub status: EnvironmentStatus,
 }
 
 /// Information about a spec (definition only, no runtime status)

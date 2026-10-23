@@ -90,17 +90,12 @@ where
         .filter(|package| show_all || package.environments().contains_key(config.environment()))
         .collect();
 
-    // Emit PackageListReady with all packages (status: None) before checking
-    let ready_items: Vec<PackageListItem> = packages_to_process
+    // Name every package to be checked before any check begins.
+    let ready_names: Vec<String> = packages_to_process
         .iter()
-        .map(|package| PackageListItem {
-            check_command: None,
-            name: package.name().to_string(),
-            environments: package.environments().keys().cloned().collect(),
-            status: None,
-        })
+        .map(|package| package.name().to_string())
         .collect();
-    sender.send_package_list_ready(ready_items).await;
+    sender.send_package_list_ready(ready_names).await;
 
     // Step 2: Check package status in parallel. Waiting when some package's
     // check command will run.
@@ -177,11 +172,13 @@ where
                         &token,
                     )
                     .await;
-                    Some(check_result.result)
+                    EnvironmentStatus::from(&check_result.result)
                 } else if supports_current_env {
-                    Some(crate::package::event::CheckResult::NoCheckCommand)
+                    EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand)
                 } else {
-                    None
+                    // Shown only under `--all`: the spec decides there is
+                    // nothing to check here.
+                    EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment)
                 };
 
                 // Create the package list item
@@ -213,7 +210,7 @@ where
                     check_command: metadata.check_command,
                     name: metadata.name,
                     environments: metadata.environments,
-                    status: Some(crate::package::event::CheckResult::CouldNotRun(
+                    status: EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
                         crate::package::event::CheckFailure::Internal {
                             message: crate::commands::BoundedText::of(&format!("Task failed: {e}")),
                         },
@@ -289,7 +286,7 @@ where
 }
 
 /// Returns the gaps among a listing's rows. A valid row is judged by its
-/// check, a spec that does not parse by its lookup failure, and a refused spec
+/// status, a spec that does not parse by its lookup failure, and a refused spec
 /// by its refusal.
 fn listing_gaps(
     valid: &[PackageListItem],
@@ -297,15 +294,7 @@ fn listing_gaps(
     refused: &[RefusedSpec],
     package_directory: &std::path::Path,
 ) -> Vec<Gap> {
-    let valid_rows = valid.iter().map(|item| {
-        // A row with no check result is one not in this environment, shown
-        // under `--all`: the spec decides there is nothing to check here.
-        let status = item.status.as_ref().map_or(
-            EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment),
-            EnvironmentStatus::from,
-        );
-        status.gap(&item.name)
-    });
+    let valid_rows = valid.iter().map(|item| item.status.gap(&item.name));
     let invalid_rows = invalid.iter().map(|failure| {
         let name = failure.display_name();
         let lookup = LookupFailure::unloadable(
@@ -515,7 +504,7 @@ mod tests {
                 &listed[..],
                 [item] if matches!(
                     item.status,
-                    Some(crate::package::event::CheckResult::CouldNotRun(
+                    EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
                         crate::package::event::CheckFailure::Internal { .. }
                     ))
                 )

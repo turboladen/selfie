@@ -81,18 +81,20 @@ fn format_list_item(
     use_colors: bool,
     show_all: bool,
 ) -> ListRow {
-    let status = status_style::format_check_result(package_item.status.as_ref(), use_colors);
+    use event::{CheckFailure, EnvironmentStatus, UnknownStatus};
+
+    let status = status_style::format_list_status(&package_item.status, use_colors);
 
     let result = match &package_item.status {
-        Some(event::CheckResult::Success { .. }) => ListItemResult::Success,
-        // A canceled check says nothing about the package, so it is not a failure.
-        Some(event::CheckResult::CouldNotRun(event::CheckFailure::Canceled { .. })) => {
-            ListItemResult::Warning
-        }
-        Some(event::CheckResult::Failed { .. }) | Some(event::CheckResult::CouldNotRun(_)) => {
-            ListItemResult::Failure
-        }
-        Some(event::CheckResult::NoCheckCommand) | None => ListItemResult::Warning,
+        EnvironmentStatus::Installed => ListItemResult::Success,
+        // A canceled check says nothing about the package, so like a row with
+        // nothing to check it is a warning, not a failure.
+        EnvironmentStatus::Unknown(
+            UnknownStatus::CheckFailed(CheckFailure::Canceled { .. })
+            | UnknownStatus::NoCheckCommand
+            | UnknownStatus::NotInEnvironment,
+        ) => ListItemResult::Warning,
+        EnvironmentStatus::NotInstalled | EnvironmentStatus::Unknown(_) => ListItemResult::Failure,
     };
 
     let environments = show_all.then(|| {
@@ -376,41 +378,31 @@ mod tests {
 
     #[test]
     fn test_format_check_status_installed() {
-        let result = status_style::format_check_result(
-            Some(&event::CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
-            false,
-        );
+        let result = status_style::format_list_status(&event::EnvironmentStatus::Installed, false);
         assert_eq!(result, "Installed");
     }
 
     #[test]
     fn test_format_check_status_not_installed() {
-        let result = status_style::format_check_result(
-            Some(&event::CheckResult::Failed {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: Some(1),
-            }),
-            false,
-        );
+        let result =
+            status_style::format_list_status(&event::EnvironmentStatus::NotInstalled, false);
         assert_eq!(result, "Not installed");
     }
 
     #[test]
     fn test_format_check_status_no_check() {
-        let result =
-            status_style::format_check_result(Some(&event::CheckResult::NoCheckCommand), false);
+        let result = status_style::format_list_status(
+            &event::EnvironmentStatus::Unknown(event::UnknownStatus::NoCheckCommand),
+            false,
+        );
         assert_eq!(result, "No check");
     }
 
     // A canceled check reads as canceled, not as a red error.
     #[test]
     fn a_canceled_check_reads_as_canceled() {
-        let result = status_style::format_check_result(
-            Some(&event::CheckResult::CouldNotRun(
+        let result = status_style::format_list_status(
+            &event::EnvironmentStatus::Unknown(event::UnknownStatus::CheckFailed(
                 event::CheckFailure::Canceled {
                     message: selfie::commands::BoundedText::bound(b"Command canceled: check-x"),
                 },
@@ -422,8 +414,8 @@ mod tests {
 
     #[test]
     fn test_format_check_status_error() {
-        let result = status_style::format_check_result(
-            Some(&event::CheckResult::CouldNotRun(
+        let result = status_style::format_list_status(
+            &event::EnvironmentStatus::Unknown(event::UnknownStatus::CheckFailed(
                 event::CheckFailure::ResultUnreadable {
                     message: selfie::commands::BoundedText::bound(b"test error"),
                 },
@@ -435,23 +427,23 @@ mod tests {
 
     #[test]
     fn test_format_check_status_na() {
-        let result = status_style::format_check_result(None, false);
+        let result = status_style::format_list_status(
+            &event::EnvironmentStatus::Unknown(event::UnknownStatus::NotInEnvironment),
+            false,
+        );
         assert_eq!(result, "N/A");
     }
 
     #[test]
     fn test_format_check_status_with_colors() {
         // Just verify these don't panic and return non-empty strings
-        let result = status_style::format_check_result(
-            Some(&event::CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
-            true,
-        );
+        let result = status_style::format_list_status(&event::EnvironmentStatus::Installed, true);
         assert!(result.contains("Installed"));
 
-        let result = status_style::format_check_result(None, true);
+        let result = status_style::format_list_status(
+            &event::EnvironmentStatus::Unknown(event::UnknownStatus::NotInEnvironment),
+            true,
+        );
         assert!(result.contains("N/A"));
     }
 
@@ -511,10 +503,7 @@ mod tests {
             name: "test-package".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
+            status: event::EnvironmentStatus::Installed,
         };
 
         let mut environment_stats = std::collections::HashMap::new();
@@ -576,10 +565,7 @@ mod tests {
             name: "test-package".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
+            status: event::EnvironmentStatus::Installed,
         };
 
         let invalid_package = selfie::package::port::PackageParseError::new(
@@ -615,22 +601,7 @@ mod tests {
     #[test]
     fn test_handle_list_event_package_list_ready() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
-        let packages = vec![
-            PackageListItem {
-                check_command: None,
-                name: "alpha".to_string(),
-
-                environments: vec![TEST_ENV.to_string()],
-                status: None,
-            },
-            PackageListItem {
-                check_command: None,
-                name: "beta".to_string(),
-
-                environments: vec![TEST_ENV.to_string()],
-                status: None,
-            },
-        ];
+        let packages = vec!["alpha".to_string(), "beta".to_string()];
 
         let event = event::PackageEvent::PackageListReady {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
@@ -649,22 +620,7 @@ mod tests {
 
         let ready_event = event::PackageEvent::PackageListReady {
             operation_info: test_common::create_test_operation_info("package_list", "", TEST_ENV),
-            packages: vec![
-                PackageListItem {
-                    check_command: None,
-                    name: "zebra".to_string(),
-
-                    environments: vec![TEST_ENV.to_string()],
-                    status: None,
-                },
-                PackageListItem {
-                    check_command: None,
-                    name: "alpha".to_string(),
-
-                    environments: vec![TEST_ENV.to_string()],
-                    status: None,
-                },
-            ],
+            packages: vec!["zebra".to_string(), "alpha".to_string()],
         };
         test_handle_event_with_state(&ready_event, &config, &mut state);
 
@@ -675,10 +631,7 @@ mod tests {
                 name: "zebra".to_string(),
 
                 environments: vec![TEST_ENV.to_string()],
-                status: Some(event::CheckResult::Success {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                }),
+                status: event::EnvironmentStatus::Installed,
             },
         };
         test_handle_event_with_state(&completed_zebra, &config, &mut state);
@@ -690,11 +643,7 @@ mod tests {
                 name: "alpha".to_string(),
 
                 environments: vec![TEST_ENV.to_string()],
-                status: Some(event::CheckResult::Failed {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: Some(1),
-                }),
+                status: event::EnvironmentStatus::NotInstalled,
             },
         };
         test_handle_event_with_state(&completed_alpha, &config, &mut state);
@@ -751,10 +700,7 @@ mod tests {
             name: "ripgrep".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
+            status: event::EnvironmentStatus::Installed,
         };
         let row = format_list_item(&success_item, &config, false, false);
         let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
@@ -768,11 +714,7 @@ mod tests {
             name: "missing-pkg".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Failed {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: Some(1),
-            }),
+            status: event::EnvironmentStatus::NotInstalled,
         };
         let row = format_list_item(&failure_item, &config, false, false);
         let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
@@ -786,7 +728,7 @@ mod tests {
             name: "no-check".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::NoCheckCommand),
+            status: event::EnvironmentStatus::Unknown(event::UnknownStatus::NoCheckCommand),
         };
         let row = format_list_item(&warning_item, &config, false, false);
         let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
@@ -794,13 +736,13 @@ mod tests {
         assert!(content.contains("no-check"));
         assert!(content.contains("No check"));
 
-        // N/A variant (status is None)
+        // N/A variant (not in this environment)
         let na_item = PackageListItem {
             check_command: None,
-            name: "pending".to_string(),
+            name: "elsewhere".to_string(),
 
-            environments: vec![TEST_ENV.to_string()],
-            status: None,
+            environments: vec![ALT_TEST_ENV.to_string()],
+            status: event::EnvironmentStatus::Unknown(event::UnknownStatus::NotInEnvironment),
         };
         let row = format_list_item(&na_item, &config, false, false);
         let result = &row.result;
@@ -816,7 +758,7 @@ mod tests {
             check_command: None,
             name: "slow".to_string(),
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::CouldNotRun(
+            status: event::EnvironmentStatus::Unknown(event::UnknownStatus::CheckFailed(
                 event::CheckFailure::Canceled {
                     message: selfie::commands::BoundedText::bound(b"Command canceled: sleep 5"),
                 },
@@ -837,10 +779,7 @@ mod tests {
             name: "test-package".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
-            status: Some(event::CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
+            status: event::EnvironmentStatus::Installed,
         };
 
         let event = event::PackageEvent::PackageListItemCompleted {
