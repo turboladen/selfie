@@ -10,7 +10,10 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         SpecOrigin,
-        event::{AuditResult, CheckResult, EnvironmentStatus, OperationResult, PackageEvent},
+        event::{
+            AuditResult, CheckResult, EnvironmentStatus, OperationFailure, OperationResult,
+            PackageEvent,
+        },
         git_adapter::GixGitStatusProvider,
         repository::YamlPackageRepository,
         service::{InstallOptions, PackageService, PackageServiceImpl},
@@ -547,8 +550,11 @@ async fn an_install_that_moves_its_own_package_directory_away_fails() {
     );
 }
 
+// An install command that succeeded is not an installed package when the check
+// still says it is not installed: the install fails, naming the check, and says
+// so once.
 #[tokio::test]
-async fn a_post_install_check_that_runs_and_fails_is_still_a_warning() {
+async fn a_post_install_check_that_says_not_installed_fails_the_install() {
     let temp = TempDir::new().unwrap();
     write_spec(
         temp.path(),
@@ -565,17 +571,124 @@ async fn a_post_install_check_that_runs_and_fails_is_still_a_warning() {
     )
     .await;
 
+    let OperationResult::Failure(failure) = completed(&events) else {
+        panic!("the install must fail: {events:?}");
+    };
+    assert!(
+        matches!(
+            failure,
+            OperationFailure::NotInstalledAfterInstall { package_name, check_command, required_by: None, .. }
+                if package_name == "pkg" && check_command == CHECK_CMD
+        ),
+        "{failure:?}"
+    );
+    // The failure is said once: one completion, and no warning beside it.
+    let completions = events
+        .iter()
+        .filter(|e| matches!(e, PackageEvent::Completed { .. }))
+        .count();
+    assert_eq!(completions, 1, "{events:?}");
+    let warnings = events
+        .iter()
+        .filter(|e| matches!(e, PackageEvent::Warning { .. }))
+        .count();
+    assert_eq!(warnings, 0, "{events:?}");
+}
+
+// Writes `pkg`, which depends on `dep` and recommends `rec`. Each of `dep` and
+// `rec` installs with its own command and is checked with its own check.
+fn write_install_graph(dir: &Path) {
+    write_spec(
+        dir,
+        &format!(
+            "    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n    dependencies:\n      - dep\n    recommends:\n      - rec\n"
+        ),
+    );
+    for (name, check) in [("dep", DEP_CHECK_CMD), ("rec", REC_CHECK_CMD)] {
+        std::fs::write(
+            dir.join(format!("{name}.yml")),
+            format!(
+                "name: {name}\nenvironments:\n  test:\n    install: \"install-{name}\"\n    check: \"{check}\"\n"
+            ),
+        )
+        .unwrap();
+    }
+}
+
+// A dependency its own check says did not install stops the run before the
+// package that needs it installs, and the failure names that package.
+#[tokio::test]
+async fn a_dependency_not_installed_after_install_stops_the_run() {
+    let temp = TempDir::new().unwrap();
+    write_install_graph(temp.path());
+    let runner = FakeCommandRunner::new()
+        .failing(DEP_CHECK_CMD, b"")
+        .succeeding("install-dep", b"")
+        .failing(CHECK_CMD, b"")
+        .succeeding(INSTALL_CMD, b"")
+        .failing(REC_CHECK_CMD, b"")
+        .succeeding("install-rec", b"");
+
+    let events = collect_events(
+        service(temp.path(), temp.path(), runner.clone())
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    assert!(
+        matches!(
+            completed(&events),
+            OperationResult::Failure(OperationFailure::NotInstalledAfterInstall {
+                package_name,
+                required_by: Some(by),
+                ..
+            }) if package_name == "dep" && by == "pkg"
+        ),
+        "{events:?}"
+    );
+    let ran: Vec<String> = runner
+        .calls()
+        .into_iter()
+        .map(|(command, _)| command)
+        .collect();
+    let count = |command: &str| ran.iter().filter(|ran| *ran == command).count();
+    assert_eq!(count("install-dep"), 1, "{ran:?}");
+    assert_eq!(count(INSTALL_CMD), 0, "{ran:?}");
+}
+
+// A recommend its own check says did not install is a failed recommend, and
+// the call still succeeds.
+#[tokio::test]
+async fn a_recommend_not_installed_after_install_does_not_fail_the_call() {
+    let temp = TempDir::new().unwrap();
+    write_install_graph(temp.path());
+    // `pkg` and `dep` are already installed; only `rec` runs an install.
+    let runner = FakeCommandRunner::new()
+        .succeeding(DEP_CHECK_CMD, b"")
+        .succeeding(CHECK_CMD, b"")
+        .failing(REC_CHECK_CMD, b"")
+        .succeeding("install-rec", b"");
+
+    let events = collect_events(
+        service(temp.path(), temp.path(), runner)
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
     assert!(
         matches!(completed(&events), OperationResult::Success(_)),
         "{events:?}"
     );
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            PackageEvent::Warning { message, .. } if message.contains("verification failed")
-        )),
-        "the failed verification must be reported: {events:?}"
-    );
+    let failed: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            PackageEvent::RecommendFailed { recommend_name, .. } => Some(recommend_name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, ["rec"], "{events:?}");
 }
 
 // A runner that answers as `FakeCommandRunner` does, and refuses every command

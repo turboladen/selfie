@@ -1,7 +1,7 @@
 use std::{fs, io::Write};
 
 use assert_cmd::Command;
-use selfie::package::Package;
+use selfie::package::{Package, PackageBuilder};
 use tempfile::TempDir;
 
 pub const SELFIE_ENV: &str = "test-env";
@@ -26,7 +26,10 @@ fn setup_optional_test_config(config_yaml: Option<&str>) -> TempDir {
     let config_dir = temp_dir.path().join(".config").join("selfie");
     fs::create_dir_all(&config_dir).unwrap();
 
-    // Create package directory
+    // Create package directory. selfie runs install and check commands here, so a
+    // fixture's relative `touch installed` writes only inside this throwaway
+    // sandbox. A fixture needs that state when its check has to say not installed
+    // before the install and installed after it.
     let package_dir = temp_dir.path().join("packages");
     fs::create_dir_all(&package_dir).unwrap();
 
@@ -46,6 +49,45 @@ fn setup_optional_test_config(config_yaml: Option<&str>) -> TempDir {
         .unwrap();
     }
     temp_dir
+}
+
+/// Set `command_timeout` to one second, the shortest the config accepts, so a
+/// check that sleeps past it gives no answer.
+///
+/// # Panics
+///
+/// Panics if the config file cannot be read or written.
+pub fn set_one_second_timeout(base_dir: &TempDir) {
+    let config_path = base_dir.path().join(".config/selfie/config.yaml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("command_timeout: 1\n");
+    fs::write(&config_path, config).unwrap();
+}
+
+/// Write `<name>.yaml` into the package directory, with `install`, an
+/// optional `check` and `dependencies` for [`SELFIE_ENV`].
+///
+/// # Panics
+///
+/// Panics if the package cannot be serialized or its file written.
+pub fn write_package(
+    base_dir: &TempDir,
+    name: &str,
+    install: &str,
+    check: Option<&str>,
+    dependencies: &[&str],
+) {
+    let package = PackageBuilder::default()
+        .name(name)
+        .environment(SELFIE_ENV, |env| {
+            let env = env.install(install).dependencies(dependencies.to_vec());
+            match check {
+                Some(check) => env.check_some(check),
+                None => env,
+            }
+        })
+        .build();
+    add_package(base_dir, &package);
 }
 
 /// # Panics

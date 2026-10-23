@@ -2231,16 +2231,17 @@ mod blank_commands {
         spec(
             &dir,
             "app",
-            "    install: \"install-app\"\n    check: \"check-app\"\n    dependencies: [pre]\n",
+            "    install: \"install-app\"\n    dependencies: [pre]\n",
         );
         spec(
             &dir,
             "pre",
             "    install: \"# TODO\"\n    check: \"check-pre\"\n",
         );
+        // `app` has no check, so nothing verifies its install and the run turns
+        // on `pre` alone.
         let runner = FakeCommandRunner::new()
             .succeeding("check-pre", b"")
-            .failing("check-app", b"")
             .succeeding("install-app", b"");
 
         let events = collect_events(

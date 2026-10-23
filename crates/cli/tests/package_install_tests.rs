@@ -12,8 +12,8 @@ fn test_package_install() {
     let package = PackageBuilder::default()
         .name("test-package")
         .environment(SELFIE_ENV, |b| {
-            b.install("echo 'Installing test package'")
-                .check_some("exit 1")
+            b.install("touch test-package.installed")
+                .check_some("test -e test-package.installed")
         })
         .build();
     add_package(&temp_dir, &package);
@@ -34,8 +34,8 @@ fn test_failing_recommend_does_not_fail_parent_install() {
     let parent = PackageBuilder::default()
         .name("parent-pkg")
         .environment(SELFIE_ENV, |b| {
-            b.install("echo 'Installing parent'")
-                .check_some("exit 1")
+            b.install("touch parent-pkg.installed")
+                .check_some("test -e parent-pkg.installed")
                 .recommends(vec!["broken-rec"])
         })
         .build();
@@ -70,8 +70,8 @@ fn test_no_recommends_flag_skips_recommends() {
     let parent = PackageBuilder::default()
         .name("skip-rec-pkg")
         .environment(SELFIE_ENV, |b| {
-            b.install("echo 'Installing'")
-                .check_some("exit 1")
+            b.install("touch skip-rec-pkg.installed")
+                .check_some("test -e skip-rec-pkg.installed")
                 .recommends(vec!["some-rec"])
         })
         .build();

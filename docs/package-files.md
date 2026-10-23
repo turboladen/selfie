@@ -261,12 +261,15 @@ anyway. A command about the current environment asks what `selfie apply` asks he
 key at the top level or in this environment, or a package spec that declares no environment at all.
 A command that shows every environment refuses a file with an unrecognized key in any of them.
 
-- `selfie package list` and `selfie spec list` list such a package as refused, with the reason, and
-  exit `0`. With `--all` they show every environment and take the second rule.
+- `selfie package list` lists such a package as refused, with the reason, and exits `3`
+  ([ADR 0010](adr/0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md));
+  `selfie spec list` lists it the same way and exits `0`. With `--all` they show every environment
+  and take the second rule.
 - `selfie spec search` shows every environment, so it takes the second rule, and lists a refused
   package when its file name matches.
-- `selfie package status` fails on a package apply would refuse and exits `1`, and reports a
-  dependency apply would refuse as unknown, with the reason.
+- `selfie package status` fails on a package apply would refuse and exits `1`. It reports a
+  dependency apply would refuse as unknown, with the reason, and exits `3`
+  ([ADR 0010](adr/0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md)).
 - `selfie spec info` describes a package apply would refuse but shows the reason in place of its
   environments and dotfiles, and exits `0`. When apply would refuse the package only in another
   environment, it shows everything, marks that environment's dotfile entries as refused, and adds a
@@ -393,6 +396,13 @@ Optional command to verify the package is installed correctly. Should exit with 
 non-zero if not. If not given, executing the `check` command will always behave as if the package is
 not yet installed.
 
+`selfie package install` runs the check again right after a successful install command, in the same
+session, to confirm the install took. If the check still says the package is not installed, the
+install fails (exit `1`), and no package that depends on it is installed. So the check has to pass
+as soon as the install command returns. If the check then gives no answer, because it timed out or
+its result could not be read, the install is reported as unconfirmed and exits `3`. A check that
+could not start at all fails the install.
+
 **Simple binary check:**
 
 ```yaml
@@ -419,6 +429,10 @@ check: |
 ```yaml
 check: systemctl is-active --quiet docker
 ```
+
+A service-state check like this one can fail right after the install, before the service has
+started, and so fail the install. Where that can happen, check the installed binary instead, as in
+`check: command -v docker`.
 
 ### `dependencies`
 

@@ -13,16 +13,16 @@ use crate::{
     config::SelfieConfig,
     package::{
         event::{
-            EventSender, OperationResult, OperationSuccess, PackageListData, PackageListItem,
-            RefusedSpec, StepEnding,
+            EnvironmentStatus, EventSender, Gap, OperationResult, OperationSuccess,
+            PackageListData, PackageListItem, RefusedSpec, StepEnding, UnknownStatus,
         },
-        port::PackageRepository,
+        port::{LookupFailure, PackageRepository},
         service::ProgressTracker,
     },
 };
 
-/// Lightweight snapshot of package identity for the JoinError fallback path.
-/// Captured before spawning tasks so we still have metadata if a task panics.
+/// A package's identity, kept beside its check task's handle so a task that
+/// panics is still listed under its own name.
 struct PackageMetadata {
     name: String,
     environments: Vec<String>,
@@ -133,21 +133,9 @@ where
     let semaphore = Arc::new(Semaphore::new(config.max_concurrency().get()));
     let package_dir: Arc<std::path::Path> = Arc::from(config.package_directory().as_path());
 
-    // Create parallel tasks for status checking with order preservation
-    // Collect package metadata for JoinError handling (values move into spawned tasks)
-    let package_metadata: Vec<PackageMetadata> = packages_to_process
-        .iter()
-        .map(|p| PackageMetadata {
-            name: p.name().to_string(),
-            environments: p.environments().keys().cloned().collect(),
-            check_command: p
-                .environments()
-                .get(config.environment())
-                .and_then(|env| env.check())
-                .map(str::to_string),
-        })
-        .collect();
-
+    // Create parallel tasks for status checking with order preservation. Each
+    // handle travels with its package's identity, so a task that panics is
+    // still listed under its own name.
     let check_futures: Vec<_> = packages_to_process
         .iter()
         .enumerate()
@@ -167,8 +155,13 @@ where
             let sender = sender.clone();
             let token = token.clone();
             let semaphore = semaphore.clone();
+            let metadata = PackageMetadata {
+                name: package_name.clone(),
+                environments: package_environments.clone(),
+                check_command: check_command.clone(),
+            };
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let status = if let Some(ref cmd) = check_command {
                     // Acquire permit before spawning a subprocess
                     let _permit = semaphore
@@ -203,38 +196,23 @@ where
                 sender.send_package_list_item(package_item.clone()).await;
 
                 (index, package_item)
-            })
+            });
+            (metadata, handle)
         })
         .collect();
 
     // Wait for all tasks and collect results in original order
     let mut results: Vec<(usize, PackageListItem)> = Vec::new();
-    for (i, handle) in check_futures.into_iter().enumerate() {
+    for (i, (metadata, handle)) in check_futures.into_iter().enumerate() {
         match handle.await {
             Ok(result) => results.push(result),
             Err(e) => {
-                // Use the captured metadata so the CLI can resolve the correct spinner.
-                // Fallback to defaults if index is somehow out of bounds — this is
-                // error-recovery code and must not panic or mask the original failure.
-                let (name, environments, check_command) = match package_metadata.get(i) {
-                    Some(meta) => (
-                        meta.name.clone(),
-                        meta.environments.clone(),
-                        meta.check_command.clone(),
-                    ),
-                    None => {
-                        tracing::warn!(
-                            index = i,
-                            "package_metadata index out of bounds in JoinError handler"
-                        );
-                        (String::new(), Vec::new(), None)
-                    }
-                };
-                // Counted with the rest, as any check that gave no answer is.
+                // Named from the metadata that travels with the handle, so the CLI
+                // resolves the right spinner.
                 let package_item = PackageListItem {
-                    check_command,
-                    name,
-                    environments,
+                    check_command: metadata.check_command,
+                    name: metadata.name,
+                    environments: metadata.environments,
                     status: Some(crate::package::event::CheckResult::CouldNotRun(
                         crate::package::event::CheckFailure::Internal {
                             message: crate::commands::BoundedText::of(&format!("Task failed: {e}")),
@@ -271,6 +249,15 @@ where
         .map(|invalid| (*invalid).clone())
         .collect();
 
+    // Every row the listing prints is covered, and each one selfie did not
+    // answer for is a gap, classified by the one rule every command uses.
+    let gaps = listing_gaps(
+        &valid_package_items,
+        &invalid_package_items,
+        &refused,
+        config.package_directory(),
+    );
+
     // Calculate the counts before moving the vectors
     let valid_count = valid_package_items.len();
     let refused_count = refused.len();
@@ -295,9 +282,54 @@ where
         valid_count,
         invalid_packages.len(),
         refused_count,
+        gaps,
         config.environment().to_string(),
         (progress.current_step(), progress.total_steps()).into(),
     ))
+}
+
+/// Returns the gaps among a listing's rows. A valid row is judged by its
+/// check, a spec that does not parse by its lookup failure, and a refused spec
+/// by its refusal.
+fn listing_gaps(
+    valid: &[PackageListItem],
+    invalid: &[crate::package::port::PackageParseError],
+    refused: &[RefusedSpec],
+    package_directory: &std::path::Path,
+) -> Vec<Gap> {
+    let valid_rows = valid.iter().map(|item| {
+        // A row with no check result is one not in this environment, shown
+        // under `--all`: the spec decides there is nothing to check here.
+        let status = item.status.as_ref().map_or(
+            EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment),
+            EnvironmentStatus::from,
+        );
+        status.gap(&item.name)
+    });
+    let invalid_rows = invalid.iter().map(|failure| {
+        let name = failure.display_name();
+        let lookup = LookupFailure::unloadable(
+            &name,
+            package_directory,
+            failure.package_path(),
+            failure.clone(),
+        );
+        Gap::new(&name, UnknownStatus::LookupFailed(lookup))
+    });
+    let refused_rows = refused.iter().map(|spec| {
+        Gap::new(
+            &spec.package_name,
+            UnknownStatus::Refused {
+                kind: spec.kind,
+                reason: spec.reason.clone(),
+            },
+        )
+    });
+    valid_rows
+        .chain(invalid_rows)
+        .chain(refused_rows)
+        .flatten()
+        .collect()
 }
 
 #[cfg(test)]
@@ -412,10 +444,10 @@ mod tests {
         (sender, rx)
     }
 
-    // A check task that panics is listed and counted like any check that gave
-    // no answer, and its item says the fault is selfie's.
+    // A check task that panics is listed, its item says the fault is selfie's,
+    // and the listing fails: a selfie bug never reads as a finding.
     #[tokio::test]
-    async fn a_panicked_check_task_is_listed_and_counted() {
+    async fn a_panicked_check_task_is_listed_and_fails_the_listing() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -455,14 +487,20 @@ mod tests {
 
         assert!(
             matches!(
-                result,
+                &result,
                 OperationResult::Success(OperationSuccess::PackageListGenerated {
                     valid_count: 1,
+                    gaps,
                     ..
-                })
+                }) if matches!(
+                    &gaps[..],
+                    [gap] if gap.package_name() == "pkg"
+                        && gap.coverage() == crate::package::event::Coverage::Error
+                )
             ),
             "{result:?}"
         );
+        assert_eq!(result.outcome(), crate::package::event::Outcome::Failed);
         let mut listed = None;
         while let Some(event) = rx.recv().await {
             if let crate::package::event::PackageEvent::PackageListLoaded { package_list, .. } =

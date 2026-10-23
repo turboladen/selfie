@@ -428,7 +428,7 @@ pub enum LookupKind {
 /// A failed lookup of one package, carrying the facts its kind needs.
 ///
 /// [`Display`](std::fmt::Display) is the error's own sentence. Its label is the
-/// variant's name in snake_case. Only
+/// variant's name in snake_case. Outside selfie, only
 /// [`PackageRepoError::into_lookup_failure`] builds one, so a variant always
 /// carries the error its kind names.
 #[derive(Debug, Clone, strum::IntoStaticStr, strum::VariantNames)]
@@ -445,6 +445,22 @@ pub enum LookupFailure {
 }
 
 impl LookupFailure {
+    /// The failure for a spec file that answers to `name` and could not be
+    /// loaded, carrying the error [`PackageError::unloadable`] chooses.
+    #[must_use]
+    pub(crate) fn unloadable(
+        name: &str,
+        packages_path: &Path,
+        failed_file: &Path,
+        cause: PackageParseError,
+    ) -> Self {
+        let error = PackageError::unloadable(name, packages_path, failed_file, cause.clone());
+        Self::Unloadable(UnloadableSpec {
+            failure: cause,
+            error: error.into(),
+        })
+    }
+
     /// The label for this failure, such as `"not_found"`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
@@ -773,7 +789,54 @@ pub enum PackageError {
     },
 }
 
-fn required_by_clause(required_by: Option<&str>) -> String {
+impl PackageError {
+    /// The error for a spec file that answers to `name` and could not be
+    /// loaded, chosen by why: a file never opened, a name refused, or YAML that
+    /// does not parse.
+    #[must_use]
+    pub(crate) fn unloadable(
+        name: &str,
+        packages_path: &Path,
+        failed_file: &Path,
+        cause: PackageParseError,
+    ) -> Self {
+        let name = name.to_string();
+        let packages_path = packages_path.to_path_buf();
+        let failed_file = failed_file.to_path_buf();
+        // A file that was never parsed gets its own variant. `ParseError` renders
+        // as "Parse error in package `ghost`", which would send the user to
+        // inspect YAML in a file selfie could not open -- whether it declined to
+        // open it or the open failed. A file refused for its name gets another,
+        // since it was not opened and the remedy is a rename.
+        //
+        // Exhaustive, so a new kind has to say which of these it is here.
+        match cause.kind() {
+            PackageParseKind::IrregularFile { .. }
+            | PackageParseKind::Refused { .. }
+            | PackageParseKind::Unreadable { .. }
+            | PackageParseKind::Io { .. } => PackageError::UnreadableFile {
+                name,
+                packages_path,
+                failed_file,
+                cause,
+            },
+            PackageParseKind::InvalidName { .. } => PackageError::UnusableName {
+                name,
+                packages_path,
+                failed_file,
+                cause,
+            },
+            PackageParseKind::Yaml { .. } => PackageError::ParseError {
+                name,
+                packages_path,
+                failed_file,
+                cause,
+            },
+        }
+    }
+}
+
+pub(crate) fn required_by_clause(required_by: Option<&str>) -> String {
     required_by.map_or_else(String::new, |by| format!(", which `{by}` requires"))
 }
 
@@ -886,6 +949,16 @@ pub struct PackageParseError {
 }
 
 impl PackageParseError {
+    /// The name a listing shows for the spec: its file's stem, or the whole
+    /// path when the stem is not UTF-8.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        self.package_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map_or_else(|| self.package_path.display().to_string(), str::to_string)
+    }
+
     /// Report `kind` against the package file at `package_path`.
     #[must_use]
     pub fn new(package_path: impl Into<PathBuf>, kind: PackageParseKind) -> Self {

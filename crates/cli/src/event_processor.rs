@@ -23,9 +23,9 @@ use crate::source_paths;
 /// | code | meaning |
 /// | ---- | ------- |
 /// | 0    | clean |
-/// | 1    | failed, refused part of its work, or could not answer |
+/// | 1    | failed, or refused part of its work; for `package check` and `package audit`, also a command that timed out or could not be started |
 /// | 2    | usage error: a bad command line, or a prompt with no terminal |
-/// | 3    | found what it was asked to look for |
+/// | 3    | finished with something to report: a finding, or a package it could not answer for |
 /// | 130  | cancelled (128 + SIGINT) |
 ///
 /// Exits compare by how much they say about the run, so the `max` of several
@@ -42,7 +42,8 @@ use crate::source_paths;
 pub(crate) enum Exit {
     /// Did everything asked, and found nothing to report.
     Clean,
-    /// Finished, and found what it was asked to look for.
+    /// Finished with something to report: what it was asked to look for, or a
+    /// package it could not answer for.
     Found,
     /// Failed, refused part of its work, or ended without saying how it went.
     Failed,

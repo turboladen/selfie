@@ -208,15 +208,10 @@ fn handle_list_event(
             // failed to parse has no environment list to filter on, so leaving one
             // out would report a clean run over a broken file.
             for invalid in &package_list.invalid_packages {
-                let path = invalid.package_path().display().to_string();
-                let filename = invalid
-                    .package_path()
-                    .file_stem()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&path);
+                let filename = invalid.display_name();
                 add(
                     &ListItemResult::Failure,
-                    filename,
+                    &filename,
                     failed(format!("unparsable: {invalid}")),
                     None,
                 );

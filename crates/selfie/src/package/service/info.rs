@@ -17,7 +17,7 @@ use crate::{
     package::{
         event::{
             CheckResult, DependencyStatus, EnvironmentStatus, EnvironmentStatusData, EventSender,
-            OperationResult, OperationSuccess, PackageInfoData, ScopedDotfile, StepEnding,
+            Gap, OperationResult, OperationSuccess, PackageInfoData, ScopedDotfile, StepEnding,
             UnknownStatus,
         },
         git::GitStatusProvider,
@@ -196,7 +196,10 @@ where
         Some(progress.next_waiting(sender, checks_label(&checked)).await)
     };
 
-    if let (Some(env_config), Some((dependencies, recommends))) = (env_config, looked_up) {
+    // The package and each dependency selfie did not answer for. Recommends are
+    // never covered.
+    let gaps = if let (Some(env_config), Some((dependencies, recommends))) = (env_config, looked_up)
+    {
         let package_dir = config.package_directory();
         let status = get_installation_status(
             package_name,
@@ -238,6 +241,18 @@ where
             sender.send_step_ended(step, ending).await;
         }
 
+        let gaps = Gap::one_per_package(
+            status
+                .as_ref()
+                .and_then(|status| status.gap(package_name))
+                .into_iter()
+                .chain(
+                    dependency_statuses
+                        .iter()
+                        .filter_map(|dependency| dependency.status.gap(&dependency.name)),
+                ),
+        );
+
         let environment_status = EnvironmentStatusData {
             environment_name: current_env.to_string(),
             is_current: true,
@@ -251,13 +266,15 @@ where
         };
 
         sender.send_environment_status(environment_status).await;
+        gaps
     } else {
         sender
             .send_warning(format!(
                 "Package '{package_name}' has no configuration for environment '{current_env}'"
             ))
             .await;
-    }
+        Vec::new()
+    };
 
     sender
         .send_debug(format!("Package status checked for: {package_name}"))
@@ -266,6 +283,7 @@ where
     OperationResult::Success(OperationSuccess::package_status_checked(
         package_name.to_string(),
         config.environment().to_string(),
+        gaps,
         (progress.current_step(), progress.total_steps()).into(),
     ))
 }
@@ -344,7 +362,7 @@ fn look_up_dependency<PR: PackageRepository>(
 
     match env_config.check() {
         Some(command) => DependencyLookup::Check(command.to_string()),
-        None => DependencyLookup::Known(check_result_to_status(CheckResult::NoCheckCommand)),
+        None => DependencyLookup::Known(EnvironmentStatus::from(&CheckResult::NoCheckCommand)),
     }
 }
 
@@ -382,24 +400,13 @@ async fn check_dependency_statuses<CR: CommandRunner>(
                         token,
                     )
                     .await;
-                    check_result_to_status(result.result)
+                    EnvironmentStatus::from(&result.result)
                 }
             };
             DependencyStatus { name, status }
         }
     });
     futures::future::join_all(statuses).await
-}
-
-fn check_result_to_status(result: CheckResult) -> EnvironmentStatus {
-    match result {
-        CheckResult::Success { .. } => EnvironmentStatus::Installed,
-        CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
-        CheckResult::NoCheckCommand => EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand),
-        CheckResult::CouldNotRun(failure) => {
-            EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(failure))
-        }
-    }
 }
 
 async fn get_installation_status(
@@ -420,7 +427,7 @@ async fn get_installation_status(
         token,
     )
     .await;
-    Some(check_result_to_status(result.result))
+    Some(EnvironmentStatus::from(&result.result))
 }
 
 #[cfg(test)]

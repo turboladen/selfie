@@ -21,6 +21,9 @@ pub(crate) struct DependencyGraph {
     /// Whether each package in `install_order` can be installed here, judged
     /// from its spec by the same read.
     pub installability: HashMap<String, Installability>,
+    /// The package that pulled each dependency into the graph. The root has no
+    /// entry.
+    pub required_by: HashMap<String, String>,
 }
 
 /// Whether a package can be installed in the current environment, as its spec
@@ -70,6 +73,7 @@ where
     let mut visit_state: HashMap<String, VisitState> = HashMap::new();
     let mut install_order: Vec<String> = Vec::new();
     let mut installability: HashMap<String, Installability> = HashMap::new();
+    let mut required_by: HashMap<String, String> = HashMap::new();
 
     sender
         .send_trace(format!(
@@ -88,6 +92,7 @@ where
         &mut visit_state,
         &mut install_order,
         &mut installability,
+        &mut required_by,
         &mut vec![root_package.to_string()],
     )
     .await?;
@@ -103,6 +108,7 @@ where
         install_order,
         root_recommends,
         installability,
+        required_by,
     })
 }
 
@@ -163,6 +169,7 @@ fn dfs<'a, PR>(
     visit_state: &'a mut std::collections::HashMap<String, VisitState>,
     install_order: &'a mut Vec<String>,
     installability: &'a mut HashMap<String, Installability>,
+    required_by: &'a mut HashMap<String, String>,
     path: &'a mut Vec<String>,
 ) -> DfsFuture<'a>
 where
@@ -234,6 +241,10 @@ where
             }
         })?;
 
+        // The package that pulled this one in, if one did. Children push onto
+        // `path` and pop off again, so it holds for the whole visit.
+        let parent = (path.len() >= 2).then(|| path[path.len() - 2].clone());
+
         // Asked before the environment is read, because reading it is the harm.
         // A key shadowing `environments:` makes this lookup miss, and a miss
         // here is indistinguishable from a package that genuinely declares no
@@ -244,10 +255,9 @@ where
             // Named the same way a missing dependency is: a user who asked to
             // install one package and is handed the name of another has no way
             // to tell why selfie looked at it.
-            let required_by = (path.len() >= 2).then(|| path[path.len() - 2].clone());
             return Err(Box::new(OperationFailure::unreadable_spec(
                 package_name.to_string(),
-                required_by,
+                parent,
                 refusal.to_string(),
             )));
         }
@@ -290,6 +300,7 @@ where
                 visit_state,
                 install_order,
                 installability,
+                required_by,
                 path,
             )
             .await?;
@@ -307,10 +318,12 @@ where
             path.pop();
         }
 
-        let required_by = (path.len() >= 2).then(|| path[path.len() - 2].clone());
+        if let Some(parent) = &parent {
+            required_by.insert(package_name.to_string(), parent.clone());
+        }
         installability.insert(
             package_name.to_string(),
-            installability_of(&package_blob, package_name, config_environment, required_by),
+            installability_of(&package_blob, package_name, config_environment, parent),
         );
         visit_state.insert(package_name.to_string(), VisitState::Visited);
         install_order.push(package_name.to_string());
