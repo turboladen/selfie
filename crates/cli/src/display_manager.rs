@@ -972,7 +972,11 @@ impl DisplayManager {
 
     #[cfg(not(test))]
     fn ask<P: Prompt>(&self, prompt: P) -> dialoguer::Result<P::Answer> {
-        prompt.ask()
+        // dialoguer hides the cursor while it asks and shows it again only
+        // after an answer.
+        prompt.ask().inspect_err(|_| {
+            let _ = console::Term::stderr().show_cursor();
+        })
     }
 
     // A test never reaches a terminal: it answers from the script, which holds

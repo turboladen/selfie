@@ -35,8 +35,9 @@ mockall.workspace = true
 # "fs" is for `mkfifo`. The snippet reader opens a file the repository already
 # read, and a fifo at that path blocks on open — the guard against that is only
 # watchable with a real one, since a mock cannot block. Same reason as the
-# entry in `crates/selfie/Cargo.toml`.
-nix = { workspace = true, features = ["fs"] }
+# entry in `crates/selfie/Cargo.toml`. "term" and "signal" are for the prompt
+# tests, which drive the binary on a pseudoterminal and signal it.
+nix = { workspace = true, features = ["fs", "signal", "term"] }
 predicates = "3.1"
 selfie = { path = "../selfie/", features = ["with_mocks"] }
 tempfile.workspace = true
