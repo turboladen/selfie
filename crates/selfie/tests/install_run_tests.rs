@@ -1,4 +1,5 @@
-// How one install run treats its recommends: the progress each one reports.
+// How one install run treats its recommends: the order they install in and
+// the progress each one reports.
 
 use std::path::Path;
 
@@ -8,7 +9,8 @@ use selfie::package::{
 };
 use tempfile::TempDir;
 use test_common::{
-    FakeCommandRunner, collect_events, create_service_test_service_with_runner as service,
+    FakeCommandRunner, SelfieConfigBuilder, collect_events,
+    create_service_test_service_with_runner as service, create_service_with_config_and_runner,
     get_operation_result,
 };
 
@@ -108,4 +110,72 @@ async fn a_recommends_progress_ends_at_its_total() {
     // Three packages of seven steps each, so the control fails if a total
     // counts the recommend alone.
     assert_eq!(total, 21, "{progress:?}");
+}
+
+// Recommends install one at a time, in the order the package lists them,
+// whatever `max_concurrency` allows. The runner yields before each answer, as
+// a running command does, so recommends awaited together would interleave.
+#[tokio::test]
+async fn recommends_install_one_at_a_time_in_the_order_listed() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    recommends:\n      - r1\n      - r2\n      - r3\n",
+    );
+    for name in ["r1", "r2", "r3"] {
+        write_spec(temp.path(), name, "");
+    }
+    let runner = ["install-pkg", "install-r1", "install-r2", "install-r3"]
+        .into_iter()
+        .fold(FakeCommandRunner::new().yielding(), |runner, command| {
+            runner.succeeding(command, b"")
+        });
+    let config = SelfieConfigBuilder::default()
+        .environment("test")
+        .package_directory(temp.path())
+        .max_concurrency_unchecked(4)
+        .build();
+
+    let events = collect_events(
+        create_service_with_config_and_runner(config, runner.clone())
+            .install("pkg", InstallOptions::default())
+            .await,
+    )
+    .await;
+
+    let recommend_events: Vec<String> = events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::RecommendStarted { recommend_name, .. } => {
+                Some(format!("started {recommend_name}"))
+            }
+            PackageEvent::RecommendSucceeded { recommend_name, .. } => {
+                Some(format!("succeeded {recommend_name}"))
+            }
+            PackageEvent::RecommendFailed { recommend_name, .. } => {
+                Some(format!("failed {recommend_name}"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        recommend_events,
+        [
+            "started r1",
+            "succeeded r1",
+            "started r2",
+            "succeeded r2",
+            "started r3",
+            "succeeded r3",
+        ],
+        "{events:#?}"
+    );
+    let installs: Vec<String> = runner
+        .calls()
+        .into_iter()
+        .map(|(command, _)| command)
+        .filter(|command| command.starts_with("install-r"))
+        .collect();
+    assert_eq!(installs, ["install-r1", "install-r2", "install-r3"]);
 }

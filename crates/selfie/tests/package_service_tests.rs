@@ -1852,11 +1852,9 @@ async fn an_audit_of_every_package_groups_the_packages_it_refuses() {
     }
 }
 
-// A cancel during the recommends names every recommend it left untried: the
-// ones in a chunk it never reached, and the ones in its own chunk that had not
-// started. Four recommends two at a time; the cancel lands in `r1`, so `r2`
-// returns from inside the first chunk without starting, and `r3` and `r4` are
-// in a chunk never reached. `r1` started, so it is not named.
+// A cancel during the recommends names every recommend it left untried, in
+// the order listed. The cancel lands in `r1`, which started, so it is not
+// named; `r2`, `r3` and `r4` come after it and never start or run a command.
 #[tokio::test]
 async fn a_cancel_during_the_recommends_names_the_ones_left_untried() {
     use selfie::{
@@ -1897,7 +1895,6 @@ async fn a_cancel_during_the_recommends_names_the_ones_left_untried() {
     let config = SelfieConfigBuilder::default()
         .environment("test")
         .package_directory(&package_dir)
-        .max_concurrency_unchecked(2)
         .build();
     let service = PackageServiceImpl::new(
         YamlPackageRepository::new(
@@ -1923,7 +1920,29 @@ async fn a_cancel_during_the_recommends_names_the_ones_left_untried() {
             e,
             PackageEvent::RecommendStarted { recommend_name, .. } if recommend_name == "r1"
         )),
-        "control: the first recommend started, so the cancel landed inside the chunk: {events:#?}"
+        "control: the first recommend started, so the cancel landed inside it: {events:#?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            PackageEvent::RecommendStarted { recommend_name, .. } if recommend_name != "r1"
+        )),
+        "no recommend after the cancel may start: {events:#?}"
+    );
+    let ran: Vec<String> = runner
+        .calls()
+        .into_iter()
+        .map(|(command, _)| command)
+        .collect();
+    assert!(
+        ran.iter().any(|command| command == "check-r1"),
+        "control: {ran:?}"
+    );
+    assert!(
+        !ran.iter().any(|command| ["r2", "r3", "r4"]
+            .iter()
+            .any(|name| command.ends_with(name))),
+        "no command may run for a recommend after the cancel: {ran:?}"
     );
     let untried: Vec<&Vec<String>> = events
         .iter()

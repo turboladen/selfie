@@ -688,6 +688,7 @@ fn after_install(result: &CheckResult, package_name: &str) -> AfterInstall {
 ///
 /// Recommends are one-level deep only — we do NOT follow recommends of recommends.
 /// Each recommend's hard dependencies ARE resolved and installed.
+/// Recommends install one at a time, in the order listed.
 /// Failures are emitted as `RecommendFailed` events but never propagate to the parent result.
 /// When a cancel leaves recommends untried, one `RecommendsUntried` event names
 /// them all.
@@ -716,31 +717,18 @@ async fn install_recommends<PR, CR>(
         ))
         .await;
 
-    // Install recommends concurrently in chunks, bounded by max_concurrency.
-    // Uses chunks+join_all (not semaphore+spawn) because the function takes
-    // borrowed references that can't move into 'static tokio tasks.
-    let max_concurrent = config.max_concurrency().get();
-
+    // One at a time, in the order listed. Two recommends' installs at once can
+    // contend for a package manager's lock, and the loser would be reported
+    // failed for a lock rather than for anything it ran.
+    //
     // Once canceled, every recommend not yet started returns at once without
-    // trying, in this chunk and every later one. All of them are named, so a
-    // canceled install never reads as one that tried every recommend.
+    // trying. All of them are named, so a canceled install never reads as one
+    // that tried every recommend.
     let mut untried: Vec<String> = Vec::new();
-    for chunk in recommends.chunks(max_concurrent) {
-        let futures: Vec<_> = chunk
-            .iter()
-            .map(|name| {
-                install_recommend_in_bulk(name, repo, config, command_runner, sender, token)
-            })
-            .collect();
-
-        let started = futures::future::join_all(futures).await;
-        untried.extend(
-            chunk
-                .iter()
-                .zip(started)
-                .filter(|(_, started)| !started)
-                .map(|(name, _)| name.clone()),
-        );
+    for name in recommends {
+        if !install_recommend_in_bulk(name, repo, config, command_runner, sender, token).await {
+            untried.push(name.clone());
+        }
     }
 
     if !untried.is_empty() {
