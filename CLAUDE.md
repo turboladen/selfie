@@ -107,8 +107,10 @@ When adding user-facing features, update `docs/` before considering the feature 
 - `docs/configuration.md` — New config settings
 - `README.md` — Status section and examples
 
-Prose uses **US spelling** — behavior, serialized, normalization, judgment. `typos` in CI does not
-catch British forms, because they are real words.
+Prose uses **US spelling** — behavior, serialized, normalization, judgment. `typos` runs with
+`locale = "en-us"`, so it rejects most British forms, but it accepts the British forms of the verb
+"cancel"; `_typos.toml` rejects those by hand. Any other British form the locale accepts still
+passes.
 
 `typos` also rejects a **deliberate** misspelling in a fixture, which unknown-key tests need — this
 paragraph tripped it once already. Probe with `echo <word> | typos -` and pick one it does not know

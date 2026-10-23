@@ -2804,7 +2804,7 @@ mod tests {
     }
 
     // The only test of this arm. Without it a regression could drop `refused`, or
-    // go back to labelling every row from the loop it stands in rather than from
+    // go back to labeling every row from the loop it stands in rather than from
     // the package, and the rest of the suite would stay green -- the CLI renders
     // this event through entirely different code.
     #[tokio::test]

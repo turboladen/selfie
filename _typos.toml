@@ -1,3 +1,16 @@
+[default]
+locale = "en-us"
+# The cancelled() functions of tokio-util and GitHub Actions cannot be renamed.
+extend-ignore-re = ['\bcancelled\(\)']
+
 [default.extend-identifiers]
 # gix API field name (short for "relative path") — cannot be renamed
 rela_path = "rela_path"
+# tokio's JoinError::is_cancelled and tokio-util's CancellationToken::is_cancelled — cannot be renamed
+is_cancelled = "is_cancelled"
+
+[default.extend-words]
+# The en-us locale accepts these British forms, so they are rejected by hand.
+cancelled = "canceled"
+cancelling = "canceling"
+cancellable = "cancelable"

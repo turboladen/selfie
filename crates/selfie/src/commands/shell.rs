@@ -2151,7 +2151,7 @@ mod tests {
 // The fixture is a script standing in for the user's shell, never the
 // developer's own: a noisy profile is, at the descriptor level, a shell that
 // writes before, during and after the `-c` string it was given. It `eval`s the
-// recipe in a real `/bin/sh`, so behaviour that depends on the shell — selfie's
+// recipe in a real `/bin/sh`, so behavior that depends on the shell — selfie's
 // `EXIT` trap displacing the profile's — is real rather than simulated.
 //
 // fish is not tested here. CI does not have it, and a test that skips when its
