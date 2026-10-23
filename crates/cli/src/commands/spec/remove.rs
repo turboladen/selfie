@@ -120,7 +120,7 @@ pub(crate) async fn handle_remove(
             Ok(true) => {}
             // A remove that removed nothing did not do what it was asked.
             Ok(false) => {
-                display.print_run_note("Package removal cancelled.");
+                display.print_run_note("Package removal canceled.");
                 return Exit::Failed;
             }
             Err(failure) => {
@@ -228,7 +228,7 @@ mod tests {
 
         let exit = super::handle_remove(&service, "tool", &config, &display, false).await;
 
-        assert_eq!(exit, Exit::Cancelled);
+        assert_eq!(exit, Exit::Canceled);
         assert!(spec.exists());
     }
 

@@ -83,7 +83,7 @@ where
     for pkg_name in &dep_graph.install_order {
         // Check for cancellation between packages
         if token.is_cancelled() {
-            return OperationResult::Failure("Installation cancelled".into());
+            return OperationResult::Failure("Installation canceled".into());
         }
 
         let installed = install_single_package(
@@ -301,7 +301,7 @@ where
 
     // Check if package is already installed. A check that could not start,
     // because nothing can start in the package directory or the operation was
-    // cancelled, ends the install here, rather than as a warning followed by
+    // canceled, ends the install here, rather than as a warning followed by
     // the same failure from the install.
     let pre_install_check = match pre_checked {
         Some(check) => check,
@@ -636,7 +636,7 @@ async fn get_environment_config<'a>(
 ///
 /// The [`CommandError`] that kept the check from starting when nothing can run
 /// in the package directory: it cannot be entered, the shell cannot start, or
-/// the install was cancelled.
+/// the install was canceled.
 async fn verify_installation<CR>(
     context: &InstallationContext<'_>,
     command_runner: &CR,

@@ -343,7 +343,7 @@ where
             // Check for cancellation before starting
             if token.is_cancelled() {
                 sender
-                    .send_canceled("Operation cancelled before start")
+                    .send_canceled("Operation canceled before start")
                     .await;
                 return;
             }
@@ -364,9 +364,9 @@ where
             )
             .await;
 
-            // If cancelled during execution, emit Canceled instead of Completed
+            // If canceled during execution, emit Canceled instead of Completed
             if token.is_cancelled() {
-                sender.send_canceled("Operation cancelled").await;
+                sender.send_canceled("Operation canceled").await;
             } else {
                 sender.send_completed(result).await;
             }

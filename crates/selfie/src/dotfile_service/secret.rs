@@ -399,11 +399,11 @@ where
         // about a cancel that lands between them. A refusal is checked ahead of
         // it: the resolve refuses before any binding runs, so a cancel cannot
         // have caused one.
-        let cancelled = self.token.is_cancelled();
+        let canceled = self.token.is_cancelled();
         let ending = match &resolved {
             Ok(_) => StepEnding::Succeeded,
             Err(_) if refusal.is_some() => StepEnding::NotRun,
-            Err(_) if cancelled => StepEnding::Cancelled,
+            Err(_) if canceled => StepEnding::Canceled,
             Err(_) => StepEnding::Failed,
         };
         self.sender.send_step_ended(step, ending).await;
@@ -417,7 +417,7 @@ where
             }
             // A command killed by the cancel failed only because the user asked
             // to stop, so the entry is reported as neither refused nor failed.
-            Err(_) if cancelled => Err(SecretOutcome::Canceled),
+            Err(_) if canceled => Err(SecretOutcome::Canceled),
             Err(e) => {
                 // Safe to surface: `ResolveError`'s Display names commands, var
                 // names, and — on failure only — truncated stderr. It never

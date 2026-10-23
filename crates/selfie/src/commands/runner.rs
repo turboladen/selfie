@@ -37,7 +37,7 @@ pub enum OutputChunk {
 /// list only the ways a command fails to run to completion. Those ways are the
 /// same for all of them: its working directory cannot be entered
 /// ([`CommandError::WorkingDirectoryUnusable`], and then no part of it runs), it
-/// cannot be started or dies part-way through, it times out, it is cancelled
+/// cannot be started or dies part-way through, it times out, it is canceled
 /// via `token`, or an output stream cannot be read to the end
 /// ([`CommandError::OutputReadFailed`]). The last includes stderr on a command
 /// whose correctness depends only on stdout — the runner reports what it could
@@ -567,9 +567,9 @@ pub enum CommandError {
         cause: Arc<std::io::Error>,
     },
 
-    /// Command was cancelled via a cancellation token
-    #[error("Command cancelled: {command}")]
-    Cancelled {
+    /// Command was canceled via a cancellation token
+    #[error("Command canceled: {command}")]
+    Canceled {
         command: String,
         working_directory: PathBuf,
     },

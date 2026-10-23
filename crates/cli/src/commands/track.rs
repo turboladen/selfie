@@ -133,7 +133,7 @@ pub(crate) async fn handle_track(
         }
         // Nothing was tracked, so the run did not do what it was asked.
         TrackChoice::Declined => {
-            display.print_run_note("Cancelled.");
+            display.print_run_note("Canceled.");
             Exit::Failed
         }
     }
@@ -859,7 +859,7 @@ mod tests {
 
         let failure = prompt_track_choice(&["bat".to_string()], "~/.batrc", &display).unwrap_err();
 
-        assert_eq!(failure.exit(), crate::event_processor::Exit::Cancelled);
+        assert_eq!(failure.exit(), crate::event_processor::Exit::Canceled);
     }
 
     // Ctrl+C at the name prompt ends the run canceled, not declined.
@@ -872,7 +872,7 @@ mod tests {
 
         let failure = prompt_track_choice(&["bat".to_string()], "~/.batrc", &display).unwrap_err();
 
-        assert_eq!(failure.exit(), crate::event_processor::Exit::Cancelled);
+        assert_eq!(failure.exit(), crate::event_processor::Exit::Canceled);
     }
 
     #[test]

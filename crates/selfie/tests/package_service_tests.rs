@@ -1297,7 +1297,7 @@ mod recommends_after_the_root_stops_loading {
 // never fail the parent, so this holds only because the operation wrapper asks
 // the token after the handler.
 #[tokio::test]
-async fn a_cancel_during_the_recommends_ends_the_stream_cancelled() {
+async fn a_cancel_during_the_recommends_ends_the_stream_canceled() {
     use selfie::{
         fs::RealFileSystem,
         package::{
@@ -1329,7 +1329,7 @@ async fn a_cancel_during_the_recommends_ends_the_stream_cancelled() {
     let runner = FakeCommandRunner::new()
         .succeeding("check-root", b"")
         .succeeding("check-rec", b"")
-        .cancelling("check-rec", &token);
+        .canceling("check-rec", &token);
     let config = service_test_config_with_dir(&package_dir);
     let service = PackageServiceImpl::new(
         YamlPackageRepository::new(
@@ -1361,13 +1361,13 @@ async fn a_cancel_during_the_recommends_ends_the_stream_cancelled() {
         events
             .iter()
             .any(|e| matches!(e, PackageEvent::Canceled { .. })),
-        "a cancelled install must say so: {events:?}"
+        "a canceled install must say so: {events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|e| matches!(e, PackageEvent::Completed { .. })),
-        "a cancelled install must not also report a result: {events:?}"
+        "a canceled install must not also report a result: {events:?}"
     );
 }
 
@@ -1891,7 +1891,7 @@ async fn a_cancel_during_the_recommends_names_the_ones_left_untried() {
     let runner = FakeCommandRunner::new()
         .succeeding("check-root", b"")
         .succeeding("check-r1", b"")
-        .cancelling("check-r1", &token);
+        .canceling("check-r1", &token);
     let config = SelfieConfigBuilder::default()
         .environment("test")
         .package_directory(&package_dir)
@@ -2003,7 +2003,7 @@ async fn a_recommend_the_cancel_stops_part_way_is_named_untried() {
     let runner = FakeCommandRunner::new()
         .succeeding("check-root", b"")
         .succeeding("check-dep", b"")
-        .cancelling("check-dep", &token);
+        .canceling("check-dep", &token);
     let config = service_test_config_with_dir(&package_dir);
     let service = PackageServiceImpl::new(
         YamlPackageRepository::new(
@@ -2089,7 +2089,7 @@ async fn a_recommend_whose_command_failed_under_a_cancel_is_reported_failed() {
         let runner = if interrupted {
             runner.erroring(
                 "install-rec",
-                CommandError::Cancelled {
+                CommandError::Canceled {
                     command: "install-rec".to_string(),
                     working_directory: package_dir.clone(),
                 },
@@ -2097,7 +2097,7 @@ async fn a_recommend_whose_command_failed_under_a_cancel_is_reported_failed() {
         } else {
             runner.failing("install-rec", b"no such formula")
         }
-        .cancelling("install-rec", &token);
+        .canceling("install-rec", &token);
         let config = service_test_config_with_dir(&package_dir);
         let service = PackageServiceImpl::new(
             YamlPackageRepository::new(
@@ -2672,7 +2672,7 @@ mod checks_that_gave_no_answer {
     fn canceled(command: &str) -> FakeCommandRunner {
         FakeCommandRunner::new().erroring(
             command,
-            CommandError::Cancelled {
+            CommandError::Canceled {
                 command: command.to_string(),
                 working_directory: PathBuf::from("/"),
             },

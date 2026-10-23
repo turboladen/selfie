@@ -211,7 +211,7 @@ rather than on output text.
 | `1`   | Failed: an error, **a refusal**, a declined prompt, or a run that ends without a result.                   |
 | `2`   | Usage: the command line could not be parsed, or a command had to ask and had no terminal.                  |
 | `3`   | Found: the command finished with **something to report**: a finding, or a package it could not answer for. |
-| `130` | Cancelled (Ctrl+C). This is the usual `128 + SIGINT` value.                                                |
+| `130` | Canceled (Ctrl+C). This is the usual `128 + SIGINT` value.                                                 |
 
 A command that has to ask a question and has no terminal to ask on, as in a script, a pipe or a CI
 job, does not wait for an answer: it exits `2` and names on stderr the flag or command that does the
@@ -319,9 +319,9 @@ not report success for a run that would refuse.
 The MCP server applies the same contract: a refusal comes back as an error result with
 `"status": "refused"`, so an assistant is not told the deploy worked. A result that could not answer
 without refusing anything, such as an audit whose command failed, is an error result with
-`"status": "failed"`. A finding is a successful call with `"status": "found"`, and a cancelled
-operation an error result with `"status": "cancelled"`. Every result also carries `outcome`:
-`"clean"`, `"found"` or `"failed"`, or `"cancelled"` for a cancelled operation.
+`"status": "failed"`. A finding is a successful call with `"status": "found"`, and a canceled
+operation an error result with `"status": "canceled"`. Every result also carries `outcome`:
+`"clean"`, `"found"` or `"failed"`, or `"canceled"` for a canceled operation.
 
 An MCP validation issue gives its place in the file as `line` and `column`, both null when it has
 none. Each `validation_result` row carries its own spec's `outcome`, in the same three words.

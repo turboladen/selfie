@@ -1771,7 +1771,7 @@ mod irregular_targets {
     //
     // Returns `None` if it did not finish, which is how a regression that
     // reintroduces the hang reports itself as a test failure. The blocked thread
-    // is left behind deliberately: it cannot be cancelled, and the process is
+    // is left behind deliberately: it cannot be canceled, and the process is
     // about to end.
     fn with_deadline<T, F>(f: F) -> Option<T>
     where

@@ -66,8 +66,8 @@ pub enum StepEnding {
     Succeeded,
     /// What was waited on failed, timed out or could not start.
     Failed,
-    /// The run was cancelled while it waited.
-    Cancelled,
+    /// The run was canceled while it waited.
+    Canceled,
     /// Nothing it was waiting to run ran: what the step was for was refused
     /// before any command started.
     NotRun,
@@ -998,7 +998,7 @@ impl OperationResult {
 
 /// How an operation ended: clean, a finding, or a failure.
 ///
-/// A cancelled operation has no outcome: it ends with
+/// A canceled operation has no outcome: it ends with
 /// [`PackageEvent::Canceled`] rather than a result.
 ///
 /// Converts to a label for an adapter: `clean`, `found` or `failed`.
@@ -4200,7 +4200,7 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
         // the stream that failed, or the program that would not start. Check that
         // before extending.
         match err {
-            CommandError::Cancelled { .. } => Self::Canceled {
+            CommandError::Canceled { .. } => Self::Canceled {
                 message: crate::commands::BoundedText::of(err),
             },
             CommandError::SpawnFailed { .. }
@@ -4595,7 +4595,7 @@ mod tests {
         let dir = || PathBuf::from("/p");
         vec![
             (
-                CommandError::Cancelled {
+                CommandError::Canceled {
                     command: cmd(),
                     working_directory: dir(),
                 },

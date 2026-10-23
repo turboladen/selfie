@@ -1235,7 +1235,7 @@ that binding and the remaining bindings for that entry are not run.
 
 Ctrl+C during `selfie apply` cancels a provider command that is still running, as it does during
 `install` and `check` — so a command waiting on a biometric or password prompt can be escaped
-without waiting out `command_timeout`. The run stops there and reports itself as cancelled; whatever
+without waiting out `command_timeout`. The run stops there and reports itself as canceled; whatever
 had already been deployed stays deployed and stays recorded.
 
 Ctrl+C during `selfie dotfiles drift` stops the check between entries. Drift reads and checksums

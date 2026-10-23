@@ -40,7 +40,7 @@ fn service<CR: CommandRunner + Clone + std::fmt::Debug + 'static>(
     service_with_token(spec_dir, package_dir, runner, CancellationToken::new())
 }
 
-// `service`, cancelled through `token`.
+// `service`, canceled through `token`.
 fn service_with_token<CR: CommandRunner + Clone + std::fmt::Debug + 'static>(
     spec_dir: &Path,
     package_dir: &Path,
@@ -466,18 +466,18 @@ async fn check_names_a_package_directory_it_cannot_enter_not_the_command() {
 }
 
 #[tokio::test]
-async fn install_stops_at_a_pre_install_check_that_was_cancelled() {
+async fn install_stops_at_a_pre_install_check_that_was_canceled() {
     let temp = TempDir::new().unwrap();
     write_spec(
         temp.path(),
         &format!("    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n"),
     );
-    let cancelled = selfie::commands::CommandError::Cancelled {
+    let canceled = selfie::commands::CommandError::Canceled {
         command: CHECK_CMD.to_string(),
         working_directory: temp.path().to_path_buf(),
     };
     let runner = FakeCommandRunner::new()
-        .erroring(CHECK_CMD, cancelled)
+        .erroring(CHECK_CMD, canceled)
         .succeeding(INSTALL_CMD, b"");
 
     let events = collect_events(
@@ -692,15 +692,15 @@ async fn a_recommend_not_installed_after_install_does_not_fail_the_call() {
 }
 
 // A runner that answers as `FakeCommandRunner` does, and refuses every command
-// once `token` is cancelled, as the shell runner does.
+// once `token` is canceled, as the shell runner does.
 #[derive(Debug, Clone)]
 struct CancelAware {
     inner: FakeCommandRunner,
 }
 
 impl CancelAware {
-    fn cancelled(command: &str, dir: &Path) -> selfie::commands::CommandError {
-        selfie::commands::CommandError::Cancelled {
+    fn canceled(command: &str, dir: &Path) -> selfie::commands::CommandError {
+        selfie::commands::CommandError::Canceled {
             command: command.to_string(),
             working_directory: dir.to_path_buf(),
         }
@@ -719,7 +719,7 @@ impl CommandRunner for CancelAware {
         token: &CancellationToken,
     ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
         if token.is_cancelled() {
-            return Err(Self::cancelled(command, working_dir));
+            return Err(Self::canceled(command, working_dir));
         }
         self.inner.execute(command, working_dir, token).await
     }
@@ -732,7 +732,7 @@ impl CommandRunner for CancelAware {
         token: &CancellationToken,
     ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
         if token.is_cancelled() {
-            return Err(Self::cancelled(command, working_dir));
+            return Err(Self::canceled(command, working_dir));
         }
         self.inner
             .execute_in_dir(command, working_dir, timeout, token)
@@ -748,7 +748,7 @@ impl CommandRunner for CancelAware {
         token: &CancellationToken,
     ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
         if token.is_cancelled() {
-            return Err(Self::cancelled(command, working_dir));
+            return Err(Self::canceled(command, working_dir));
         }
         self.inner
             .execute_streaming(command, working_dir, timeout, output_sender, token)
@@ -772,7 +772,7 @@ impl CommandRunner for CancelAware {
 // check. The install ends as a cancellation: no warning about a check that never
 // ran, and nothing runs after it.
 #[tokio::test]
-async fn a_cancel_before_the_post_install_check_ends_the_install_cancelled() {
+async fn a_cancel_before_the_post_install_check_ends_the_install_canceled() {
     let temp = TempDir::new().unwrap();
     write_spec(
         temp.path(),
@@ -783,7 +783,7 @@ async fn a_cancel_before_the_post_install_check_ends_the_install_cancelled() {
         inner: FakeCommandRunner::new()
             .failing(CHECK_CMD, b"")
             .succeeding(INSTALL_CMD, b"")
-            .cancelling(INSTALL_CMD, &token),
+            .canceling(INSTALL_CMD, &token),
     };
 
     let events = collect_events(
@@ -797,13 +797,13 @@ async fn a_cancel_before_the_post_install_check_ends_the_install_cancelled() {
         events
             .iter()
             .any(|e| matches!(e, PackageEvent::Canceled { .. })),
-        "a cancelled install must say so: {events:?}"
+        "a canceled install must say so: {events:?}"
     );
     assert!(
         !events
             .iter()
             .any(|e| matches!(e, PackageEvent::Completed { .. })),
-        "a cancelled install must not also report a result: {events:?}"
+        "a canceled install must not also report a result: {events:?}"
     );
     assert!(
         !events
@@ -825,6 +825,6 @@ async fn a_cancel_before_the_post_install_check_ends_the_install_cancelled() {
             e,
             PackageEvent::Progress { message, .. } if message.contains("installation completed")
         )),
-        "the install carried on past the cancelled check: {events:?}"
+        "the install carried on past the canceled check: {events:?}"
     );
 }

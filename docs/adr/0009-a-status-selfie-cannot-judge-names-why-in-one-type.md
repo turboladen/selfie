@@ -93,7 +93,7 @@ A check gives `CheckResult::Success` or `CheckResult::Failed` when it ran and an
 
 | `CommandError`                                        | `CheckFailure`             |
 | ----------------------------------------------------- | -------------------------- |
-| `Cancelled`                                           | `Canceled`                 |
+| `Canceled`                                            | `Canceled`                 |
 | `SpawnFailed`, `StdoutSpawn`, `StderrSpawn`           | `CouldNotStart`            |
 | `WorkingDirectoryUnusable`                            | `WorkingDirectoryUnusable` |
 | `Timeout`                                             | `TimedOut`                 |

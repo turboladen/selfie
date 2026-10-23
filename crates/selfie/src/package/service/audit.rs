@@ -141,7 +141,7 @@ where
     // borrowed references that can't move into 'static tokio tasks.
     for chunk in package_names.chunks(max_concurrent) {
         if token.is_cancelled() {
-            return OperationResult::Failure("Operation cancelled".into());
+            return OperationResult::Failure("Operation canceled".into());
         }
 
         let futures: Vec<_> = chunk
@@ -192,7 +192,7 @@ impl AuditTally {
 ///
 /// Errors are emitted as events rather than propagated, so the bulk
 /// operation can continue with remaining packages. `None` when the run was
-/// cancelled before this package was audited.
+/// canceled before this package was audited.
 async fn audit_single_in_bulk<PR, CR>(
     package_name: &str,
     repo: &PR,
@@ -915,7 +915,7 @@ mod tests {
                 "could_not_start",
             ),
             (
-                CommandError::Cancelled {
+                CommandError::Canceled {
                     command: "sleep 9".to_string(),
                     working_directory: std::path::PathBuf::from("/pkg"),
                 },

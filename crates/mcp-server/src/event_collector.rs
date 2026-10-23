@@ -119,7 +119,7 @@ fn gap_json(gap: &Gap) -> Value {
 
 pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     let mut final_result = None;
-    let mut cancelled = None;
+    let mut canceled = None;
     let mut data_events: Vec<Value> = Vec::new();
 
     tokio::pin!(stream);
@@ -127,7 +127,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     while let Some(event) = stream.next().await {
         match &event {
             PackageEvent::Completed { result, .. } => final_result = Some(result.clone()),
-            PackageEvent::Canceled { reason, .. } => cancelled = Some(reason.clone()),
+            PackageEvent::Canceled { reason, .. } => canceled = Some(reason.clone()),
             _ => {}
         }
 
@@ -167,10 +167,10 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
             ),
         },
         Some(OperationResult::Failure(f)) => (false, failure_json(f)),
-        None => match cancelled {
+        None => match canceled {
             Some(reason) => (
                 false,
-                serde_json::json!({ "status": "cancelled", "reason": reason, "outcome": "cancelled" }),
+                serde_json::json!({ "status": "canceled", "reason": reason, "outcome": "canceled" }),
             ),
             // An operation that reported nothing did not do what was asked.
             None => (
@@ -188,7 +188,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     }
     // An apply result that completed carries both counts whatever its status, so a
     // caller never reads a missing field as zero. A run that stopped or was
-    // cancelled has no counts to give. `refused` wins the status when both are set:
+    // canceled has no counts to give. `refused` wins the status when both are set:
     // a refusal names a condition the user can act on.
     if let Some(OperationResult::Success(s)) = &final_result
         && let (Some(refused), Some(failed)) = (s.refused_count(), s.failed_count())
@@ -2305,20 +2305,20 @@ mod tests {
         assert_eq!(result.data["result"]["unjudged_count"], 2);
     }
 
-    // A cancelled operation says so instead of reporting a missing completion.
+    // A canceled operation says so instead of reporting a missing completion.
     #[tokio::test]
-    async fn a_cancelled_operation_is_reported_as_cancelled() {
+    async fn a_canceled_operation_is_reported_as_canceled() {
         let events = vec![PackageEvent::Canceled {
             operation_info: test_op_info(),
-            reason: "Apply cancelled".to_string(),
+            reason: "Apply canceled".to_string(),
         }];
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
         assert!(!result.success);
-        assert_eq!(result.data["result"]["status"], "cancelled");
-        assert_eq!(result.data["result"]["reason"], "Apply cancelled");
-        assert_eq!(result.data["result"]["outcome"], "cancelled");
+        assert_eq!(result.data["result"]["status"], "canceled");
+        assert_eq!(result.data["result"]["reason"], "Apply canceled");
+        assert_eq!(result.data["result"]["outcome"], "canceled");
     }
 
     // The reason is a field, so telling a typo from a spec that failed to load
@@ -2804,7 +2804,7 @@ mod tests {
     }
 
     // The only test of this arm. Without it a regression could drop `refused`, or
-    // go back to labelling every row from the loop it stands in rather than from
+    // go back to labeling every row from the loop it stands in rather than from
     // the package, and the rest of the suite would stay green -- the CLI renders
     // this event through entirely different code.
     #[tokio::test]

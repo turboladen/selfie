@@ -23,7 +23,7 @@ use crate::{
     privilege::{Privilege, SudoPolicy, SudoRefusal, WriteScope},
 };
 
-use super::apply::{APPLY_CANCELLED, ApplyContext, Scope, handle_apply};
+use super::apply::{APPLY_CANCELED, ApplyContext, Scope, handle_apply};
 use super::collect::{Collected, collect_all_packages, collect_packages};
 use super::drift::handle_check_drift;
 use super::orphan::Catalog;
@@ -258,10 +258,10 @@ where
             };
 
             // A collection failure is a failure however the token stands; only the
-            // handler says whether the run itself was cancelled, as drift's does.
+            // handler says whether the run itself was canceled, as drift's does.
             match result {
                 Some(result) => sender.send_completed(result).await,
-                None => sender.send_canceled(APPLY_CANCELLED).await,
+                None => sender.send_canceled(APPLY_CANCELED).await,
             }
         })
     }
@@ -336,11 +336,11 @@ where
 
             // The handler says whether it stopped part way; the token is not asked
             // again here. A run that finished is a whole answer even if the token
-            // was cancelled after it, and a collection failure is a failure however
+            // was canceled after it, and a collection failure is a failure however
             // the token stands.
             match outcome {
                 Some(result) => sender.send_completed(result).await,
-                None => sender.send_canceled("Drift check cancelled").await,
+                None => sender.send_canceled("Drift check canceled").await,
             }
         })
     }
