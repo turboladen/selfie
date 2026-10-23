@@ -469,8 +469,10 @@ impl EventProcessor {
                     .print_status(format!("Installing recommended: {recommend_name}"));
             }
 
+            // `print_success` and `print_warning` add the line's mark, so the
+            // message carries none of its own.
             PackageEvent::RecommendSucceeded { recommend_name, .. } => {
-                self.display.print_success(format!("  ✓ {recommend_name}"));
+                self.display.print_success(recommend_name);
             }
 
             PackageEvent::RecommendFailed {
@@ -479,7 +481,7 @@ impl EventProcessor {
                 ..
             } => {
                 self.display
-                    .print_warning(format!("  ⚠ {recommend_name} failed: {error}"));
+                    .print_warning(format!("{recommend_name} failed: {error}"));
             }
 
             // Shown at every verbosity, not through `print_status`: a run that
@@ -1067,6 +1069,44 @@ mod tests {
                 .contains("Canceled before installing recommended packages: r2, r3"),
             "{printed:?}"
         );
+    }
+
+    // A recommend's verdict line is marked once, by the display: the message
+    // the display marks carries no mark of its own.
+    #[tokio::test]
+    async fn a_recommend_verdict_carries_one_mark() {
+        use crate::display_manager::Channel;
+
+        let info = || make_operation_info("root");
+        for (event, channel, expected) in [
+            (
+                PackageEvent::RecommendSucceeded {
+                    operation_info: info(),
+                    recommend_name: "rec".to_string(),
+                },
+                Channel::Stdout,
+                "rec",
+            ),
+            (
+                PackageEvent::RecommendFailed {
+                    operation_info: info(),
+                    recommend_name: "rec".to_string(),
+                    error: "no such formula".to_string(),
+                },
+                Channel::Stderr,
+                "rec failed: no such formula",
+            ),
+        ] {
+            let printed = printed_for(DisplayManager::new(false), vec![event]).await;
+
+            assert_eq!(printed.len(), 1, "{printed:?}");
+            assert_eq!(printed[0].0, channel, "{printed:?}");
+            assert_eq!(printed[0].1, expected, "{printed:?}");
+            assert!(
+                !printed[0].1.contains('✓') && !printed[0].1.contains('⚠'),
+                "{printed:?}"
+            );
+        }
     }
 
     // A package settled earlier in the run gets one line at default verbosity,
