@@ -3,7 +3,8 @@ pub mod common;
 use std::fs;
 
 use common::{
-    RunOutput, SELFIE_ENV, package_repo_with_remote, run_sandboxed, setup_default_test_config,
+    FAILED, RunOutput, SELFIE_ENV, package_repo_with_remote, run_sandboxed,
+    setup_default_test_config,
 };
 
 // Packages refused whole for one reason print as one warning naming them all,
@@ -67,7 +68,7 @@ fn drift_groups_its_refusals_and_keeps_its_finding() {
 
     let out = run(&temp_dir, &["dotfiles", "drift"]);
 
-    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert_eq!(out.code, Some(FAILED), "{}", out.stderr);
     assert_grouped(&out);
     assert!(out.stdout.contains("Drift in"), "{}", out.stdout);
 }
@@ -78,7 +79,7 @@ fn apply_dry_run_groups_its_refusals() {
 
     let out = run(&temp_dir, &["apply", "--dry-run"]);
 
-    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert_eq!(out.code, Some(FAILED), "{}", out.stderr);
     assert_grouped(&out);
 }
 

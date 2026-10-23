@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, sandboxed_command, setup_default_test_config};
 
 // What every command that enumerates specs prints when it skips one it could not
 // parse. Four commands share one sentence, and these are the only assertions on
@@ -124,7 +124,7 @@ fn the_readable_spec_is_still_processed() {
 }
 
 // The exit status and the terminal text are what the library tests cannot see.
-// A handler that claimed the failure event would print it and exit 0.
+// A handler that claimed the failure event would print it and exit clean.
 fn apply_output(temp_dir: &tempfile::TempDir, name: &str) -> (Option<i32>, String) {
     let output = sandboxed_command(temp_dir)
         .args(["apply", name])
@@ -146,7 +146,7 @@ fn apply_naming_an_unparsable_spec_fails_and_says_it_could_not_be_loaded() {
 
     let (code, text) = apply_output(&temp_dir, "creds");
 
-    assert_eq!(code, Some(1), "output was: {text}");
+    assert_eq!(code, Some(FAILED), "output was: {text}");
     assert!(
         text.contains("Package 'creds' could not be loaded"),
         "output was: {text}"
@@ -160,7 +160,7 @@ fn apply_naming_no_package_fails() {
 
     let (code, text) = apply_output(&temp_dir, "nope");
 
-    assert_eq!(code, Some(1), "output was: {text}");
+    assert_eq!(code, Some(FAILED), "output was: {text}");
     assert!(
         text.contains("No package named 'nope' was found"),
         "output was: {text}"
@@ -201,7 +201,7 @@ fn drift_does_not_claim_a_clean_check_over_a_spec_it_could_not_load() {
         stdout.contains("✗ Dotfile drift check") && stdout.contains("1 refused"),
         "must count the spec it could not load as refused: {stdout}"
     );
-    assert_eq!(code, Some(1), "output was: {stdout}{stderr}");
+    assert_eq!(code, Some(FAILED), "output was: {stdout}{stderr}");
 }
 
 // Control for the assertion above: with every spec loadable the clean check is
@@ -228,7 +228,7 @@ fn drift_reports_a_clean_check_when_every_spec_loads() {
         stdout.contains("0 refused"),
         "nothing was skipped, and the line says so: {stdout}"
     );
-    assert_eq!(code, Some(0), "output was: {stdout}{stderr}");
+    assert_eq!(code, Some(CLEAN), "output was: {stdout}{stderr}");
 }
 
 // A named apply says nothing about specs it was not asked for, even one it could
@@ -244,11 +244,11 @@ fn a_named_apply_does_not_report_another_spec_it_could_not_load() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(!stderr.contains("creds.yml"), "{stderr}");
-    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(output.status.code(), Some(CLEAN), "{stderr}");
 }
 
 // `selfie apply` with no name counts a spec it could not load as a refusal and
-// exits 1, while a named apply of a loadable spec is not held to account for an
+// exits `FAILED`, while a named apply of a loadable spec is not held to account for an
 // unrelated file.
 #[test]
 fn apply_all_exits_1_over_a_spec_it_could_not_load_and_a_named_apply_does_not() {
@@ -265,10 +265,10 @@ fn apply_all_exits_1_over_a_spec_it_could_not_load_and_a_named_apply_does_not() 
 
     let all_stdout = String::from_utf8_lossy(&all.stdout);
     assert!(all_stdout.contains("1 refused"), "{all_stdout}");
-    assert_eq!(all.status.code(), Some(1), "{all_stdout}");
+    assert_eq!(all.status.code(), Some(FAILED), "{all_stdout}");
     assert_eq!(
         named.status.code(),
-        Some(0),
+        Some(CLEAN),
         "{}",
         String::from_utf8_lossy(&named.stderr)
     );

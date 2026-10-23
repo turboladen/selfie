@@ -13,7 +13,7 @@ pub mod common;
 
 use std::path::Path;
 
-use common::{SELFIE_ENV, sandboxed_command};
+use common::{FAILED, SELFIE_ENV, sandboxed_command};
 use tempfile::TempDir;
 
 const MISSING_DIR_WARNING: &str = "standalone dotfiles will not be read";
@@ -297,7 +297,7 @@ fn dotfiles_track_refuses_once_when_the_dotfiles_directory_is_missing() {
 
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(FAILED),
         "tracking into a directory that is not there must fail, got:\n{combined}"
     );
     assert_eq!(
@@ -662,7 +662,7 @@ fn dotfiles_track_with_a_file_at_the_package_directory_names_the_directory() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(FAILED), "stderr:\n{stderr}");
     assert!(
         stderr.contains(&format!(
             "{} is not a directory, it is a regular file",

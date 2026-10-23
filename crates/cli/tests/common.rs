@@ -7,6 +7,19 @@ use tempfile::TempDir;
 pub const SELFIE_ENV: &str = "test-env";
 const SELFIE_BIN_NAME: &str = "selfie";
 
+/// Exit code of a command that did what it was asked and found nothing to report.
+pub const CLEAN: i32 = 0;
+/// Exit code of an error, a refusal, a declined prompt, or a run that ends without a result.
+pub const FAILED: i32 = 1;
+/// Exit code of a command line that could not be parsed, or a command that had to ask and had no
+/// terminal.
+pub const USAGE: i32 = 2;
+/// Exit code of a command that finished with something to report: a finding, or a package it could
+/// not answer for.
+pub const FOUND: i32 = 3;
+/// Exit code of a run cancelled with Ctrl+C, the usual `128 + SIGINT` value.
+pub const CANCELLED: i32 = 130;
+
 // Helper to create a temporary config environment
 #[must_use]
 pub fn setup_default_test_config() -> TempDir {

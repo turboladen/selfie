@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{SELFIE_ENV, git, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, SELFIE_ENV, git, sandboxed_command, setup_default_test_config};
 
 fn sandbox_with_one_unparsable_spec_in_a_git_repo() -> tempfile::TempDir {
     let temp_dir = setup_default_test_config();
@@ -56,7 +56,7 @@ fn sync_status_does_not_report_success_over_a_spec_it_could_not_load() {
     // git status when drift cannot be fully checked -- so an unloaded spec
     // does not fail the command. This asserts the exit code selfie actually
     // returns rather than a code chosen to fit an assumption.
-    assert_eq!(output.status.code(), Some(0), "output was: {text}");
+    assert_eq!(output.status.code(), Some(CLEAN), "output was: {text}");
 }
 
 // A sandbox whose deploy state file cannot be parsed, and no drift to report
@@ -127,7 +127,7 @@ fn sync_status_does_not_report_success_over_an_unparsable_deploy_state() {
     // The drift check is non-fatal by design, so a warning it cannot act on
     // does not fail the command. This asserts the exit code selfie actually
     // returns rather than a code chosen to fit an assumption.
-    assert_eq!(output.status.code(), Some(0), "output was: {text}");
+    assert_eq!(output.status.code(), Some(CLEAN), "output was: {text}");
 }
 
 // A sandbox whose `dotfiles_directory` is configured but not there, with no
@@ -195,5 +195,5 @@ fn sync_status_does_not_report_success_over_a_missing_dotfiles_directory() {
     // The drift check is non-fatal by design, so a warning it cannot act on
     // does not fail the command. This asserts the exit code selfie actually
     // returns rather than a code chosen to fit an assumption.
-    assert_eq!(output.status.code(), Some(0), "output was: {text}");
+    assert_eq!(output.status.code(), Some(CLEAN), "output was: {text}");
 }

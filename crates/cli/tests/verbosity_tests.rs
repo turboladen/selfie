@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // What each command shows at default verbosity and under `--verbose`, and on
 // which stream. stdout carries the answer; stderr carries everything about the
@@ -67,7 +67,7 @@ fn spec_info_shows_only_its_table_by_default() {
 
     let out = run(&temp_dir, &["spec", "info", "bat"]);
 
-    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(out.code, Some(CLEAN), "{}", out.stderr);
     assert_eq!(count(&out.stdout, "*test-env"), 1, "{}", out.stdout);
     for text in [&out.stdout, &out.stderr] {
         assert_eq!(count(text, SPEC_INFO_HEADER), 0, "{text}");
@@ -215,7 +215,7 @@ fn apply_prints_no_header_by_default() {
 
     let out = run(&temp_dir, &["apply", "--dry-run"]);
 
-    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(out.code, Some(CLEAN), "{}", out.stderr);
     for text in [&out.stdout, &out.stderr] {
         assert_eq!(count(text, "Dotfile apply in environment"), 0, "{text}");
     }
@@ -234,7 +234,7 @@ fn an_install_command_output_is_shown_only_when_verbose_on_stderr() {
     );
 
     let quiet = run(&temp_dir, &["package", "install", "echoer"]);
-    assert_eq!(quiet.code, Some(0), "{}", quiet.stderr);
+    assert_eq!(quiet.code, Some(CLEAN), "{}", quiet.stderr);
     assert_eq!(
         count(&quiet.stderr, "MARKER-FROM-INSTALL"),
         0,
@@ -284,7 +284,7 @@ fn a_failing_install_shows_its_stderr_by_default() {
 
     let out = run(&temp_dir, &["package", "install", "broken"]);
 
-    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert_eq!(out.code, Some(FAILED), "{}", out.stderr);
     // Its own line, apart from the error that quotes the command.
     assert_eq!(
         out.stderr
@@ -311,7 +311,7 @@ fn the_config_file_setting_is_as_verbose_as_the_flag() {
 
     let out = run(&temp_dir, &["spec", "info", "bat"]);
 
-    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(out.code, Some(CLEAN), "{}", out.stderr);
     assert!(
         out.stderr.lines().any(|l| l.ends_with(SPEC_INFO_HEADER)),
         "{}",
@@ -330,7 +330,7 @@ fn without_the_setting_or_the_flag_there_are_no_debug_logs() {
 
     let out = run(&temp_dir, &["spec", "info", "bat"]);
 
-    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(out.code, Some(CLEAN), "{}", out.stderr);
     assert_eq!(count(&out.stderr, "Final config"), 0, "{}", out.stderr);
 }
 
@@ -348,7 +348,7 @@ fn a_verbose_run_logs_even_when_the_config_fails_to_load() {
     for (args, logs) in [(&["-v", "spec", "list"][..], 1), (&["spec", "list"][..], 0)] {
         let out = run(&temp_dir, args);
 
-        assert_ne!(out.code, Some(0), "{args:?}: {}", out.stderr);
+        assert_ne!(out.code, Some(CLEAN), "{args:?}: {}", out.stderr);
         assert_eq!(
             count(&out.stderr, "CLI arguments"),
             logs,

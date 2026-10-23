@@ -1,12 +1,12 @@
 //! `selfie spec edit` opens the user's file without rewriting it first.
 //!
-//! These drive the real binary with `EDITOR=true`, an editor that exits 0 having
+//! These drive the real binary with `EDITOR=true`, an editor that exits cleanly having
 //! changed nothing, so what the file looks like afterwards is entirely down to
 //! what selfie did to it before and after the editor ran.
 
 pub mod common;
 
-use common::{sandboxed_command, setup_default_test_config};
+use common::{FAILED, sandboxed_command, setup_default_test_config};
 use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 
@@ -188,7 +188,7 @@ fn spec_edit_refusal_for_an_occupied_path_does_not_blame_capitalization() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(FAILED), "stderr:\n{stderr}");
     assert!(
         stderr.contains(
             "is already taken by something selfie did not find under that name; selfie will not \

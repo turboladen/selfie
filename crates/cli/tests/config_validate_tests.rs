@@ -1,6 +1,6 @@
 pub mod common;
 
-use common::{sandboxed_command, setup_default_test_config, setup_test_config};
+use common::{FAILED, sandboxed_command, setup_default_test_config, setup_test_config};
 use predicates::prelude::*;
 
 #[test]
@@ -118,9 +118,9 @@ fn test_validate_config_with_nonexistent_directory_shows_error() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
 
-    // An error is a failure, which exits 1.
+    // An error is a failure, which exits `FAILED`.
     cmd.assert()
-        .code(1)
+        .code(FAILED)
         .stdout(predicates::str::contains("Validation failed."))
         .stdout(predicates::str::contains("does not exist"));
 }

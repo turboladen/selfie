@@ -3,7 +3,7 @@ pub mod common;
 use std::{fs, io::Write};
 
 use common::{
-    SELFIE_ENV, add_package, get_command, sandboxed_command, set_one_second_timeout,
+    FAILED, FOUND, SELFIE_ENV, add_package, get_command, sandboxed_command, set_one_second_timeout,
     setup_default_test_config, setup_test_config,
 };
 use predicates::prelude::*;
@@ -155,7 +155,7 @@ fn test_package_file_invalid_yaml_error() {
     cmd.args(["package", "list"]);
 
     cmd.assert()
-        .code(3) // the list continues, names the file, and exits 3 for it
+        .code(FOUND) // the list continues, names the file, and exits as a finding for it
         .stdout(predicate::str::contains("invalid-package"));
 }
 
@@ -176,9 +176,9 @@ name: "incomplete-package"
     cmd.args(["package", "list"]);
 
     // The package parses, and apply refuses it for declaring no environment.
-    // The listing says so rather than leaving it out, and exits 3 for it.
+    // The listing says so rather than leaving it out, and exits as a finding for it.
     cmd.assert()
-        .code(3)
+        .code(FOUND)
         .stdout(predicate::str::contains(
             "incomplete-package ┆ refused (incomplete-package.yaml)",
         ))
@@ -245,10 +245,10 @@ fn test_package_check_command_failure() {
     cmd.args(["package", "check", "failing-check-package"]);
 
     // A check that ran and exited non-zero answered the question: not installed.
-    // That is the finding `check` was asked for, so it exits 3 and reports the
+    // That is the finding `check` was asked for, so it exits as a finding and reports the
     // result, not a command error.
     cmd.assert()
-        .code(3)
+        .code(FOUND)
         .stderr(predicate::str::contains("Check failed"))
         .stderr(predicate::str::contains("Command error").not());
 }
@@ -275,7 +275,7 @@ fn test_package_check_command_timeout() {
     // finding. It says it timed out, names the setting, and does not call a
     // command that ran too long an invalid one.
     cmd.assert()
-        .code(1)
+        .code(FAILED)
         .stderr(predicate::str::contains(
             "`sleep 5` timed out after 1 second, the limit `command_timeout` sets",
         ))
@@ -514,7 +514,7 @@ fn test_large_number_of_invalid_packages() {
 
     // Should handle all invalid packages gracefully
     cmd.assert()
-        .code(3)
+        .code(FOUND)
         .stdout(predicate::str::contains("invalid-"));
 }
 
@@ -583,7 +583,7 @@ fn test_partial_package_directory_corruption() {
 
     // Should list valid packages and report errors for invalid ones
     cmd.assert()
-        .code(3)
+        .code(FOUND)
         .stdout(predicate::str::contains("valid-package"))
         .stdout(predicate::str::contains("corrupted"));
 }
@@ -626,6 +626,6 @@ environments:
 
     // Should show the working package and report all errors
     cmd.assert()
-        .code(3)
+        .code(FOUND)
         .stdout(predicate::str::contains("working-package"));
 }

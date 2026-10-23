@@ -1,19 +1,14 @@
 //! The exit code each command reports for a clean run, a finding, and a failure.
 //!
 //! Every assertion names the exact code. A test asserting only "non-zero" passes
-//! for a finding (3) and a failure (1) alike, so it cannot tell the two apart.
+//! for a finding and a failure alike, so it cannot tell the two apart.
 
 pub mod common;
 
 use common::{
-    SELFIE_ENV, sandboxed_command, set_one_second_timeout, setup_default_test_config,
-    setup_test_config_with_state_directory as sandbox, write_package,
+    CLEAN, FAILED, FOUND, SELFIE_ENV, USAGE, sandboxed_command, set_one_second_timeout,
+    setup_default_test_config, setup_test_config_with_state_directory as sandbox, write_package,
 };
-
-const CLEAN: i32 = 0;
-const FAILED: i32 = 1;
-const USAGE: i32 = 2;
-const FOUND: i32 = 3;
 
 fn write_spec(temp: &tempfile::TempDir, name: &str, yaml: &str) {
     let packages = temp.path().join("packages");
@@ -130,7 +125,7 @@ fn retargeted() -> tempfile::TempDir {
 #[test]
 fn drift_exits_three_when_it_could_not_check_for_orphans() {
     let temp = retargeted();
-    // Deploys the new target. Left undeployed it is drift, which exits 3 by
+    // Deploys the new target. Left undeployed it is drift, which exits as a finding by
     // itself and hides whether the unjudged record is counted at all.
     let (code, output) = run(&temp, &["apply", "-y"]);
     assert_eq!(code, Some(CLEAN), "{output}");
@@ -527,7 +522,7 @@ fn spec_validate_exits_three_on_a_warning() {
 }
 
 // Commands run through the user's own shell, so one that does not parse as POSIX
-// sh is a warning, which is a finding (3), never an error (1): fish's `\'` inside
+// sh is a warning, which is a finding, never an error: fish's `\'` inside
 // single quotes, and a trailing backslash.
 #[test]
 fn spec_validate_exits_three_for_a_command_that_is_not_posix_sh() {

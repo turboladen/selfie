@@ -1,5 +1,5 @@
 // A command that needs to ask and has no terminal to ask on ends as a usage
-// error (exit 2), names what to run instead, and changes nothing.
+// error, names what to run instead, and changes nothing.
 //
 // The test process gives `selfie` no terminal on stderr, which is what the
 // prompt door checks, so every run here is the no-terminal case.
@@ -8,9 +8,9 @@ pub mod common;
 
 use std::fs;
 
-use common::{SELFIE_ENV, package_repo_with_remote, run_sandboxed, setup_default_test_config};
-
-const USAGE: Option<i32> = Some(2);
+use common::{
+    SELFIE_ENV, USAGE, package_repo_with_remote, run_sandboxed, setup_default_test_config,
+};
 
 fn write_spec(temp: &tempfile::TempDir, name: &str) -> std::path::PathBuf {
     let path = temp.path().join("packages").join(format!("{name}.yml"));
@@ -38,7 +38,7 @@ fn spec_create_interactive_without_a_terminal_is_a_usage_error() {
 
     let out = run_sandboxed(&temp, &["spec", "create", "fresh", "--interactive"]);
 
-    assert_eq!(out.code, USAGE, "{}{}", out.stdout, out.stderr);
+    assert_eq!(out.code, Some(USAGE), "{}{}", out.stdout, out.stderr);
     assert!(
         out.stderr
             .contains("spec create --interactive needs a terminal"),
@@ -69,7 +69,7 @@ fn spec_edit_of_a_new_name_without_a_terminal_is_a_usage_error() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    assert_eq!(out.status.code(), USAGE, "{stderr}");
+    assert_eq!(out.status.code(), Some(USAGE), "{stderr}");
     assert!(stderr.contains("needs a terminal"), "{stderr}");
     assert!(stderr.contains("selfie spec create fresh"), "{stderr}");
     assert!(
@@ -86,7 +86,7 @@ fn spec_remove_without_a_terminal_is_a_usage_error_and_keeps_the_file() {
 
     let out = run_sandboxed(&temp, &["spec", "remove", "tool"]);
 
-    assert_eq!(out.code, USAGE, "{}{}", out.stdout, out.stderr);
+    assert_eq!(out.code, Some(USAGE), "{}{}", out.stdout, out.stderr);
     assert!(out.stderr.contains("Pass --yes"), "{}", out.stderr);
     assert!(path.exists(), "the spec must not be removed unasked");
 }
@@ -111,7 +111,7 @@ fn sync_push_without_a_terminal_is_a_usage_error_and_commits_nothing() {
 
     let out = run_sandboxed(&temp, &["sync", "push"]);
 
-    assert_eq!(out.code, USAGE, "{}{}", out.stdout, out.stderr);
+    assert_eq!(out.code, Some(USAGE), "{}{}", out.stdout, out.stderr);
     assert!(out.stderr.contains("Pass --yes"), "{}", out.stderr);
     // The preview exists to be confirmed, so a run that cannot ask prints none.
     assert_eq!(out.stdout, "");

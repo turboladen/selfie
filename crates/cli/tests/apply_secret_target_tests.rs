@@ -5,7 +5,7 @@ pub mod common;
 
 use std::os::unix::fs::PermissionsExt as _;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // `--yes` accepts conflicts, and never one over a target selfie could not read. A
 // credential there may be the only copy, and nothing about it is recorded, so an
@@ -49,7 +49,7 @@ fn apply_yes_refuses_a_secret_target_it_cannot_read_before_running_anything() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(output.status.code(), Some(1), "output:\n{all}");
+    assert_eq!(output.status.code(), Some(FAILED), "output:\n{all}");
     assert!(
         all.contains("could not be read")
             && all.contains(&*target.to_string_lossy())
@@ -66,7 +66,7 @@ fn apply_yes_refuses_a_secret_target_it_cannot_read_before_running_anything() {
 }
 
 // A failed operation is printed as an error, not as a warning the way a refusal
-// is: the run counts it as failed and exits 1. The marker is what tells the two
+// is: the run counts it as failed and exits `FAILED`. The marker tells the two
 // apart on a terminal.
 #[test]
 fn apply_prints_a_failed_resolve_as_an_error() {
@@ -85,7 +85,7 @@ fn apply_prints_a_failed_resolve_as_an_error() {
     let output = sandboxed_command(&temp).arg("apply").output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(FAILED), "stderr:\n{stderr}");
     let lines: Vec<&str> = stderr
         .lines()
         .filter(|line| line.contains("Failed to resolve"))
@@ -117,7 +117,7 @@ fn apply_without_a_terminal_says_only_a_terminal_accepts_a_secret_conflict() {
 
     let out = common::run_sandboxed(&temp, &["apply"]);
 
-    assert_eq!(out.code, Some(0), "{}{}", out.stdout, out.stderr);
+    assert_eq!(out.code, Some(CLEAN), "{}{}", out.stdout, out.stderr);
     assert!(
         out.stderr.contains(
             "1 secret-bearing conflict was left as it is with no terminal to ask on. Only a \

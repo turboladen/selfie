@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // `apply` names each base directory once and shows every source relative to it.
 // A source printed whole repeats the directory on every line; one printed as the
@@ -84,7 +84,7 @@ fn position(lines: &[&str], needle: &str) -> usize {
 fn apply_names_each_directory_once_and_sources_relative_to_it() {
     let temp_dir = sandbox(true);
     let (code, stdout, stderr) = run(&temp_dir, &["apply", "--dry-run"]);
-    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
 
     let packages = position(&lines, "Packages: ");
@@ -113,7 +113,7 @@ fn apply_names_each_directory_once_and_sources_relative_to_it() {
 fn apply_names_only_the_directories_its_entries_come_from() {
     let temp_dir = sandbox(false);
     let (code, stdout, stderr) = run(&temp_dir, &["apply", "--dry-run"]);
-    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
 
     assert_eq!(
         stdout.lines().filter(|l| l.contains("Packages: ")).count(),
@@ -133,7 +133,7 @@ fn apply_names_only_the_directories_its_entries_come_from() {
 fn a_declined_conflict_is_shown_once() {
     let temp_dir = sandbox(false);
     let (code, stdout, stderr) = run(&temp_dir, &["apply", "--yes"]);
-    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
     fs::write(temp_dir.path().join(".config/bat/config"), "edited\n").unwrap();
     fs::write(temp_dir.path().join("packages/bat/config"), "changed\n").unwrap();
 

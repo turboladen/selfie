@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // `spec info` names each entry's content source, and warns that apply runs
 // commands for them. Nothing here runs a command: the fixture's commands are
@@ -42,7 +42,7 @@ fn spec_info_lists_dotfile_sources_and_warns_that_apply_runs_commands() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert_eq!(output.status.code(), Some(CLEAN), "{text}");
     assert!(text.contains("a.tpl (vars: x, y)"), "{text}");
     assert!(text.contains("command: echo other"), "{text}");
     assert!(
@@ -84,7 +84,7 @@ fn spec_info_says_nothing_about_commands_when_apply_runs_none() {
 
     let text = String::from_utf8_lossy(&output.stdout).to_string()
         + &String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert_eq!(output.status.code(), Some(CLEAN), "{text}");
     assert!(text.contains("a.conf"), "{text}");
     assert!(!text.contains("selfie apply runs"), "{text}");
 }
@@ -118,7 +118,7 @@ fn spec_info_names_a_refusal_in_another_environment() {
 
     let text = String::from_utf8_lossy(&output.stdout).to_string()
         + &String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert_eq!(output.status.code(), Some(CLEAN), "{text}");
     assert!(text.contains("Environments"), "{text}");
     assert!(
         text.contains("selfie apply would refuse this spec in another environment"),

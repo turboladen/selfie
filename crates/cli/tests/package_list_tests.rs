@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{add_package, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, FOUND, add_package, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
 
@@ -110,7 +110,7 @@ fn test_package_list_with_invalid_yaml() {
 
     // Should show the valid package but report error for invalid one
     cmd.assert()
-        .code(3)
+        .code(FOUND)
         .stdout(predicate::str::contains("valid-package"))
         .stdout(predicate::str::contains("invalid-package"));
 }
@@ -514,7 +514,7 @@ fn an_invalid_package_row_names_the_file_once_and_fits_one_line() {
     let output = sandboxed_command(&temp_dir)
         .args(["package", "list"])
         .assert()
-        .code(3)
+        .code(FOUND)
         .get_output()
         .stdout
         .clone();
@@ -585,7 +585,7 @@ mod a_spec_selfie_will_not_read {
             .unwrap();
 
         let text = combined(&output);
-        assert_eq!(output.status.code(), Some(3), "{text}");
+        assert_eq!(output.status.code(), Some(FOUND), "{text}");
         assert!(text.contains("shadowed"), "{text}");
         assert!(text.contains("refused"), "{text}");
         assert!(text.contains("_environments"), "{text}");
@@ -607,12 +607,12 @@ mod a_spec_selfie_will_not_read {
             .unwrap();
 
         let text = combined(&output);
-        assert_eq!(output.status.code(), Some(0), "{text}");
+        assert_eq!(output.status.code(), Some(CLEAN), "{text}");
         assert!(text.contains("Refused: shadowed"), "{text}");
         assert!(text.contains("_environments"), "{text}");
     }
 
-    // Described with the reason in place of the environments, and exits 0.
+    // Described with the reason in place of the environments, and exits clean.
     #[test]
     fn spec_info_shows_the_reason_instead_of_the_environments() {
         let temp_dir = setup_default_test_config();
@@ -624,7 +624,7 @@ mod a_spec_selfie_will_not_read {
             .unwrap();
 
         let text = combined(&output);
-        assert_eq!(output.status.code(), Some(0), "{text}");
+        assert_eq!(output.status.code(), Some(CLEAN), "{text}");
         assert!(text.contains("Refused"), "{text}");
         assert!(text.contains("_environments"), "{text}");
         assert!(!text.contains("Environments"), "{text}");
@@ -641,7 +641,7 @@ mod a_spec_selfie_will_not_read {
             .unwrap();
 
         let text = combined(&output);
-        assert_eq!(output.status.code(), Some(1), "{text}");
+        assert_eq!(output.status.code(), Some(FAILED), "{text}");
         assert!(text.contains("_environments"), "{text}");
     }
 }
@@ -663,7 +663,7 @@ mod table {
         fs::write(packages.join("broken.yaml"), "name: [unterminated\n").unwrap();
         fs::write(packages.join("noenv.yaml"), "name: noenv\n").unwrap();
         let output = sandboxed_command(&temp_dir).args(args).output().unwrap();
-        assert_eq!(output.status.code(), Some(3), "{output:?}");
+        assert_eq!(output.status.code(), Some(FOUND), "{output:?}");
         let stdout = String::from_utf8(output.stdout).unwrap();
         // Paths printed in a row are relative to the package directory.
         assert!(

@@ -6,7 +6,7 @@
 
 pub mod common;
 
-use common::{sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, USAGE, sandboxed_command, setup_default_test_config};
 use std::fs;
 
 // The control the unit tests cannot provide: a genuinely new name must still be
@@ -44,7 +44,7 @@ fn spec_create_writes_the_first_package_before_the_package_directory_exists() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(0), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(CLEAN), "stderr:\n{stderr}");
     assert!(
         stdout.contains("Package 'brandnew' created at"),
         "the create must report its answer, stdout:\n{stdout}\nstderr:\n{stderr}"
@@ -100,7 +100,7 @@ fn spec_create_does_not_replace_a_file_stored_under_another_case() {
         // follows cannot be asked, a usage error. A check on the message alone
         // would also pass on a run that printed it and then failed for an
         // unrelated reason.
-        .code(2)
+        .code(USAGE)
         .stderr(predicates::str::contains("'neovim' is already a package"));
 
     // Listing the directory rather than testing `neovim.yml.exists()`, which is
@@ -214,7 +214,7 @@ fn spec_create_refuses_a_directory_stored_under_another_normalization() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(FAILED), "stderr:\n{stderr}");
     assert!(
         stderr.contains(
             "is already taken by something selfie did not find under that name; selfie will not \
