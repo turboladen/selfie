@@ -264,7 +264,11 @@ impl ValidationIssue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How serious a validation issue is.
+///
+/// Converts to a label for an adapter: `error`, `warning` or `info`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ValidationLevel {
     Error,
     Warning,

@@ -1000,7 +1000,10 @@ impl OperationResult {
 ///
 /// A cancelled operation has no outcome: it ends with
 /// [`PackageEvent::Canceled`] rather than a result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Converts to a label for an adapter: `clean`, `found` or `failed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum Outcome {
     /// Did everything it was asked, and found nothing to report.
     Clean,
@@ -3726,7 +3729,10 @@ impl RefusedSpec {
 }
 
 /// Why selfie refused a whole package.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Converts to a label for an adapter, the variant's name in snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum RefusalKind {
     /// The file carries top-level keys a package does not accept.
     UnknownTopLevelKeys,
