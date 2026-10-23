@@ -830,7 +830,7 @@ mod tests {
     async fn a_claimed_cancellation_exits_130_and_stops() {
         let events = vec![
             PackageEvent::Canceled {
-                operation_info: make_operation_info("cancelled"),
+                operation_info: make_operation_info("canceled"),
                 reason: "Ctrl+C".to_string(),
             },
             drift_checked(0, 0),

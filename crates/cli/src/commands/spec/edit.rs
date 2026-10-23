@@ -193,7 +193,7 @@ fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(
         Ok(true) => Ok(()),
         // A create that wrote nothing did not do what it was asked.
         Ok(false) => {
-            display.print_run_note("Package creation cancelled.");
+            display.print_run_note("Package creation canceled.");
             Err(Exit::Failed)
         }
         Err(failure) => Err(display.refuse_prompt(

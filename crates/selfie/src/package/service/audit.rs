@@ -141,7 +141,7 @@ where
     // borrowed references that can't move into 'static tokio tasks.
     for chunk in package_names.chunks(max_concurrent) {
         if token.is_cancelled() {
-            return OperationResult::Failure("Operation cancelled".into());
+            return OperationResult::Failure("Operation canceled".into());
         }
 
         let futures: Vec<_> = chunk

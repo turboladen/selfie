@@ -73,7 +73,7 @@ pub(crate) async fn handle_create(
         // A create that wrote nothing did not do what it was asked, so a script
         // must not read it as success.
         Ok(PackageNameResult::Canceled) => {
-            display.print_run_note("Package creation cancelled.");
+            display.print_run_note("Package creation canceled.");
             return Exit::Failed;
         }
         Err(exit) => return exit,
@@ -942,7 +942,7 @@ mod tests {
                     "'tool' is already a package ({}). Edit it, or choose a different name.",
                     packages.join("tool.yml").display()
                 ),
-                "Package creation cancelled.".to_string(),
+                "Package creation canceled.".to_string(),
             ],
         );
     }

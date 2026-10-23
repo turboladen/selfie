@@ -83,7 +83,7 @@ where
     for pkg_name in &dep_graph.install_order {
         // Check for cancellation between packages
         if token.is_cancelled() {
-            return OperationResult::Failure("Installation cancelled".into());
+            return OperationResult::Failure("Installation canceled".into());
         }
 
         let installed = install_single_package(

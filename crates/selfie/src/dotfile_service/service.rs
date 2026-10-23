@@ -340,7 +340,7 @@ where
             // the token stands.
             match outcome {
                 Some(result) => sender.send_completed(result).await,
-                None => sender.send_canceled("Drift check cancelled").await,
+                None => sender.send_canceled("Drift check canceled").await,
             }
         })
     }

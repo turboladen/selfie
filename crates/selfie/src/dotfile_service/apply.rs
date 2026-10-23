@@ -57,7 +57,7 @@ pub(super) enum Scope {
 }
 
 /// The reason a cancelled apply gives.
-pub(super) const APPLY_CANCELED: &str = "Apply cancelled";
+pub(super) const APPLY_CANCELED: &str = "Apply canceled";
 
 /// Why an apply stopped before its last entry.
 ///

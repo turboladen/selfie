@@ -170,7 +170,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
         None => match canceled {
             Some(reason) => (
                 false,
-                serde_json::json!({ "status": "cancelled", "reason": reason, "outcome": "cancelled" }),
+                serde_json::json!({ "status": "canceled", "reason": reason, "outcome": "canceled" }),
             ),
             // An operation that reported nothing did not do what was asked.
             None => (
@@ -2310,15 +2310,15 @@ mod tests {
     async fn a_canceled_operation_is_reported_as_canceled() {
         let events = vec![PackageEvent::Canceled {
             operation_info: test_op_info(),
-            reason: "Apply cancelled".to_string(),
+            reason: "Apply canceled".to_string(),
         }];
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
         assert!(!result.success);
-        assert_eq!(result.data["result"]["status"], "cancelled");
-        assert_eq!(result.data["result"]["reason"], "Apply cancelled");
-        assert_eq!(result.data["result"]["outcome"], "cancelled");
+        assert_eq!(result.data["result"]["status"], "canceled");
+        assert_eq!(result.data["result"]["reason"], "Apply canceled");
+        assert_eq!(result.data["result"]["outcome"], "canceled");
     }
 
     // The reason is a field, so telling a typo from a spec that failed to load

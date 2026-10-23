@@ -92,7 +92,7 @@ where
 {
     tokio::task::spawn_blocking(f).await.map_err(|e| {
         let message = if e.is_cancelled() {
-            "blocking task was cancelled".to_string()
+            "blocking task was canceled".to_string()
         } else if e.is_panic() {
             let panic = e.into_panic();
             if let Some(s) = panic.downcast_ref::<&str>() {
@@ -2478,7 +2478,7 @@ mod tests {
             // which is exactly what the collector used to drop.
             Box::pin(futures::stream::iter(vec![PackageEvent::Canceled {
                 operation_info: test_operation_info(),
-                reason: "Drift check cancelled".to_string(),
+                reason: "Drift check canceled".to_string(),
             }]))
         }
 
@@ -2595,7 +2595,7 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("status() must report the cancellation: {events:?}"));
         assert!(
-            reason.contains("cancelled"),
+            reason.contains("canceled"),
             "the reason must say so: {reason}"
         );
 

@@ -1312,7 +1312,7 @@ mod tests {
             command: "test-command".to_string(),
             working_directory: PathBuf::from("/tmp"),
         };
-        assert!(canceled_error.to_string().contains("Command cancelled"));
+        assert!(canceled_error.to_string().contains("Command canceled"));
         assert!(canceled_error.to_string().contains("test-command"));
 
         let stdout_error = CommandError::StdoutSpawn("stdout issue".to_string());
