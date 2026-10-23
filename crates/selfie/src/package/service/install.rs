@@ -773,8 +773,8 @@ where
 
     sender.send_recommend_started(recommend_name).await;
 
-    // Each recommend gets its own progress tracker (7 steps per package)
-    let mut rec_progress = ProgressTracker::new(7);
+    // Each recommend gets its own progress tracker, whose total its graph sets.
+    let mut rec_progress = ProgressTracker::new(0);
 
     match install_single_recommend(
         recommend_name,
@@ -830,6 +830,9 @@ where
     let dep_graph = deps::resolve_dependencies(recommend_name, repo, config.environment(), sender)
         .await
         .map_err(|f| RecommendError::Failed(f.to_string()))?;
+    // 7 per package (fetch, env, check, get_cmd, execute, verify, complete).
+    // Resolution takes no step here.
+    progress.set_total_steps(7 * dep_graph.install_order.len());
     // A recommend that cannot be installed is refused before its dependencies
     // install, exactly as the package that recommends it would be.
     let mut confirmed =
