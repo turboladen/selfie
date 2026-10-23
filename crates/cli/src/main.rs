@@ -25,6 +25,7 @@ use selfie::{
     config::{ConfigFile, ConfigLoadError, YamlLoader, loader::ConfigLoader},
     fs::real::RealFileSystem,
 };
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -47,24 +48,62 @@ fn init_tracing(verbose: bool) {
     }
 }
 
-/// Wait for a shutdown signal, SIGINT or SIGTERM.
-///
-/// Returns when the first signal is received. Call again to wait for a second signal.
-async fn wait_for_shutdown_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-    match signal(SignalKind::terminate()) {
-        Ok(mut sigterm) => {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = sigterm.recv() => {}
-            }
-        }
-        Err(_) => {
-            // SIGTERM registration can fail in sandboxed environments;
-            // fall back to SIGINT-only.
-            let _ = tokio::signal::ctrl_c().await;
+/// Where shutdown signals come from.
+trait NextSignal {
+    /// Wait for the next one. Dropping the future before it completes loses no
+    /// signal.
+    fn next(&mut self) -> impl Future<Output = ()> + Send;
+}
+
+/// SIGINT and SIGTERM, registered once and kept, so a signal that arrives
+/// between two waits is still seen.
+struct ShutdownSignals {
+    interrupt: Option<Signal>,
+    terminate: Option<Signal>,
+}
+
+impl ShutdownSignals {
+    /// Install both handlers. One that cannot be installed, as can happen in a
+    /// sandbox, is never waited on; the other still is.
+    fn register() -> Self {
+        Self {
+            interrupt: signal(SignalKind::interrupt()).ok(),
+            terminate: signal(SignalKind::terminate()).ok(),
         }
     }
+}
+
+impl NextSignal for ShutdownSignals {
+    async fn next(&mut self) {
+        async fn one(signal: Option<&mut Signal>) {
+            match signal {
+                // `recv` is cancel safe, which is what makes `next` so.
+                Some(signal) => drop(signal.recv().await),
+                None => std::future::pending().await,
+            }
+        }
+        tokio::select! {
+            () = one(self.interrupt.as_mut()) => {}
+            () = one(self.terminate.as_mut()) => {}
+        }
+    }
+}
+
+/// Return when the run should be force-quit.
+///
+/// The first signal cancels `token`, saying so on stderr. Once `token` is
+/// canceled, by that signal or by Ctrl+C at a prompt, the next signal returns.
+async fn until_force_quit(signals: &mut impl NextSignal, token: &CancellationToken) {
+    tokio::select! {
+        () = signals.next() => {
+            eprintln!("\nCanceling... (signal again to force quit)");
+            token.cancel();
+        }
+        // Ctrl+C typed at a prompt cancels the run with no signal, and the
+        // next signal is then the second.
+        () = token.cancelled() => {}
+    }
+    signals.next().await;
 }
 
 /// Parse arguments, load configuration, dispatch, and exit with the handler's
@@ -183,8 +222,10 @@ async fn main() -> anyhow::Result<()> {
     let (config, notices) = loaded?;
     debug!("Final config: {:#?}", &config);
 
-    let display =
-        DisplayManager::new(config.use_colors()).with_verbosity(Verbosity::from(config.verbose()));
+    let cancellation_token = CancellationToken::new();
+    let display = DisplayManager::new(config.use_colors())
+        .with_verbosity(Verbosity::from(config.verbose()))
+        .with_cancellation(cancellation_token.clone());
 
     // After `display` exists, so the warnings honor `--no-color`, and before
     // dispatch, so they are not buried under a command's own output.
@@ -192,15 +233,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Set up graceful shutdown: first SIGINT/SIGTERM cancels in-flight operations,
     // second signal forces immediate exit.
-    let cancellation_token = CancellationToken::new();
+    let mut signals = ShutdownSignals::register();
     let token_clone = cancellation_token.clone();
     tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        eprintln!("\nCanceling... (signal again to force quit)");
-        token_clone.cancel();
-
-        // Second signal: force exit
-        wait_for_shutdown_signal().await;
+        until_force_quit(&mut signals, &token_clone).await;
         process::exit(event_processor::Exit::Canceled.code());
     });
 
@@ -208,4 +244,54 @@ async fn main() -> anyhow::Result<()> {
     let exit = dispatch_command(&args.command, &config, display, cancellation_token, &fs).await;
 
     process::exit(exit.code())
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+    use tokio_test::{assert_pending, assert_ready, task};
+
+    use super::*;
+
+    // Signals sent by the test.
+    struct Sent(mpsc::UnboundedReceiver<()>);
+
+    impl NextSignal for Sent {
+        async fn next(&mut self) {
+            self.0.recv().await;
+        }
+    }
+
+    fn signals() -> (mpsc::UnboundedSender<()>, Sent) {
+        let (send, receive) = mpsc::unbounded_channel();
+        (send, Sent(receive))
+    }
+
+    #[test]
+    fn the_first_signal_cancels_and_the_second_force_quits() {
+        let (send, mut sent) = signals();
+        let token = CancellationToken::new();
+        let mut waiting = task::spawn(until_force_quit(&mut sent, &token));
+
+        assert_pending!(waiting.poll());
+        send.send(()).unwrap();
+        assert_pending!(waiting.poll());
+        assert!(token.is_cancelled());
+        send.send(()).unwrap();
+        assert_ready!(waiting.poll());
+    }
+
+    // Ctrl+C typed at a prompt cancels the run, so the next signal is the second.
+    #[test]
+    fn after_a_prompt_cancels_the_run_one_signal_force_quits() {
+        let (send, mut sent) = signals();
+        let token = CancellationToken::new();
+        let mut waiting = task::spawn(until_force_quit(&mut sent, &token));
+
+        assert_pending!(waiting.poll());
+        token.cancel();
+        assert_pending!(waiting.poll());
+        send.send(()).unwrap();
+        assert_ready!(waiting.poll());
+    }
 }

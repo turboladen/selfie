@@ -68,8 +68,6 @@ fn reveal_body(incoming: &[u8], current: &[u8], target: &str) -> RevealBody {
 /// each side's shape — so it additionally offers to reveal the two values.
 struct InteractiveConflictResolver {
     display: DisplayManager,
-    // The run's token, canceled when the user presses Ctrl+C at a prompt.
-    token: CancellationToken,
     // The conflicts skipped because there was no terminal to ask on.
     unasked: Arc<Mutex<Unasked>>,
 }
@@ -164,8 +162,8 @@ impl InteractiveConflictResolver {
         )
     }
 
-    /// The answer a prompt got, or `None` when it got none. Ctrl+C cancels the
-    /// run as well, and no terminal counts the conflict with `unasked`.
+    /// The answer a prompt got, or `None` when it got none. No terminal counts
+    /// the conflict with `unasked`.
     fn answered<T>(
         &self,
         answer: Result<T, PromptFailure>,
@@ -173,12 +171,8 @@ impl InteractiveConflictResolver {
     ) -> Option<T> {
         match answer {
             Ok(answer) => Some(answer),
-            // Canceled here rather than left to the SIGINT console raises, so
-            // the run ends canceled whoever delivers the signal.
-            Err(PromptFailure::Interrupted) => {
-                self.token.cancel();
-                None
-            }
+            // The prompt has already canceled the run.
+            Err(PromptFailure::Interrupted) => None,
             Err(PromptFailure::NoTerminal) => {
                 if let Ok(mut count) = self.unasked.lock() {
                     unasked(&mut count);
@@ -289,7 +283,7 @@ impl ConflictResolver for InteractiveConflictResolver {
                     Some(1) => ConflictResolution::Accept,
                     Some(2) => {
                         self.reveal(incoming, current, target);
-                        if self.token.is_cancelled() {
+                        if self.display.is_canceled() {
                             return ConflictResolution::Skip;
                         }
                         // Ask again, without offering reveal a second time.
@@ -341,7 +335,6 @@ pub(crate) async fn handle_apply(
         auto_accept: args.yes,
         conflict_resolver: Some(Arc::new(InteractiveConflictResolver {
             display: display.clone(),
-            token: cancellation_token.clone(),
             unasked: Arc::clone(&unasked),
         })),
     };
@@ -440,7 +433,6 @@ mod tests {
         let display = DisplayManager::new(false);
         let resolver = InteractiveConflictResolver {
             display: display.clone(),
-            token: CancellationToken::new(),
             unasked: Arc::default(),
         };
         let source = DotfileSource::File(RepoPath {
@@ -476,7 +468,6 @@ mod tests {
         let display = DisplayManager::new(false);
         let resolver = InteractiveConflictResolver {
             display: display.clone(),
-            token: CancellationToken::new(),
             unasked: Arc::default(),
         };
         let source = DotfileSource::File(RepoPath {
@@ -504,15 +495,11 @@ mod tests {
         })
     }
 
-    // A resolver over `display`, with a token of its own to read back.
-    fn resolver(display: &DisplayManager) -> (InteractiveConflictResolver, CancellationToken) {
-        let token = CancellationToken::new();
-        let resolver = InteractiveConflictResolver {
+    fn resolver(display: &DisplayManager) -> InteractiveConflictResolver {
+        InteractiveConflictResolver {
             display: display.clone(),
-            token: token.clone(),
             unasked: Arc::default(),
-        };
-        (resolver, token)
+        }
     }
 
     fn resolve_secret(resolver: &InteractiveConflictResolver) -> ConflictResolution {
@@ -533,8 +520,11 @@ mod tests {
     fn ctrl_c_at_the_conflict_prompt_cancels_the_run() {
         use crate::display_manager::ctrl_c;
 
-        let display = DisplayManager::new(false).answering(vec![ctrl_c()]);
-        let (resolver, token) = resolver(&display);
+        let token = CancellationToken::new();
+        let display = DisplayManager::new(false)
+            .with_cancellation(token.clone())
+            .answering(vec![ctrl_c()]);
+        let resolver = resolver(&display);
         let source = source();
 
         let resolution = resolver.resolve(
@@ -553,8 +543,11 @@ mod tests {
     #[test]
     fn an_unreadable_answer_skips_the_conflict_and_says_why() {
         let failed = Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone").into());
-        let display = DisplayManager::new(false).answering(vec![failed]);
-        let (resolver, token) = resolver(&display);
+        let token = CancellationToken::new();
+        let display = DisplayManager::new(false)
+            .with_cancellation(token.clone())
+            .answering(vec![failed]);
+        let resolver = resolver(&display);
         let source = source();
 
         let resolution = resolver.resolve(
@@ -582,10 +575,12 @@ mod tests {
     fn ctrl_c_at_the_reveal_confirmation_cancels_the_run() {
         use crate::display_manager::{answer, ctrl_c};
 
+        let token = CancellationToken::new();
         let display = DisplayManager::new(false)
+            .with_cancellation(token.clone())
             .drawing_as_a_terminal()
             .answering(vec![answer(2_usize), ctrl_c()]);
-        let (resolver, token) = resolver(&display);
+        let resolver = resolver(&display);
 
         assert!(matches!(
             resolve_secret(&resolver),
@@ -599,10 +594,12 @@ mod tests {
     fn ctrl_c_at_the_prompt_after_a_reveal_cancels_the_run() {
         use crate::display_manager::{answer, ctrl_c};
 
+        let token = CancellationToken::new();
         let display = DisplayManager::new(false)
+            .with_cancellation(token.clone())
             .drawing_as_a_terminal()
             .answering(vec![answer(2_usize), answer(false), ctrl_c()]);
-        let (resolver, token) = resolver(&display);
+        let resolver = resolver(&display);
 
         assert!(matches!(
             resolve_secret(&resolver),

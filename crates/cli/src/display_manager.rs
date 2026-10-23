@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use selfie::package::event::{BaseKind, StepEnding, StepId};
+use tokio_util::sync::CancellationToken;
 
 use crate::event_processor::Exit;
 
@@ -318,6 +319,10 @@ pub struct DisplayManager {
     // stderr is a terminal, so a prompt can be drawn and answered.
     #[cfg_attr(test, expect(dead_code, reason = "a test answers from `script`"))]
     can_prompt: bool,
+    // The run's token. A signal that cancels the run ends a prompt, and a
+    // prompt ended by Ctrl+C cancels the run. Outside a test, a display
+    // without it never prompts.
+    cancellation: Option<CancellationToken>,
     // What the next prompts answer, in a test.
     #[cfg(test)]
     script: Arc<Mutex<VecDeque<Scripted>>>,
@@ -372,6 +377,7 @@ impl DisplayManager {
             #[cfg(test)]
             printed: Arc::new(Mutex::new(Vec::new())),
             can_prompt: draws_spinner,
+            cancellation: None,
             #[cfg(test)]
             script: Arc::new(Mutex::new(VecDeque::new())),
         }
@@ -383,6 +389,34 @@ impl DisplayManager {
     pub(crate) fn with_verbosity(mut self, verbosity: Verbosity) -> Self {
         self.verbosity = verbosity;
         self
+    }
+
+    /// Tie prompts to the run's `token`: a signal that cancels the run ends a
+    /// waiting prompt as interrupted, and a prompt the user interrupts cancels
+    /// the run. A display that prompts on a terminal must be built with it.
+    ///
+    /// Installs a process-wide signal handler, so it must be called inside the
+    /// tokio runtime. Warns on stderr when it cannot, since a signal then no
+    /// longer ends a prompt.
+    #[must_use]
+    pub(crate) fn with_cancellation(mut self, token: CancellationToken) -> Self {
+        #[cfg(not(test))]
+        if let Err(error) = wakeup::install() {
+            self.print_warning(format!(
+                "A signal cannot end a prompt in this run, so it takes a second one to stop \
+                 selfie while it asks: {error}"
+            ));
+        }
+        self.cancellation = Some(token);
+        self
+    }
+
+    /// Whether the run this display belongs to has been canceled, by a signal
+    /// or by Ctrl+C at a prompt.
+    pub(crate) fn is_canceled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
     }
 
     /// Whether the operation header, local steps and command output are shown.
@@ -918,24 +952,44 @@ impl DisplayManager {
         if !self.can_prompt() {
             return Err(PromptFailure::NoTerminal);
         }
+        // A run already canceled would only have its question drawn and taken
+        // away again.
+        if self.is_canceled() {
+            return Err(PromptFailure::Interrupted);
+        }
         // Suspended, not cleared: a spinner would redraw over the question while
         // the user types, but a step still running, or whose end is already on
         // its way, keeps its line and gets its ✓ or ✗ once the prompt returns.
-        self.mp
+        let answer = self
+            .mp
             .suspend(|| self.ask(prompt))
-            .map_err(PromptFailure::from)
+            .map_err(PromptFailure::from);
+        if let (Err(PromptFailure::Interrupted), Some(token)) = (&answer, &self.cancellation) {
+            token.cancel();
+        }
+        answer
     }
 
     /// Whether a prompt can be asked: stderr, where dialoguer draws and reads
-    /// through, is a terminal.
+    /// through, is a terminal, and the display carries the run's token.
     pub(crate) fn can_prompt(&self) -> bool {
+        // A test answers from its script and never reaches a terminal, so no
+        // signal can leave one of its prompts waiting, and the many tests that
+        // script answers need no token to do it.
         #[cfg(test)]
         {
             self.script.lock().is_ok_and(|script| !script.is_empty())
         }
+        // Refused rather than asked: without the token a signal cannot end the
+        // prompt, and the run hangs until a second one. The assert keeps that
+        // refusal from passing as "no terminal" in any debug build.
         #[cfg(not(test))]
         {
-            self.can_prompt
+            debug_assert!(
+                !self.can_prompt || self.cancellation.is_some(),
+                "a display that prompts on a terminal needs `with_cancellation`"
+            );
+            self.can_prompt && self.cancellation.is_some()
         }
     }
 
@@ -972,7 +1026,23 @@ impl DisplayManager {
 
     #[cfg(not(test))]
     fn ask<P: Prompt>(&self, prompt: P) -> dialoguer::Result<P::Answer> {
-        prompt.ask()
+        let answer = match &self.cancellation {
+            Some(token) => wakeup::ask(token, || prompt.ask()),
+            None => prompt.ask(),
+        };
+        answer.inspect_err(|error| {
+            let stderr = console::Term::stderr();
+            // dialoguer hides the cursor while it asks and shows it again only
+            // after an answer.
+            let _ = stderr.show_cursor();
+            // Ctrl+C typed at the question leaves the cursor on its line. A
+            // signal has already ended that line: main prints "Canceling..."
+            // before it cancels the run.
+            let dialoguer::Error::IO(error) = error;
+            if error.kind() == std::io::ErrorKind::Interrupted && !self.is_canceled() {
+                let _ = stderr.write_line("");
+            }
+        })
     }
 
     // A test never reaches a terminal: it answers from the script, which holds
@@ -1199,6 +1269,169 @@ impl std::fmt::Debug for DisplayManager {
             .field("is_tty", &self.is_tty)
             .field("verbosity", &self.verbosity)
             .finish()
+    }
+}
+
+// Ending a terminal prompt when a signal cancels the run.
+//
+// console waits for a key in select(2) on a macOS terminal and in poll(2)
+// elsewhere. Neither restarts after a signal handler, so a handled signal
+// delivered to the waiting thread ends the wait with EINTR. console then
+// restores the terminal mode it saved and returns `Interrupted`, whichever
+// signal it was. The kernel hands a process's signals to the main thread while
+// it does not block them, and apply's conflict prompt waits on a
+// blocking-pool thread, so the run's cancellation is carried to the prompting
+// thread as SIGURG, the one handled signal it leaves unblocked.
+mod wakeup {
+    use std::{pin::pin, thread, time::Duration};
+
+    use nix::sys::{
+        pthread::{pthread_kill, pthread_self},
+        signal::{SigSet, SigmaskHow, Signal},
+    };
+    use tokio_util::sync::CancellationToken;
+
+    // Nothing selfie runs sends it, and its default action is to ignore, so
+    // the handler `install` adds changes nothing else. Go's runtime preempts
+    // goroutines with it for the same reasons.
+    const WAKEUP: Signal = Signal::SIGURG;
+
+    // Left deliverable on the prompting thread. The faults are raised on the
+    // thread that caused them, and blocking one makes it fatal. The job-control
+    // three have no handler here, so they cannot end the wait, and blocking
+    // them would let selfie in the background change a terminal it does not
+    // own instead of stopping.
+    const UNBLOCKED: [Signal; 11] = [
+        WAKEUP,
+        Signal::SIGSEGV,
+        Signal::SIGBUS,
+        Signal::SIGFPE,
+        Signal::SIGILL,
+        Signal::SIGTRAP,
+        Signal::SIGSYS,
+        Signal::SIGABRT,
+        Signal::SIGTSTP,
+        Signal::SIGTTIN,
+        Signal::SIGTTOU,
+    ];
+
+    // A wakeup that lands before console starts waiting meets a call that
+    // restarts (a write, `tcsetattr`) and is lost, so it is repeated until one
+    // lands in the wait.
+    const RETRY: Duration = Duration::from_millis(10);
+
+    /// Install the handler a wakeup needs: a signal left at its default of
+    /// ignore is discarded and interrupts nothing.
+    ///
+    /// # Errors
+    ///
+    /// When the handler cannot be installed; a signal then cannot end a
+    /// prompt.
+    #[cfg_attr(test, expect(dead_code, reason = "a test never prompts on a terminal"))]
+    pub(super) fn install() -> std::io::Result<()> {
+        // tokio keeps a handler for the life of the process, so the stream it
+        // returns can be dropped.
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(WAKEUP as i32))
+            .map(drop)
+    }
+
+    // Puts the thread's signal mask back when the prompt ends, a panic
+    // included. A child inherits the mask of the thread that spawns it, so a
+    // pooled thread left blocking SIGINT would pass that on to every command it
+    // later runs.
+    struct RestoreMask(SigSet);
+
+    impl Drop for RestoreMask {
+        fn drop(&mut self) {
+            let _ = self.0.thread_set_mask();
+        }
+    }
+
+    // Every signal but `UNBLOCKED`.
+    fn blocked_while_asking() -> SigSet {
+        let mut blocked = SigSet::all();
+        for signal in UNBLOCKED {
+            blocked.remove(signal);
+        }
+        blocked
+    }
+
+    /// Run `ask` on this thread, ending it as interrupted once `token` is
+    /// canceled.
+    pub(super) fn ask<T>(
+        token: &CancellationToken,
+        ask: impl FnOnce() -> dialoguer::Result<T>,
+    ) -> dialoguer::Result<T> {
+        // Blocked for the prompt, so any other handled signal (SIGINT, SIGTERM,
+        // tokio's SIGCHLD) is handled on another thread rather than ending the
+        // wait as a Ctrl+C would. The SIGINT console raises at Ctrl+C stays
+        // pending here instead of reaching main's handler as a second signal,
+        // which force-quits.
+        let Ok(previous) = blocked_while_asking().thread_swap_mask(SigmaskHow::SIG_BLOCK) else {
+            return ask();
+        };
+        let _restore = RestoreMask(previous);
+
+        let prompting = pthread_self();
+        let finished = CancellationToken::new();
+        let answer = thread::scope(|scope| {
+            scope.spawn(|| {
+                futures::executor::block_on(futures::future::select(
+                    pin!(token.cancelled()),
+                    pin!(finished.cancelled()),
+                ));
+                while !finished.is_cancelled() {
+                    let _ = pthread_kill(prompting, WAKEUP);
+                    thread::sleep(RETRY);
+                }
+            });
+            // Set on a panic too, or the scope would wait on the watcher forever.
+            let _finished = finished.clone().drop_guard();
+            ask()
+        });
+
+        if let Err(dialoguer::Error::IO(error)) = &answer
+            && error.kind() == std::io::ErrorKind::Interrupted
+        {
+            // Taken here, so restoring the mask does not deliver the SIGINT
+            // console raised. Raised once more first, so the wait finds one
+            // whatever console did: standard signals do not queue.
+            let _ = pthread_kill(prompting, Signal::SIGINT);
+            let _ = SigSet::from(Signal::SIGINT).wait();
+        }
+        answer
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // While it asks, the thread blocks every signal that has a handler
+        // except the wakeup, and gets its own mask back afterwards.
+        #[test]
+        fn asking_blocks_every_handled_signal_but_the_wakeup() {
+            let before = SigSet::thread_get_mask().unwrap();
+
+            let during = ask(&CancellationToken::new(), || {
+                Ok(SigSet::thread_get_mask().unwrap())
+            })
+            .unwrap();
+
+            for signal in [
+                Signal::SIGINT,
+                Signal::SIGTERM,
+                Signal::SIGCHLD,
+                Signal::SIGWINCH,
+                Signal::SIGHUP,
+                Signal::SIGUSR1,
+            ] {
+                assert!(during.contains(signal), "{signal} reaches the prompt");
+            }
+            for signal in UNBLOCKED {
+                assert!(!during.contains(signal), "{signal} is blocked");
+            }
+            assert_eq!(SigSet::thread_get_mask().unwrap(), before);
+        }
     }
 }
 
@@ -1521,6 +1754,36 @@ mod tests {
 
         assert!(matches!(failure, PromptFailure::Interrupted), "{failure:?}");
         assert_eq!(failure.exit(), Exit::Canceled);
+    }
+
+    // Ctrl+C at a prompt cancels the whole run, not only the question; any
+    // other answer leaves the run going.
+    #[test]
+    fn ctrl_c_at_a_prompt_cancels_the_run() {
+        let token = CancellationToken::new();
+        let dm = DisplayManager::new(false)
+            .with_cancellation(token.clone())
+            .answering(vec![io_error(std::io::ErrorKind::BrokenPipe), ctrl_c()]);
+
+        dm.prompt(Answered).unwrap_err();
+        assert!(!token.is_cancelled());
+        dm.prompt(Answered).unwrap_err();
+        assert!(token.is_cancelled());
+    }
+
+    // Once the run is canceled a prompt is not asked at all.
+    #[test]
+    fn a_prompt_after_the_run_is_canceled_is_interrupted_unasked() {
+        let token = CancellationToken::new();
+        let dm = DisplayManager::new(false)
+            .with_cancellation(token.clone())
+            .answering(vec![answer(())]);
+        token.cancel();
+
+        let failure = dm.prompt(Answered).unwrap_err();
+
+        assert!(matches!(failure, PromptFailure::Interrupted), "{failure:?}");
+        assert!(dm.can_prompt(), "the scripted answer was used up");
     }
 
     // dialoguer's own no-terminal refusal reads as no terminal; any other

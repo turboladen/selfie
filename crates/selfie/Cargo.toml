@@ -16,7 +16,7 @@ mockall = { workspace = true, optional = true }
 # `unsafe` for the same reason the dev entry below did. "fs" is for the `OFlag`
 # constants `RealFileSystem::read_file_no_follow` opens with, which `std` does not
 # name.
-nix = { version = "0.31", features = ["fs", "user"] }
+nix = { workspace = true, features = ["fs", "user"] }
 serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true
@@ -50,7 +50,7 @@ mockall.workspace = true
 # fifo for reading with. There is no std equivalent for either; the alternatives
 # were a subprocess or the crate's first `unsafe` block. "user" comes from the
 # production entry above, which cargo unifies into the test build.
-nix = { version = "0.31", features = ["fs"] }
+nix = { workspace = true, features = ["fs"] }
 test-common = { path = "../test-common/" }
 tracing-subscriber.workspace = true
 tokio = { version = "1.44", features = [
