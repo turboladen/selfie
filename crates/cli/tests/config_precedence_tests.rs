@@ -14,7 +14,7 @@ pub mod common;
 
 use std::{fs, path::Path};
 
-use common::{SELFIE_ENV, sandboxed_command};
+use common::{SELFIE_ENV, USAGE, sandboxed_command};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -269,7 +269,7 @@ fn an_empty_package_directory_flag_is_refused_by_the_parser() {
     sandboxed_command(&temp)
         .args(["-p", "", "package", "list"])
         .assert()
-        .code(2)
+        .code(USAGE)
         .stderr(predicate::str::contains("a value is required"));
 }
 

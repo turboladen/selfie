@@ -10,7 +10,7 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{FAILED, SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // The construct that fails the re-read while the package itself still parses:
 // `serde_json::Value` has no key for a mapping keyed by a sequence.
@@ -57,7 +57,7 @@ fn apply_fails_the_run_for_an_unchecked_file_that_has_dotfiles() {
 
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(FAILED),
         "a refusal must reach the exit status, got:\n{text}"
     );
 
@@ -105,7 +105,7 @@ fn apply_fails_the_run_when_an_unchecked_file_deploys_nothing() {
 
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(FAILED),
         "a refusal must reach the exit status, got:\n{text}"
     );
     assert!(
@@ -134,7 +134,7 @@ fn drift_fails_the_run_for_an_unchecked_file() {
 
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(FAILED),
         "a package drift could not check must reach the exit status, got:\n{text}"
     );
 

@@ -2,7 +2,10 @@ pub mod common;
 
 use std::fs;
 
-use common::{SELFIE_ENV, package_repo_with_remote, run_sandboxed, setup_default_test_config};
+use common::{
+    CLEAN, FAILED, FOUND, SELFIE_ENV, package_repo_with_remote, run_sandboxed,
+    setup_default_test_config,
+};
 
 // A failure's explanation and its remedy are about the run, so they go to
 // stderr together, and a failing command leaves stdout empty. Advice that
@@ -31,7 +34,7 @@ fn an_unsupported_environment_is_explained_on_stderr_alone() {
     for command in ["check", "audit"] {
         let out = run_sandboxed(&temp_dir, &["package", command, "elsewhere"]);
 
-        assert_eq!(out.code, Some(1), "{command}: {}", out.stderr);
+        assert_eq!(out.code, Some(FAILED), "{command}: {}", out.stderr);
         assert_eq!(out.stdout, "", "{command}");
         for needle in [
             "doesn't support environment 'test-env'",
@@ -63,12 +66,12 @@ fn a_missing_check_command_is_named_as_such() {
 
     // At any verbosity: `-v` shows result cards, and a failure has none.
     let verbose = run_sandboxed(&temp_dir, &["-v", "package", "check", "nocheck"]);
-    assert_eq!(verbose.code, Some(1), "{}", verbose.stderr);
+    assert_eq!(verbose.code, Some(FAILED), "{}", verbose.stderr);
     assert_eq!(verbose.stdout, "");
 
     let out = run_sandboxed(&temp_dir, &["package", "check", "nocheck"]);
 
-    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert_eq!(out.code, Some(FAILED), "{}", out.stderr);
     assert_eq!(out.stdout, "");
     assert!(
         out.stderr.contains("No check command defined"),
@@ -95,7 +98,7 @@ fn a_missing_editor_is_explained_on_stderr_alone() {
 
     let out = run_sandboxed(&temp_dir, &["spec", "edit", "bat"]);
 
-    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert_eq!(out.code, Some(FAILED), "{}", out.stderr);
     assert_eq!(out.stdout, "");
     assert!(
         out.stderr
@@ -126,7 +129,7 @@ fn a_broken_dependency_warning_keeps_its_advice() {
 
     let out = run_sandboxed(&temp_dir, &["spec", "remove", "lib", "--yes"]);
 
-    assert_eq!(out.code, Some(0), "{}", out.stderr);
+    assert_eq!(out.code, Some(CLEAN), "{}", out.stderr);
     assert!(out.stderr.contains("broken dependencies"), "{}", out.stderr);
     assert!(
         out.stderr.contains("You may need to update"),
@@ -156,7 +159,10 @@ fn sync_status_keeps_its_drift_list_and_moves_its_advice() {
         ),
     );
     package_repo_with_remote(&temp_dir);
-    assert_eq!(run_sandboxed(&temp_dir, &["apply", "--yes"]).code, Some(0));
+    assert_eq!(
+        run_sandboxed(&temp_dir, &["apply", "--yes"]).code,
+        Some(CLEAN)
+    );
     fs::write(temp_dir.path().join(".batrc"), "edited\n").unwrap();
 
     let out = run_sandboxed(&temp_dir, &["sync", "status"]);
@@ -181,7 +187,7 @@ fn sync_push_explains_a_validation_failure_on_stderr() {
 
     let out = run_sandboxed(&temp_dir, &["sync", "push"]);
 
-    assert_eq!(out.code, Some(1), "{}{}", out.stdout, out.stderr);
+    assert_eq!(out.code, Some(FAILED), "{}{}", out.stdout, out.stderr);
     assert_eq!(out.stdout, "");
     for needle in ["failed validation", "Validation", "noenv", "environments"] {
         assert!(out.stderr.contains(needle), "{needle}\n{}", out.stderr);
@@ -201,7 +207,7 @@ fn spec_validate_shows_a_suggestion_in_its_table() {
 
     let out = run_sandboxed(&temp_dir, &["--no-color", "spec", "validate", "other"]);
 
-    assert_eq!(out.code, Some(3), "{}", out.stderr);
+    assert_eq!(out.code, Some(FOUND), "{}", out.stderr);
     let header = out
         .stdout
         .lines()
@@ -230,7 +236,7 @@ fn spec_validate_without_a_suggestion_has_no_column() {
 
     let out = run_sandboxed(&temp_dir, &["--no-color", "spec", "validate", "typo"]);
 
-    assert_eq!(out.code, Some(1), "{}", out.stderr);
+    assert_eq!(out.code, Some(FAILED), "{}", out.stderr);
     assert!(out.stdout.contains("audt"), "{}", out.stdout);
     assert!(!out.stdout.contains("Suggestion"), "{}", out.stdout);
 }
@@ -254,7 +260,7 @@ fn sync_push_shows_a_suggestion_in_its_table() {
 
     let out = run_sandboxed(&temp_dir, &["--no-color", "sync", "push"]);
 
-    assert_eq!(out.code, Some(1), "{}{}", out.stdout, out.stderr);
+    assert_eq!(out.code, Some(FAILED), "{}{}", out.stdout, out.stderr);
     assert_eq!(out.stdout, "");
     assert!(
         out.stderr

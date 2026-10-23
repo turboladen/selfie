@@ -10,7 +10,7 @@ use std::time::Duration;
 
 pub mod common;
 
-use common::sandboxed_command;
+use common::{FOUND, sandboxed_command};
 
 /// A fifo at the configuration path, which every command reads before doing
 /// anything else.
@@ -307,14 +307,14 @@ fn config_validate_reports_an_ignored_key() {
         "a file with an ignored key must not be called valid, got:\n{combined}"
     );
     // A warning, not an error: the configuration is still usable, so it says so
-    // and exits 3, the code for a finding, rather than 1.
+    // and exits as a finding rather than a failure.
     assert!(
         combined.contains("Configuration is usable, with warnings."),
         "a file with only warnings must say it is usable, got:\n{combined}"
     );
     assert_eq!(
         output.status.code(),
-        Some(3),
+        Some(FOUND),
         "an ignored key is a finding, not a failure, got:\n{combined}"
     );
 }

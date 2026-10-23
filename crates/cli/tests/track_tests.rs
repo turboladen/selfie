@@ -5,7 +5,7 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, SELFIE_ENV, USAGE, sandboxed_command, setup_default_test_config};
 
 // Reported from the spec, not from the argument. The two differ exactly here:
 // the spec holds `~/…` and the caller names the same file absolutely, which is
@@ -54,7 +54,7 @@ fn already_tracking_names_the_target_the_spec_holds() {
 
 // The pre-check reports what a spec already tracks, and a spec may hold an entry
 // `selfie apply` will always refuse — a relative target, or one naming another
-// user's home. Reporting that as plain success with exit 0 tells the user the
+// user's home. Reporting that as plain success with a clean exit tells the user the
 // file is handled when no deploy will ever touch it (selfie-63yd).
 //
 // The library guards this for the three commands that reach it, but this answer
@@ -90,7 +90,7 @@ fn already_tracking_refuses_an_entry_apply_would_refuse() {
 
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(FAILED),
         "an entry that can never deploy must not exit 0, got:\n{both}"
     );
     assert!(
@@ -188,7 +188,7 @@ fn already_tracking_reports_a_symlinked_target() {
 
     assert_eq!(
         output.status.code(),
-        Some(0),
+        Some(CLEAN),
         "an idempotent track must not be refused, got:\n{both}"
     );
     assert!(
@@ -237,7 +237,7 @@ fn already_tracking_says_nothing_about_a_plain_target() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(output.status.code(), Some(0), "got:\n{both}");
+    assert_eq!(output.status.code(), Some(CLEAN), "got:\n{both}");
     assert!(
         both.contains("Already tracking"),
         "the entry is tracked and must be reported so, got:\n{both}"
@@ -297,7 +297,7 @@ fn track_commands_refuse_under_sudo_before_the_service_starts() {
 
         assert_eq!(
             output.status.code(),
-            Some(1),
+            Some(FAILED),
             "{args:?} must refuse under sudo, got:\n{both}"
         );
         // Exit 1 alone proves almost nothing -- a missing config or an unreadable
@@ -366,7 +366,7 @@ fn track_without_a_terminal_on_stderr_refuses_rather_than_prompting_forever() {
 
     let status = status.expect("the command must end rather than prompt with no terminal");
     // 2, a usage error: the question needs a terminal, and nothing was tracked.
-    assert_eq!(status.code(), Some(2), "{stderr}");
+    assert_eq!(status.code(), Some(USAGE), "{stderr}");
     assert!(
         stderr.contains("needs a terminal"),
         "the refusal must say what is missing, got:\n{stderr}"
@@ -423,7 +423,7 @@ fn track_without_a_terminal_refuses_rather_than_prompting_forever() {
 
     let status = status.expect("the command must end rather than prompt with no terminal");
     // 2, a usage error: the question needs a terminal, and nothing was tracked.
-    assert_eq!(status.code(), Some(2), "{stderr}");
+    assert_eq!(status.code(), Some(USAGE), "{stderr}");
     assert!(
         stderr.contains("needs a terminal"),
         "the refusal must say what is missing, got:\n{stderr}"
@@ -457,7 +457,7 @@ fn a_second_track_of_a_name_says_the_spec_exists() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(output.status.code(), Some(FAILED), "{stderr}");
     assert!(
         stderr.contains("A dotfile spec named 'rc' already exists"),
         "{stderr}"
@@ -486,7 +486,7 @@ fn tracking_under_a_package_name_says_it_is_a_package() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(output.status.code(), Some(FAILED), "{stderr}");
     assert!(stderr.contains("'bat' is already a package"), "{stderr}");
     assert!(
         stderr.contains("selfie package track-dotfile bat <file>"),
@@ -510,7 +510,7 @@ fn track_before_the_package_directory_exists_gets_to_choosing_a_destination() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(2), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(USAGE), "stderr:\n{stderr}");
     assert!(
         stderr.contains("Choosing where to track a file needs a terminal"),
         "stderr:\n{stderr}"
@@ -552,7 +552,7 @@ fn track_names_every_spec_that_already_tracks_the_file() {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     // Two specs deploying one file is not a handled file.
-    assert_eq!(output.status.code(), Some(1), "{stdout}{stderr}");
+    assert_eq!(output.status.code(), Some(FAILED), "{stdout}{stderr}");
     for spec in ["app", "solo"] {
         assert!(
             stdout.contains(&format!("Already tracking '~/.apprc' in spec '{spec}'")),
@@ -590,7 +590,7 @@ fn an_existing_tracker_is_named_by_its_file_beside_a_spec_that_did_not_load() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
+    assert_eq!(output.status.code(), Some(CLEAN), "{stdout}{stderr}");
     assert!(
         stdout.contains("Already tracking '~/.apprc' in spec 'bar'"),
         "{stdout}{stderr}"
@@ -633,7 +633,7 @@ fn a_spec_both_scans_list_is_one_tracker() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(0), "{stdout}{stderr}");
+    assert_eq!(output.status.code(), Some(CLEAN), "{stdout}{stderr}");
     assert_eq!(
         stdout
             .matches("Already tracking '~/.apprc' in spec 'app'")

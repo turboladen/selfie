@@ -2,7 +2,10 @@ pub mod common;
 
 use std::fs;
 
-use common::{SELFIE_ENV, package_repo_with_remote, sandboxed_command, setup_default_test_config};
+use common::{
+    CLEAN, FAILED, FOUND, SELFIE_ENV, package_repo_with_remote, sandboxed_command,
+    setup_default_test_config,
+};
 
 // Every run prints its result: a command that finishes prints at least one line
 // on stdout saying so, even when there is nothing else to show. Each row of the
@@ -85,7 +88,7 @@ fn every_command_prints_its_result_on_stdout() {
         // Clean or found: a failure, a usage error, a panic, a cancel or a
         // signal all fail here.
         assert!(
-            matches!(output.status.code(), Some(0 | 3)),
+            matches!(output.status.code(), Some(CLEAN | FOUND)),
             "{args:?} did not finish: {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
             output.status.code()
         );
@@ -108,7 +111,7 @@ fn a_silent_passing_check_names_the_package_and_environment() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert_eq!(output.status.code(), Some(CLEAN), "{stdout}");
     assert!(
         stdout.lines().any(|line| line.contains("'bat'")
             && line.contains("check completed")
@@ -131,7 +134,7 @@ fn a_validator_prints_its_verdict_on_stdout() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&spec.stdout);
     let stderr = String::from_utf8_lossy(&spec.stderr);
-    assert_eq!(spec.status.code(), Some(1), "{stdout}{stderr}");
+    assert_eq!(spec.status.code(), Some(FAILED), "{stdout}{stderr}");
     assert!(
         stdout.contains("validation failed with 1 error(s)"),
         "{stdout}"
@@ -143,7 +146,7 @@ fn a_validator_prints_its_verdict_on_stdout() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&all.stdout);
-    assert_eq!(all.status.code(), Some(1), "{stdout}");
+    assert_eq!(all.status.code(), Some(FAILED), "{stdout}");
     assert!(stdout.contains("1 with errors"), "{stdout}");
 
     // A `cli:` key the section does not know makes the file usable, with a
@@ -158,7 +161,7 @@ fn a_validator_prints_its_verdict_on_stdout() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&config.stdout);
     let stderr = String::from_utf8_lossy(&config.stderr);
-    assert_eq!(config.status.code(), Some(3), "{stdout}{stderr}");
+    assert_eq!(config.status.code(), Some(FOUND), "{stdout}{stderr}");
     assert!(stdout.contains("usable, with warnings"), "{stdout}");
     assert!(
         stdout.contains("verbos"),

@@ -3,7 +3,9 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_test_config_with_state_directory as sandbox};
+use common::{
+    CLEAN, FOUND, SELFIE_ENV, sandboxed_command, setup_test_config_with_state_directory as sandbox,
+};
 
 fn write_package(temp: &tempfile::TempDir, target: &str) {
     let packages = temp.path().join("packages");
@@ -32,7 +34,7 @@ fn moved_target() -> tempfile::TempDir {
     let temp = sandbox();
     write_package(&temp, "~/.old");
     let (code, stdout, stderr) = run(&temp, &["apply", "-y"]);
-    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
     assert!(temp.path().join(".old").exists());
     assert!(temp.path().join("state/deploy-state.yml").exists());
     write_package(&temp, "~/.new");
@@ -46,7 +48,7 @@ fn apply_names_the_orphan_and_exits_zero() {
     let (code, stdout, stderr) = run(&temp, &["apply", "-y"]);
     assert_eq!(
         code,
-        Some(0),
+        Some(CLEAN),
         "an orphan is not a failure:\n{stdout}{stderr}"
     );
     assert_eq!(
@@ -78,10 +80,10 @@ fn drift_warns_in_its_summary_and_exits_three() {
     let temp = moved_target();
     // Deploys the new target, so the orphan is the only thing drift can find.
     let (code, stdout, stderr) = run(&temp, &["apply", "-y"]);
-    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
 
     let (code, stdout, stderr) = run(&temp, &["dotfiles", "drift"]);
-    assert_eq!(code, Some(3), "{stdout}{stderr}");
+    assert_eq!(code, Some(FOUND), "{stdout}{stderr}");
     assert!(
         stdout.contains("Orphaned") && !stderr.contains("Orphaned"),
         "{stdout}{stderr}"
@@ -107,7 +109,7 @@ fn drift_shows_an_orphan_relative_to_its_directory() {
     let temp = moved_target();
 
     let (code, stdout, stderr) = run(&temp, &["dotfiles", "drift"]);
-    assert_eq!(code, Some(3), "{stdout}{stderr}");
+    assert_eq!(code, Some(FOUND), "{stdout}{stderr}");
     let lines: Vec<&str> = stdout.lines().collect();
     let heading = lines
         .iter()
@@ -139,7 +141,7 @@ fn an_orphan_whose_record_names_no_base_shows_its_spelling() {
     .unwrap();
 
     let (code, stdout, stderr) = run(&temp, &["dotfiles", "drift"]);
-    assert_eq!(code, Some(3), "{stdout}{stderr}");
+    assert_eq!(code, Some(FOUND), "{stdout}{stderr}");
     assert!(
         stdout
             .contains("deployed from myapp/rc (as recorded, directory unknown) by package 'myapp'"),
@@ -155,7 +157,7 @@ fn apply_heads_an_orphan_on_its_own_stream() {
     let temp = moved_target();
 
     let (code, stdout, stderr) = run(&temp, &["apply", "-y"]);
-    assert_eq!(code, Some(0), "{stdout}{stderr}");
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
     let lines: Vec<&str> = stderr.lines().collect();
     let heading = lines.iter().position(|l| l.contains("Packages: "));
     let orphan = lines
