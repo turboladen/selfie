@@ -588,8 +588,8 @@ impl SelfieServer {
     #[tool(
         name = "selfie_package_list",
         description = "List packages with installation status. Set all=true to include packages from other environments. \
-Each `package_list_item` row's `status` is \"installed\", \"not installed\", \"no check command defined\", \"error\" or \"timed out\"; for the last two, `kind` says why the check gave no answer: \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\", \"result_unreadable\" or \"internal\" (a fault in selfie, not in the check command); `reason` says it in prose, and `working_directory` names the directory for \"working_directory_unusable\". Each is null otherwise. A row's `command` is its check command, null when it has none. \
-`unanswered` and `errors` list `{package, kind, reason}`. `unanswered` holds each package selfie could not answer for (a check with no answer, a spec that does not parse or is refused) and makes `status` \"found\"; `errors` holds selfie's own failures and fails the call. \
+Each `package_list_item` row's `status` is \"installed\", \"not installed\", \"no check command defined\", \"error\" or \"timed out\"; for the last two, `kind` says why the check gave no answer: \"canceled\", \"could_not_start\", \"working_directory_unusable\", \"timed_out\", \"result_unreadable\" or \"internal\" (a fault in selfie, not in the check command); `reason` says it in prose, and `working_directory` names the directory for \"working_directory_unusable\". Each is null otherwise. A package with no entry in this environment, listed under all=true, has a null `status`, `kind` and `reason`. A row's `command` is its check command, null when it has none. \
+`unanswered` and `errors` list `{package, kind, reason}`. `unanswered` holds each package selfie could not answer for (a check with no answer, a spec that does not parse or is refused) and makes `status` \"found\"; `errors` holds selfie's own failures (`kind` \"internal\") and fails the call. \
 A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location. \
 A spec that loaded but that selfie will not read is listed in the summary's `refused` array, with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\" or \"no_environments\"; branch on it) and `reason`, \
 and is not counted in total_packages. Without all=true, a spec is refused when 'selfie apply' would refuse it in the current environment; \
@@ -943,10 +943,11 @@ mod tests {
     use super::*;
 
     // A description that lists the labels of why a status is unknown, or why a
-    // check gave no answer, lists every one the enums define.
+    // check gave no answer, lists every one the enums define, and places each
+    // in the group its reason's coverage decides.
     #[test]
     fn the_status_descriptions_list_every_label() {
-        use selfie::package::event::{CheckFailure, RefusalKind, UnknownStatus};
+        use selfie::package::event::{CheckFailure, Coverage, RefusalKind, UnknownStatus};
         use selfie::package::port::LookupFailure;
         use strum::VariantNames;
 
@@ -1002,6 +1003,92 @@ mod tests {
                 assert_eq!(quoted(text, label), offered, "{name} and {label}");
             }
         }
+
+        let reasons = crate::test_samples::every_labeled_reason();
+        let label = |reason: &UnknownStatus| reason.kind().expect("every sample has a label");
+        let mut sampled: Vec<&str> = reasons.iter().map(label).collect();
+        sampled.sort_unstable();
+        let mut defined: Vec<&str> = LookupFailure::VARIANTS
+            .iter()
+            .chain(CheckFailure::VARIANTS)
+            .copied()
+            .chain(own.iter().copied())
+            .collect();
+        defined.sort_unstable();
+        assert_eq!(sampled, defined, "one sample per label");
+        let grouped = |reasons: &[UnknownStatus], text: &str, coverage: Coverage| {
+            let mut labels: Vec<&'static str> = reasons
+                .iter()
+                .filter(|reason| reason.coverage() == coverage)
+                .map(|reason| reason.kind().expect("every sample has a label"))
+                .filter(|label| quoted(text, label))
+                .collect();
+            labels.sort_unstable();
+            labels
+        };
+
+        // package_status names the answered labels, and every other labeled
+        // row is unanswered. Only a row with no label is an error.
+        let answered = labels_in(between(
+            &status,
+            "Every unknown row except ",
+            " goes in `unanswered`",
+        ));
+        assert_eq!(answered, grouped(&reasons, &status, Coverage::Answered));
+        assert_eq!(
+            grouped(&reasons, &status, Coverage::Error),
+            Vec::<&str>::new()
+        );
+        let unlabeled = UnknownStatus::Error(selfie::package::port::PackageRepoError::IoError(
+            std::sync::Arc::new(std::io::Error::other("e")),
+        ));
+        assert_eq!(unlabeled.kind(), None);
+        assert_eq!(unlabeled.coverage(), Coverage::Error);
+        assert!(
+            status.contains("(`kind` null) goes in `errors`"),
+            "{status}"
+        );
+
+        // package_list names the error labels, and every other check with no
+        // answer is unanswered.
+        let list = description(SelfieServer::package_list_tool_attr());
+        let checks: Vec<UnknownStatus> = reasons
+            .into_iter()
+            .filter(|reason| matches!(reason, UnknownStatus::CheckFailed(_)))
+            .collect();
+        let errors = labels_in(between(&list, "`errors` holds", "."));
+        assert!(
+            list.contains(
+                "no entry in this environment, listed under all=true, has a null `status`, `kind` \
+                 and `reason`"
+            ),
+            "{list}"
+        );
+        assert_eq!(errors, grouped(&checks, &list, Coverage::Error));
+        assert_eq!(
+            grouped(&checks, &list, Coverage::Answered),
+            Vec::<&str>::new()
+        );
+    }
+
+    // The text of `description` from the end of `from` to the start of the
+    // next `to`.
+    fn between<'a>(description: &'a str, from: &str, to: &str) -> &'a str {
+        let start = description
+            .find(from)
+            .unwrap_or_else(|| panic!("no {from:?} in {description}"))
+            + from.len();
+        let length = description[start..]
+            .find(to)
+            .unwrap_or_else(|| panic!("no {to:?} after {from:?} in {description}"));
+        &description[start..start + length]
+    }
+
+    // The labels quoted in `text`, sorted.
+    fn labels_in(text: &str) -> Vec<&str> {
+        let mut labels: Vec<&str> = text.split('"').skip(1).step_by(2).collect();
+        labels.sort_unstable();
+        labels
     }
 
     // The spec_create description lists exactly the refusal labels MCP can

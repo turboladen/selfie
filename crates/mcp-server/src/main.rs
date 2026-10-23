@@ -1,5 +1,7 @@
 mod event_collector;
 mod server;
+#[cfg(test)]
+mod test_samples;
 
 use anyhow::Result;
 use rmcp::{ServiceExt, transport::io::stdio};

@@ -1117,6 +1117,7 @@ fn audit_details(result: &AuditResult) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_samples::{ambiguous, directory_unreadable, not_found, unloadable};
     use futures::stream;
     use selfie::package::event::{
         AuditResultData, CheckResult, CheckResultData, DriftType, OperationContext,
@@ -3350,67 +3351,6 @@ mod tests {
         assert_eq!(result.data["data"][0]["type"], "removal_dependency_info");
         assert_eq!(result.data["data"][0]["package"], "target-pkg");
         assert_eq!(result.data["data"][0]["dependent_packages"][0], "dep-a");
-    }
-
-    // These build each lookup failure the way production does, by classifying
-    // the error a lookup returned.
-    fn lookup(error: selfie::package::port::PackageError) -> selfie::package::event::UnknownStatus {
-        selfie::package::event::UnknownStatus::LookupFailed(
-            selfie::package::port::PackageRepoError::from(error)
-                .into_lookup_failure()
-                .expect("a lookup returns this error"),
-        )
-    }
-
-    fn not_found() -> selfie::package::event::UnknownStatus {
-        lookup(selfie::package::port::PackageError::PackageNotFound {
-            name: "d".to_string(),
-            packages_path: "/packages".into(),
-            files_examined: 0,
-            search_patterns: Vec::new(),
-        })
-    }
-
-    fn ambiguous() -> selfie::package::event::UnknownStatus {
-        lookup(selfie::package::port::PackageError::MultiplePackagesFound {
-            name: "twice".to_string(),
-            packages_path: "/packages".into(),
-            conflicting_paths: vec!["/packages/twice.yaml".into(), "/packages/twice.yml".into()],
-            files_examined: 2,
-            search_patterns: Vec::new(),
-        })
-    }
-
-    fn unloadable() -> selfie::package::event::UnknownStatus {
-        use selfie::package::port::{PackageParseError, PackageParseKind};
-
-        let source =
-            selfie::yaml::parse::<selfie::package::Package>("name: dep\nenvironments: {oops\n")
-                .expect_err("the fixture must not parse");
-        lookup(selfie::package::port::PackageError::ParseError {
-            name: "dep".to_string(),
-            packages_path: "/packages".into(),
-            failed_file: "/packages/dep.yml".into(),
-            cause: PackageParseError::new(
-                "/packages/dep.yml",
-                PackageParseKind::Yaml { cause: source },
-            ),
-        })
-    }
-
-    fn directory_unreadable() -> selfie::package::event::UnknownStatus {
-        selfie::package::event::UnknownStatus::LookupFailed(
-            selfie::package::port::PackageRepoError::from(
-                selfie::package::port::PackageListError::new(
-                    "/packages".into(),
-                    selfie::fs::DirectoryState::Unlistable(std::sync::Arc::new(
-                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-                    )),
-                ),
-            )
-            .into_lookup_failure()
-            .expect("a lookup returns this error"),
-        )
     }
 
     // The label set is the MCP contract, so each label is pinned. A check that
