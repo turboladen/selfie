@@ -20,6 +20,9 @@ console.workspace = true
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 indicatif.workspace = true
 futures.workspace = true
+# "pthread" and "signal" are for ending a terminal prompt when a signal cancels
+# the run.
+nix = { workspace = true, features = ["pthread", "signal"] }
 human-panic = "2"
 selfie = { path = "../selfie/" }
 serde.workspace = true

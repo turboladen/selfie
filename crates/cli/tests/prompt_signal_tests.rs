@@ -17,7 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::{CANCELED, CLEAN, SELFIE_ENV, sandboxed_std_command, setup_default_test_config};
+use common::{
+    CANCELED, CLEAN, SELFIE_ENV, sandboxed_std_command, setup_default_test_config,
+    setup_test_config_with_state_directory,
+};
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
     pty::openpty,
@@ -198,6 +201,77 @@ fn remove_doomed(temp: &TempDir) -> PtyRun {
     run
 }
 
+// A sandbox whose one package deploys `fresh`, a target not there yet, and then
+// meets `edited`, a target holding content of its own, which apply asks about.
+struct ApplyFixture {
+    temp: TempDir,
+    fresh: PathBuf,
+    edited: PathBuf,
+}
+
+fn deploy_then_conflict() -> ApplyFixture {
+    let temp = setup_test_config_with_state_directory();
+    let root = temp.path();
+    for dir in ["state", "packages/app", "home"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(root.join("packages/app/fresh.conf"), "from-repo\n").unwrap();
+    std::fs::write(root.join("packages/app/edited.conf"), "from-repo\n").unwrap();
+    let fresh = root.join("home/fresh.conf");
+    let edited = root.join("home/edited.conf");
+    std::fs::write(&edited, "hand-edited\n").unwrap();
+    std::fs::write(
+        root.join("packages/app.yaml"),
+        format!(
+            "name: app\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  \
+             - source: app/fresh.conf\n    target: \"{}\"\n  \
+             - source: app/edited.conf\n    target: \"{}\"\n",
+            fresh.display(),
+            edited.display()
+        ),
+    )
+    .unwrap();
+    ApplyFixture {
+        temp,
+        fresh,
+        edited,
+    }
+}
+
+fn apply_to_the_conflict(fixture: &ApplyFixture) -> PtyRun {
+    let mut run = PtyRun::spawn(&fixture.temp, &["apply"]);
+    run.wait_for_text("How should this conflict be resolved?");
+    run
+}
+
+impl ApplyFixture {
+    // apply ended as canceled: it said so, left the conflicted target as it was,
+    // and kept the record of the entry it deployed before the prompt.
+    fn assert_canceled_at_the_conflict(&self, finished: &Finished) {
+        assert_eq!(finished.code, Some(CANCELED), "{}", finished.output);
+        assert!(
+            finished.output.contains("Apply canceled"),
+            "{}",
+            finished.output
+        );
+        assert_eq!(
+            std::fs::read_to_string(&self.edited).unwrap(),
+            "hand-edited\n"
+        );
+        assert_eq!(std::fs::read_to_string(&self.fresh).unwrap(), "from-repo\n");
+        let state =
+            std::fs::read_to_string(self.temp.path().join("state/deploy-state.yml")).unwrap();
+        assert!(
+            state.contains(&self.fresh.display().to_string()),
+            "the deploy before the prompt went unrecorded:\n{state}"
+        );
+        assert!(
+            !state.contains(&self.edited.display().to_string()),
+            "the conflict was recorded as deployed:\n{state}"
+        );
+    }
+}
+
 fn exists(path: &Path) -> bool {
     path.try_exists().unwrap()
 }
@@ -215,6 +289,22 @@ fn a_signal_at_a_main_thread_prompt_ends_the_command_as_canceled() {
     assert!(exists(&spec), "a canceled remove removed the spec");
 }
 
+// The shell's prompt must not start on the question's line.
+#[test]
+fn ctrl_c_typed_at_a_question_ends_its_line() {
+    let (temp, spec) = one_spec();
+    let mut run = remove_doomed(&temp);
+
+    run.type_keys(b"\x03");
+    let finished = run.finish();
+
+    assert_eq!(finished.code, Some(CANCELED), "{}", finished.output);
+    finished.assert_terminal_restored();
+    let (_, after) = finished.output.rsplit_once("[y/N] ").unwrap();
+    assert!(after.contains('\n'), "{:?}", finished.output);
+    assert!(exists(&spec), "a canceled remove removed the spec");
+}
+
 // The control: an answered prompt still does what it was told.
 #[test]
 fn an_answered_prompt_still_answers() {
@@ -227,4 +317,49 @@ fn an_answered_prompt_still_answers() {
     assert_eq!(finished.code, Some(CLEAN), "{}", finished.output);
     finished.assert_terminal_restored();
     assert!(!exists(&spec), "the answered remove left the spec");
+}
+
+// apply asks about a conflict on a thread of its own, which a signal never
+// reaches, so the run's cancellation has to end the prompt.
+#[test]
+fn a_signal_at_a_conflict_prompt_ends_apply_as_canceled() {
+    let fixture = deploy_then_conflict();
+    let run = apply_to_the_conflict(&fixture);
+
+    run.signal(Signal::SIGINT);
+    let finished = run.finish();
+
+    fixture.assert_canceled_at_the_conflict(&finished);
+    finished.assert_terminal_restored();
+}
+
+#[test]
+fn sigterm_at_a_conflict_prompt_ends_apply_as_canceled() {
+    let fixture = deploy_then_conflict();
+    let run = apply_to_the_conflict(&fixture);
+
+    run.signal(Signal::SIGTERM);
+    let finished = run.finish();
+
+    fixture.assert_canceled_at_the_conflict(&finished);
+    finished.assert_terminal_restored();
+}
+
+// Ctrl+C typed at the prompt is a key, not a signal: the run is canceled without
+// the hint about signaling again.
+#[test]
+fn ctrl_c_typed_at_a_conflict_prompt_ends_apply_as_canceled() {
+    let fixture = deploy_then_conflict();
+    let mut run = apply_to_the_conflict(&fixture);
+
+    run.type_keys(b"\x03");
+    let finished = run.finish();
+
+    fixture.assert_canceled_at_the_conflict(&finished);
+    finished.assert_terminal_restored();
+    assert!(
+        !finished.output.contains("Canceling"),
+        "{}",
+        finished.output
+    );
 }
