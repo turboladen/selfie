@@ -479,6 +479,12 @@ keeps installation predictable and avoids deep recursive recommend chains.
 
 Recommends install after the parent, one at a time, in the order listed.
 
+A package that settled earlier in the same run, under the parent or an earlier recommend, is not
+checked or installed again. selfie prints one line naming it and saying how it settled, such as
+`dep: installed earlier in this run`, and reports its outcome once, under the first of the parent
+and its recommends, in the order listed, that settled it. A package that failed to install is not
+remembered: the next recommend that needs it tries it again.
+
 Pressing Ctrl+C while recommends install ends the run as canceled, and selfie names every recommend
 it did not try: one it had not started, or one stopped before installing the next of its packages. A
 recommend whose own command the Ctrl+C interrupted is reported as failed.

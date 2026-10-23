@@ -9,7 +9,7 @@ use crate::{
         EnvironmentConfig,
         event::{
             CheckFailure, CheckResult, CheckResultData, Coverage, EventSender, Gap,
-            OperationFailure, OperationResult, OperationSuccess, UnknownStatus,
+            OperationFailure, OperationResult, OperationSuccess, Settled, UnknownStatus,
         },
         port::PackageRepository,
         service::{InstallOptions, ProgressTracker},
@@ -77,6 +77,9 @@ where
     // Every package's gap, attached once to the root's result: only that result
     // reaches the caller, so a dependency's would otherwise be lost.
     let mut gaps = Vec::new();
+    // Every package that settled in this run, which no later graph checks or
+    // installs again. The root's graph runs first, so it reuses nothing.
+    let mut settled = SettledPackages::new();
     for pkg_name in &dep_graph.install_order {
         // Check for cancellation between packages
         if token.is_cancelled() {
@@ -98,6 +101,9 @@ where
 
         match installed {
             Ok(mut installed) => {
+                // Read before the gap is taken, or an unconfirmed install would
+                // be recorded as a confirmed one.
+                settled.insert(pkg_name.clone(), Settled::from(&installed));
                 gaps.extend(installed.gap.take());
                 root = Some((pkg_name.as_str(), installed));
             }
@@ -115,6 +121,7 @@ where
             command_runner,
             sender,
             token,
+            &mut settled,
         )
         .await;
     }
@@ -144,6 +151,43 @@ struct Installed {
     was_already_installed: bool,
     executable_path: Option<String>,
     gap: Option<Gap>,
+}
+
+impl From<&Installed> for Settled {
+    fn from(installed: &Installed) -> Self {
+        if installed.gap.is_some() {
+            Settled::Unconfirmed
+        } else if installed.was_already_installed {
+            Settled::AlreadyInstalled
+        } else {
+            Settled::Installed
+        }
+    }
+}
+
+/// The packages that settled earlier in an install run, by name. Only a
+/// success is recorded, so a package that failed is tried again by the next
+/// graph that needs it.
+type SettledPackages = HashMap<String, Settled>;
+
+/// Remove from `graph`'s install order every package in `settled`, and return
+/// those packages with how each settled, in install order.
+fn drop_settled(
+    graph: &mut deps::DependencyGraph,
+    settled: &SettledPackages,
+) -> Vec<(String, Settled)> {
+    let reused = graph
+        .install_order
+        .iter()
+        .filter_map(|name| settled.get(name).map(|how| (name.clone(), *how)))
+        .collect();
+    // Still a dependency order: a package is recorded only once every package
+    // before it in its own graph had settled, so whatever it depends on is
+    // settled too, and a subsequence of a dependency order is one.
+    graph
+        .install_order
+        .retain(|name| !settled.contains_key(name));
+    reused
 }
 
 /// Refuse a package in `graph` that cannot be installed here, before any install
@@ -695,6 +739,7 @@ fn after_install(result: &CheckResult, package_name: &str) -> AfterInstall {
 ///
 /// `recommends` must be the root package's list for `config.environment()`, as
 /// `DependencyGraph::root_recommends` holds it.
+#[allow(clippy::too_many_arguments)]
 async fn install_recommends<PR, CR>(
     package_name: &str,
     recommends: &[String],
@@ -703,6 +748,7 @@ async fn install_recommends<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     token: &CancellationToken,
+    settled: &mut SettledPackages,
 ) where
     PR: PackageRepository + Sync,
     CR: CommandRunner,
@@ -726,7 +772,10 @@ async fn install_recommends<PR, CR>(
     // that tried every recommend.
     let mut untried: Vec<String> = Vec::new();
     for name in recommends {
-        if !install_recommend_in_bulk(name, repo, config, command_runner, sender, token).await {
+        let tried =
+            install_recommend_in_bulk(name, repo, config, command_runner, sender, token, settled)
+                .await;
+        if !tried {
             untried.push(name.clone());
         }
     }
@@ -750,6 +799,7 @@ async fn install_recommend_in_bulk<PR, CR>(
     command_runner: &CR,
     sender: &EventSender,
     token: &CancellationToken,
+    settled: &mut SettledPackages,
 ) -> bool
 where
     PR: PackageRepository + Sync,
@@ -772,6 +822,7 @@ where
         sender,
         &mut rec_progress,
         token,
+        settled,
     )
     .await
     {
@@ -801,6 +852,7 @@ enum RecommendError {
 }
 
 /// Try to install a single recommended package (with its hard dependencies).
+#[allow(clippy::too_many_arguments)]
 async fn install_single_recommend<PR, CR>(
     recommend_name: &str,
     repo: &PR,
@@ -809,15 +861,21 @@ async fn install_single_recommend<PR, CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
+    settled: &mut SettledPackages,
 ) -> Result<(), RecommendError>
 where
     PR: PackageRepository + Sync,
     CR: CommandRunner,
 {
     // Resolve hard dependencies for this recommend
-    let dep_graph = deps::resolve_dependencies(recommend_name, repo, config.environment(), sender)
-        .await
-        .map_err(|f| RecommendError::Failed(f.to_string()))?;
+    let mut dep_graph =
+        deps::resolve_dependencies(recommend_name, repo, config.environment(), sender)
+            .await
+            .map_err(|f| RecommendError::Failed(f.to_string()))?;
+    // A package that settled earlier in the run is neither refused, checked,
+    // counted nor installed again here. Its outcome, gap included, was
+    // reported under the graph that settled it.
+    let reused = drop_settled(&mut dep_graph, settled);
     // 7 per package (fetch, env, check, get_cmd, execute, verify, complete).
     // Resolution takes no step here.
     progress.set_total_steps(7 * dep_graph.install_order.len());
@@ -827,6 +885,10 @@ where
         confirm_installable(&dep_graph, config, command_runner, sender, progress, token)
             .await
             .map_err(|f| RecommendError::Failed(f.to_string()))?;
+    // Only now, since a refused recommend reused nothing.
+    for (name, how) in reused {
+        sender.send_settled_earlier(name, recommend_name, how).await;
+    }
 
     // Install each package in dependency order
     for pkg_name in &dep_graph.install_order {
@@ -847,6 +909,7 @@ where
         )
         .await
         .map_err(|failure| RecommendError::Failed(failure.to_string()))?;
+        settled.insert(pkg_name.clone(), Settled::from(&installed));
 
         // A recommend leaves the run clean whatever happens to it, so a check
         // that gave no answer for it, or for one of its own dependencies, is a

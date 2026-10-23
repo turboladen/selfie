@@ -1,10 +1,11 @@
-// How one install run treats its recommends: the order they install in and
-// the progress each one reports.
+// How one install run treats its recommends: the order they install in, the
+// progress each one reports, and the packages an earlier graph in the run
+// settled, which a recommend neither checks nor installs again.
 
 use std::path::Path;
 
 use selfie::package::{
-    event::{OperationResult, PackageEvent},
+    event::{OperationResult, Outcome, PackageEvent, Settled},
     service::{InstallOptions, PackageService},
 };
 use tempfile::TempDir;
@@ -32,6 +33,74 @@ async fn install(temp: &TempDir, runner: FakeCommandRunner) -> Vec<PackageEvent>
             .await,
     )
     .await
+}
+
+// A runner on which `install-<name>` succeeds for each of `names`.
+fn installing(names: &[&str]) -> FakeCommandRunner {
+    names.iter().fold(FakeCommandRunner::new(), |runner, name| {
+        runner.succeeding(&format!("install-{name}"), b"")
+    })
+}
+
+// How many times `runner` was asked to run `command`.
+fn runs(runner: &FakeCommandRunner, command: &str) -> usize {
+    runner
+        .calls()
+        .iter()
+        .filter(|(called, _)| called == command)
+        .count()
+}
+
+// Each `SettledEarlier` event as (package, recommend, how), in order.
+fn settled_earlier(events: &[PackageEvent]) -> Vec<(String, String, Settled)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::SettledEarlier {
+                package_name,
+                recommend_name,
+                settled,
+                ..
+            } => Some((package_name.clone(), recommend_name.clone(), *settled)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn settled(package: &str, recommend: &str, how: Settled) -> (String, String, Settled) {
+    (package.to_string(), recommend.to_string(), how)
+}
+
+// The run's outcome, which must be a success.
+fn outcome(events: &[PackageEvent]) -> Outcome {
+    match get_operation_result(events) {
+        Some(OperationResult::Success(success)) => success.outcome(),
+        other => panic!("the run must complete successfully: {other:?}"),
+    }
+}
+
+fn recommend_succeeded(events: &[PackageEvent], recommend: &str) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            PackageEvent::RecommendSucceeded { recommend_name, .. } if recommend_name == recommend
+        )
+    })
+}
+
+// The error each `RecommendFailed` event carries, by recommend, in order.
+fn recommend_failures(events: &[PackageEvent]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::RecommendFailed {
+                recommend_name,
+                error,
+                ..
+            } => Some((recommend_name.clone(), error.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 // Returns each progress event's step and total, from the one after the
@@ -178,4 +247,209 @@ async fn recommends_install_one_at_a_time_in_the_order_listed() {
         .filter(|command| command.starts_with("install-r"))
         .collect();
     assert_eq!(installs, ["install-r1", "install-r2", "install-r3"]);
+}
+
+// A recommend counts only the packages it installs itself: one the root
+// settled leaves its total, and a recommend the root settled whole reports no
+// progress at all.
+#[tokio::test]
+async fn a_recommend_counts_only_the_packages_it_installs() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    dependencies:\n      - a\n      - whole\n    recommends:\n      - rec\n      - whole\n",
+    );
+    write_spec(
+        temp.path(),
+        "rec",
+        "    dependencies:\n      - a\n      - b\n",
+    );
+    for name in ["a", "b", "whole"] {
+        write_spec(temp.path(), name, "");
+    }
+    let runner = installing(&["pkg", "rec", "a", "b", "whole"]);
+
+    let events = install(&temp, runner).await;
+
+    let progress = recommend_progress(&events, "rec");
+    assert_eq!(progress.last(), Some(&(14, 14)), "{progress:?}");
+    assert!(
+        progress.iter().all(|&(step, total)| step <= total),
+        "{progress:?}"
+    );
+    assert!(recommend_succeeded(&events, "whole"), "{events:#?}");
+    assert_eq!(recommend_progress(&events, "whole"), []);
+}
+
+// A dependency the root's graph found installed is not checked again by a
+// recommend that also needs it. The recommend says it settled earlier, and
+// that changes nothing about the run.
+#[tokio::test]
+async fn a_dependency_the_root_settled_is_not_checked_again_by_a_recommend() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    dependencies:\n      - dep\n    recommends:\n      - rec\n",
+    );
+    write_spec(temp.path(), "rec", "    dependencies:\n      - dep\n");
+    write_spec(temp.path(), "dep", "    check: \"check-dep\"\n");
+    let runner = installing(&["pkg", "rec"]).succeeding("check-dep", b"");
+
+    let events = install(&temp, runner.clone()).await;
+
+    assert_eq!(runs(&runner, "check-dep"), 1, "{:?}", runner.calls());
+    assert_eq!(runs(&runner, "install-dep"), 0, "{:?}", runner.calls());
+    assert_eq!(
+        settled_earlier(&events),
+        [settled("dep", "rec", Settled::AlreadyInstalled)]
+    );
+    assert!(recommend_succeeded(&events, "rec"), "{events:#?}");
+    assert_eq!(outcome(&events), Outcome::Clean);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, PackageEvent::Warning { .. })),
+        "{events:#?}"
+    );
+}
+
+// Two recommends that need one package install it once, under the first; the
+// second says it settled earlier.
+#[tokio::test]
+async fn two_recommends_sharing_a_dependency_install_it_once() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    recommends:\n      - a\n      - b\n",
+    );
+    write_spec(temp.path(), "a", "    dependencies:\n      - e\n");
+    write_spec(temp.path(), "b", "    dependencies:\n      - e\n");
+    write_spec(temp.path(), "e", "");
+    let runner = installing(&["pkg", "a", "b", "e"]);
+
+    let events = install(&temp, runner.clone()).await;
+
+    assert_eq!(runs(&runner, "install-e"), 1, "{:?}", runner.calls());
+    assert!(recommend_succeeded(&events, "a"), "{events:#?}");
+    assert!(recommend_succeeded(&events, "b"), "{events:#?}");
+    assert_eq!(
+        settled_earlier(&events),
+        [settled("e", "b", Settled::Installed)]
+    );
+}
+
+// A failure is never shared: the next recommend that needs the package runs
+// its install again itself, and each failure is about a command that
+// recommend ran.
+#[tokio::test]
+async fn a_dependency_that_failed_in_one_recommend_is_tried_again_by_the_next() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    recommends:\n      - a\n      - b\n",
+    );
+    write_spec(temp.path(), "a", "    dependencies:\n      - e\n");
+    write_spec(temp.path(), "b", "    dependencies:\n      - e\n");
+    write_spec(temp.path(), "e", "");
+    let runner = installing(&["pkg", "a", "b"]).failing("install-e", b"no such formula");
+
+    let events = install(&temp, runner.clone()).await;
+
+    assert_eq!(runs(&runner, "install-e"), 2, "{:?}", runner.calls());
+    let failures = recommend_failures(&events);
+    let failed: Vec<&str> = failures.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(failed, ["a", "b"], "{events:#?}");
+    for (name, error) in &failures {
+        assert!(error.contains("install-e"), "{name}: {error}");
+    }
+    assert_eq!(settled_earlier(&events), []);
+}
+
+// A recommend the root depends on settled with the root's graph, so it runs
+// nothing and still reports success.
+#[tokio::test]
+async fn a_recommend_the_root_installed_runs_nothing_and_succeeds() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    dependencies:\n      - a\n    recommends:\n      - a\n",
+    );
+    write_spec(temp.path(), "a", "");
+    let runner = installing(&["pkg", "a"]);
+
+    let events = install(&temp, runner.clone()).await;
+
+    assert_eq!(runs(&runner, "install-a"), 1, "{:?}", runner.calls());
+    assert_eq!(
+        settled_earlier(&events),
+        [settled("a", "a", Settled::Installed)]
+    );
+    assert!(recommend_succeeded(&events, "a"), "{events:#?}");
+}
+
+// A package whose install command is blank is installed only by already being
+// installed. Once its check said so, no later graph asks again.
+#[tokio::test]
+async fn a_shared_check_first_dependency_is_checked_once() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    dependencies:\n      - d\n    recommends:\n      - rec\n",
+    );
+    write_spec(temp.path(), "rec", "    dependencies:\n      - d\n");
+    std::fs::write(
+        temp.path().join("d.yml"),
+        "name: d\nenvironments:\n  test:\n    install: \"\"\n    check: \"check-d\"\n",
+    )
+    .unwrap();
+    let runner = installing(&["pkg", "rec"]).succeeding("check-d", b"");
+
+    let events = install(&temp, runner.clone()).await;
+
+    assert_eq!(runs(&runner, "check-d"), 1, "{:?}", runner.calls());
+    assert_eq!(
+        settled_earlier(&events),
+        [settled("d", "rec", Settled::AlreadyInstalled)]
+    );
+}
+
+// A recommend refused before it installs anything reused nothing, so it says
+// nothing about the package it shares with the root.
+#[tokio::test]
+async fn a_refused_recommend_reports_no_reuse() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    dependencies:\n      - dep\n    recommends:\n      - rec\n",
+    );
+    write_spec(
+        temp.path(),
+        "rec",
+        "    dependencies:\n      - dep\n      - bad\n",
+    );
+    write_spec(temp.path(), "dep", "");
+    // A blank install and no check: nothing can install it here.
+    std::fs::write(
+        temp.path().join("bad.yml"),
+        "name: bad\nenvironments:\n  test:\n    install: \"\"\n",
+    )
+    .unwrap();
+    let runner = installing(&["pkg", "rec", "dep"]);
+
+    let events = install(&temp, runner.clone()).await;
+
+    assert_eq!(runs(&runner, "install-dep"), 1, "{:?}", runner.calls());
+    let failed: Vec<String> = recommend_failures(&events)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(failed, ["rec"], "{events:#?}");
+    assert_eq!(settled_earlier(&events), []);
 }

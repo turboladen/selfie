@@ -667,6 +667,24 @@ impl EventSender {
         .await;
     }
 
+    /// Report that `package_name`, which `recommend_name` needs, settled
+    /// earlier in this install run.
+    pub(crate) async fn send_settled_earlier(
+        &self,
+        package_name: impl fmt::Display,
+        recommend_name: impl fmt::Display,
+        settled: Settled,
+    ) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::SettledEarlier {
+            operation_info,
+            package_name: package_name.to_string(),
+            recommend_name: recommend_name.to_string(),
+            settled,
+        })
+        .await;
+    }
+
     /// Send individual spec list item data (for streaming)
     pub(crate) async fn send_spec_list_item(&self, spec_item: SpecListItem) {
         let operation_info = self.touch_operation_info();
@@ -2920,6 +2938,22 @@ impl From<crate::package::port::PackageListError> for OperationFailure {
     }
 }
 
+/// How a package settled earlier in an install run.
+///
+/// Converts to a label for an adapter: `installed`, `already_installed` or
+/// `unconfirmed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum Settled {
+    /// Its install command ran and its check confirmed it.
+    Installed,
+    /// Its check found it already installed.
+    AlreadyInstalled,
+    /// Its install command ran and its check gave no answer, so the install
+    /// is unconfirmed.
+    Unconfirmed,
+}
+
 /// Events that can be emitted during package operations
 #[derive(Debug, Clone)]
 pub enum PackageEvent {
@@ -3119,6 +3153,18 @@ pub enum PackageEvent {
         operation_info: OperationInfo,
         recommend_name: String,
         error: String,
+    },
+
+    /// A package a recommend needs settled earlier in the same install run, so
+    /// the recommend neither checks nor installs it again.
+    ///
+    /// Not a warning, and it changes no result: the package's outcome was
+    /// reported under the graph that settled it.
+    SettledEarlier {
+        operation_info: OperationInfo,
+        package_name: String,
+        recommend_name: String,
+        settled: Settled,
     },
 
     /// A config file is about to be deployed

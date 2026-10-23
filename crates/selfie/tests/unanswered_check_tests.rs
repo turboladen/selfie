@@ -10,6 +10,7 @@ use selfie::{
     package::{
         event::{
             Coverage, OperationFailure, OperationResult, OperationSuccess, Outcome, PackageEvent,
+            Settled,
         },
         service::PackageService,
     },
@@ -553,6 +554,94 @@ async fn a_recommends_dependency_is_named_for_the_recommend() {
         1,
         "{events:?}"
     );
+}
+
+// Each `SettledEarlier` event as (package, recommend, how), in order.
+fn settled_earlier(events: &[PackageEvent]) -> Vec<(&str, &str, Settled)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::SettledEarlier {
+                package_name,
+                recommend_name,
+                settled,
+                ..
+            } => Some((package_name.as_str(), recommend_name.as_str(), *settled)),
+            _ => None,
+        })
+        .collect()
+}
+
+// A dependency the root's graph installed without an answer from its check is
+// the run's gap, reported once in the root's result. A recommend that needs it
+// neither checks it again nor warns about it, and says it is unconfirmed.
+#[tokio::test]
+async fn a_root_gap_is_not_warned_about_again_by_a_recommend() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    dependencies:\n      - dep\n    recommends:\n      - rec\n",
+    );
+    write_spec(temp.path(), "rec", "    dependencies:\n      - dep\n");
+    write_spec(temp.path(), "dep", "    check: \"check-dep\"\n");
+    let runner = FakeCommandRunner::new()
+        .succeeding("true", b"")
+        .erroring("check-dep", timed_out("check-dep"));
+
+    let events = install(&temp, runner.clone()).await;
+
+    let success = completed(&events);
+    assert_eq!(gaps(success), [("dep".to_string(), Coverage::Unanswered)]);
+    assert_eq!(success.outcome(), Outcome::Found);
+    // The root's own check before the install and after it, and none from the
+    // recommend.
+    let checks = runner
+        .calls()
+        .iter()
+        .filter(|(command, _)| command == "check-dep")
+        .count();
+    assert_eq!(checks, 2, "{:?}", runner.calls());
+    assert_eq!(
+        warnings_starting(&events, "'dep', a dependency of recommended package"),
+        0,
+        "{events:?}"
+    );
+    assert_eq!(
+        settled_earlier(&events),
+        [("dep", "rec", Settled::Unconfirmed)]
+    );
+}
+
+// A gap two recommends share is warned about once, under the first recommend
+// in the order listed, and the second says it is unconfirmed.
+#[tokio::test]
+async fn a_shared_recommend_gap_is_warned_once_under_the_first_recommend() {
+    let temp = TempDir::new().unwrap();
+    write_spec(
+        temp.path(),
+        "pkg",
+        "    recommends:\n      - a\n      - b\n",
+    );
+    write_spec(temp.path(), "a", "    dependencies:\n      - e\n");
+    write_spec(temp.path(), "b", "    dependencies:\n      - e\n");
+    write_spec(temp.path(), "e", "    check: \"check-e\"\n");
+    let runner = FakeCommandRunner::new()
+        .succeeding("true", b"")
+        .erroring("check-e", timed_out("check-e"));
+
+    let events = install(&temp, runner).await;
+
+    assert_eq!(completed(&events).outcome(), Outcome::Clean);
+    let warned = |recommend: &str| {
+        warnings_starting(
+            &events,
+            &format!("'e', a dependency of recommended package '{recommend}', installed"),
+        )
+    };
+    assert_eq!(warned("a"), 1, "{events:?}");
+    assert_eq!(warned("b"), 0, "{events:?}");
+    assert_eq!(settled_earlier(&events), [("e", "b", Settled::Unconfirmed)]);
 }
 
 // A check that never ran fails the install, whatever path its failure took:

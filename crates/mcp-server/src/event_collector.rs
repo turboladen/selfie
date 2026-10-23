@@ -643,6 +643,17 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "package": recommend_name,
             "error": error,
         })),
+        PackageEvent::SettledEarlier {
+            package_name,
+            recommend_name,
+            settled,
+            ..
+        } => Some(serde_json::json!({
+            "type": "settled_earlier",
+            "package": package_name,
+            "recommend": recommend_name,
+            "settled": label(*settled),
+        })),
         // Only a canceled install sends it, and this server never cancels one;
         // rendered so that a server that can will report it.
         PackageEvent::RecommendsUntried { names, .. } => Some(serde_json::json!({
@@ -2645,6 +2656,36 @@ mod tests {
             result.data["data"],
             serde_json::json!([{ "type": "recommends_untried", "packages": ["r2", "r3"] }])
         );
+    }
+
+    #[tokio::test]
+    async fn settled_earlier_is_one_row_naming_the_recommend() {
+        use selfie::package::event::Settled;
+
+        for (settled, label) in [
+            (Settled::Installed, "installed"),
+            (Settled::AlreadyInstalled, "already_installed"),
+            (Settled::Unconfirmed, "unconfirmed"),
+        ] {
+            let events = vec![PackageEvent::SettledEarlier {
+                operation_info: test_op_info(),
+                package_name: "dep".to_string(),
+                recommend_name: "rec".to_string(),
+                settled,
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            assert_eq!(
+                result.data["data"],
+                serde_json::json!([{
+                    "type": "settled_earlier",
+                    "package": "dep",
+                    "recommend": "rec",
+                    "settled": label,
+                }])
+            );
+        }
     }
 
     // A skipped spec reaches a tool caller as fields it can branch on, and the
