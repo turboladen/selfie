@@ -14,7 +14,10 @@ use thiserror::Error;
 use super::message::GitMessage;
 
 /// Git status of a single file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Converts to a label for an adapter, the variant's name in snake_case.
+#[derive(Debug, Clone, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum GitFileStatus {
     /// Tracked, no changes
     Clean,

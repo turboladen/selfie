@@ -10,7 +10,10 @@ what a dotfile entry that does not deploy reports, and by
 [0009](0009-a-status-selfie-cannot-judge-names-why-in-one-type.md), which types the reason a status
 is unknown, and by [0010](0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md), which
 decides which packages a listing, a status and an install could not answer for, and so when those
-runs are Found. 0008 and 0009 change no verdict or exit code.
+runs are Found, and by
+[0011](0011-an-install-run-settles-each-package-once-and-installs-recommends-in-order.md), which
+adds one line to what §5 prints at default verbosity. 0008, 0009 and 0011 change no verdict or exit
+code.
 
 ## Context
 
@@ -103,7 +106,9 @@ A script that captures stdout gets the answer and nothing else, at any verbosity
   it is one status line on stderr. The library marks such a step as waiting when it emits it. The
   CLI does not infer it from step numbers or message text.
 - **Everything else about the run is hidden unless `--verbose`**: the operation header, local steps,
-  and debug logs. `cli: verbose: true` in the config file is the same switch as `--verbose`.
+  and debug logs, except a package reused within an install run, as
+  [0011](0011-an-install-run-settles-each-package-once-and-installs-recommends-in-order.md) decides.
+  `cli: verbose: true` in the config file is the same switch as `--verbose`.
 - **The summary line names the environment** for every command whose answer depends on it.
 
 ### 6. Paths

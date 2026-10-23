@@ -72,6 +72,18 @@ where
     service_with_runner(service_test_config_with_dir(temp_dir.path()), runner)
 }
 
+/// Creates a service with `config` that runs its commands through `runner`.
+#[must_use]
+pub fn create_service_with_config_and_runner<CR>(
+    config: SelfieConfig,
+    runner: CR,
+) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, CR, GixGitStatusProvider>
+where
+    CR: selfie::commands::runner::CommandRunner + Clone + Send + Sync + 'static,
+{
+    service_with_runner(config, runner)
+}
+
 // The wiring every helper here shares: repositories over `config`'s directories,
 // and `runner` for commands.
 fn service_with_runner<CR>(

@@ -8,6 +8,9 @@ Accepted. Refines [0006](0006-command-output-contract.md). It does not change wh
 means. It decides, once for the three commands §2 names, which packages count as "part of what it
 was asked to cover" that "was not covered", the clause in 0006's definition of Found. It refines
 [0009](0009-a-status-selfie-cannot-judge-names-why-in-one-type.md), using the reasons it types.
+Refined by
+[0011](0011-an-install-run-settles-each-package-once-and-installs-recommends-in-order.md), which
+decides how often an install run checks and installs a package.
 
 ## Context
 
@@ -97,7 +100,8 @@ happened: the install command succeeded and the check says not installed.
   cannot be read does.
 - `package audit --all` scores "a spec left out" as Failed, which this record does not change. It is
   not a listing, and its row in 0006 stays as it is.
-- An install run reports a dependency once for each graph that reaches it; installing and checking
-  each package once per run is left to a later decision.
+- An install run reports each package under the first graph that settles it, and a later graph
+  neither checks nor installs a package that already settled, as
+  [0011](0011-an-install-run-settles-each-package-once-and-installs-recommends-in-order.md) decides.
 - 0006's table gains rows for `package list`, `package status` and `package install`, which point
   here.

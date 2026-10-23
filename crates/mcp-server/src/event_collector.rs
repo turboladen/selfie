@@ -3,7 +3,7 @@ use selfie::package::SpecOrigin;
 use selfie::package::event::{
     AuditResult, BaseKind, CheckResult, ConflictReport, Coverage, DotfileSource, EventStream, Gap,
     LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
-    RefusalKind, SkipReason,
+    SkipReason,
 };
 use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
@@ -103,7 +103,7 @@ fn with_source(mut row: Value, source: &DotfileSource) -> Value {
 /// a failed operation's is.
 pub(crate) fn failure_payload(failure: &OperationFailure) -> Value {
     let mut result = failure_json(failure);
-    result["outcome"] = outcome_label(Outcome::Failed).into();
+    result["outcome"] = label(Outcome::Failed);
     serde_json::json!({ "result": result, "data": [] })
 }
 
@@ -115,15 +115,6 @@ fn gap_json(gap: &Gap) -> Value {
         "kind": gap.reason().kind(),
         "reason": gap.reason().to_string(),
     })
-}
-
-/// The `outcome` field's value.
-fn outcome_label(outcome: Outcome) -> &'static str {
-    match outcome {
-        Outcome::Clean => "clean",
-        Outcome::Found => "found",
-        Outcome::Failed => "failed",
-    }
 }
 
 pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
@@ -187,13 +178,13 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
                 serde_json::json!({
                     "status": "unknown",
                     "error": "No completion event received",
-                    "outcome": outcome_label(Outcome::Failed),
+                    "outcome": label(Outcome::Failed),
                 }),
             ),
         },
     };
     if let Some(result) = &final_result {
-        result_data["outcome"] = outcome_label(result.outcome()).into();
+        result_data["outcome"] = label(result.outcome());
     }
     // An apply result that completed carries both counts whatever its status, so a
     // caller never reads a missing field as zero. A run that stopped or was
@@ -331,7 +322,7 @@ fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
             serde_json::json!({
                 "package": &r.package_name,
                 "path": r.path.display().to_string(),
-                "kind": refusal_kind_label(r.kind),
+                "kind": label(r.kind),
                 "reason": &r.reason,
             })
         })
@@ -371,17 +362,6 @@ fn skip_reason_fields(mut row: Value, reason: &SkipReason) -> Value {
     map.insert("commands".into(), commands);
     map.insert("link".into(), link);
     row
-}
-
-/// The `kind` field's value for a package refused whole.
-fn refusal_kind_label(kind: RefusalKind) -> &'static str {
-    match kind {
-        RefusalKind::UnknownTopLevelKeys => "unknown_top_level_keys",
-        RefusalKind::UnknownEnvironmentKeys => "unknown_environment_keys",
-        RefusalKind::UncheckedTopLevel => "unchecked_top_level",
-        RefusalKind::NoEnvironments => "no_environments",
-        RefusalKind::AmbiguousName => "ambiguous_name",
-    }
 }
 
 /// One parse failure as fields, shared by every surface that reports one.
@@ -435,7 +415,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                             .iter()
                             .map(|path| path.display().to_string())
                             .collect::<Vec<_>>(),
-                        "kind": refusal_kind_label(*kind),
+                        "kind": label(*kind),
                         "reason": reason,
                     })
                 })
@@ -486,7 +466,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                 "homepage": &package_info.homepage,
                 "environments": &package_info.environments,
                 "current_environment": &package_info.current_environment,
-                "git_status": git_status_label(package_info.git_status.as_ref()),
+                "git_status": package_info.git_status.as_ref().map(label),
                 "refusal": &package_info.refusal,
                 "refusal_elsewhere": &package_info.refusal_elsewhere,
                 "dotfiles": dotfiles,
@@ -530,7 +510,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         } => {
             let issues: Vec<Value> = validation_result.issues.iter().map(issue_json).collect();
             Some(
-                serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "outcome": outcome_label(validation_result.outcome), "issues": issues }),
+                serde_json::json!({ "type": "validation_result", "package": &validation_result.package_name, "outcome": label(validation_result.outcome), "issues": issues }),
             )
         }
         PackageEvent::RemovalDependencyInfo {
@@ -561,7 +541,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "name": &spec_item.name,
             "description": &spec_item.description,
             "environments": &spec_item.environments,
-            "git_status": git_status_label(spec_item.git_status.as_ref()),
+            "git_status": spec_item.git_status.as_ref().map(label),
         })),
         PackageEvent::SpecListLoaded { spec_list, .. } => {
             let invalid: Vec<Value> = spec_list
@@ -642,6 +622,17 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "type": "recommend_failed",
             "package": recommend_name,
             "error": error,
+        })),
+        PackageEvent::SettledEarlier {
+            package_name,
+            recommend_name,
+            settled,
+            ..
+        } => Some(serde_json::json!({
+            "type": "settled_earlier",
+            "package": package_name,
+            "recommend": recommend_name,
+            "settled": label(*settled),
         })),
         // Only a canceled install sends it, and this server never cancels one;
         // rendered so that a server that can will report it.
@@ -821,7 +812,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "unverified_count": unverified_count,
             "orphan_count": orphan_count,
             "unjudged_count": unjudged_count,
-            "drift_outcome": outcome_label(*drift_outcome),
+            "drift_outcome": label(*drift_outcome),
         })),
         PackageEvent::SyncCommitCreated {
             package_name,
@@ -867,19 +858,6 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
     row.into_iter().collect()
 }
 
-fn git_status_label(status: Option<&selfie::package::git::GitFileStatus>) -> Value {
-    use selfie::package::git::GitFileStatus;
-    match status {
-        Some(GitFileStatus::Clean) => Value::String("clean".to_string()),
-        Some(GitFileStatus::Modified) => Value::String("modified".to_string()),
-        Some(GitFileStatus::Staged) => Value::String("staged".to_string()),
-        Some(GitFileStatus::StagedAndModified) => Value::String("staged_and_modified".to_string()),
-        Some(GitFileStatus::Untracked) => Value::String("untracked".to_string()),
-        Some(GitFileStatus::NotInRepo) => Value::String("not_in_repo".to_string()),
-        None => Value::Null,
-    }
-}
-
 /// One validation issue as JSON, for a validation result and for a spec refused
 /// as invalid alike.
 fn issue_json(issue: &selfie::package::event::ValidationIssueData) -> Value {
@@ -909,7 +887,10 @@ struct IssueRow<'a> {
 /// place in the file.
 fn issue_row(issue: &IssueRow<'_>) -> Value {
     serde_json::json!({
-        "level": validation_level_label(&issue.level),
+        // Without the level, an assistant cannot tell an error, a warning and a
+        // notice apart, and the notice, which never makes a package invalid, reads
+        // as a defect beside a clean `outcome`.
+        "level": label(issue.level),
         "category": issue.category,
         "field": issue.field,
         "message": issue.message,
@@ -962,6 +943,9 @@ pub(crate) fn push_category_label(
 }
 
 /// Labels the category of an issue `selfie spec validate` reports.
+// Hand-written rather than derived: the enum's strum `to_string` is its wording
+// for a person, and `IntoStaticStr` would take that wording instead of the
+// snake_case label.
 pub(crate) fn validation_category_label(category: ValidationErrorCategory) -> &'static str {
     match category {
         ValidationErrorCategory::RequiredField => "required_field",
@@ -971,20 +955,6 @@ pub(crate) fn validation_category_label(category: ValidationErrorCategory) -> &'
         ValidationErrorCategory::UrlFormat => "url_format",
         ValidationErrorCategory::PathFormat => "path_format",
         ValidationErrorCategory::Advisory => "advisory",
-    }
-}
-
-/// Label a validation issue's severity.
-fn validation_level_label(level: &selfie::validation::ValidationLevel) -> &'static str {
-    // Without a label for the level, an assistant cannot tell the three levels
-    // apart, and an informational notice, which never makes a package invalid,
-    // reads as a defect beside a clean `outcome`.
-    use selfie::validation::ValidationLevel;
-
-    match level {
-        ValidationLevel::Error => "error",
-        ValidationLevel::Warning => "warning",
-        ValidationLevel::Info => "info",
     }
 }
 
@@ -1074,12 +1044,12 @@ fn status_fields(
     };
 
     let mut fields = serde_json::Map::new();
-    let label = status.map(|status| match status {
+    let status_label = status.map(|status| match status {
         EnvironmentStatus::Installed => "installed",
         EnvironmentStatus::NotInstalled => "not installed",
         EnvironmentStatus::Unknown(_) => "unknown",
     });
-    fields.insert("status".to_string(), Value::from(label));
+    fields.insert("status".to_string(), Value::from(status_label));
     let unknown = match status {
         Some(EnvironmentStatus::Unknown(unknown)) => Some(unknown),
         _ => None,
@@ -1111,7 +1081,7 @@ fn status_fields(
     fields.insert("conflicting_paths".to_string(), paths);
     let refusal = match unknown {
         Some(UnknownStatus::Refused { kind, reason }) => serde_json::json!({
-            "kind": refusal_kind_label(*kind),
+            "kind": label(*kind),
             "reason": reason,
         }),
         _ => Value::Null,
@@ -1138,7 +1108,7 @@ mod tests {
     use futures::stream;
     use selfie::package::event::{
         AuditResultData, CheckResult, CheckResultData, DriftType, OperationContext,
-        OperationFailure, OperationInfo, OperationSuccess, RepoPath, StepCount,
+        OperationFailure, OperationInfo, OperationSuccess, RefusalKind, RepoPath, StepCount,
         metadata::OperationType,
     };
     use std::time::Instant;
@@ -2645,6 +2615,153 @@ mod tests {
             result.data["data"],
             serde_json::json!([{ "type": "recommends_untried", "packages": ["r2", "r3"] }])
         );
+    }
+
+    // Each label is part of the MCP contract, so every variant's label is pinned
+    // through the row that carries it.
+
+    // A validation result with `outcome` and one issue at `level`.
+    fn validation_row(outcome: Outcome, level: selfie::validation::ValidationLevel) -> Value {
+        let event = PackageEvent::ValidationResultCompleted {
+            operation_info: test_op_info(),
+            validation_result: selfie::package::event::ValidationResultData {
+                package_name: "p".to_string(),
+                environment: "test".to_string(),
+                outcome,
+                issues: vec![selfie::package::event::ValidationIssueData {
+                    category: ValidationErrorCategory::Advisory,
+                    field: "f".to_string(),
+                    message: "m".to_string(),
+                    level,
+                    suggestion: None,
+                    location: None,
+                }],
+            },
+        };
+        let rows = event_to_json(&event);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        rows[0].clone()
+    }
+
+    #[test]
+    fn every_outcome_has_its_label() {
+        use selfie::validation::ValidationLevel;
+
+        for (outcome, label) in [
+            (Outcome::Clean, "clean"),
+            (Outcome::Found, "found"),
+            (Outcome::Failed, "failed"),
+        ] {
+            assert_eq!(
+                validation_row(outcome, ValidationLevel::Info)["outcome"],
+                label,
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_validation_level_has_its_label() {
+        use selfie::validation::ValidationLevel;
+
+        for (level, label) in [
+            (ValidationLevel::Error, "error"),
+            (ValidationLevel::Warning, "warning"),
+            (ValidationLevel::Info, "info"),
+        ] {
+            assert_eq!(
+                validation_row(Outcome::Clean, level)["issues"][0]["level"],
+                label,
+                "{level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_refusal_kind_has_its_label() {
+        for (kind, label) in [
+            (RefusalKind::UnknownTopLevelKeys, "unknown_top_level_keys"),
+            (
+                RefusalKind::UnknownEnvironmentKeys,
+                "unknown_environment_keys",
+            ),
+            (RefusalKind::UncheckedTopLevel, "unchecked_top_level"),
+            (RefusalKind::NoEnvironments, "no_environments"),
+            (RefusalKind::AmbiguousName, "ambiguous_name"),
+        ] {
+            let rows = event_to_json(&PackageEvent::PackagesRefused {
+                operation_info: test_op_info(),
+                kind,
+                reason: "r".to_string(),
+                packages: vec![selfie::package::event::RefusedPackage {
+                    name: "p".to_string(),
+                    paths: vec![],
+                }],
+            });
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0]["kind"], label, "{kind:?}");
+        }
+    }
+
+    // A spec outside a repository has no status at all, which is null.
+    #[test]
+    fn every_git_status_has_its_label() {
+        use selfie::package::git::GitFileStatus;
+
+        for (status, label) in [
+            (Some(GitFileStatus::Clean), Value::from("clean")),
+            (Some(GitFileStatus::Modified), Value::from("modified")),
+            (Some(GitFileStatus::Staged), Value::from("staged")),
+            (
+                Some(GitFileStatus::StagedAndModified),
+                Value::from("staged_and_modified"),
+            ),
+            (Some(GitFileStatus::Untracked), Value::from("untracked")),
+            (Some(GitFileStatus::NotInRepo), Value::from("not_in_repo")),
+            (None, Value::Null),
+        ] {
+            let rows = event_to_json(&PackageEvent::SpecListItemCompleted {
+                operation_info: test_op_info(),
+                spec_item: selfie::package::event::SpecListItem {
+                    name: "p".to_string(),
+                    description: None,
+                    environments: vec![],
+                    git_status: status.clone(),
+                },
+            });
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0]["git_status"], label, "{status:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn settled_earlier_is_one_row_naming_the_recommend() {
+        use selfie::package::event::Settled;
+
+        for (settled, label) in [
+            (Settled::Installed, "installed"),
+            (Settled::AlreadyInstalled, "already_installed"),
+            (Settled::Unconfirmed, "unconfirmed"),
+        ] {
+            let events = vec![PackageEvent::SettledEarlier {
+                operation_info: test_op_info(),
+                package_name: "dep".to_string(),
+                recommend_name: "rec".to_string(),
+                settled,
+            }];
+
+            let result = collect_events(Box::pin(stream::iter(events))).await;
+
+            assert_eq!(
+                result.data["data"],
+                serde_json::json!([{
+                    "type": "settled_earlier",
+                    "package": "dep",
+                    "recommend": "rec",
+                    "settled": label,
+                }])
+            );
+        }
     }
 
     // A skipped spec reaches a tool caller as fields it can branch on, and the

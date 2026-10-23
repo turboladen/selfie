@@ -37,6 +37,7 @@ pub struct FakeCommandRunner {
     responses: HashMap<String, Response>,
     calls: Arc<Mutex<Vec<(String, PathBuf)>>>,
     cancels: HashMap<String, CancellationToken>,
+    yields: bool,
 }
 
 impl FakeCommandRunner {
@@ -148,13 +149,28 @@ impl FakeCommandRunner {
         self
     }
 
+    /// Yield to the runtime before answering each command, as a real command
+    /// does while it runs, so futures awaited together interleave.
+    #[must_use]
+    pub fn yielding(mut self) -> Self {
+        self.yields = true;
+        self
+    }
+
     /// How many commands this runner has been asked to run.
     #[must_use]
     pub fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }
 
-    fn answer(&self, command: &str, working_dir: &Path) -> Result<CommandOutput, CommandError> {
+    async fn answer(
+        &self,
+        command: &str,
+        working_dir: &Path,
+    ) -> Result<CommandOutput, CommandError> {
+        if self.yields {
+            tokio::task::yield_now().await;
+        }
         self.calls
             .lock()
             .unwrap()
@@ -193,7 +209,7 @@ impl CommandRunner for FakeCommandRunner {
         working_dir: &Path,
         _token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        self.answer(command, working_dir)
+        self.answer(command, working_dir).await
     }
 
     async fn execute_in_dir(
@@ -203,7 +219,7 @@ impl CommandRunner for FakeCommandRunner {
         _timeout: Duration,
         _token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        self.answer(command, working_dir)
+        self.answer(command, working_dir).await
     }
 
     async fn execute_streaming(
@@ -214,7 +230,7 @@ impl CommandRunner for FakeCommandRunner {
         _output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
         _token: &CancellationToken,
     ) -> Result<CommandOutput, CommandError> {
-        self.answer(command, working_dir)
+        self.answer(command, working_dir).await
     }
 
     /// Answers with the scripted output, already separated.
@@ -230,7 +246,7 @@ impl CommandRunner for FakeCommandRunner {
         _timeout: Duration,
         _token: &CancellationToken,
     ) -> Result<ContentOutput, CommandError> {
-        let output = self.answer(command, working_dir)?;
+        let output = self.answer(command, working_dir).await?;
         let success = output.is_success();
         let stderr = output.stderr().to_vec();
         Ok(ContentOutput::from_parts(

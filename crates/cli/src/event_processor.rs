@@ -9,7 +9,7 @@ use futures::StreamExt;
 use selfie::package::{
     event::{
         ConsoleOutput, EventStream, OperationInfo, OperationResult, OperationType, Outcome,
-        PackageEvent, RefusedPackage, StepKind,
+        PackageEvent, RefusedPackage, Settled, StepKind,
     },
     port::{PackageError, PackageParseKind},
 };
@@ -469,8 +469,10 @@ impl EventProcessor {
                     .print_status(format!("Installing recommended: {recommend_name}"));
             }
 
+            // `print_success` and `print_warning` add the line's mark, so the
+            // message carries none of its own.
             PackageEvent::RecommendSucceeded { recommend_name, .. } => {
-                self.display.print_success(format!("  ✓ {recommend_name}"));
+                self.display.print_success(recommend_name);
             }
 
             PackageEvent::RecommendFailed {
@@ -479,7 +481,19 @@ impl EventProcessor {
                 ..
             } => {
                 self.display
-                    .print_warning(format!("  ⚠ {recommend_name} failed: {error}"));
+                    .print_warning(format!("{recommend_name} failed: {error}"));
+            }
+
+            // Shown at every verbosity, not through `print_status`: a run that
+            // skips a check or an install says why, by the maintainer's choice
+            // that refines what the output contract hides by default.
+            PackageEvent::SettledEarlier {
+                package_name,
+                settled,
+                ..
+            } => {
+                self.display
+                    .print_progress(settled_earlier_line(&package_name, settled));
             }
 
             PackageEvent::RecommendsUntried { names, .. } => {
@@ -627,6 +641,20 @@ impl EventProcessor {
                 // If no custom handler processed them, just continue
             }
         }
+    }
+}
+
+/// The line saying that `package_name` settled earlier in the install run, and
+/// how.
+fn settled_earlier_line(package_name: &str, settled: Settled) -> String {
+    match settled {
+        Settled::Installed => format!("{package_name}: installed earlier in this run"),
+        Settled::AlreadyInstalled => {
+            format!("{package_name}: already installed, as found earlier in this run")
+        }
+        Settled::Unconfirmed => format!(
+            "{package_name}: installed earlier in this run, unconfirmed: its check gave no answer"
+        ),
     }
 }
 
@@ -1041,6 +1069,81 @@ mod tests {
                 .contains("Canceled before installing recommended packages: r2, r3"),
             "{printed:?}"
         );
+    }
+
+    // A recommend's verdict line is marked once, by the display: the message
+    // the display marks carries no mark of its own.
+    #[tokio::test]
+    async fn a_recommend_verdict_carries_one_mark() {
+        use crate::display_manager::Channel;
+
+        let info = || make_operation_info("root");
+        for (event, channel, expected) in [
+            (
+                PackageEvent::RecommendSucceeded {
+                    operation_info: info(),
+                    recommend_name: "rec".to_string(),
+                },
+                Channel::Stdout,
+                "rec",
+            ),
+            (
+                PackageEvent::RecommendFailed {
+                    operation_info: info(),
+                    recommend_name: "rec".to_string(),
+                    error: "no such formula".to_string(),
+                },
+                Channel::Stderr,
+                "rec failed: no such formula",
+            ),
+        ] {
+            let printed = printed_for(DisplayManager::new(false), vec![event]).await;
+
+            assert_eq!(printed.len(), 1, "{printed:?}");
+            assert_eq!(printed[0].0, channel, "{printed:?}");
+            assert_eq!(printed[0].1, expected, "{printed:?}");
+            assert!(
+                !printed[0].1.contains('✓') && !printed[0].1.contains('⚠'),
+                "{printed:?}"
+            );
+        }
+    }
+
+    // A package settled earlier in the run gets one line at default verbosity,
+    // on stderr, saying how it settled. None claims success, and an
+    // unconfirmed install never reads as a confirmed one.
+    #[tokio::test]
+    async fn a_settled_earlier_line_names_the_package_on_stderr() {
+        use crate::display_manager::Channel;
+        use selfie::package::event::Settled;
+
+        for (settled, expected) in [
+            (Settled::Installed, "dep: installed earlier in this run"),
+            (
+                Settled::AlreadyInstalled,
+                "dep: already installed, as found earlier in this run",
+            ),
+            (
+                Settled::Unconfirmed,
+                "dep: installed earlier in this run, unconfirmed: its check gave no answer",
+            ),
+        ] {
+            let printed = printed_for(
+                DisplayManager::new(false),
+                vec![PackageEvent::SettledEarlier {
+                    operation_info: make_operation_info("root"),
+                    package_name: "dep".to_string(),
+                    recommend_name: "rec".to_string(),
+                    settled,
+                }],
+            )
+            .await;
+
+            assert_eq!(printed.len(), 1, "{settled:?}: {printed:?}");
+            assert_eq!(printed[0].0, Channel::Stderr, "{settled:?}");
+            assert_eq!(printed[0].1.trim(), expected, "{settled:?}");
+            assert!(!printed[0].1.contains("successfully"), "{printed:?}");
+        }
     }
 
     #[test]

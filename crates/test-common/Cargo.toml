@@ -9,7 +9,7 @@ tempfile.workspace = true
 shlex = "2.0"
 futures.workspace = true
 tokio-util.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }
