@@ -494,7 +494,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                     "recommends": &environment_status.recommends,
                     "recommend_statuses": rec_statuses,
                 }),
-                status_fields(environment_status.status.as_ref()),
+                status_fields(&environment_status.status),
             ))
         }
         PackageEvent::PackageListReady { .. } => None, // CLI-specific event for spinner setup
@@ -1033,7 +1033,7 @@ fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -
     statuses
         .iter()
         .map(|dep| {
-            let mut row = status_fields(Some(&dep.status));
+            let mut row = status_fields(&dep.status);
             row.insert("name".to_string(), Value::from(dep.name.as_str()));
             Value::Object(row)
         })
@@ -1047,23 +1047,18 @@ fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -
 /// not apply is null.
 // One function renders the package's own status and every dependency and
 // recommendation row, so the two shapes cannot disagree.
-fn status_fields(
-    status: Option<&selfie::package::event::EnvironmentStatus>,
-) -> serde_json::Map<String, Value> {
-    use selfie::package::{
-        event::{EnvironmentStatus, UnknownStatus},
-        port::LookupFailure,
-    };
+fn status_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
+    use selfie::package::{event::UnknownStatus, port::LookupFailure};
 
     let mut fields = serde_json::Map::new();
-    let status_label = status.map(|status| match status {
+    let status_label = match status {
         EnvironmentStatus::Installed => "installed",
         EnvironmentStatus::NotInstalled => "not installed",
         EnvironmentStatus::Unknown(_) => "unknown",
-    });
+    };
     fields.insert("status".to_string(), Value::from(status_label));
     let unknown = match status {
-        Some(EnvironmentStatus::Unknown(unknown)) => Some(unknown),
+        EnvironmentStatus::Unknown(unknown) => Some(unknown),
         _ => None,
     };
     fields.insert(
@@ -3484,7 +3479,7 @@ mod tests {
                 dependency_statuses: vec![],
                 recommends: vec![],
                 recommend_statuses: vec![],
-                status: Some(EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand)),
+                status: EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand),
             },
         }];
 
@@ -3521,7 +3516,7 @@ mod tests {
                     ],
                     recommends: vec![],
                     recommend_statuses: vec![],
-                    status: Some(EnvironmentStatus::Installed),
+                    status: EnvironmentStatus::Installed,
                 },
             },
             PackageEvent::Completed {

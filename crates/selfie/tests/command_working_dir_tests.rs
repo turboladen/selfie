@@ -284,7 +284,7 @@ async fn status_reports_a_package_and_its_dependency_installed_from_a_relative_c
         })
         .expect("status should report the environment");
     assert!(
-        matches!(status.status, Some(EnvironmentStatus::Installed)),
+        matches!(status.status, EnvironmentStatus::Installed),
         "{status:?}"
     );
     assert!(

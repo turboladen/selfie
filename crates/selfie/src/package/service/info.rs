@@ -242,15 +242,11 @@ where
         }
 
         let gaps = Gap::one_per_package(
-            status
-                .as_ref()
-                .and_then(|status| status.gap(package_name))
-                .into_iter()
-                .chain(
-                    dependency_statuses
-                        .iter()
-                        .filter_map(|dependency| dependency.status.gap(&dependency.name)),
-                ),
+            status.gap(package_name).into_iter().chain(
+                dependency_statuses
+                    .iter()
+                    .filter_map(|dependency| dependency.status.gap(&dependency.name)),
+            ),
         );
 
         let environment_status = EnvironmentStatusData {
@@ -416,7 +412,7 @@ async fn get_installation_status(
     package_dir: &Path,
     command_runner: &impl CommandRunner,
     token: &CancellationToken,
-) -> Option<EnvironmentStatus> {
+) -> EnvironmentStatus {
     let check_cmd = env_config.check().map(str::to_string);
     let result = super::check::execute_check_command_quiet(
         package_name,
@@ -427,7 +423,7 @@ async fn get_installation_status(
         token,
     )
     .await;
-    Some(EnvironmentStatus::from(&result.result))
+    EnvironmentStatus::from(&result.result)
 }
 
 #[cfg(test)]
