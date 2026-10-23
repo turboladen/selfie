@@ -119,7 +119,7 @@ fn gap_json(gap: &Gap) -> Value {
 
 pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     let mut final_result = None;
-    let mut cancelled = None;
+    let mut canceled = None;
     let mut data_events: Vec<Value> = Vec::new();
 
     tokio::pin!(stream);
@@ -127,7 +127,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     while let Some(event) = stream.next().await {
         match &event {
             PackageEvent::Completed { result, .. } => final_result = Some(result.clone()),
-            PackageEvent::Canceled { reason, .. } => cancelled = Some(reason.clone()),
+            PackageEvent::Canceled { reason, .. } => canceled = Some(reason.clone()),
             _ => {}
         }
 
@@ -167,7 +167,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
             ),
         },
         Some(OperationResult::Failure(f)) => (false, failure_json(f)),
-        None => match cancelled {
+        None => match canceled {
             Some(reason) => (
                 false,
                 serde_json::json!({ "status": "cancelled", "reason": reason, "outcome": "cancelled" }),
@@ -2307,7 +2307,7 @@ mod tests {
 
     // A cancelled operation says so instead of reporting a missing completion.
     #[tokio::test]
-    async fn a_cancelled_operation_is_reported_as_cancelled() {
+    async fn a_canceled_operation_is_reported_as_canceled() {
         let events = vec![PackageEvent::Canceled {
             operation_info: test_op_info(),
             reason: "Apply cancelled".to_string(),

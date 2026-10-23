@@ -144,7 +144,7 @@ impl FakeCommandRunner {
     /// Cancel `token` when `command` runs, as a Ctrl+C landing while it runs
     /// would. The command still answers as scripted.
     #[must_use]
-    pub fn cancelling(mut self, command: &str, token: &CancellationToken) -> Self {
+    pub fn canceling(mut self, command: &str, token: &CancellationToken) -> Self {
         self.cancels.insert(command.to_string(), token.clone());
         self
     }

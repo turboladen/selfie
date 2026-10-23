@@ -23,7 +23,7 @@ use crate::{
     privilege::{Privilege, SudoPolicy, SudoRefusal, WriteScope},
 };
 
-use super::apply::{APPLY_CANCELLED, ApplyContext, Scope, handle_apply};
+use super::apply::{APPLY_CANCELED, ApplyContext, Scope, handle_apply};
 use super::collect::{Collected, collect_all_packages, collect_packages};
 use super::drift::handle_check_drift;
 use super::orphan::Catalog;
@@ -261,7 +261,7 @@ where
             // handler says whether the run itself was cancelled, as drift's does.
             match result {
                 Some(result) => sender.send_completed(result).await,
-                None => sender.send_canceled(APPLY_CANCELLED).await,
+                None => sender.send_canceled(APPLY_CANCELED).await,
             }
         })
     }

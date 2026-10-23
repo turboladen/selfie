@@ -18,7 +18,7 @@ pub const USAGE: i32 = 2;
 /// not answer for.
 pub const FOUND: i32 = 3;
 /// Exit code of a run cancelled with Ctrl+C, the usual `128 + SIGINT` value.
-pub const CANCELLED: i32 = 130;
+pub const CANCELED: i32 = 130;
 
 // Helper to create a temporary config environment
 #[must_use]

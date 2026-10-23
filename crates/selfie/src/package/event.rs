@@ -67,7 +67,7 @@ pub enum StepEnding {
     /// What was waited on failed, timed out or could not start.
     Failed,
     /// The run was cancelled while it waited.
-    Cancelled,
+    Canceled,
     /// Nothing it was waiting to run ran: what the step was for was refused
     /// before any command started.
     NotRun,
@@ -4200,7 +4200,7 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
         // the stream that failed, or the program that would not start. Check that
         // before extending.
         match err {
-            CommandError::Cancelled { .. } => Self::Canceled {
+            CommandError::Canceled { .. } => Self::Canceled {
                 message: crate::commands::BoundedText::of(err),
             },
             CommandError::SpawnFailed { .. }
@@ -4595,7 +4595,7 @@ mod tests {
         let dir = || PathBuf::from("/p");
         vec![
             (
-                CommandError::Cancelled {
+                CommandError::Canceled {
                     command: cmd(),
                     working_directory: dir(),
                 },

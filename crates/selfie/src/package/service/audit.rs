@@ -915,7 +915,7 @@ mod tests {
                 "could_not_start",
             ),
             (
-                CommandError::Cancelled {
+                CommandError::Canceled {
                     command: "sleep 9".to_string(),
                     working_directory: std::path::PathBuf::from("/pkg"),
                 },

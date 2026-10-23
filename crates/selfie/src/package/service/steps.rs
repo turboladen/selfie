@@ -240,7 +240,7 @@ pub(crate) fn ending_of(
     match result {
         Ok(output) if output.is_success() => StepEnding::Succeeded,
         Ok(_) => on_nonzero,
-        Err(CommandError::Cancelled { .. }) => StepEnding::Cancelled,
+        Err(CommandError::Canceled { .. }) => StepEnding::Canceled,
         Err(_) => StepEnding::Failed,
     }
 }

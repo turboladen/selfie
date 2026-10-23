@@ -201,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Second signal: force exit
         wait_for_shutdown_signal().await;
-        process::exit(event_processor::Exit::Cancelled.code());
+        process::exit(event_processor::Exit::Canceled.code());
     });
 
     // Dispatch and execute the requested command

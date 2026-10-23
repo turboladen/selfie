@@ -149,7 +149,7 @@ impl ShellCommandRunner {
 
         // Check for pre-cancellation before spawning
         if token.is_cancelled() {
-            return Err(CommandError::Cancelled {
+            return Err(CommandError::Canceled {
                 command: reported.to_string(),
                 working_directory,
             });
@@ -180,7 +180,7 @@ impl ShellCommandRunner {
                 timeout,
                 working_directory: working_directory.clone(),
             })),
-            () = token.cancelled() => Err(CommandError::Cancelled {
+            () = token.cancelled() => Err(CommandError::Canceled {
                 command: reported.to_string(),
                 working_directory: working_directory.clone(),
             }),
@@ -270,7 +270,7 @@ impl CommandRunner for ShellCommandRunner {
 
         // Check for pre-cancellation before spawning
         if token.is_cancelled() {
-            return Err(CommandError::Cancelled {
+            return Err(CommandError::Canceled {
                 command: command.to_string(),
                 working_directory,
             });
@@ -323,7 +323,7 @@ impl CommandRunner for ShellCommandRunner {
                 timeout,
                 working_directory: working_directory.clone(),
             })),
-            () = token.cancelled() => Err(CommandError::Cancelled {
+            () = token.cancelled() => Err(CommandError::Canceled {
                 command: command.to_string(),
                 working_directory: working_directory.clone(),
             }),
@@ -1308,12 +1308,12 @@ mod tests {
         };
         assert!(cmd_error.to_string().contains("test-command"));
 
-        let cancelled_error = CommandError::Cancelled {
+        let canceled_error = CommandError::Canceled {
             command: "test-command".to_string(),
             working_directory: PathBuf::from("/tmp"),
         };
-        assert!(cancelled_error.to_string().contains("Command cancelled"));
-        assert!(cancelled_error.to_string().contains("test-command"));
+        assert!(canceled_error.to_string().contains("Command cancelled"));
+        assert!(canceled_error.to_string().contains("test-command"));
 
         let stdout_error = CommandError::StdoutSpawn("stdout issue".to_string());
         assert_eq!(
@@ -1675,7 +1675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pre_cancelled_token_returns_cancelled_error() {
+    async fn test_pre_canceled_token_returns_canceled_error() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
         let token = CancellationToken::new();
@@ -1684,11 +1684,11 @@ mod tests {
         let result = runner
             .execute("echo should_not_run", Path::new("."), &token)
             .await;
-        assert!(matches!(result, Err(CommandError::Cancelled { .. })));
+        assert!(matches!(result, Err(CommandError::Canceled { .. })));
     }
 
     #[tokio::test]
-    async fn test_pre_cancelled_token_streaming_returns_cancelled_error() {
+    async fn test_pre_canceled_token_streaming_returns_canceled_error() {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(5));
         let token = CancellationToken::new();
@@ -1704,7 +1704,7 @@ mod tests {
                 &token,
             )
             .await;
-        assert!(matches!(result, Err(CommandError::Cancelled { .. })));
+        assert!(matches!(result, Err(CommandError::Canceled { .. })));
     }
 
     // ---- The decoder that frames a pipe at character boundaries ---------------

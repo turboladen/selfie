@@ -223,7 +223,7 @@ where
             // summary and a completion would put a zero-count drift report and
             // "Sync status complete" in front of someone who pressed Ctrl+C, and the
             // CLI maps this event to exit 130.
-            if let Some(reason) = summary.cancelled {
+            if let Some(reason) = summary.canceled {
                 sender.send_canceled(reason).await;
                 return;
             }
@@ -1376,7 +1376,7 @@ struct DriftSummary {
     ///
     /// Distinct from `error`: a cancelled check did not fail, it did not finish, and
     /// its counts describe only what it reached.
-    cancelled: Option<String>,
+    canceled: Option<String>,
     /// Warnings, refused packages and entries, and skipped specs, in the order
     /// drift reported them.
     relayed: Vec<RelayedDriftEvent>,
@@ -1471,7 +1471,7 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
             // caller went on to report zero drift and a successful completion
             // (found by Copilot on PR #185).
             PackageEvent::Canceled { reason, .. } => {
-                summary.cancelled = Some(reason);
+                summary.canceled = Some(reason);
             }
             // Progress events with nothing to collect. Anything that changes what
             // the summary says needs an arm of its own above.
@@ -2454,9 +2454,9 @@ mod tests {
     // A DotfileService whose drift check reports itself cancelled, the way an
     // interrupted one does.
     #[derive(Clone)]
-    struct DriftCancelled;
+    struct DriftCanceled;
 
-    impl DotfileService for DriftCancelled {
+    impl DotfileService for DriftCanceled {
         async fn list(&self) -> EventStream {
             unreachable!("status() does not list dotfiles")
         }
@@ -2568,12 +2568,12 @@ mod tests {
     // zero-count drift summary and "Sync status complete" to someone who had pressed
     // Ctrl+C, and the exit code said success (found by Copilot on PR #185).
     #[tokio::test]
-    async fn status_reports_a_cancelled_drift_check_as_cancelled() {
+    async fn status_reports_a_canceled_drift_check_as_canceled() {
         use futures::StreamExt;
 
         let service = SyncServiceImpl::new(
             GitReachingDrift,
-            DriftCancelled,
+            DriftCanceled,
             crate::config::SelfieConfigBuilder::default()
                 .environment("test-env")
                 .package_directory("/tmp/selfie-packages")

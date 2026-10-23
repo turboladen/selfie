@@ -57,7 +57,7 @@ pub(super) enum Scope {
 }
 
 /// The reason a cancelled apply gives.
-pub(super) const APPLY_CANCELLED: &str = "Apply cancelled";
+pub(super) const APPLY_CANCELED: &str = "Apply cancelled";
 
 /// Why an apply stopped before its last entry.
 ///
@@ -65,7 +65,7 @@ pub(super) const APPLY_CANCELLED: &str = "Apply cancelled";
 /// describe the same stop differently.
 enum Stop {
     /// The caller cancelled the run.
-    Cancelled,
+    Canceled,
     /// An entry was refused or failed while `stop_on_error` is on. Carries the
     /// entry's target as the package file spells it.
     Entry(String),
@@ -83,7 +83,7 @@ enum Stop {
 impl std::fmt::Display for Stop {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cancelled => f.write_str(APPLY_CANCELLED),
+            Self::Canceled => f.write_str(APPLY_CANCELED),
             Self::Entry(target) => write!(
                 f,
                 "Stopped after failing to apply dotfile '{target}' (stop_on_error is enabled)"
@@ -174,7 +174,7 @@ impl ApplyTally {
             Unfinished::Failed => self.failed += 1,
         }
         if token.is_cancelled() {
-            Some(Stop::Cancelled)
+            Some(Stop::Canceled)
         } else if config.stop_on_error() {
             Some(cause)
         } else {
@@ -427,7 +427,7 @@ where
             // here: the resolve of a command the cancel killed returns
             // `SecretOutcome::Canceled`, which stops the run without counting the entry.
             if token.is_cancelled() {
-                stopped = Some(Stop::Cancelled);
+                stopped = Some(Stop::Canceled);
                 break 'packages;
             }
             // The stop any refusal of this entry calls for, when `stop_on_error`
@@ -746,7 +746,7 @@ where
                     break 'packages;
                 }
                 EntryOutcome::Canceled => {
-                    stopped = Some(Stop::Cancelled);
+                    stopped = Some(Stop::Canceled);
                     break 'packages;
                 }
             }
@@ -764,12 +764,12 @@ where
     // Does not overwrite an existing reason: `stop_on_error` names the entry that
     // failed, which is more specific than this.
     if stopped.is_none() && token.is_cancelled() {
-        stopped = Some(Stop::Cancelled);
+        stopped = Some(Stop::Canceled);
     }
 
     if let Some(stop) = stopped {
         return match stop {
-            Stop::Cancelled => None,
+            Stop::Canceled => None,
             stop => Some(OperationResult::Failure(OperationFailure::Generic(
                 stop.to_string(),
             ))),

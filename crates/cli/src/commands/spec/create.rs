@@ -25,7 +25,7 @@ const MAX_NAME_RETRIES: usize = 3;
 enum PackageNameResult {
     CreateNew(String),     // Use this name to create a new package
     EditExisting(PathBuf), // User wants to edit the existing package at this path
-    Cancelled,             // User cancelled the operation
+    Canceled,              // User cancelled the operation
 }
 
 pub(crate) async fn handle_create(
@@ -72,7 +72,7 @@ pub(crate) async fn handle_create(
         }
         // A create that wrote nothing did not do what it was asked, so a script
         // must not read it as success.
-        Ok(PackageNameResult::Cancelled) => {
+        Ok(PackageNameResult::Canceled) => {
             display.print_run_note("Package creation cancelled.");
             return Exit::Failed;
         }
@@ -135,7 +135,7 @@ pub(crate) async fn handle_create(
         // way the user hears that the spec exists.
         Err(PromptFailure::Interrupted) => {
             edit_later();
-            Exit::Cancelled
+            Exit::Canceled
         }
         Err(failure) => {
             display.note_unanswered_prompt(&failure);
@@ -152,7 +152,7 @@ pub(crate) async fn handle_create(
 /// # Errors
 ///
 /// The [`Exit`] when the spec was not created: [`Exit::Failed`],
-/// [`Exit::Cancelled`] or [`Exit::Usage`]. A create that scored
+/// [`Exit::Canceled`] or [`Exit::Usage`]. A create that scored
 /// [`Exit::Clean`] or [`Exit::Found`] returns `Ok` with that score.
 pub(super) async fn write_spec(
     service: &impl SpecService,
@@ -195,7 +195,7 @@ pub(super) async fn write_spec(
         .await;
 
     match result.exit {
-        Exit::Failed | Exit::Cancelled | Exit::Usage => return Err(result.exit),
+        Exit::Failed | Exit::Canceled | Exit::Usage => return Err(result.exit),
         Exit::Clean | Exit::Found => {}
     }
     created
@@ -287,7 +287,7 @@ fn get_valid_package_name(
                         Ok(1) => {
                             // Fall through to prompt for new name below
                         }
-                        Ok(_) => return Ok(PackageNameResult::Cancelled),
+                        Ok(_) => return Ok(PackageNameResult::Canceled),
                         Err(failure) => {
                             return Err(display.refuse_prompt(
                                 &failure,
@@ -702,7 +702,7 @@ mod tests {
 
         let exit = handle_create(&service, "tool", &config, &display, false).await;
 
-        assert_eq!(exit, Exit::Cancelled);
+        assert_eq!(exit, Exit::Canceled);
         assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 1);
     }
 
@@ -715,7 +715,7 @@ mod tests {
 
         let exit = handle_create(&service, "fresh", &config, &display, true).await;
 
-        assert_eq!(exit, Exit::Cancelled);
+        assert_eq!(exit, Exit::Canceled);
         assert_eq!(std::fs::read_dir(&packages).unwrap().count(), 0);
     }
 
@@ -844,7 +844,7 @@ mod tests {
 
         let exit = handle_create(&service, "arg", &config, &display, true).await;
 
-        assert_eq!(exit, Exit::Cancelled);
+        assert_eq!(exit, Exit::Canceled);
         assert!(packages.join("fresh.yml").exists());
         assert_eq!(
             display.printed().last().map(|(_, line)| line.as_str()),
@@ -911,7 +911,7 @@ mod tests {
 
         let exit = handle_create(&service, "fresh", &config, &display, false).await;
 
-        assert_eq!(exit, Exit::Cancelled, "{:?}", display.printed());
+        assert_eq!(exit, Exit::Canceled, "{:?}", display.printed());
     }
 
     // Cancel at the "already exists" menu writes nothing and exits as a
@@ -981,7 +981,7 @@ mod tests {
 
         let exit = handle_create(&service, "arg", &config, &display, true).await;
 
-        assert_eq!(exit, Exit::Cancelled, "{:?}", display.printed());
+        assert_eq!(exit, Exit::Canceled, "{:?}", display.printed());
         let written: Vec<String> = std::fs::read_dir(&packages)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

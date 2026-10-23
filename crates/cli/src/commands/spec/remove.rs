@@ -228,7 +228,7 @@ mod tests {
 
         let exit = super::handle_remove(&service, "tool", &config, &display, false).await;
 
-        assert_eq!(exit, Exit::Cancelled);
+        assert_eq!(exit, Exit::Canceled);
         assert!(spec.exists());
     }
 

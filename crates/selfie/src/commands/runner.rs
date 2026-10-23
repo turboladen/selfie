@@ -569,7 +569,7 @@ pub enum CommandError {
 
     /// Command was cancelled via a cancellation token
     #[error("Command cancelled: {command}")]
-    Cancelled {
+    Canceled {
         command: String,
         working_directory: PathBuf,
     },

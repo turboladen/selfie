@@ -254,7 +254,7 @@ mod tests {
     fn ctrl_c_at_the_create_confirmation_is_canceled() {
         let display = DisplayManager::new(false).answering(vec![crate::display_manager::ctrl_c()]);
 
-        assert_eq!(confirm_new_package("fresh", &display), Err(Exit::Cancelled));
+        assert_eq!(confirm_new_package("fresh", &display), Err(Exit::Canceled));
     }
 
     // No at the confirmation is a decline: nothing was created, so the run fails.

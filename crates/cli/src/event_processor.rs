@@ -50,7 +50,7 @@ pub(crate) enum Exit {
     /// Needed an answer and had no terminal to ask on.
     Usage,
     /// Interrupted.
-    Cancelled,
+    Canceled,
 }
 
 impl Exit {
@@ -61,7 +61,7 @@ impl Exit {
             Exit::Found => 1,
             Exit::Failed => 2,
             Exit::Usage => 3,
-            Exit::Cancelled => 4,
+            Exit::Canceled => 4,
         }
     }
 
@@ -73,7 +73,7 @@ impl Exit {
             Exit::Usage => 2,
             Exit::Found => 3,
             // 128 + 2 (SIGINT), the Unix convention for Ctrl+C termination.
-            Exit::Cancelled => 130,
+            Exit::Canceled => 130,
         }
     }
 }
@@ -152,14 +152,14 @@ impl EventProcessor {
             // A step still open when the operation ends is cleared without a
             // result line, before anything renders the ending: only its own end
             // event says how it went.
-            let cancelled = match &event {
+            let canceled = match &event {
                 PackageEvent::Completed { result, .. } => {
                     ending = Some(Exit::from(result.outcome()));
                     self.display.clear_waiting();
                     false
                 }
                 PackageEvent::Canceled { .. } => {
-                    ending = Some(Exit::Cancelled);
+                    ending = Some(Exit::Canceled);
                     self.display.clear_waiting();
                     true
                 }
@@ -171,7 +171,7 @@ impl EventProcessor {
             }
 
             // Nothing after a cancellation is read, whoever rendered it.
-            if cancelled {
+            if canceled {
                 break;
             }
         }
@@ -727,9 +727,9 @@ mod tests {
     // orders, so a tie in the ranking fails one of them whichever way `max`
     // breaks it.
     #[test]
-    fn exits_rank_cancelled_usage_failed_found_clean() {
+    fn exits_rank_canceled_usage_failed_found_clean() {
         let ranked = [
-            Exit::Cancelled,
+            Exit::Canceled,
             Exit::Usage,
             Exit::Failed,
             Exit::Found,
@@ -847,7 +847,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.exit, Exit::Cancelled);
+        assert_eq!(result.exit, Exit::Canceled);
         assert_eq!(completions_seen, 0);
     }
 
@@ -1668,7 +1668,7 @@ mod tests {
             .await;
 
         // Should use exit code 130 (128 + SIGINT)
-        assert_eq!(result.exit, Exit::Cancelled);
+        assert_eq!(result.exit, Exit::Canceled);
         // Completed event after Canceled should not have been processed
         assert_eq!(events_after_cancel, 0);
     }

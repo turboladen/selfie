@@ -234,7 +234,7 @@ where
         // before it shows the answer.
         if let Some(step) = step {
             let ending = if token.is_cancelled() {
-                StepEnding::Cancelled
+                StepEnding::Canceled
             } else {
                 StepEnding::Succeeded
             };

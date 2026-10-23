@@ -229,7 +229,7 @@ where
     // item's answer, not a failure of the step.
     if let Some(step) = step {
         let ending = if token.is_cancelled() {
-            StepEnding::Cancelled
+            StepEnding::Canceled
         } else {
             StepEnding::Succeeded
         };

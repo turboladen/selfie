@@ -147,7 +147,7 @@ impl PromptFailure {
     pub(crate) fn exit(&self) -> Exit {
         match self {
             Self::NoTerminal => Exit::Usage,
-            Self::Interrupted => Exit::Cancelled,
+            Self::Interrupted => Exit::Canceled,
             Self::Unreadable(_) => Exit::Failed,
         }
     }
@@ -478,7 +478,7 @@ impl DisplayManager {
                 StepEnding::Failed => Some(("✗", style("✗").red())),
                 // The refusal or cancellation that follows says why; a mark
                 // would claim an outcome for commands that did not finish or start.
-                StepEnding::Cancelled | StepEnding::NotRun => None,
+                StepEnding::Canceled | StepEnding::NotRun => None,
             };
             if let Some((plain, styled)) = mark {
                 self.record_stderr(&format!("{plain} {text}"));
@@ -1520,7 +1520,7 @@ mod tests {
         let failure = dm.prompt(Answered).unwrap_err();
 
         assert!(matches!(failure, PromptFailure::Interrupted), "{failure:?}");
-        assert_eq!(failure.exit(), Exit::Cancelled);
+        assert_eq!(failure.exit(), Exit::Canceled);
     }
 
     // dialoguer's own no-terminal refusal reads as no terminal; any other
@@ -1553,7 +1553,7 @@ mod tests {
             "Pass --yes.",
         );
 
-        assert_eq!((exit, canceled), (Exit::Usage, Exit::Cancelled));
+        assert_eq!((exit, canceled), (Exit::Usage, Exit::Canceled));
         assert_eq!(
             dm.printed(),
             vec![
@@ -1757,11 +1757,11 @@ mod tests {
 
     // A cancelled step is cleared with no result line.
     #[test]
-    fn a_cancelled_step_prints_nothing() {
+    fn a_canceled_step_prints_nothing() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
         dm.start_waiting(ONE, "Running the install command for a");
 
-        dm.end_waiting(ONE, StepEnding::Cancelled);
+        dm.end_waiting(ONE, StepEnding::Canceled);
 
         assert!(dm.printed().is_empty(), "{:?}", dm.printed());
         assert!(dm.waiting_messages().is_empty());

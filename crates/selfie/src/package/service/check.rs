@@ -267,7 +267,7 @@ where
     if let Some(step) = step {
         let ending = match &result {
             Ok(data) => check_ending(&data.result, token),
-            Err(CommandError::Cancelled { .. }) => StepEnding::Cancelled,
+            Err(CommandError::Canceled { .. }) => StepEnding::Canceled,
             Err(_) => StepEnding::Failed,
         };
         sender.send_step_ended(step, ending).await;
@@ -281,7 +281,7 @@ pub(super) fn check_ending(result: &CheckResult, token: &CancellationToken) -> S
     match result {
         // A timeout is the check's own failure, whatever else canceled the run.
         CheckResult::CouldNotRun(CheckFailure::TimedOut(_)) => StepEnding::Failed,
-        CheckResult::CouldNotRun(_) if token.is_cancelled() => StepEnding::Cancelled,
+        CheckResult::CouldNotRun(_) if token.is_cancelled() => StepEnding::Canceled,
         CheckResult::CouldNotRun(_) => StepEnding::Failed,
         CheckResult::Success { .. } | CheckResult::Failed { .. } | CheckResult::NoCheckCommand => {
             StepEnding::Succeeded
@@ -370,7 +370,7 @@ where
         Err(
             err @ (CommandError::WorkingDirectoryUnusable(_)
             | CommandError::SpawnFailed { .. }
-            | CommandError::Cancelled { .. }),
+            | CommandError::Canceled { .. }),
         ) => return Err(err),
         Err(err) => CheckResult::CouldNotRun(CheckFailure::from(&err)),
     };
@@ -409,6 +409,6 @@ mod tests {
         );
 
         assert_eq!(timed_out, StepEnding::Failed);
-        assert_eq!(unreadable, StepEnding::Cancelled);
+        assert_eq!(unreadable, StepEnding::Canceled);
     }
 }

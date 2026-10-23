@@ -466,18 +466,18 @@ async fn check_names_a_package_directory_it_cannot_enter_not_the_command() {
 }
 
 #[tokio::test]
-async fn install_stops_at_a_pre_install_check_that_was_cancelled() {
+async fn install_stops_at_a_pre_install_check_that_was_canceled() {
     let temp = TempDir::new().unwrap();
     write_spec(
         temp.path(),
         &format!("    install: \"{INSTALL_CMD}\"\n    check: \"{CHECK_CMD}\"\n"),
     );
-    let cancelled = selfie::commands::CommandError::Cancelled {
+    let canceled = selfie::commands::CommandError::Canceled {
         command: CHECK_CMD.to_string(),
         working_directory: temp.path().to_path_buf(),
     };
     let runner = FakeCommandRunner::new()
-        .erroring(CHECK_CMD, cancelled)
+        .erroring(CHECK_CMD, canceled)
         .succeeding(INSTALL_CMD, b"");
 
     let events = collect_events(
@@ -699,8 +699,8 @@ struct CancelAware {
 }
 
 impl CancelAware {
-    fn cancelled(command: &str, dir: &Path) -> selfie::commands::CommandError {
-        selfie::commands::CommandError::Cancelled {
+    fn canceled(command: &str, dir: &Path) -> selfie::commands::CommandError {
+        selfie::commands::CommandError::Canceled {
             command: command.to_string(),
             working_directory: dir.to_path_buf(),
         }
@@ -719,7 +719,7 @@ impl CommandRunner for CancelAware {
         token: &CancellationToken,
     ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
         if token.is_cancelled() {
-            return Err(Self::cancelled(command, working_dir));
+            return Err(Self::canceled(command, working_dir));
         }
         self.inner.execute(command, working_dir, token).await
     }
@@ -732,7 +732,7 @@ impl CommandRunner for CancelAware {
         token: &CancellationToken,
     ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
         if token.is_cancelled() {
-            return Err(Self::cancelled(command, working_dir));
+            return Err(Self::canceled(command, working_dir));
         }
         self.inner
             .execute_in_dir(command, working_dir, timeout, token)
@@ -748,7 +748,7 @@ impl CommandRunner for CancelAware {
         token: &CancellationToken,
     ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
         if token.is_cancelled() {
-            return Err(Self::cancelled(command, working_dir));
+            return Err(Self::canceled(command, working_dir));
         }
         self.inner
             .execute_streaming(command, working_dir, timeout, output_sender, token)
@@ -772,7 +772,7 @@ impl CommandRunner for CancelAware {
 // check. The install ends as a cancellation: no warning about a check that never
 // ran, and nothing runs after it.
 #[tokio::test]
-async fn a_cancel_before_the_post_install_check_ends_the_install_cancelled() {
+async fn a_cancel_before_the_post_install_check_ends_the_install_canceled() {
     let temp = TempDir::new().unwrap();
     write_spec(
         temp.path(),
@@ -783,7 +783,7 @@ async fn a_cancel_before_the_post_install_check_ends_the_install_cancelled() {
         inner: FakeCommandRunner::new()
             .failing(CHECK_CMD, b"")
             .succeeding(INSTALL_CMD, b"")
-            .cancelling(INSTALL_CMD, &token),
+            .canceling(INSTALL_CMD, &token),
     };
 
     let events = collect_events(

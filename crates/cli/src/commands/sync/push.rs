@@ -430,7 +430,7 @@ mod tests {
 
         let failure = confirm_commits(pending, false, &display).unwrap_err();
 
-        assert_eq!(failure.exit(), crate::event_processor::Exit::Cancelled);
+        assert_eq!(failure.exit(), crate::event_processor::Exit::Canceled);
     }
 
     #[test]

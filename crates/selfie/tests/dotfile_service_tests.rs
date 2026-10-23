@@ -572,7 +572,7 @@ impl TestDirs {
     // and these tests run in parallel.
     // A service whose filesystem cancels the token when `cancel_on` is read, so a
     // cancellation lands inside the run rather than before or after it.
-    fn service_cancelling_on_read(
+    fn service_canceling_on_read(
         &self,
         cancel_on: &std::path::Path,
         token: CancellationToken,
@@ -876,7 +876,7 @@ impl RecordsTargetReads {
 
     // `token` is canceled by the read that finds the repository file gone: a
     // Ctrl+C landing while the resolve reads the template.
-    fn cancelling_when_gone(mut self, token: &CancellationToken) -> Self {
+    fn canceling_when_gone(mut self, token: &CancellationToken) -> Self {
         self.cancel_when_gone = Some(token.clone());
         self
     }
@@ -3671,7 +3671,7 @@ environments:
 // has already finished by the time the first event is read, and drift reaches no
 // command runner for the `cancellation` module's trigger to work through.
 #[tokio::test]
-async fn a_cancelled_drift_check_stops_between_entries_of_one_package() {
+async fn a_canceled_drift_check_stops_between_entries_of_one_package() {
     let dirs = TestDirs::new();
 
     // Two entries in ONE package, so only the guard inside the entry loop can stop
@@ -3698,11 +3698,11 @@ async fn a_cancelled_drift_check_stops_between_entries_of_one_package() {
     );
 
     let token = CancellationToken::new();
-    let service = dirs.service_cancelling_on_read(&source_dir.join("first.toml"), token.clone());
+    let service = dirs.service_canceling_on_read(&source_dir.join("first.toml"), token.clone());
 
     let events = collect_events(service.check_drift().await).await;
 
-    assert_cancelled_without_counts(&events, "Drift");
+    assert_canceled_without_counts(&events, "Drift");
     let examined = events
         .iter()
         .filter(|e| matches!(e, PackageEvent::DotfileDriftDetected { .. }))
@@ -3718,7 +3718,7 @@ async fn a_cancelled_drift_check_stops_between_entries_of_one_package() {
 // DotfileDriftChecked with zero counts and exit 0 — a clean bill of health for a check
 // that examined nothing.
 #[tokio::test]
-async fn a_cancelled_drift_check_over_no_packages_reports_the_cancellation() {
+async fn a_canceled_drift_check_over_no_packages_reports_the_cancellation() {
     let dirs = TestDirs::new();
 
     // Deliberately no packages, and the token is cancelled before the run so the
@@ -3729,14 +3729,14 @@ async fn a_cancelled_drift_check_over_no_packages_reports_the_cancellation() {
 
     let events = collect_events(service.check_drift().await).await;
 
-    assert_cancelled_without_counts(&events, "Drift");
+    assert_canceled_without_counts(&events, "Drift");
 }
 
 // The other guard. A package with no entries for this environment never enters the
 // inner loop, so only the guard at the top of the package loop can stop a run
 // walking a directory of them.
 #[tokio::test]
-async fn a_cancelled_drift_check_stops_between_packages() {
+async fn a_canceled_drift_check_stops_between_packages() {
     let dirs = TestDirs::new();
 
     // One package with an entry, to trigger the cancel, then two with none.
@@ -3761,13 +3761,13 @@ async fn a_cancelled_drift_check_stops_between_packages() {
     }
 
     let token = CancellationToken::new();
-    let service = dirs.service_cancelling_on_read(&source_dir.join("config.toml"), token.clone());
+    let service = dirs.service_canceling_on_read(&source_dir.join("config.toml"), token.clone());
 
     let events = collect_events(service.check_drift().await).await;
 
     // With no guard on the package loop the entry-less packages are walked and the
     // run completes, reporting counts for a run the user interrupted.
-    assert_cancelled_without_counts(&events, "Drift");
+    assert_canceled_without_counts(&events, "Drift");
 }
 
 // Reported as a cancellation, not as a failure carrying prose: that is the event the
@@ -3776,7 +3776,7 @@ async fn a_cancelled_drift_check_stops_between_packages() {
 // `operation` is the word the cancellation's reason must carry, naming the
 // operation the user ran.
 #[track_caller]
-fn assert_cancelled_without_counts(events: &[PackageEvent], operation: &str) {
+fn assert_canceled_without_counts(events: &[PackageEvent], operation: &str) {
     let canceled = events
         .iter()
         .find_map(|e| match e {
@@ -4441,7 +4441,7 @@ mod secret_bearing {
         let token = CancellationToken::new();
         let fs = RecordsTargetReads::new()
             .repository_gone_after_first_read(&template)
-            .cancelling_when_gone(&token);
+            .canceling_when_gone(&token);
         let runner = FakeCommandRunner::new().succeeding("op read x", b"KEY");
 
         let events = collect_events(
@@ -6867,7 +6867,7 @@ mod secret_bearing {
             cancel: bool,
             // Report the command as killed, which is what `ShellCommandRunner`
             // does once the token fires.
-            fail_as_cancelled: bool,
+            fail_as_canceled: bool,
         }
 
         // A runner that records the token it is **handed** and cancels the token
@@ -6896,7 +6896,7 @@ mod secret_bearing {
             // runner acting on it. On, it makes this fake faithful to the
             // production runner on the one behavior that closes the
             // between-bindings window.
-            refuse_when_handed_cancelled: bool,
+            refuse_when_handed_canceled: bool,
             // Returned as stdout by any call that is not failing.
             stdout: Vec<u8>,
         }
@@ -6908,25 +6908,25 @@ mod secret_bearing {
                     observed: Arc::new(Mutex::new(Vec::new())),
                     calls: Arc::new(Mutex::new(Vec::new())),
                     effects,
-                    refuse_when_handed_cancelled: false,
+                    refuse_when_handed_canceled: false,
                     stdout: SECRET.as_bytes().to_vec(),
                 }
             }
 
             // Behave like the real shell runner: refuse a pre-cancelled token.
-            fn refusing_a_cancelled_token(mut self) -> Self {
-                self.refuse_when_handed_cancelled = true;
+            fn refusing_a_canceled_token(mut self) -> Self {
+                self.refuse_when_handed_canceled = true;
                 self
             }
 
             // Cancel while the *first* command is in flight, and report that
             // command as killed — a faithful Ctrl+C.
-            fn cancelling_and_failing(real_token: &CancellationToken) -> Self {
+            fn canceling_and_failing(real_token: &CancellationToken) -> Self {
                 Self::new(
                     real_token,
                     vec![CallEffect {
                         cancel: true,
-                        fail_as_cancelled: true,
+                        fail_as_canceled: true,
                     }],
                 )
             }
@@ -6956,8 +6956,8 @@ mod secret_bearing {
 
                 // Before this call's own effect, and before any scripted answer:
                 // the real runner checks the token before it spawns anything.
-                if self.refuse_when_handed_cancelled && handed.is_cancelled() {
-                    return Err(CommandError::Cancelled {
+                if self.refuse_when_handed_canceled && handed.is_cancelled() {
+                    return Err(CommandError::Canceled {
                         command: command.to_string(),
                         working_directory: Path::new(".").to_path_buf(),
                     });
@@ -6967,8 +6967,8 @@ mod secret_bearing {
                 if effect.cancel {
                     self.real_token.cancel();
                 }
-                if effect.fail_as_cancelled {
-                    return Err(CommandError::Cancelled {
+                if effect.fail_as_canceled {
+                    return Err(CommandError::Canceled {
                         command: command.to_string(),
                         working_directory: Path::new(".").to_path_buf(),
                     });
@@ -7047,8 +7047,8 @@ mod secret_bearing {
 
         // Assert the run ended as a cancellation naming apply, with no result.
         #[track_caller]
-        fn assert_cancelled(events: &[PackageEvent]) {
-            super::super::assert_cancelled_without_counts(events, "Apply");
+        fn assert_canceled(events: &[PackageEvent]) {
+            super::super::assert_canceled_without_counts(events, "Apply");
         }
 
         // ── The token has to reach the runner ────────────────────────────────
@@ -7080,7 +7080,7 @@ mod secret_bearing {
                 &token,
                 vec![CallEffect {
                     cancel: true,
-                    fail_as_cancelled: false,
+                    fail_as_canceled: false,
                 }],
             );
             let service = dirs.service_with_runner_and_token(runner.clone(), token);
@@ -7131,10 +7131,10 @@ mod secret_bearing {
                 &token,
                 vec![CallEffect {
                     cancel: true,
-                    fail_as_cancelled: false,
+                    fail_as_canceled: false,
                 }],
             )
-            .refusing_a_cancelled_token();
+            .refusing_a_canceled_token();
             let service = dirs.service_with_runner_and_token(runner.clone(), token);
 
             let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
@@ -7147,7 +7147,7 @@ mod secret_bearing {
                 "the cancellation has to land between the two bindings"
             );
 
-            assert_cancelled(&events);
+            assert_canceled(&events);
 
             let rendered = format!("{events:?}");
             assert!(
@@ -7163,7 +7163,7 @@ mod secret_bearing {
         // ── Between entries ──────────────────────────────────────────────────
 
         #[tokio::test]
-        async fn a_cancelled_token_stops_apply_before_running_a_provider_command() {
+        async fn a_canceled_token_stops_apply_before_running_a_provider_command() {
             let dirs = TestDirs::new();
             let target = dirs.target_dir.join("credentials");
             provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
@@ -7184,7 +7184,7 @@ mod secret_bearing {
                 !target.exists(),
                 "nothing may be written after cancellation"
             );
-            assert_cancelled(&events);
+            assert_canceled(&events);
         }
 
         // The positive control for the test above.
@@ -7192,7 +7192,7 @@ mod secret_bearing {
         // Without it, that test passes just as well if apply were failing for
         // some reason having nothing to do with the token.
         #[tokio::test]
-        async fn an_uncancelled_token_runs_the_provider_command() {
+        async fn an_uncanceled_token_runs_the_provider_command() {
             let dirs = TestDirs::new();
             let target = dirs.target_dir.join("credentials");
             provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
@@ -7231,7 +7231,7 @@ mod secret_bearing {
             provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
 
             let token = CancellationToken::new();
-            let runner = TokenObservingRunner::cancelling_and_failing(&token);
+            let runner = TokenObservingRunner::canceling_and_failing(&token);
             let service = dirs.service_with_runner_and_token(runner.clone(), token);
 
             let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
@@ -7243,7 +7243,7 @@ mod secret_bearing {
             // The terminal event exists and names cancellation — this is also the
             // assertion that a cancelled run still completes its stream rather
             // than dropping it.
-            assert_cancelled(&events);
+            assert_canceled(&events);
 
             let rendered = format!("{events:?}");
             assert!(
@@ -7287,7 +7287,7 @@ mod secret_bearing {
                 &token,
                 vec![CallEffect {
                     cancel: true,
-                    fail_as_cancelled: false,
+                    fail_as_canceled: false,
                 }],
             );
             let service = dirs.service_with_runner_and_token(runner.clone(), token);
@@ -7302,7 +7302,7 @@ mod secret_bearing {
                 "the write happened before the cancellation was noticed"
             );
 
-            assert_cancelled(&events);
+            assert_canceled(&events);
         }
 
         // ── What a cancelled run leaves behind ───────────────────────────────
@@ -7317,7 +7317,7 @@ mod secret_bearing {
         // entry. Not a dry run, because dry runs skip saving state entirely --
         // which would make the assertion pass for an unrelated reason.
         #[tokio::test]
-        async fn a_cancelled_apply_still_records_what_it_already_deployed() {
+        async fn a_canceled_apply_still_records_what_it_already_deployed() {
             let dirs = TestDirs::new();
             let first = dirs.target_dir.join("first.conf");
             let secret_target = dirs.target_dir.join("credentials");
@@ -7344,14 +7344,14 @@ mod secret_bearing {
                 &token,
                 vec![CallEffect {
                     cancel: true,
-                    fail_as_cancelled: false,
+                    fail_as_canceled: false,
                 }],
             );
             let service = dirs.service_with_runner_and_token(runner, token);
 
             let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
 
-            assert_cancelled(&events);
+            assert_canceled(&events);
             assert!(
                 first.exists(),
                 "the entry before the cancellation must have deployed"
@@ -17507,7 +17507,7 @@ mod orphans {
 
     // A run that stops part way neither reports nor drops anything.
     #[tokio::test]
-    async fn a_cancelled_run_reports_and_drops_nothing() {
+    async fn a_canceled_run_reports_and_drops_nothing() {
         let dirs = TestDirs::new();
         package(&dirs, "app", &["new"]);
         seed(&dirs, &target(&dirs, "present"), "app/present", Some("app"));
@@ -17516,7 +17516,7 @@ mod orphans {
         let source = dirs.package_dir.join("app/new");
 
         let token = CancellationToken::new();
-        let service = dirs.service_cancelling_on_read(&source, token.clone());
+        let service = dirs.service_canceling_on_read(&source, token.clone());
         let events = collect_events(service.check_drift().await).await;
         assert!(orphans(&events).is_empty(), "{events:?}");
         assert!(
@@ -17527,7 +17527,7 @@ mod orphans {
         );
 
         let token = CancellationToken::new();
-        let service = dirs.service_cancelling_on_read(&source, token.clone());
+        let service = dirs.service_canceling_on_read(&source, token.clone());
         let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
         assert!(orphans(&events).is_empty(), "{events:?}");
         assert!(recorded(&dirs, &target(&dirs, "gone")));
@@ -17723,18 +17723,18 @@ mod orphans {
 
         let token = CancellationToken::new();
         let service =
-            dirs.service_cancelling_on_read(&dirs.target_dir.join("present"), token.clone());
+            dirs.service_canceling_on_read(&dirs.target_dir.join("present"), token.clone());
         let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
-        assert_cancelled_without_counts(&events, "Apply");
+        assert_canceled_without_counts(&events, "Apply");
         assert!(recorded(&dirs, &target(&dirs, "gone")));
 
         // Drift writes nothing, but a cancel during its check still makes the
         // answer partial, so it must not report a completed check.
         let token = CancellationToken::new();
         let service =
-            dirs.service_cancelling_on_read(&dirs.target_dir.join("present"), token.clone());
+            dirs.service_canceling_on_read(&dirs.target_dir.join("present"), token.clone());
         let events = collect_events(service.check_drift().await).await;
-        assert_cancelled_without_counts(&events, "Drift");
+        assert_canceled_without_counts(&events, "Drift");
     }
 
     // A relative key names no one file, so it is never judged or dropped.
