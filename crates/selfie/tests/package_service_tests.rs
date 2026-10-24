@@ -499,20 +499,13 @@ async fn test_package_list_ready_emitted_before_item_completed() {
     let mut saw_item_before_ready = false;
     let mut saw_loaded = false;
     let mut saw_item_after_loaded = false;
-    let mut ready_count = 0;
+    let mut ready_names = Vec::new();
 
     while let Some(event) = stream.next().await {
         match &event {
             PackageEvent::PackageListReady { packages, .. } => {
                 saw_ready = true;
-                ready_count = packages.len();
-                // All items should have status: None
-                for pkg in packages {
-                    assert!(
-                        pkg.status.is_none(),
-                        "PackageListReady items should have status: None"
-                    );
-                }
+                ready_names.clone_from(packages);
             }
             PackageEvent::PackageListItemCompleted { .. } => {
                 if !saw_ready {
@@ -539,7 +532,11 @@ async fn test_package_list_ready_emitted_before_item_completed() {
         !saw_item_after_loaded,
         "No PackageListItemCompleted should appear after PackageListLoaded"
     );
-    assert_eq!(ready_count, 2, "PackageListReady should contain 2 packages");
+    assert_eq!(
+        ready_names,
+        ["alpha-pkg", "beta-pkg"],
+        "PackageListReady should name both packages, sorted"
+    );
 }
 
 // Test that PostInstallNote is emitted during a fresh install when the package has a note
@@ -2663,7 +2660,7 @@ mod checks_that_gave_no_answer {
 
     use selfie::{
         commands::runner::{CommandError, TimedOut},
-        package::event::{CheckFailure, CheckResult},
+        package::event::{CheckFailure, CheckResult, EnvironmentStatus, UnknownStatus},
     };
     use test_common::{FakeCommandRunner, create_service_test_service_with_runner};
 
@@ -2790,15 +2787,17 @@ mod checks_that_gave_no_answer {
             .iter()
             .find_map(|event| match event {
                 PackageEvent::PackageListItemCompleted { package_item, .. } => {
-                    package_item.status.clone()
+                    Some(package_item.status.clone())
                 }
                 _ => None,
             })
-            .expect("the item must be listed with a status");
+            .expect("the item must be listed");
         assert!(
             matches!(
                 status,
-                CheckResult::CouldNotRun(CheckFailure::Canceled { .. })
+                EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
+                    CheckFailure::Canceled { .. }
+                ))
             ),
             "{status:?}"
         );

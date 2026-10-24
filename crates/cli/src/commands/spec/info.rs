@@ -194,10 +194,8 @@ pub(crate) fn create_environment_table(
         |value: &str| -> String { presentation::format_field_value(value, config.use_colors()) };
 
     // Add installation status if this is the current environment and we have status
-    if env_status.is_current
-        && let Some(status) = &env_status.status
-    {
-        let status_text = format_status(status, config.use_colors());
+    if env_status.is_current {
+        let status_text = format_status(&env_status.status, config.use_colors());
         env_table.add_row(vec![format_env_key("Status"), status_text]);
     }
 
