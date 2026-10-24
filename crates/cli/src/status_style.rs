@@ -55,31 +55,32 @@ pub(crate) fn format_no_audit(use_colors: bool) -> String {
     format_status_indicator("⚠", "No audit command", use_colors, |s| s.yellow())
 }
 
-/// Format a check result as plain text status (no emoji prefix).
-///
-/// Used in contexts where emoji prefixes are inappropriate, such as
-/// inline status within spinner lines. For emoji-prefixed status
-/// indicators (used in tables), use `format_installed()` etc.
-pub(crate) fn format_check_result(
-    status: Option<&selfie::package::event::CheckResult>,
+/// The status cell of a `package list` row: a few words, styled when
+/// `use_colors` is set, with no marker. The row's marker cell is separate.
+pub(crate) fn format_list_status(
+    status: &selfie::package::event::EnvironmentStatus,
     use_colors: bool,
 ) -> String {
-    use selfie::package::event::{CheckFailure, CheckResult};
+    use selfie::package::event::{CheckFailure, EnvironmentStatus, UnknownStatus};
     match status {
-        Some(CheckResult::Success { .. }) => styled_text("Installed", use_colors, |s| s.green()),
-        Some(CheckResult::Failed { .. }) => styled_text("Not installed", use_colors, |s| s.cyan()),
-        Some(CheckResult::NoCheckCommand) => styled_text("No check", use_colors, |s| s.yellow()),
-        Some(CheckResult::CouldNotRun(CheckFailure::Canceled { .. })) => {
-            styled_text("Canceled", use_colors, |s| s.yellow())
+        EnvironmentStatus::Installed => styled_text("Installed", use_colors, |s| s.green()),
+        EnvironmentStatus::NotInstalled => styled_text("Not installed", use_colors, |s| s.cyan()),
+        EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand) => {
+            styled_text("No check", use_colors, |s| s.yellow())
         }
-        Some(CheckResult::CouldNotRun(CheckFailure::TimedOut(timed_out))) => {
-            styled_text(&timed_out.to_string(), use_colors, |s| s.red())
+        EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment) => {
+            styled_text("N/A", use_colors, |s| s.dim())
         }
-        Some(CheckResult::CouldNotRun(failure)) => {
-            let msg = format!("Error: {failure}");
+        EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::Canceled {
+            ..
+        })) => styled_text("Canceled", use_colors, |s| s.yellow()),
+        EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(
+            timed_out,
+        ))) => styled_text(&timed_out.to_string(), use_colors, |s| s.red()),
+        EnvironmentStatus::Unknown(reason) => {
+            let msg = format!("Error: {reason}");
             styled_text(&msg, use_colors, |s| s.red())
         }
-        None => styled_text("N/A", use_colors, |s| s.dim()),
     }
 }
 
@@ -105,15 +106,14 @@ mod tests {
     #[test]
     fn a_timed_out_check_status_is_bounded() {
         use selfie::commands::runner::TimedOut;
-        use selfie::package::event::{CheckFailure, CheckResult};
+        use selfie::package::event::{CheckFailure, EnvironmentStatus, UnknownStatus};
 
         let long = "Z".repeat(30_000);
-        let status = CheckResult::CouldNotRun(CheckFailure::TimedOut(TimedOut::new(
-            long,
-            std::time::Duration::from_secs(1),
-        )));
+        let status = EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
+            CheckFailure::TimedOut(TimedOut::new(long, std::time::Duration::from_secs(1))),
+        ));
 
-        let cell = format_check_result(Some(&status), false);
+        let cell = format_list_status(&status, false);
 
         assert!(cell.contains("bytes elided"), "{}", &cell[..80]);
         assert!(cell.matches('Z').count() < 3_000, "{}", &cell[..80]);
