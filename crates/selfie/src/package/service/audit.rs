@@ -107,10 +107,62 @@ where
     // the user, so it warns per file the way `validate_all` does, and counts it
     // as a refusal: the run could not audit everything it was asked to.
     let mut refused_count = 0;
+    let unparsable: Vec<&std::path::Path> = packages
+        .invalid_packages()
+        .map(crate::package::port::PackageParseError::package_path)
+        .collect();
     for invalid in packages.invalid_packages() {
         sender.send_spec_skipped(invalid.clone()).await;
         refused_count += 1;
     }
+
+    // A name several files claim is refused once, by the rule apply uses: when a
+    // file of it does not parse, or one declares dotfiles here. A file that did not
+    // parse already has its own row and count, so it is left out of the refusal's
+    // files, and a name with one is not counted again. No audit command of any
+    // file of the name runs.
+    let names = packages.names();
+    let loaded: Vec<&crate::package::Package> = packages.valid_packages().collect();
+    let refused_names: Vec<(&String, Vec<std::path::PathBuf>, bool)> = names
+        .ambiguous
+        .iter()
+        .filter(|(_, paths)| {
+            crate::package::collect::ambiguity_matters(paths, &loaded, config.environment())
+        })
+        .map(|(name, paths)| {
+            let loaded_paths: Vec<std::path::PathBuf> = paths
+                .iter()
+                .filter(|path| !unparsable.contains(&path.as_path()))
+                .cloned()
+                .collect();
+            let counted = loaded_paths.len() < paths.len();
+            (name, loaded_paths, counted)
+        })
+        .collect();
+    sender
+        .send_packages_refused(
+            refused_names
+                .iter()
+                .filter(|(_, loaded_paths, _)| !loaded_paths.is_empty())
+                .map(
+                    |(name, loaded_paths, _)| crate::package::event::PackageRefusal {
+                        kind: crate::package::event::RefusalKind::AmbiguousName,
+                        reason: crate::package::port::ambiguous_files_sentence(
+                            name,
+                            &names.ambiguous[*name],
+                        ),
+                        package: crate::package::event::RefusedPackage {
+                            name: (*name).clone(),
+                            paths: loaded_paths.clone(),
+                        },
+                    },
+                ),
+        )
+        .await;
+    refused_count += refused_names
+        .iter()
+        .filter(|(_, _, counted)| !counted)
+        .count();
 
     // A spec whose `environments:` a shadowing key hides parses, so it reaches
     // `valid_packages` and the filter below drops it for declaring nothing about
@@ -120,7 +172,7 @@ where
     //
     // Counted as a refusal, as an unparsable file is above.
     let (readable, refused) = crate::package::refusal::refuse_up_front(
-        packages.valid_packages(),
+        names.usable.iter().copied(),
         config.environment(),
         sender,
     )
@@ -1388,6 +1440,164 @@ mod tests {
             named.contains("_environments"),
             "the warning must name the key it refused over, got: {named}"
         );
+    }
+
+    // A name one of whose files does not parse is counted once, by that file's own
+    // row, and the refusal names only the file that loaded.
+    #[tokio::test]
+    async fn an_ambiguous_name_with_an_unparsable_file_counts_once() {
+        use crate::package::port::{ListPackagesOutput, PackageParseError, PackageParseKind};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+        let yml = PackageBuilder::default()
+            .name("foo")
+            .environment("test", |b| b.install("echo install").audit_some("echo bun"))
+            .path(temp_dir.path().join("foo.yml"))
+            .build();
+        let broken = temp_dir.path().join("foo.yaml");
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo.expect_list_packages().returning(move || {
+            Ok(ListPackagesOutput(vec![
+                Ok(yml.clone()),
+                Err(PackageParseError::new(
+                    broken.clone(),
+                    PackageParseKind::Unreadable {
+                        reason: "broken".to_string(),
+                    },
+                )),
+            ]))
+        });
+        let mock_runner = MockCommandRunner::new();
+
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(1);
+        let token = CancellationToken::new();
+        let result = handle_audit_all(
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        let OperationResult::Success(crate::package::event::OperationSuccess::PackagesAudited {
+            refused_count,
+            ..
+        }) = result
+        else {
+            panic!("expected PackagesAudited, got {result:?}");
+        };
+        assert_eq!(refused_count, 1);
+        let mut refused_paths = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::package::event::PackageEvent::PackagesRefused { packages, .. } = event {
+                refused_paths.extend(packages.into_iter().flat_map(|p| p.paths));
+            }
+        }
+        assert_eq!(refused_paths, [temp_dir.path().join("foo.yml")]);
+    }
+
+    // An ambiguous name whose files declare no dotfiles here is left alone, as
+    // apply leaves it: nothing is refused, and neither file is audited.
+    #[tokio::test]
+    async fn an_ambiguous_name_that_does_not_matter_here_is_not_refused() {
+        use crate::package::port::ListPackagesOutput;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+        let bat = |file: &str| {
+            PackageBuilder::default()
+                .name("bat")
+                .environment("test", |b| b.install("echo install").audit_some("echo bun"))
+                .path(temp_dir.path().join(file))
+                .build()
+        };
+        let (yml, yaml) = (bat("bat.yml"), bat("bat.yaml"));
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_list_packages()
+            .returning(move || Ok(ListPackagesOutput(vec![Ok(yml.clone()), Ok(yaml.clone())])));
+        let mock_runner = MockCommandRunner::new();
+
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(1);
+        let token = CancellationToken::new();
+        let result = handle_audit_all(
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        let OperationResult::Success(crate::package::event::OperationSuccess::PackagesAudited {
+            audited_count,
+            refused_count,
+            ..
+        }) = result
+        else {
+            panic!("expected PackagesAudited, got {result:?}");
+        };
+        assert_eq!((audited_count, refused_count), (0, 0));
+    }
+
+    // Two files claiming one name are refused once, counted once, and audited
+    // not at all.
+    #[tokio::test]
+    async fn audit_all_refuses_an_ambiguous_name_once() {
+        use crate::package::port::ListPackagesOutput;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+        let bat = |file: &str| {
+            PackageBuilder::default()
+                .name("bat")
+                .dotfiles(vec![crate::package::DotfileEntry::new("bat/rc", "~/.bat")])
+                .environment("test", |b| b.install("echo install").audit_some("echo bun"))
+                .path(temp_dir.path().join(file))
+                .build()
+        };
+        let (yml, yaml) = (bat("bat.yml"), bat("bat.yaml"));
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_list_packages()
+            .returning(move || Ok(ListPackagesOutput(vec![Ok(yml.clone()), Ok(yaml.clone())])));
+        let mock_runner = MockCommandRunner::new();
+
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(1);
+        let token = CancellationToken::new();
+        let result = handle_audit_all(
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        let OperationResult::Success(crate::package::event::OperationSuccess::PackagesAudited {
+            audited_count,
+            refused_count,
+            ..
+        }) = result
+        else {
+            panic!("expected PackagesAudited, got {result:?}");
+        };
+        assert_eq!((audited_count, refused_count), (0, 1));
+        let mut refused = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::package::event::PackageEvent::PackagesRefused { packages, .. } = event {
+                refused.extend(packages.into_iter().map(|p| p.name));
+            }
+        }
+        assert_eq!(refused, ["bat"]);
     }
 
     #[tokio::test]

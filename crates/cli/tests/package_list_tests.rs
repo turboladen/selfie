@@ -748,3 +748,65 @@ mod table {
         assert_eq!(stdout.matches("refused package(s)").count(), 1, "{stdout}");
     }
 }
+
+// Two files claiming one name are no package: each is a refused row naming both
+// files, no check of either runs, and the listing is Found until one is removed.
+#[test]
+fn an_ambiguous_name_is_listed_as_refused_rows() {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("packages");
+    fs::create_dir_all(&packages_dir).unwrap();
+    let marker = temp_dir.path().join("checked");
+    for ext in ["yml", "yaml"] {
+        fs::write(
+            packages_dir.join(format!("bat.{ext}")),
+            format!(
+                "name: bat\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    check: \"touch {}\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["package", "list"])
+        .assert()
+        .code(FOUND)
+        .get_output()
+        .clone();
+
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(both.contains("bat.yaml, bat.yml"), "{both}");
+    assert!(!marker.exists(), "no check of an ambiguous name may run");
+}
+
+// A refused row of an ambiguous name is labeled by the name the files claim, not
+// by a `name:` field that says something else.
+#[test]
+fn an_ambiguous_row_is_labeled_by_the_files_name() {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("packages");
+    fs::create_dir_all(&packages_dir).unwrap();
+    for ext in ["yml", "yaml"] {
+        fs::write(
+            packages_dir.join(format!("nvim.{ext}")),
+            format!("name: neovim\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+        )
+        .unwrap();
+    }
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["package", "list"])
+        .assert()
+        .code(FOUND)
+        .get_output()
+        .clone();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("nvim"), "{stdout}");
+    assert!(!stdout.contains("neovim"), "{stdout}");
+}

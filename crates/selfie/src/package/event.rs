@@ -3716,6 +3716,21 @@ pub struct RefusedSpec {
 }
 
 impl RefusedSpec {
+    /// The file at `path`, one of `files` that all claim the name `name`, so none
+    /// of them is used. Named by the name they claim.
+    pub(crate) fn ambiguous_file(
+        name: &str,
+        path: &std::path::Path,
+        files: &[std::path::PathBuf],
+    ) -> Self {
+        Self {
+            package_name: name.to_string(),
+            path: path.to_path_buf(),
+            kind: RefusalKind::AmbiguousName,
+            reason: crate::package::port::ambiguous_files_sentence(name, files),
+        }
+    }
+
     pub(crate) fn new(
         package: &crate::package::Package,
         refusal: &crate::package::SpecRefusal,

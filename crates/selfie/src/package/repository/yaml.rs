@@ -487,23 +487,32 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             package_list.invalid_packages().cloned().collect();
 
         let target = target_package.to_lowercase();
+        let ambiguous = package_list.names().ambiguous;
         for package in package_list.valid_packages() {
+            let spec_name = package.spec_name();
             // Names compare with case folded, as package lookup resolves them.
             if package.name().to_lowercase() == target {
                 continue;
             }
 
-            // A spec whose mapping a shadowing key may hide can name the target
-            // where this loop cannot see it, so it is reported with the specs
-            // that did not load. It is still checked below: reporting a
-            // dependency the file may not really have is the safe direction.
-            // Asked of every environment, since the loop reads every one.
-            if let Some(reason) = package.listing_refusal() {
+            // A file of a name several files claim is used by no command, but
+            // becomes the package once the others are removed. A spec whose
+            // mapping a shadowing key may hide can name the target where this loop
+            // cannot see it. Either is reported with the specs that did not load,
+            // once, and still checked below: reporting a dependency the file may
+            // not really have is the safe direction. The shadowing rule is asked
+            // of every environment, since the loop reads every one.
+            let reason = match spec_name.as_ref().and_then(|name| ambiguous.get(name)) {
+                Some(files) => Some(crate::package::port::ambiguous_files_sentence(
+                    spec_name.as_deref().unwrap_or_default(),
+                    files,
+                )),
+                None => package.listing_refusal().map(|reason| reason.to_string()),
+            };
+            if let Some(reason) = reason {
                 unreadable.push(PackageParseError::new(
                     package.path().clone(),
-                    PackageParseKind::Refused {
-                        reason: reason.to_string(),
-                    },
+                    PackageParseKind::Refused { reason },
                 ));
             }
 
@@ -1722,6 +1731,28 @@ mod tests {
         assert_eq!(refused, ["a.yml", "shadowed.yml"]);
     }
 
+    // A file both ambiguous and carrying a shadowing key is reported once.
+    #[test]
+    fn an_ambiguous_shadowed_dependent_is_reported_once() {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        let body =
+            "environments:\n  test:\n    install: echo d\n    dependencies:\n      - target\n";
+        std::fs::write(package_dir.join("dep.yml"), format!("name: dep\n{body}")).unwrap();
+        std::fs::write(
+            package_dir.join("dep.yaml"),
+            format!("name: dep\n_environments: x\n{body}"),
+        )
+        .unwrap();
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
+
+        let (_, unreadable) = repo.find_dependent_packages("target").unwrap();
+
+        assert_eq!(unreadable.len(), 2, "{unreadable:?}");
+    }
+
     #[test]
     fn test_find_dependent_packages_no_dependencies() {
         // Test finding dependents when there are none
@@ -1749,6 +1780,41 @@ environments:
 
         let (dependents, _unreadable) = repo.find_dependent_packages("target-package").unwrap();
         assert!(dependents.is_empty());
+    }
+
+    // A file of an ambiguous name is used by no command, but becomes the package
+    // once the others go, so it is reported as a spec selfie cannot rely on, and
+    // still checked.
+    #[test]
+    fn an_ambiguous_dependent_is_reported_and_still_checked() {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::write(
+            package_dir.join("target-package.yml"),
+            "name: target-package\nenvironments:\n  test:\n    install: echo t\n",
+        )
+        .unwrap();
+        for ext in ["yml", "yaml"] {
+            std::fs::write(
+                package_dir.join(format!("dep.{ext}")),
+                "name: dep\nenvironments:\n  test:\n    install: echo d\n    dependencies:\n      - target-package\n",
+            )
+            .unwrap();
+        }
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
+
+        let (dependents, unreadable) = repo.find_dependent_packages("target-package").unwrap();
+
+        assert_eq!(dependents.len(), 2);
+        assert_eq!(unreadable.len(), 2, "{unreadable:?}");
+        assert!(
+            unreadable
+                .iter()
+                .all(|failure| failure.to_string().contains("dep.yaml, dep.yml")),
+            "{unreadable:?}"
+        );
     }
 
     #[test]

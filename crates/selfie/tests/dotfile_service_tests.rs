@@ -13225,12 +13225,10 @@ environments:
     assert_eq!(listed.packages[0].name(), "bat");
 }
 
-// A name in both directories is two files, and a listing is asked what is on
-// disk rather than which one would deploy. `collect_all_packages` drops the
-// dotfiles/ copy for exactly that deploy question, so the listing must not reuse
-// that answer.
+// A name in both directories is listed as apply would use it: the packages/
+// copy, with the warning apply gives about the dotfiles/ one it leaves out.
 #[tokio::test]
-async fn list_keeps_both_copies_of_a_name_in_both_directories() {
+async fn list_shows_what_apply_uses_for_a_name_in_both_directories() {
     let dirs = TestDirs::new();
     write_package_yaml(
         &dirs.package_dir,
@@ -13263,25 +13261,18 @@ dotfiles:
             _ => None,
         })
         .expect("the listing must be emitted");
-
-    assert_eq!(
-        listed.packages.len(),
-        2,
-        "both files exist, so both are listed; got {:?}",
-        listed
-            .packages
-            .iter()
-            .map(selfie::package::Package::name)
-            .collect::<Vec<_>>()
-    );
-
-    let origins: Vec<_> = listed
+    let targets: Vec<&str> = listed
         .packages
         .iter()
-        .map(selfie::package::Package::origin)
+        .flat_map(|p| p.dotfiles_with_scope().into_iter().map(|(_, e)| e.target()))
         .collect();
-    assert!(origins.contains(&SpecOrigin::PackageDirectory));
-    assert!(origins.contains(&SpecOrigin::DotfilesDirectory));
+    assert_eq!(targets, ["~/.from-packages"], "{listed:?}");
+    assert!(
+        warning_messages(&events)
+            .iter()
+            .any(|w| w.starts_with("Duplicate name 'shared' found in both packages/ and dotfiles/")),
+        "{events:?}"
+    );
 }
 
 // One level down from the shadowed top level, and the same harm: a key inside an
@@ -13325,6 +13316,62 @@ environments:
         "the reason must name the key, got: {}",
         listed.refused[0].reason
     );
+}
+
+// The listing spans every environment, so a name whose files declare dotfiles
+// only for another environment, which apply here leaves unmentioned, is still
+// refused rows.
+#[tokio::test]
+async fn list_refuses_an_ambiguous_name_with_dotfiles_only_elsewhere() {
+    let dirs = TestDirs::new();
+    for ext in ["yml", "yaml"] {
+        std::fs::write(
+            dirs.package_dir.join(format!("bat.{ext}")),
+            "name: bat\nenvironments:\n  test:\n    install: \"true\"\n  other:\n    install: \"true\"\n    dotfiles:\n      - source: bat/rc\n        target: ~/.bat\n",
+        )
+        .unwrap();
+    }
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+    assert_eq!(listed.refused.len(), 2, "{listed:?}");
+    assert!(listed.refused.iter().all(|row| row.package_name == "bat"));
+}
+
+// Several files claiming one name deploy none of them, so the listing shows each
+// as a refused row naming the files, rather than as dotfiles.
+#[tokio::test]
+async fn list_refuses_every_file_of_an_ambiguous_name() {
+    let dirs = TestDirs::new();
+    for ext in ["yml", "yaml"] {
+        std::fs::write(
+            dirs.package_dir.join(format!("bat.{ext}")),
+            "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - source: bat/rc\n    target: ~/.bat\n",
+        )
+        .unwrap();
+    }
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+    assert!(listed.packages.is_empty(), "{listed:?}");
+    assert_eq!(listed.refused.len(), 2, "{listed:?}");
+    assert!(listed.refused.iter().all(|row| row.kind
+        == selfie::package::event::RefusalKind::AmbiguousName
+        && row.reason.contains("bat.yaml, bat.yml")));
 }
 
 // Copies of what a target held before an apply overwrote it.

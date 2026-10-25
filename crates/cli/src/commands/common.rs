@@ -69,14 +69,28 @@ pub(crate) fn package_names_and_skipped(
 ) -> Result<(Vec<String>, Vec<String>), PackageListError> {
     let output = repo.list_packages()?;
 
+    // A name several files claim is offered by neither picker, since every
+    // command using it refuses it; the files are named instead.
+    let listing = output.names();
     let skipped = output
         .invalid_packages()
         .map(selfie::package::service::skipped_spec_warning)
+        .chain(
+            listing
+                .rows
+                .iter()
+                .map(selfie::package::service::ambiguous_spec_warning),
+        )
         .collect();
 
     // Not the `name:` field: a dependency or a track destination is resolved by
     // file name, and a field that disagrees with it names nothing selfie finds.
-    let mut names: Vec<String> = output.valid_packages().filter_map(file_name_of).collect();
+    let mut names: Vec<String> = listing
+        .usable
+        .iter()
+        .copied()
+        .filter_map(file_name_of)
+        .collect();
     names.sort();
     names.dedup();
 

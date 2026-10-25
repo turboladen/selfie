@@ -71,7 +71,11 @@ Names are compared ignoring case, so `neovim` and `Neovim` are one package: a sp
 package from another — `Neovim.YML`, `neovim.yml` and `neovim.yaml` all name the package `neovim`.
 
 A directory holding two of them is reported as ambiguous rather than resolved silently, and
-`selfie sync push` refuses to carry it.
+`selfie sync push` refuses to carry it. No command uses either file: `apply` and `dotfiles drift`
+refuse the name when one of its files fails to parse or declares dotfiles for the environment in
+use, and `package audit --all` refuses it once by the same rule, every command naming it fails,
+`package list`, `spec list` and `spec search` show each file as a refused row (`package list` exits
+3 until one is removed), and the interactive pickers do not offer it.
 
 Two capitalizations of one name are worse than two extensions, and the refusals say so. `neovim.yml`
 and `neovim.yaml` both survive any checkout, and the package is merely unresolvable until one of
@@ -1434,6 +1438,10 @@ See all dotfile mappings across packages and standalone dotfiles:
 ```bash
 selfie dotfiles list
 ```
+
+The list shows what `selfie apply` would use, and says what apply says about the rest: a standalone
+spec whose name a package spec also has is left out with apply's warning, and every file of a name
+several files claim is a refused row.
 
 ### Tracking New Files
 

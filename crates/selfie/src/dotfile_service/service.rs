@@ -28,10 +28,8 @@ use super::drift::handle_check_drift;
 use super::orphan::Catalog;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
-use crate::package::collect::warning::{
-    CollectionRefusal, Finding, NameCollision, no_such_package,
-};
-use crate::package::collect::{Collected, collect_all_packages, collect_packages};
+use crate::package::collect::warning::{CollectionRefusal, Finding, no_such_package};
+use crate::package::collect::{Collected, collect_all_packages};
 
 /// Whether `package` is the one `folded_name`, already lowercased, names.
 ///
@@ -415,13 +413,11 @@ where
     }
 
     async fn list(&self) -> EventStream {
-        // `KeepBoth`: a name in both directories is two files on disk, and a
-        // listing that showed one of them would be answering the deploy question
-        // instead of the one the user asked.
-        let collected = collect_packages(
+        // The collection apply makes, so the listing shows what apply would use
+        // and says what apply says about every file it would not.
+        let collected = collect_all_packages(
             &self.package_repository,
             &self.dotfiles_repository,
-            NameCollision::KeepBoth,
             self.config.dotfiles_directory_is_expected(),
             self.config.environment(),
         );
@@ -449,14 +445,52 @@ where
                         .refusals()
                         .any(CollectionRefusal::is_unreadable_directory);
                     let Collected {
-                        packages, findings, ..
+                        packages,
+                        findings,
+                        unrefused_ambiguities,
+                        ..
                     } = collected;
 
                     // Drained before the listing is sent, so a consumer reading
                     // events in order has the caveats in hand before the answer
-                    // they qualify.
+                    // they qualify. An ambiguous name is not sent: its files are
+                    // refused rows of the listing itself.
+                    let mut refused = Vec::new();
+                    let unloadable: Vec<&std::path::Path> = findings
+                        .iter()
+                        .filter_map(|finding| match finding {
+                            Finding::Refusal(CollectionRefusal::UnloadableSpec(error)) => {
+                                Some(error.package_path())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    // A file that did not parse keeps its own row.
+                    let mut refuse_name = |name: &str, paths: &[std::path::PathBuf]| {
+                        refused.extend(
+                            paths
+                                .iter()
+                                .filter(|path| !unloadable.contains(&path.as_path()))
+                                .map(|path| {
+                                    crate::package::event::RefusedSpec::ambiguous_file(
+                                        name, path, paths,
+                                    )
+                                }),
+                        );
+                    };
                     for finding in &findings {
-                        finding.send(&sender).await;
+                        match finding {
+                            Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths }) => {
+                                refuse_name(name, paths);
+                            }
+                            _ => finding.send(&sender).await,
+                        }
+                    }
+                    // The listing spans every environment, so a name apply leaves
+                    // unmentioned here, its files declaring no dotfiles in this
+                    // one, is refused rows too.
+                    for (name, paths) in &unrefused_ambiguities {
+                        refuse_name(name, paths);
                     }
 
                     if unreadable {
@@ -477,7 +511,6 @@ where
                     // the table never asks -- while a shadowing key in ANY
                     // environment empties a list this table would otherwise show
                     // as simply absent.
-                    let mut refused = Vec::new();
                     let mut listable = Vec::new();
                     for package in packages {
                         if let Some(reason) = package.listing_refusal() {
