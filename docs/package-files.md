@@ -218,6 +218,13 @@ the group as an error naming each entry. Validation compares targets without kno
 directory, so two shared entries `~/.x` and `/home/you/.x` pass it, while `apply` and `drift` still
 refuse the pair.
 
+The same holds across specs. When two specs, packages or standalone dotfiles, each deploy to one
+file in the environment in use, `selfie apply` deploys neither: it refuses every such entry, names
+every spec and entry deploying there, and exits non-zero, and `selfie dotfiles drift` refuses the
+same entries. Applying one package by name refuses its entry too, since writing it would overwrite
+the other spec's file. Neither spec takes precedence; remove one of the entries. A package selfie
+refuses whole takes no part, since nothing of it deploys.
+
 `selfie spec validate` reports each override as an informational note, which never fails validation
 or `selfie sync push`. A shared and an environment entry that are one file only for a particular
 home, such as `~/.x` and `/home/you/.x`, get a note naming that home, when that home is `/root` or a

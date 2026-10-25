@@ -406,17 +406,26 @@ impl TargetCollision<'_> {
     /// The entries and the target, as a clause: `dotfiles[0] and dotfiles[1]
     /// both deploy to '/home/me/.x'`.
     pub(crate) fn describe(&self) -> String {
-        let fields = self.fields();
-        let (last, rest) = fields
-            .split_last()
-            .expect("a collision has at least two entries");
-        let quantifier = if rest.len() == 1 { "both" } else { "all" };
-        format!(
-            "{} and {last} {quantifier} deploy to '{}'",
-            rest.join(", "),
-            self.target.display()
-        )
+        deploy_to_clause(&self.fields(), &self.target)
     }
+}
+
+/// `members` and the `target` they share, as a clause: `a and b both deploy to
+/// '/home/me/.x'`, or `a, b and c all deploy to …`.
+///
+/// # Panics
+///
+/// If `members` is empty.
+pub(crate) fn deploy_to_clause(members: &[String], target: &TargetPath) -> String {
+    let (last, rest) = members
+        .split_last()
+        .expect("a collision has at least two entries");
+    let quantifier = if rest.len() == 1 { "both" } else { "all" };
+    format!(
+        "{} and {last} {quantifier} deploy to '{}'",
+        rest.join(", "),
+        target.display()
+    )
 }
 
 /// What to do about a [`TargetCollision`].
