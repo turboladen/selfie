@@ -4000,7 +4000,7 @@ environments:
 
 // An entry scoped to another environment deploys nothing here, so it does not
 // make the file tracked. The track adds a shared entry, which that environment's
-// entry, spelled the same, overrides there.
+// entry overrides there.
 #[tokio::test]
 async fn a_package_track_ignores_an_entry_scoped_to_another_environment() {
     let dirs = TestDirs::new();
@@ -16515,26 +16515,23 @@ environments:
         assert_eq!(std::fs::read_to_string(home.join(".x")).unwrap(), "work");
     }
 
-    // The two overrides plus a third entry spelled `~/./.x`. The effective set
-    // holds the first override and the third, and the environment's own list
-    // holds all three; both refusals name every one of them, so the user sees
-    // the whole group from either warning.
+    // Three environment entries for one target, one spelled `~/./.x`, and no
+    // shared entry for them to override, so all three are in the effective set.
+    // Every refusal names every one of them, so the user sees the whole group
+    // from any warning.
     #[tokio::test]
     async fn every_refusal_names_the_whole_group_for_its_target() {
         let dirs = TestDirs::new();
         let home = dirs.target_dir.clone();
         let sources = dirs.package_dir.join("dup");
         std::fs::create_dir_all(&sources).unwrap();
-        for name in ["shared", "one", "two", "three"] {
+        for name in ["one", "two", "three"] {
             std::fs::write(sources.join(name), name).unwrap();
         }
         write_package_yaml(
             &dirs.package_dir,
             "dup",
             r#"name: dup
-dotfiles:
-  - source: dup/shared
-    target: "~/.x"
 environments:
   test:
     install: "echo installed"
@@ -16555,7 +16552,7 @@ environments:
         )
         .await;
 
-        assert_eq!(deploy_state_of(&events), (0, 2));
+        assert_eq!(deploy_state_of(&events), (0, 3));
         let warnings = warning_messages(&events);
         let naming_all = warnings
             .iter()
@@ -16566,24 +16563,27 @@ environments:
                 )
             })
             .count();
-        assert_eq!(naming_all, 2, "got: {warnings:?}");
+        assert_eq!(naming_all, 3, "got: {warnings:?}");
     }
 
-    // A shared entry and an environment entry spelled differently for one file.
-    // Spelled identically it would be an override; spelled this way both deploy
-    // in that environment, so both are refused, with the hint about spelling.
+    // A shared entry and an environment entry spelled differently for one file:
+    // `~/.x` and its absolute form. They are one target, so the environment entry
+    // overrides the shared one; nothing is refused, and the override's content is
+    // what lands.
     #[tokio::test]
-    async fn apply_refuses_an_environment_entry_that_matches_a_shared_one_only_by_expansion() {
+    async fn an_absolute_override_of_a_tilde_shared_entry_deploys_the_override() {
         let dirs = TestDirs::new();
         let home = dirs.target_dir.clone();
         let sources = dirs.package_dir.join("dup");
         std::fs::create_dir_all(&sources).unwrap();
         std::fs::write(sources.join("shared"), "shared").unwrap();
         std::fs::write(sources.join("work"), "work").unwrap();
+        let absolute = home.join(".x");
         write_package_yaml(
             &dirs.package_dir,
             "dup",
-            r#"name: dup
+            &format!(
+                r#"name: dup
 dotfiles:
   - source: dup/shared
     target: "~/.x"
@@ -16592,8 +16592,10 @@ environments:
     install: "echo installed"
     dotfiles:
       - source: dup/work
-        target: "~/./.x"
+        target: "{}"
 "#,
+                absolute.display()
+            ),
         );
 
         let events = collect_events(
@@ -16603,17 +16605,117 @@ environments:
         )
         .await;
 
-        assert_eq!(deploy_state_of(&events), (0, 2));
-        assert!(!home.join(".x").exists(), "a colliding entry was deployed");
-        let warnings = warning_messages(&events);
-        let hinted = warnings
-            .iter()
-            .filter(|w| {
-                w.contains("dotfiles[0] and environments.test.dotfiles[0] both deploy to")
-                    && w.contains("write the target exactly as the shared entry does")
-            })
-            .count();
-        assert_eq!(hinted, 2, "got: {warnings:?}");
+        assert_eq!(
+            deploy_state_of(&events),
+            (1, 0),
+            "{:?}",
+            warning_messages(&events)
+        );
+        assert_eq!(std::fs::read_to_string(&absolute).unwrap(), "work");
+    }
+
+    // A package whose `~` shared entry and absolute environment entry, or the
+    // reverse, name one file.
+    fn spelled_pair(dirs: &TestDirs, shared: &str, scoped: &str, extra_shared: Option<&str>) {
+        let sources = dirs.package_dir.join("dup");
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::write(sources.join("shared"), "shared").unwrap();
+        std::fs::write(sources.join("work"), "work").unwrap();
+        let extra = extra_shared
+            .map(|target| format!("  - source: dup/shared\n    target: \"{target}\"\n"))
+            .unwrap_or_default();
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            &format!(
+                "name: dup\ndotfiles:\n  - source: dup/shared\n    target: \"{shared}\"\n{extra}\
+                 environments:\n  test:\n    install: \"echo installed\"\n    dotfiles:\n      \
+                 - source: dup/work\n        target: \"{scoped}\"\n"
+            ),
+        );
+    }
+
+    // The reverse spelling: an absolute shared entry, overridden by a `~` one.
+    #[tokio::test]
+    async fn a_tilde_override_of_an_absolute_shared_entry_deploys_the_override() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let absolute = home.join(".x");
+        spelled_pair(&dirs, &absolute.display().to_string(), "~/.x", None);
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            deploy_state_of(&events),
+            (1, 0),
+            "{:?}",
+            warning_messages(&events)
+        );
+        assert_eq!(std::fs::read_to_string(&absolute).unwrap(), "work");
+    }
+
+    // Two shared entries spelled differently for one file, both replaced by one
+    // override, which deploys once.
+    #[tokio::test]
+    async fn one_override_replaces_two_spellings_of_one_shared_target_once() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let absolute = home.join(".x");
+        spelled_pair(
+            &dirs,
+            "~/.x",
+            "~/./.x",
+            Some(&absolute.display().to_string()),
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            deploy_state_of(&events),
+            (1, 0),
+            "{:?}",
+            warning_messages(&events)
+        );
+        // Listed twice, the override would deploy, then be found in sync and
+        // skipped: one deploy, but two passes over one entry.
+        match get_operation_result(&events).expect("no Completed event") {
+            OperationResult::Success(OperationSuccess::DotfilesApplied {
+                skipped_count, ..
+            }) => {
+                assert_eq!(
+                    *skipped_count, 0,
+                    "the override must be reached once: {events:?}"
+                );
+            }
+            other => panic!("expected DotfilesApplied, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&absolute).unwrap(), "work");
+    }
+
+    // Drift checks the override alone, as apply deploys it alone.
+    #[tokio::test]
+    async fn drift_checks_one_entry_for_a_cross_spelled_override() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        spelled_pair(&dirs, "~/.x", &home.join(".x").display().to_string(), None);
+
+        let events = collect_events(dirs.service_with_home(&home).check_drift().await).await;
+
+        assert_eq!(
+            drift_summary(&events),
+            (1, 1, 0),
+            "(drifted, total, refused)"
+        );
     }
 }
 

@@ -478,7 +478,7 @@ where
     // without a branch of its own.
     let already_tracked = spec
         .package
-        .dotfiles_for_environment(config.environment())
+        .dotfiles_for_environment(filesystem, config.environment())
         .into_iter()
         .find(|entry| expand_target_path(filesystem, entry.target()) == expanded_target);
 

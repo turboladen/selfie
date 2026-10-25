@@ -11,22 +11,11 @@ use super::{
     environment_field,
 };
 
-/// A home directory that cannot be determined, so `~` stays literal.
-///
-/// Validation has no file system, so it compares targets with `~` unexpanded and
-/// `.` and `..` resolved as text resolves them. Two targets it matches name one file
-/// on every machine; two it does not match may still be one file on some machine.
-// "One file" assumes no directory on the way is a symlink, which text cannot see.
-// What it cannot match is `~/x` against the absolute path of the same file, or a
-// pair that meets only after a `..` climbs out of home and back in. Apply compares
-// against the real home and refuses those where they collide.
-struct NoHome;
-
-impl crate::fs::target::HomeDir for NoHome {
-    fn home(&self) -> Result<PathBuf, crate::fs::filesystem::FileSystemError> {
-        Err(crate::fs::filesystem::FileSystemError::HomeDirNotFound)
-    }
-}
+// Validation has no file system, so it compares targets through `NoHome`. What it
+// cannot match is `~/x` against the absolute path of the same file, or a pair that
+// meets only after a `..` climbs out of home and back in. Apply compares against the
+// real home and decides those.
+use crate::fs::target::{NoHome, TargetPath, expand_target_path};
 
 /// A templated dotfile entry whose file has still to be read.
 ///
@@ -620,24 +609,29 @@ impl Package {
         }
 
         // Environment-specific dotfiles (ADR-0001): the same structural checks,
-        // plus a warning when an entry overrides a shared entry's target, so the
-        // override is surfaced rather than applied silently. An entry in a
-        // collision gets the collision's error instead: calling it allowed would
-        // contradict the error beside it.
+        // plus a notice when an entry overrides a shared entry's target, so the
+        // override is surfaced rather than applied silently. A notice, not a
+        // warning: an override is intended, and a warning fails validation and
+        // refuses `sync push`. An entry in a collision gets the collision's error
+        // instead: calling it allowed would contradict the error beside it.
+        let shared_keys: Vec<_> = self
+            .dotfiles
+            .iter()
+            .map(|shared| expand_target_path(&NoHome, shared.target()))
+            .collect();
         for (env_name, env) in self.environments_sorted() {
             for (i, dotfile) in env.dotfiles().iter().enumerate() {
                 let field = environment_field(env_name, &dotfile_field(i));
                 issues.extend(Self::validate_dotfile_entry(dotfile, &field));
 
                 let scoped = ScopedEntry::environment(env_name, i, dotfile);
-                if self
-                    .dotfiles
-                    .iter()
-                    .any(|shared| shared.target() == dotfile.target())
-                    && !collisions.iter().any(|c| c.contains(&scoped))
-                {
-                    issues.push(ValidationIssue::warning(
-                        ValidationErrorCategory::InvalidValue,
+                if collisions.iter().any(|c| c.contains(&scoped)) {
+                    continue;
+                }
+                let key = expand_target_path(&NoHome, dotfile.target());
+                if shared_keys.contains(&key) {
+                    issues.push(ValidationIssue::info(
+                        ValidationErrorCategory::Advisory,
                         &format!("{field}.target"),
                         &format!(
                             "Environment '{env_name}' overrides the shared dotfile for target '{}'",
@@ -647,6 +641,29 @@ impl Package {
                             "This is allowed; the environment-specific source is used in that environment.",
                         ),
                     ));
+                    continue;
+                }
+                // A pair whose keys differ can still be one file on the machine
+                // whose home makes them meet. Validation cannot know that home, so
+                // it names it.
+                for (shared, shared_key) in self.dotfiles.iter().zip(&shared_keys) {
+                    if let Some(home) = Self::home_joining(&key, shared_key) {
+                        issues.push(ValidationIssue::info(
+                            ValidationErrorCategory::Advisory,
+                            &format!("{field}.target"),
+                            &format!(
+                                "'{field}' ('{}') overrides the shared '{}' on a machine whose \
+                                 home is '{}'",
+                                dotfile.target(),
+                                shared.target(),
+                                home.display()
+                            ),
+                            Some(
+                                "Elsewhere both deploy. Spell both targets the same way if they \
+                                 are meant to be one file on every machine.",
+                            ),
+                        ));
+                    }
                 }
             }
         }
@@ -660,13 +677,51 @@ impl Package {
                     "Dotfile entries {}, so apply deploys none of them",
                     collision.describe()
                 ),
-                Some(collision.remedy()),
+                Some(super::KEEP_ONE_ENTRY),
                 SourceLocation::from_location(first.entry.target_location()),
             )
         }));
         issues.extend(self.report_apply_time_commands());
 
         issues
+    }
+
+    // The home on which `a` and `b`, keys from `expand_target_path` against no home,
+    // name one file: one is absolute and the other `~/` plus a path the absolute one
+    // ends with. A `~` key that climbs out of home with `..` is not judged.
+    fn home_joining(a: &TargetPath, b: &TargetPath) -> Option<PathBuf> {
+        let (absolute, tilde) = match (a.path().is_absolute(), b.path().is_absolute()) {
+            (true, false) => (a.path(), b.path()),
+            (false, true) => (b.path(), a.path()),
+            _ => return None,
+        };
+        let below_home = tilde.strip_prefix("~").ok()?;
+        if below_home.as_os_str().is_empty()
+            || below_home
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+        let depth = below_home.components().count();
+        let home: PathBuf = absolute
+            .components()
+            .take(absolute.components().count().checked_sub(depth)?)
+            .collect();
+        (absolute.ends_with(below_home) && Self::is_conventional_home(&home)).then_some(home)
+    }
+
+    // Whether `home` is where a home directory conventionally is: `/root`, or a
+    // direct child of `/Users`, `/home` or `/var/home`. Elsewhere a `~` target the
+    // absolute path ends with is a coincidence of names, such as `/usr/local/bin/x`
+    // and `~/bin/x`, and a note about it would be noise.
+    fn is_conventional_home(home: &std::path::Path) -> bool {
+        home == std::path::Path::new("/root")
+            || home.parent().is_some_and(|parent| {
+                ["/Users", "/home", "/var/home"]
+                    .iter()
+                    .any(|base| parent == std::path::Path::new(base))
+            })
     }
 
     /// Every group of entries that deploy to one target in some environment,
@@ -730,7 +785,7 @@ impl Package {
         let command_count = self
             .environments()
             .keys()
-            .map(|env| count_of(&self.dotfiles_for_environment(env)))
+            .map(|env| count_of(&self.dotfiles_for_environment(&NoHome, env)))
             .chain(std::iter::once(count_of(&self.dotfiles)))
             .max()
             .unwrap_or(0);
@@ -1376,13 +1431,11 @@ environments:
         }
     }
 
-    // The two spellings differ as strings, so this is not an override; they
-    // expand to one path, so both would deploy. The hint says how to make it the
-    // override it probably was.
+    // The two spellings differ as strings and are equal as text, so the
+    // environment entry overrides the shared one rather than colliding with it.
     #[test]
-    fn a_shared_and_an_environment_entry_equal_only_after_expansion_are_an_error() {
-        let errors = collision_errors(
-            r"
+    fn a_shared_and_an_environment_entry_equal_as_text_are_an_override() {
+        let yaml = r"
 name: x
 dotfiles:
   - source: a/shared
@@ -1393,20 +1446,108 @@ environments:
     dotfiles:
       - source: a/work
         target: ~/./.x
-",
-        );
-        assert_eq!(errors.len(), 1, "got: {}", messages(&errors));
+";
+        assert!(collision_errors(yaml).is_empty());
+        let issues = package_from_yaml(yaml).validate_dotfiles();
         assert!(
-            errors[0]
-                .message()
-                .contains("dotfiles[0] and environments.work.dotfiles[0]"),
+            issues.iter().any(|i| i.level() == ValidationLevel::Info
+                && i.message().contains("overrides the shared dotfile")),
             "got: {}",
-            errors[0].message()
+            messages(&issues)
         );
-        let suggestion = errors[0].suggestion().expect("a remedy").as_str();
+    }
+
+    // A pair that is one file only on the machine whose home makes them meet,
+    // in either direction, gets a notice naming that home. The control pair ends
+    // differently and gets none.
+    #[test]
+    fn the_possible_override_note_names_the_home_it_needs() {
+        let notes = |shared: &str, scoped: &str| -> Vec<String> {
+            package_from_yaml(&format!(
+                r"
+name: x
+dotfiles:
+  - source: a/shared
+    target: {shared}
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/work
+        target: {scoped}
+"
+            ))
+            .validate_dotfiles()
+            .into_iter()
+            .filter(|i| i.level() == ValidationLevel::Info && i.message().contains("whose home"))
+            .map(|i| i.message().to_string())
+            .collect()
+        };
+
+        let forward = notes("~/.config/x", "/Users/me/.config/x");
+        assert_eq!(forward.len(), 1, "{forward:?}");
+        assert!(forward[0].contains("home is '/Users/me'"), "{forward:?}");
         assert!(
-            suggestion.contains("write the target exactly as the shared entry does"),
-            "got: {suggestion}"
+            forward[0].contains("environments.work.dotfiles[0]"),
+            "{forward:?}"
+        );
+
+        assert!(notes("~/.config/x", "/Users/me/.config/y").is_empty());
+        assert!(notes("~/../me/.x", "/Users/me/.x").is_empty());
+    }
+
+    // Only a conventional home gets the note: elsewhere a `~` target that an
+    // absolute path ends with is a coincidence of names.
+    #[test]
+    fn the_possible_override_note_needs_a_conventional_home() {
+        let notes = |shared: &str, scoped: &str| -> usize {
+            package_from_yaml(&format!(
+                r"
+name: x
+dotfiles:
+  - source: a/shared
+    target: {shared}
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/work
+        target: {scoped}
+"
+            ))
+            .validate_dotfiles()
+            .iter()
+            .filter(|i| i.level() == ValidationLevel::Info && i.message().contains("whose home"))
+            .count()
+        };
+        assert_eq!(notes("~/bin/tool", "/usr/local/bin/tool"), 0);
+        assert_eq!(notes("~/.x", "/home/me/.x"), 1);
+        assert_eq!(notes("~/.x", "/root/.x"), 1);
+    }
+
+    #[test]
+    fn the_possible_override_note_covers_an_absolute_shared_entry() {
+        let issues = package_from_yaml(
+            r"
+name: x
+dotfiles:
+  - source: a/shared
+    target: /Users/me/.x
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: a/work
+        target: ~/.x
+",
+        )
+        .validate_dotfiles();
+        assert!(
+            issues.iter().any(|i| i.level() == ValidationLevel::Info
+                && i.message()
+                    .contains("on a machine whose home is '/Users/me'")),
+            "got: {}",
+            messages(&issues)
         );
     }
 
@@ -1568,7 +1709,7 @@ environments:
         target: ~/.x
 ";
         let package = package_from_yaml(yaml);
-        let effective = package.effective_dotfiles(Some("work"));
+        let effective = package.effective_dotfiles(&super::NoHome, Some("work"));
         assert_eq!(
             effective.iter().map(ScopedEntry::field).collect::<Vec<_>>(),
             vec!["environments.work.dotfiles[0]"]
@@ -1963,7 +2104,7 @@ environments:
         let issues = package.validate_dotfiles();
         let notice = issues
             .iter()
-            .find(|i| i.level() == ValidationLevel::Info)
+            .find(|i| i.level() == ValidationLevel::Info && i.message().contains("executes"))
             .expect("expected an informational notice");
 
         assert!(
@@ -2418,7 +2559,7 @@ dotfiles:
     }
 
     #[test]
-    fn test_validate_env_dotfile_override_warns_not_errors() {
+    fn test_validate_env_dotfile_override_is_a_notice() {
         let package = PackageBuilder::default()
             .name("override-config")
             .dotfiles(vec![DotfileEntry::new(
@@ -2437,9 +2578,19 @@ dotfiles:
             !result.issues().has_errors(),
             "overriding a shared dotfile is allowed, not an error"
         );
+        // Surfaced, but as a notice: a warning would fail `spec validate` and
+        // refuse `sync push` for a feature working as intended.
         assert!(
-            result.issues().has_warnings(),
-            "an environment overriding a shared dotfile target must be surfaced as a warning"
+            !result.issues().has_warnings(),
+            "an override must not be a warning"
+        );
+        assert!(
+            result
+                .issues()
+                .infos()
+                .iter()
+                .any(|i| i.message().contains("overrides the shared dotfile")),
+            "an environment overriding a shared dotfile target must be surfaced"
         );
     }
 

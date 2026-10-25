@@ -142,7 +142,7 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
                 entry.target(),
                 collisions.package,
                 collision.describe(),
-                collision.remedy()
+                crate::package::KEEP_ONE_ENTRY
             ),
         ));
     }

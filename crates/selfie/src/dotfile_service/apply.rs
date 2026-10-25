@@ -378,7 +378,7 @@ where
     let home = ResolvedHome::of(filesystem);
 
     'packages: for package in packages {
-        let dotfiles = package.effective_dotfiles(Some(config.environment()));
+        let dotfiles = package.effective_dotfiles(&home, Some(config.environment()));
         let package_name = package.spec_name();
         let collisions = PackageCollisions::of(package, &home, config.environment());
 

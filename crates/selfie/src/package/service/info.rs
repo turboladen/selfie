@@ -26,6 +26,15 @@ use crate::{
     },
 };
 
+// A repository's home directory, asked as `HomeDir` asks for one.
+struct RepoHome<'a, R>(&'a R);
+
+impl<R: PackageRepository> crate::fs::target::HomeDir for RepoHome<'_, R> {
+    fn home(&self) -> Result<std::path::PathBuf, crate::fs::filesystem::FileSystemError> {
+        self.0.home_directory()
+    }
+}
+
 /// Spec-only info: load package definition and emit `PackageInfoLoaded`.
 /// Does NOT execute any commands or check installation status.
 pub(super) async fn handle_spec_info<PR, G>(
@@ -90,9 +99,10 @@ where
                 })
                 .collect(),
             // The current environment's effective set, overrides replacing the
-            // shared entries they target, since that is what apply deploys.
+            // shared entries they target, against the home apply uses, since that
+            // is what apply deploys.
             package
-                .dotfiles_for_environment(config.environment())
+                .dotfiles_for_environment(&RepoHome(repo), config.environment())
                 .iter()
                 .map(crate::package::DotfileEntry::command_count)
                 .sum(),
@@ -487,6 +497,9 @@ mod tests {
             .build();
 
         let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_home_directory()
+            .returning(|| Err(crate::fs::filesystem::FileSystemError::HomeDirNotFound));
         let package_clone = package.clone();
         mock_repo.expect_get_package().returning(move |_| {
             Ok(crate::package::GetPackage::from_existing(
@@ -531,6 +544,75 @@ mod tests {
         assert!(found_info, "Expected PackageInfoLoaded event");
     }
 
+    // The count is apply's, so it takes apply's home: a shared `~/.c` and an
+    // environment `/home/me/.c` are one entry on that home, and one command.
+    #[tokio::test]
+    async fn spec_info_counts_commands_against_the_real_home() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pkg_path = temp_dir.path().join("creds.yml");
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+        let yaml = r#"
+name: creds
+dotfiles:
+  - command: op read shared
+    target: ~/.c
+environments:
+  test:
+    install: echo i
+    dotfiles:
+      - command: op read test
+        target: /home/me/.c
+"#;
+        let mut package: crate::package::Package = crate::yaml::parse(yaml).unwrap();
+        package.set_source(
+            pkg_path.clone(),
+            yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
+        );
+
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_home_directory()
+            .returning(|| Ok(std::path::PathBuf::from("/home/me")));
+        mock_repo.expect_get_package().returning(move |_| {
+            Ok(crate::package::GetPackage::from_existing(
+                package.clone(),
+                pkg_path.clone(),
+            ))
+        });
+        let mut mock_git = MockGitStatusProvider::new();
+        mock_git.expect_status_for_directory().returning(|_| {
+            Ok(GitDirectoryStatus {
+                in_repo: false,
+                files: HashMap::new(),
+            })
+        });
+
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        handle_spec_info(
+            "creds",
+            &mock_repo,
+            &config,
+            &mock_git,
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        drop(sender);
+        let mut counted = None;
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::PackageInfoLoaded { package_info, .. } = event {
+                counted = Some(package_info.apply_commands);
+            }
+        }
+        assert_eq!(counted, Some(1));
+    }
+
     #[tokio::test]
     async fn test_spec_info_git_error_emits_warning_and_none() {
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -547,6 +629,9 @@ mod tests {
             .build();
 
         let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_home_directory()
+            .returning(|| Err(crate::fs::filesystem::FileSystemError::HomeDirNotFound));
         let package_clone = package.clone();
         mock_repo.expect_get_package().returning(move |_| {
             Ok(crate::package::GetPackage::from_existing(

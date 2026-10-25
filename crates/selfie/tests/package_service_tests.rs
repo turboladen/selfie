@@ -1156,6 +1156,10 @@ mod recommends_after_the_root_stops_loading {
             self.inner.resolved_directory()
         }
 
+        fn home_directory(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
+            self.inner.home_directory()
+        }
+
         fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
             if name == "root"
                 && self

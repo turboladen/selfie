@@ -248,6 +248,10 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         self.fs.canonicalize(&self.package_dir).ok()
     }
 
+    fn home_directory(&self) -> Result<PathBuf, FileSystemError> {
+        crate::fs::target::HomeDir::home(&self.fs)
+    }
+
     fn read_referenced_file(
         &self,
         package_path: &Path,

@@ -307,7 +307,13 @@ fn ambiguity_matters(paths: &[PathBuf], loaded: &[Package], environment: &str) -
         loaded
             .iter()
             .find(|pkg| pkg.path() == path)
-            .is_none_or(|pkg| !pkg.dotfiles_for_environment(environment).is_empty())
+            .is_none_or(|pkg| {
+                !pkg.dotfiles().is_empty()
+                    || pkg
+                        .environments()
+                        .get(environment)
+                        .is_some_and(|env| !env.dotfiles().is_empty())
+            })
     })
 }
 

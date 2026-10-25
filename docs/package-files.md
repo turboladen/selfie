@@ -207,15 +207,24 @@ environments:
         target: ~/.config/zscaler/config
 ```
 
-An override has to spell its `target` exactly as the shared entry does. Any other pair of entries
-that deploy to the same file in one environment is an error: two shared entries, two entries in one
-environment, or a shared and an environment entry whose targets differ as written but name the same
-file, such as `~/.x` and `~/./.x`. Deploying either would leave the other reported as drifted on
-every run, so `selfie apply` refuses every entry in the group, writes none of them, counts each one
-it would have deployed as a refusal and exits non-zero; `selfie dotfiles drift` refuses the same
-entries. `selfie spec validate` reports the group as an error naming each entry. Validation compares
-targets without knowing your home directory, so `~/.x` and `/home/you/.x` pass it, while `apply` and
-`drift` still refuse the pair.
+An environment entry overrides a shared entry when the two targets name the same file once `~` is
+expanded and `.` and `..` are resolved, however each is spelled: `~/.x`, `~/./.x` and `/home/you/.x`
+(when your home is `/home/you`) are one target. Any other pair of entries that deploy to the same
+file in one environment is an error: two shared entries, or two entries in one environment.
+Deploying either would leave the other reported as drifted on every run, so `selfie apply` refuses
+every entry in the group, writes none of them, counts each one it would have deployed as a refusal
+and exits non-zero; `selfie dotfiles drift` refuses the same entries. `selfie spec validate` reports
+the group as an error naming each entry. Validation compares targets without knowing your home
+directory, so two shared entries `~/.x` and `/home/you/.x` pass it, while `apply` and `drift` still
+refuse the pair.
+
+`selfie spec validate` reports each override as an informational note, which never fails validation
+or `selfie sync push`. A shared and an environment entry that are one file only for a particular
+home, such as `~/.x` and `/home/you/.x`, get a note naming that home, when that home is `/root` or a
+directory directly in `/Users`, `/home` or `/var/home`. A pair implying any other home, such as
+`/usr/local/bin/tool` and `~/bin/tool`, gets no note; `apply` still overrides correctly on a machine
+where the two are one file. One that meets only after a `..` climbs out of home and back in, such as
+`~/../you/.x`, is not reported.
 
 There is intentionally no way to _exclude_ a shared entry from a single environment: a config that
 is not universal belongs in the relevant `environments.<name>.dotfiles` lists rather than the shared
@@ -1440,9 +1449,8 @@ source→target mapping, and record initial deploy state for drift detection.
 A file the package already deploys in the current environment is reported as already tracked, and
 nothing is copied or added. An entry under `environments.<name>.dotfiles` counts when `<name>` is
 the current environment; one scoped to another environment does not, so the track adds a shared
-entry, which that environment's entry overrides if it spells the target the same way. The entry's
-target counts however it is spelled, so `~/.gemrc` and the absolute path to the same file are one
-target.
+entry, which that environment's entry overrides. The entry's target counts however it is spelled, so
+`~/.gemrc` and the absolute path to the same file are one target.
 
 Those three steps are ordered so a failure leaves nothing half-finished. A spec that cannot be saved
 takes the copy with it: selfie removes the file it had just written, so a retry after fixing the
