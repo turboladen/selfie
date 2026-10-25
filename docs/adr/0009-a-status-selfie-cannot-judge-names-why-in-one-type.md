@@ -8,7 +8,9 @@ Accepted 2026-10-14. Refines [0006](0006-command-output-contract.md), whose verd
 this record does not change, and applies the labeling rule of ADR 0008, "A dotfile entry is refused
 or failed, and its kind names the condition", (d) to a second family of labels. Refined by
 [0010](0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md), which decides what a
-reason it types means for a run's exit code.
+reason it types means for a run's exit code, and by
+[0012](0012-which-spec-files-are-packages-is-decided-once-from-the-files-names.md), which decides
+once which files claim a name.
 
 ## Context
 
