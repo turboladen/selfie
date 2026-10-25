@@ -120,6 +120,15 @@ pub trait PackageRepository: Send + Sync {
     /// Two repositories answering the same `Some` read one directory, however
     /// each was configured. `None` says nothing about another repository.
     fn resolved_directory(&self) -> Option<PathBuf>;
+
+    /// The home directory dotfile targets expand against, as the repository's
+    /// file system reports it.
+    ///
+    /// # Errors
+    ///
+    /// [`FileSystemError`] when the home directory cannot be determined, as
+    /// [`HomeDir::home`](crate::fs::target::HomeDir::home) reports it.
+    fn home_directory(&self) -> Result<PathBuf, FileSystemError>;
 }
 
 /// Errors that can occur during package repository operations

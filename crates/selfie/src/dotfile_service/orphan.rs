@@ -98,7 +98,7 @@ impl Survey {
             }
             // Every entry, refused or secret-bearing alike: each still names a
             // target the user means selfie to manage.
-            for scoped in package.effective_dotfiles(Some(environment)) {
+            for scoped in package.effective_dotfiles(home, Some(environment)) {
                 match deploy_target(home, scoped.entry.target()) {
                     Ok(target) => {
                         produced

@@ -417,21 +417,10 @@ impl TargetCollision<'_> {
             self.target.display()
         )
     }
-
-    /// What to do about it.
-    pub(crate) fn remedy(&self) -> &'static str {
-        // Mixed scopes are where spelling the targets identically would have
-        // made an override.
-        let shared = self.members.iter().any(|m| m.environment.is_none());
-        let scoped = self.members.iter().any(|m| m.environment.is_some());
-        if shared && scoped {
-            "Keep one entry per target. To override the shared entry in one environment, write \
-             the target exactly as the shared entry does."
-        } else {
-            "Keep one entry per target."
-        }
-    }
 }
+
+/// What to do about a [`TargetCollision`].
+pub(crate) const KEEP_ONE_ENTRY: &str = "Keep one entry per target.";
 
 /// Every target two or more entries of any one of `lists` resolve to, once `~`
 /// is expanded against `home`. Groups from different lists sharing a target are
@@ -1575,11 +1564,18 @@ impl Package {
     }
 
     /// Compute the effective dotfiles for `environment`: the shared (top-level)
-    /// entries, with any whose `target` matches an environment-specific entry
+    /// entries, with any whose target an environment-specific entry names
     /// replaced by it, plus environment-specific entries with new targets.
+    ///
+    /// Two targets are one when they are equal once `~` is expanded against
+    /// `home` and `.` and `..` are resolved as text, however each is spelled.
     #[must_use]
-    pub fn dotfiles_for_environment(&self, environment: &str) -> Vec<DotfileEntry> {
-        self.effective_dotfiles(Some(environment))
+    pub fn dotfiles_for_environment<H: HomeDir + ?Sized>(
+        &self,
+        home: &H,
+        environment: &str,
+    ) -> Vec<DotfileEntry> {
+        self.effective_dotfiles(home, Some(environment))
             .into_iter()
             .map(|scoped| scoped.entry.clone())
             .collect()
@@ -1588,7 +1584,11 @@ impl Package {
     /// The entries [`Self::dotfiles_for_environment`] deploys, each with the
     /// field path naming it. `None` is the shared list alone, which is what an
     /// environment declaring no dotfiles deploys.
-    pub(crate) fn effective_dotfiles(&self, environment: Option<&str>) -> Vec<ScopedEntry<'_>> {
+    pub(crate) fn effective_dotfiles<H: HomeDir + ?Sized>(
+        &self,
+        home: &H,
+        environment: Option<&str>,
+    ) -> Vec<ScopedEntry<'_>> {
         // An environment the package does not declare contributes no entries,
         // so its name is never read.
         let (env_name, env_dotfiles): (&str, &[DotfileEntry]) = environment
@@ -1597,18 +1597,21 @@ impl Package {
         let env_entry = |i: usize| ScopedEntry::environment(env_name, i, &env_dotfiles[i]);
 
         // Shared entries, each replaced by the first environment-specific entry
-        // with the same target *string* (override) when one exists. Raw strings,
-        // not expanded paths: an override is something the file spells, and a
-        // pair that only expands equal is a collision `target_collisions` reports.
+        // with the same expanded target (override) when one exists. Expanded, as
+        // `target_collisions` compares, so no pair is one target to a collision and
+        // two to an override.
         //
         // An override matching two shared entries replaces both and is listed
         // once: listed twice, apply would deploy it twice and run a provider
         // command twice.
+        let key = |entry: &DotfileEntry| expand_target_path(home, entry.target());
+        let env_keys: Vec<TargetPath> = env_dotfiles.iter().map(key).collect();
+        let shared_keys: Vec<TargetPath> = self.dotfiles.iter().map(key).collect();
         let mut effective: Vec<ScopedEntry<'_>> = Vec::new();
         for (i, shared) in self.dotfiles.iter().enumerate() {
-            let scoped = env_dotfiles
+            let scoped = env_keys
                 .iter()
-                .position(|env| env.target() == shared.target())
+                .position(|env| *env == shared_keys[i])
                 .map_or_else(|| ScopedEntry::shared(i, shared), env_entry);
             if !effective.iter().any(|seen| seen.is(&scoped)) {
                 effective.push(scoped);
@@ -1616,8 +1619,8 @@ impl Package {
         }
 
         // Environment-specific entries introducing a new target (presence).
-        for (i, env) in env_dotfiles.iter().enumerate() {
-            if !self.dotfiles.iter().any(|s| s.target() == env.target()) {
+        for (i, env) in env_keys.iter().enumerate() {
+            if !shared_keys.contains(env) {
                 effective.push(env_entry(i));
             }
         }
@@ -1633,20 +1636,26 @@ impl Package {
         home: &H,
         environment: Option<&str>,
     ) -> Vec<TargetCollision<'_>> {
-        target_collisions(home, &self.collision_candidates(environment))
+        target_collisions(home, &self.collision_candidates(home, environment))
     }
 
     /// The lists [`target_collisions`] is asked about for `environment`: what it
     /// deploys and, for a declared environment, its own `dotfiles` as written.
     /// `None` is the shared list alone.
-    pub(crate) fn collision_candidates(
+    pub(crate) fn collision_candidates<H: HomeDir + ?Sized>(
         &self,
+        home: &H,
         environment: Option<&str>,
     ) -> Vec<Vec<ScopedEntry<'_>>> {
         // The environment's own list as well, because two of its entries
         // overriding one shared target leave only the first in the effective
         // set: it would deploy, and the second would vanish unreported.
-        let mut candidates = vec![self.effective_dotfiles(environment)];
+        //
+        // No group these lists produce mixes a shared and an environment entry:
+        // an environment entry with a shared entry's target replaces it in the
+        // effective set, and the second list holds environment entries only. So
+        // one remedy, `KEEP_ONE_ENTRY`, fits every collision.
+        let mut candidates = vec![self.effective_dotfiles(home, environment)];
         if let Some((name, env)) =
             environment.and_then(|name| self.environments.value.get_key_value(name))
         {
@@ -2505,7 +2514,7 @@ environments:
             })
             .build();
 
-        let effective = package.dotfiles_for_environment("work");
+        let effective = package.dotfiles_for_environment(&crate::fs::target::NoHome, "work");
 
         assert_eq!(
             effective.len(),
@@ -2583,7 +2592,7 @@ environments:
             .environment("home", |b| b.install("brew install x"))
             .build();
 
-        let effective = package.dotfiles_for_environment("nonexistent");
+        let effective = package.dotfiles_for_environment(&crate::fs::target::NoHome, "nonexistent");
 
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].source(), Some("bat/config"));

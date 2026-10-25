@@ -3797,6 +3797,24 @@ mod name_collision_tests {
         )
     }
 
+    // An environment override is a feature working as intended. Validation surfaces
+    // it as a notice, which a push does not refuse; a warning would.
+    #[test]
+    fn a_spec_with_an_override_can_be_pushed() {
+        let spec = r#"name: myapp
+dotfiles:
+  - source: myapp/shared
+    target: ~/.x
+environments:
+  test-env:
+    install: "true"
+    dotfiles:
+      - source: myapp/env
+        target: ~/.x
+"#;
+        assert!(push_result(spec).is_ok(), "{:?}", push_result(spec));
+    }
+
     // Push asks apply's question, so it cannot ship a file the receiving machine
     // will refuse. Every rule apply refuses on is also a validation error today,
     // so no file makes the consult observable; this asks the helper directly, with

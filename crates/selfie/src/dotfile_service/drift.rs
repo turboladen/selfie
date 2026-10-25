@@ -108,7 +108,7 @@ where
         // The same collisions apply refuses, so drift refuses the same entries.
         let collisions = PackageCollisions::of(package, &home, config.environment());
 
-        for scoped in &package.effective_dotfiles(Some(config.environment())) {
+        for scoped in &package.effective_dotfiles(&home, Some(config.environment())) {
             // Between entries. Drift reads and checksums every tracked file, so
             // over a large repository an unchecked run goes on long after the
             // receiver is gone.

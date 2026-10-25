@@ -30,6 +30,21 @@ impl<F: FileSystem + ?Sized> HomeDir for F {
     }
 }
 
+/// A home directory that cannot be determined, so `~` stays literal.
+///
+/// For a caller that compares targets without knowing whose machine they will
+/// deploy on, such as validation. Targets expand against it with `.` and `..`
+/// resolved as text resolves them. Two that expand equal name one file on every
+/// machine; two that do not may still be one file on some machine.
+// "One file" assumes no directory on the way is a symlink, which text cannot see.
+pub(crate) struct NoHome;
+
+impl HomeDir for NoHome {
+    fn home(&self) -> Result<PathBuf, FileSystemError> {
+        Err(FileSystemError::HomeDirNotFound)
+    }
+}
+
 /// A path selfie is going to write to, which nothing can resolve afterwards.
 ///
 /// [`FileSystem::write_file_private`], [`FileSystem::write_file_no_follow`],

@@ -69,8 +69,12 @@ the other a `~` target whose path below home is a suffix of it, whichever side i
 Validation reports that pair as an informational note naming the home on which it would override:
 "`environments.work.dotfiles[0]` (`/Users/me/.x`) overrides the shared `~/.x` on a machine whose
 home is `/Users/me`." It is informational because whether it overrides depends on the machine, not
-on the file. A pair that meets only after a `..` climbs out of home and back in, such as a shared
-`~/../me/.x` and an environment `~/.x`, is not reported, and is a known cost (§5).
+on the file. The note is given only when that home is where a home directory conventionally is:
+`/root`, or a directory directly in `/Users`, `/home` or `/var/home`. A pair implying any other
+home, such as `/usr/local/bin/tool` and `~/bin/tool`, gets no note, and apply still treats it
+correctly on whatever machine it runs. A pair that meets only after a `..` climbs out of home and
+back in, such as a shared `~/../me/.x` and an environment `~/.x`, is not reported, and is a known
+cost (§5).
 
 Rejected: keep spelling as the override rule and teach track to copy the other entry's spelling. It
 leaves a hand-written pair refused for a reason the user cannot see in the file. Rejected: give

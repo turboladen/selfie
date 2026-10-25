@@ -75,6 +75,8 @@ where
     if !dotfiles.is_empty() {
         // Preserve definition order (shared first, then environments) while
         // deduping targets an environment override shares with a shared entry.
+        // By spelling, not by expanded target: this lists what the spec names in
+        // every environment, so `~/.x` and its absolute form are both shown.
         let mut seen = std::collections::HashSet::new();
         let dotfile_targets: Vec<String> = dotfiles
             .iter()
