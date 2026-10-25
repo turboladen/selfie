@@ -432,6 +432,29 @@ pub(crate) fn deploy_to_clause(members: &[String], target: &TargetPath) -> Strin
 /// What to do about a [`TargetCollision`].
 pub(crate) const KEEP_ONE_ENTRY: &str = "Keep one entry per target.";
 
+/// What to do about entries of several specs deploying to one target.
+pub(crate) const KEEP_ONE_ENTRY_ACROSS_SPECS: &str = "Keep one entry for this target, in one spec.";
+
+/// Every one of `found`, a value with the context it was found in, kept once per
+/// `key`, in the order first found, with every context it was found in.
+pub(crate) fn seen_in<E, C, K: Ord>(
+    found: impl IntoIterator<Item = (E, C)>,
+    key: impl Fn(&C) -> K,
+) -> Vec<(C, Vec<E>)> {
+    let mut index: BTreeMap<K, usize> = BTreeMap::new();
+    let mut seen: Vec<(C, Vec<E>)> = Vec::new();
+    for (context, value) in found {
+        match index.entry(key(&value)) {
+            std::collections::btree_map::Entry::Occupied(at) => seen[*at.get()].1.push(context),
+            std::collections::btree_map::Entry::Vacant(at) => {
+                at.insert(seen.len());
+                seen.push((value, vec![context]));
+            }
+        }
+    }
+    seen
+}
+
 /// Whether an environment entry overrides a shared entry, from their targets
 /// expanded against no home.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1648,6 +1671,34 @@ impl Package {
         self.effective_dotfiles(home, Some(environment))
             .into_iter()
             .map(|scoped| scoped.entry.clone())
+            .collect()
+    }
+
+    /// The entries of `environment` that deploy on every home: what
+    /// [`Self::effective_dotfiles`] deploys without a home, less each shared
+    /// entry an environment entry may override on some home.
+    pub(crate) fn dotfiles_on_every_home(&self, environment: &str) -> Vec<ScopedEntry<'_>> {
+        let env_keys: Vec<TargetPath> = self
+            .environments
+            .value
+            .get(environment)
+            .map(|env| {
+                env.dotfiles()
+                    .iter()
+                    .map(|entry| expand_target_path(&crate::fs::target::NoHome, entry.target()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.effective_dotfiles(&crate::fs::target::NoHome, Some(environment))
+            .into_iter()
+            .filter(|scoped| {
+                scoped.environment.is_some() || {
+                    let key = expand_target_path(&crate::fs::target::NoHome, scoped.entry.target());
+                    env_keys
+                        .iter()
+                        .all(|env_key| overrides(env_key, &key) == Override::Never)
+                }
+            })
             .collect()
     }
 

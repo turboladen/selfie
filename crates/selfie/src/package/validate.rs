@@ -10,7 +10,7 @@ use super::{
     SpecRefusal, TargetCollision, TopLevelKeys, UnknownEntryKey, UnknownKey, dotfile_field,
     environment_field,
 };
-use super::{Override, overrides};
+use super::{Override, overrides, seen_in};
 
 // Validation has no file system, so it compares targets through `NoHome`. What it
 // cannot match is `~/x` against the absolute path of the same file, or a pair that
@@ -31,6 +31,71 @@ pub struct TemplateReference<'a> {
     pub source: &'a str,
     /// The entry's declared bindings.
     pub vars: &'a BTreeMap<String, String>,
+}
+
+/// The errors for entries of two or more of `packages` that deploy to one target
+/// on every machine, keyed by the spec file each belongs to.
+///
+/// Asked of `environment` and every environment any of `packages` declares. Each
+/// member entry gets one error naming every member, the target, and the
+/// environments where they meet.
+#[must_use]
+pub(crate) fn cross_spec_issues(
+    packages: &[Package],
+    environment: &str,
+) -> BTreeMap<PathBuf, Vec<ValidationIssue>> {
+    use crate::package::collect::CrossSpecCollisions;
+
+    // A standalone spec declares no environment and deploys in every one, so the
+    // environments asked are the union of what any spec declares.
+    let environments: std::collections::BTreeSet<&str> = packages
+        .iter()
+        .flat_map(|package| package.environments().keys().map(String::as_str))
+        .chain(std::iter::once(environment))
+        .collect();
+    // Only entries that deploy on every home take part, so only a pair that is
+    // one file on every machine is reported.
+    let found = environments.into_iter().flat_map(|environment| {
+        let members = packages
+            .iter()
+            .map(|package| (package, package.dotfiles_on_every_home(environment)));
+        CrossSpecCollisions::of(members, &NoHome, environment)
+            .into_groups()
+            .into_iter()
+            .map(move |group| (environment, group))
+    });
+    let merged = seen_in(found, |group| {
+        let mut members: Vec<(PathBuf, String)> = group
+            .members()
+            .iter()
+            .map(|(package, scoped)| (package.path().clone(), scoped.field()))
+            .collect();
+        members.sort();
+        (group.target().state_key(), members)
+    });
+
+    let mut issues: BTreeMap<PathBuf, Vec<ValidationIssue>> = BTreeMap::new();
+    for (group, environments) in merged {
+        let environments: Vec<String> = environments.iter().map(|e| format!("'{e}'")).collect();
+        let message = format!(
+            "Dotfile entries {} in environment {}, so apply deploys none of them there",
+            group.describe(),
+            environments.join(", ")
+        );
+        for (package, scoped) in group.members() {
+            issues
+                .entry(package.path().clone())
+                .or_default()
+                .push(ValidationIssue::error_at(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("{}.target", scoped.field()),
+                    &message,
+                    Some(super::KEEP_ONE_ENTRY_ACROSS_SPECS),
+                    SourceLocation::from_location(scoped.entry.target_location()),
+                ));
+        }
+    }
+    issues
 }
 
 /// Check that every declared variable is actually referenced by its template.
@@ -708,19 +773,19 @@ impl Package {
         let contexts =
             std::iter::once(None).chain(environments.iter().map(|(name, _)| Some(*name)));
 
-        let mut collisions: Vec<TargetCollision<'_>> = Vec::new();
-        for collision in contexts.flat_map(|context| self.target_collisions(&NoHome, context)) {
-            let mut key = collision.fields();
-            key.sort();
-            if !collisions.iter().any(|seen| {
-                let mut seen_key = seen.fields();
-                seen_key.sort();
-                seen_key == key
-            }) {
-                collisions.push(collision);
-            }
-        }
-        collisions
+        let found = contexts.flat_map(|context| {
+            self.target_collisions(&NoHome, context)
+                .into_iter()
+                .map(move |collision| (context, collision))
+        });
+        seen_in(found, |collision| {
+            let mut fields = collision.fields();
+            fields.sort();
+            fields
+        })
+        .into_iter()
+        .map(|(collision, _)| collision)
+        .collect()
     }
 
     /// Note how many commands `selfie apply` will run for this package's

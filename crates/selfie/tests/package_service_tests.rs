@@ -1555,6 +1555,205 @@ mod validate_all_covers_standalone_specs {
             .collect()
     }
 
+    // The issues the run reported for `name`, as (field, message).
+    fn issues_of(events: &[PackageEvent], name: &str) -> Vec<(String, String)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::ValidationResultCompleted {
+                    validation_result, ..
+                } if validation_result.package_name == name => Some(&validation_result.issues),
+                _ => None,
+            })
+            .flat_map(|issues| {
+                issues
+                    .iter()
+                    .map(|issue| (issue.field.clone(), issue.message.clone()))
+            })
+            .collect()
+    }
+
+    // Two specs deploying one file are an error on each, naming both, as apply's
+    // refusal names them; a package and a standalone spec meet too.
+    #[tokio::test]
+    async fn validate_all_reports_a_collision_across_specs_on_each_member() {
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.gemrc\n",
+        );
+        write_standalone(&dirs.dotfiles, "gem", "");
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_failed_answer(&events);
+        for name in ["alpha", "gem"] {
+            let issues = issues_of(&events, name);
+            assert!(
+                issues
+                    .iter()
+                    .any(|(field, message)| field == "dotfiles[0].target"
+                        && message.contains("package 'alpha' (dotfiles[0])")
+                        && message.contains("standalone dotfile 'gem' (dotfiles[0])")
+                        && message.contains("environment 'test'")),
+                "{name}: {issues:?}"
+            );
+        }
+    }
+
+    // Standalone specs declare no environment and deploy in every one, so two of
+    // them meeting are reported with nothing else in the repository.
+    #[tokio::test]
+    async fn validate_all_reports_two_standalone_specs_on_one_target() {
+        let dirs = dirs();
+        write_standalone(&dirs.dotfiles, "gem", "");
+        std::fs::write(
+            dirs.dotfiles.join("other.yml"),
+            "name: other\ndotfiles:\n  - source: gem/rc\n    target: ~/.gemrc\n",
+        )
+        .unwrap();
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_failed_answer(&events);
+        for name in ["gem", "other"] {
+            let issues = issues_of(&events, name);
+            assert!(
+                issues
+                    .iter()
+                    .any(|(_, message)| message.contains("environment 'test'")),
+                "{name}: {issues:?}"
+            );
+        }
+    }
+
+    // A pair whose targets meet only on some home directory is not one file on
+    // every machine, so validation, which knows no home, reports no collision.
+    #[tokio::test]
+    async fn validate_all_compares_targets_without_a_home() {
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.x\n",
+        );
+        write_package(
+            &dirs.packages,
+            "beta.yml",
+            "dotfiles:\n  - source: beta/rc\n    target: /home/me/.x\n",
+        );
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_successful_operation(&events);
+        assert_eq!(
+            results(&events),
+            [
+                ("alpha".to_string(), Outcome::Clean),
+                ("beta".to_string(), Outcome::Clean)
+            ]
+        );
+    }
+
+    // On the home `/home/me`, alpha's `test` entry overrides its shared `~/.x`, so
+    // the shared entry is not one file with beta's on every machine. Validation
+    // cannot rule that home out, so the pair is not reported.
+    #[tokio::test]
+    async fn a_shared_entry_an_environment_may_override_takes_no_part() {
+        let dirs = dirs();
+        std::fs::write(
+            dirs.packages.join("alpha.yml"),
+            "name: alpha\ndotfiles:\n  - source: alpha/rc\n    target: ~/.x\nenvironments:\n  \
+             test:\n    install: \"true\"\n    dotfiles:\n      - source: alpha/me\n        \
+             target: /home/me/.x\n",
+        )
+        .unwrap();
+        write_package(
+            &dirs.packages,
+            "beta.yml",
+            "dotfiles:\n  - source: beta/rc\n    target: ~/.x\n",
+        );
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert_successful_operation(&events);
+        assert!(issues_of(&events, "beta").is_empty(), "{events:?}");
+    }
+
+    // A pair meeting at one target in two environments is one error per member,
+    // naming both environments.
+    #[tokio::test]
+    async fn one_collision_in_two_environments_is_one_error_naming_both() {
+        let dirs = dirs();
+        std::fs::write(
+            dirs.packages.join("alpha.yml"),
+            "name: alpha\ndotfiles:\n  - source: alpha/rc\n    target: ~/.gemrc\n\
+             environments:\n  test:\n    install: \"true\"\n  work:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        write_standalone(&dirs.dotfiles, "gem", "");
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        for name in ["alpha", "gem"] {
+            let issues = issues_of(&events, name);
+            assert_eq!(issues.len(), 1, "{name}: {issues:?}");
+            assert!(
+                issues[0].1.contains("in environment 'test', 'work'"),
+                "{name}: {issues:?}"
+            );
+        }
+    }
+
+    // A package refused whole deploys nothing, so the spec sharing its target is
+    // not reported; the refused one fails for its own reason.
+    #[tokio::test]
+    async fn a_package_refused_whole_takes_no_part() {
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "configs: []\ndotfiles:\n  - source: alpha/rc\n    target: ~/.gemrc\n",
+        );
+        write_standalone(&dirs.dotfiles, "gem", "");
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        assert!(issues_of(&events, "gem").is_empty(), "{events:?}");
+        assert!(
+            results(&events).contains(&("alpha".to_string(), Outcome::Failed)),
+            "{events:?}"
+        );
+    }
+
+    // Three members are named in one sentence, each with its entry.
+    #[tokio::test]
+    async fn three_specs_on_one_target_are_named_together() {
+        let dirs = dirs();
+        for name in ["alpha.yml", "beta.yml"] {
+            write_package(
+                &dirs.packages,
+                name,
+                "dotfiles:\n  - source: x/rc\n    target: ~/.gemrc\n",
+            );
+        }
+        write_standalone(&dirs.dotfiles, "gem", "");
+
+        let events = collect_events(dirs.service().validate_all().await).await;
+
+        let issues = issues_of(&events, "beta");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].1.starts_with(
+                "Dotfile entries package 'alpha' (dotfiles[0]), package 'beta' (dotfiles[0]) \
+                 and standalone dotfile 'gem' (dotfiles[0]) all deploy to '~/.gemrc' in \
+                 environment 'test', so apply deploys none of them there"
+            ),
+            "{issues:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_clean_standalone_spec_is_valid() {
         let dirs = dirs();

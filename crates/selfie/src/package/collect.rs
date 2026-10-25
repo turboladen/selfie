@@ -4,7 +4,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use crate::package::{Package, port::PackageRepository};
+use crate::fs::target::{HomeDir, TargetPath, expand_target_path};
+use crate::package::{Package, ScopedEntry, SpecOrigin, port::PackageRepository};
 
 pub(crate) mod directory;
 pub(crate) mod warning;
@@ -383,6 +384,121 @@ pub(crate) fn ambiguity_matters(paths: &[PathBuf], loaded: &[&Package], environm
                         .is_some_and(|env| !env.dotfiles().is_empty())
             })
     })
+}
+
+/// Entries of two or more specs that deploy to one target in one environment, in
+/// order of target. Apply and drift refuse every one; validation reports them.
+pub(crate) struct CrossSpecCollisions<'c> {
+    groups: Vec<CrossSpecGroup<'c>>,
+}
+
+/// One target and the entries of several specs that deploy to it.
+pub(crate) struct CrossSpecGroup<'c> {
+    target: TargetPath,
+    members: Vec<(&'c Package, ScopedEntry<'c>)>,
+}
+
+impl<'c> CrossSpecCollisions<'c> {
+    /// The cross-spec collisions among `members`, each spec with the entries it
+    /// deploys in `environment`, targets compared once expanded against `home`.
+    // Asked of every collected package, whichever ones the run deploys, since an
+    // entry of the one package a run names can still overwrite another spec's file.
+    pub(crate) fn of<H: HomeDir + ?Sized>(
+        members: impl IntoIterator<Item = (&'c Package, Vec<ScopedEntry<'c>>)>,
+        home: &H,
+        environment: &str,
+    ) -> Self {
+        let mut by_target: BTreeMap<String, CrossSpecGroup<'c>> = BTreeMap::new();
+        // A package refused whole takes no part: nothing of it deploys, and its
+        // entries may not be the ones it means. An entry refused for a reason of
+        // its own still does, so every entry sharing the target gets one answer.
+        for (package, entries) in members
+            .into_iter()
+            .filter(|(package, _)| !package.is_refused(environment))
+        {
+            for scoped in entries {
+                let target = expand_target_path(home, scoped.entry.target());
+                by_target
+                    .entry(target.state_key())
+                    .or_insert_with(|| CrossSpecGroup {
+                        target,
+                        members: Vec::new(),
+                    })
+                    .members
+                    .push((package, scoped));
+            }
+        }
+        let groups = by_target
+            .into_values()
+            .filter(|group| {
+                group
+                    .members
+                    .iter()
+                    .any(|(package, _)| package.path() != group.members[0].0.path())
+            })
+            .collect();
+        Self { groups }
+    }
+
+    /// Every collision, in order of target.
+    pub(crate) fn groups(&self) -> &[CrossSpecGroup<'c>] {
+        &self.groups
+    }
+
+    /// Every collision, in order of target, owned.
+    pub(crate) fn into_groups(self) -> Vec<CrossSpecGroup<'c>> {
+        self.groups
+    }
+}
+
+impl<'c> CrossSpecGroup<'c> {
+    /// The target every member deploys to.
+    pub(crate) fn target(&self) -> &TargetPath {
+        &self.target
+    }
+
+    /// Every member entry with its spec, in the order collected.
+    pub(crate) fn members(&self) -> &[(&'c Package, ScopedEntry<'c>)] {
+        &self.members
+    }
+
+    /// Whether an entry of the spec at `package`'s file is a member.
+    pub(crate) fn involves(&self, package: &Package) -> bool {
+        self.members
+            .iter()
+            .any(|(member, _)| member.path() == package.path())
+    }
+
+    // Matched by the spec's file and the entry's place in it, since a run over one
+    // named package holds its own copy of that package.
+    pub(crate) fn contains(&self, package: &Package, scoped: &ScopedEntry<'_>) -> bool {
+        self.members
+            .iter()
+            .any(|(member, entry)| member.path() == package.path() && entry.is(scoped))
+    }
+
+    /// Every member, as `package 'bat' (dotfiles[0])`, in the order collected, and
+    /// the target they share, as one clause.
+    pub(crate) fn describe(&self) -> String {
+        let names: Vec<String> = self
+            .members
+            .iter()
+            .map(|(package, scoped)| format!("{} ({})", spec_label(package), scoped.field()))
+            .collect();
+        crate::package::deploy_to_clause(&names, &self.target)
+    }
+}
+
+/// How a refusal names a spec: by the name lookup resolves it by, and as a package
+/// or a standalone dotfile spec.
+pub(crate) fn spec_label(package: &Package) -> String {
+    let name = package
+        .spec_name()
+        .unwrap_or_else(|| package.name().to_string());
+    match package.origin() {
+        SpecOrigin::DotfilesDirectory => format!("standalone dotfile '{name}'"),
+        SpecOrigin::PackageDirectory | SpecOrigin::Memory => format!("package '{name}'"),
+    }
 }
 
 #[cfg(test)]

@@ -101,6 +101,11 @@ where
     let mut error_count: usize = 0;
     let mut warning_count: usize = 0;
 
+    // Collisions across specs are a property of the collection, not of any one
+    // file, so they are asked of every collected spec and reported on each member
+    // this run validates.
+    let mut across = crate::package::validate::cross_spec_issues(&packages, environment);
+
     for package in &valid_packages {
         // A spec is read through the repository that loaded it, which is the one
         // that reads the files it refers to.
@@ -109,8 +114,9 @@ where
         } else {
             repo
         };
-        let issues = &super::validate::all_issues(package, source, environment);
-        let validation_issues = super::validate::issue_payload(issues);
+        let mut issues = super::validate::all_issues(package, source, environment);
+        issues.extend(across.remove(package.path()).unwrap_or_default());
+        let validation_issues = super::validate::issue_payload(&issues);
 
         let outcome = issues.outcome();
         match outcome {

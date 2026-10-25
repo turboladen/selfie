@@ -5,6 +5,7 @@
 //! canceling, the deploy state failing to write, and any refusal or failure while
 //! `stop_on_error` is on.
 
+use crate::package::collect::CrossSpecCollisions;
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
@@ -31,8 +32,8 @@ use crate::{
 };
 
 use super::classify::{
-    Classified, CrossSpecCollisions, PackageCollisions, Purpose, RepoFile, RepoRead, ResolvedHome,
-    classify_entry, read_repo_file,
+    Classified, PackageCollisions, Purpose, RepoFile, RepoRead, ResolvedHome, classify_entry,
+    read_repo_file,
 };
 use super::deploy_entry::{
     Decided, DeployOutcome, DeployUnit, Ledger, Recorded, deploy_and_record, record_and_save,
@@ -380,7 +381,16 @@ where
     // Asked once, so every package compares targets against the same home.
     let home = ResolvedHome::of(filesystem);
     // Over every collected package, not only the ones this run deploys.
-    let across = CrossSpecCollisions::of(catalog.packages, &home, config.environment());
+    let across = CrossSpecCollisions::of(
+        catalog.packages.iter().map(|package| {
+            (
+                package,
+                package.effective_dotfiles(&home, Some(config.environment())),
+            )
+        }),
+        &home,
+        config.environment(),
+    );
 
     'packages: for package in packages {
         let dotfiles = package.effective_dotfiles(&home, Some(config.environment()));
