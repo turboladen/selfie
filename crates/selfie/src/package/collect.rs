@@ -9,16 +9,13 @@ use crate::package::{Package, port::PackageRepository};
 pub(crate) mod directory;
 pub(crate) mod warning;
 
-use warning::{ApplyWarning, CollectionRefusal, NameCollision};
+use warning::{ApplyWarning, CollectionRefusal, Finding, NameCollision};
 
 /// What collecting the packages an operation covers found.
 pub(crate) struct Collected {
     pub(crate) packages: Vec<Package>,
-    /// What is worth saying, in the order it was found.
-    pub(crate) warnings: Vec<ApplyWarning>,
-    /// What collection refused, in the order it found them. Each is one refusal
-    /// for an operation over every package.
-    pub(crate) refusals: Vec<CollectionRefusal>,
+    /// What is worth saying and what was refused, in the order it was found.
+    pub(crate) findings: Vec<Finding>,
     /// Names several files in one directory claim that matter to no operation over
     /// every package, since none of them declares dotfiles here. Not refusals, but
     /// none of the files is used, so a run asking for one by name still fails as
@@ -29,13 +26,29 @@ pub(crate) struct Collected {
     pub(crate) set_aside: Vec<String>,
 }
 
+impl Collected {
+    /// What collection refused, in the order it found them.
+    pub(crate) fn refusals(&self) -> impl Iterator<Item = &CollectionRefusal> {
+        self.findings.iter().filter_map(|finding| match finding {
+            Finding::Refusal(refusal) => Some(refusal),
+            Finding::Warning(_) => None,
+        })
+    }
+
+    /// What collection found worth saying and refused nothing, in order.
+    pub(crate) fn warnings(&self) -> impl Iterator<Item = &ApplyWarning> {
+        self.findings.iter().filter_map(|finding| match finding {
+            Finding::Warning(warning) => Some(warning),
+            Finding::Refusal(_) => None,
+        })
+    }
+}
+
 /// Collect packages from both the main package repository and the dotfiles
-/// repository, returning a combined list, what is worth saying, and what
-/// was refused.
-///
-/// Warnings are returned rather than emitted because collection happens before
-/// the event channel exists. Each caller sends them once its stream is up, and
-/// [`ApplyWarning`] is what tells it which event each one is.
+/// repository, returning a combined list and what collecting them found. The
+/// caller sends each [`Finding`] once its event stream is up.
+// Findings are returned rather than emitted because collection happens before
+// the event channel exists.
 pub(crate) fn collect_all_packages<R: PackageRepository>(
     package_repo: &R,
     dotfiles_repo: &R,
@@ -68,31 +81,19 @@ pub(crate) fn collect_packages<R: PackageRepository>(
     dotfiles_directory_is_expected: bool,
     environment: &str,
 ) -> Result<Collected, crate::package::port::PackageListError> {
-    let mut warnings = Vec::new();
-
-    // A package file that does not parse is dropped by `valid_packages`, and
-    // silence there is dangerous for this command specifically: apply is what
-    // people run, and a dotfile that quietly stops deploying surfaces much
-    // later as an authentication failure nobody traces back to a typo. The
-    // run would otherwise report success having done nothing at all.
-    let note_unparsable = |output: &crate::package::port::ListPackagesOutput,
-                           warnings: &mut Vec<ApplyWarning>| {
-        for invalid in output.invalid_packages() {
-            warnings.push(ApplyWarning::SkippedSpec(invalid.clone()));
-        }
-    };
+    let mut findings = Vec::new();
 
     // The failure travels typed. Rendering it here hands the caller a bare
     // sentence, leaving it able to say only that loading failed -- not which of
     // the three fixes for a missing package directory applies.
     let output = package_repo.list_packages()?;
-    note_unparsable(&output, &mut warnings);
+    let invalid_in_packages: Vec<_> = output.invalid_packages().cloned().collect();
     let unparsable_in_packages = unparsable_paths(&output);
     let mut packages = output.valid_packages().cloned().collect::<Vec<_>>();
 
     let mut dotfiles_packages = Vec::new();
+    let mut invalid_in_dotfiles = Vec::new();
     let mut unparsable_in_dotfiles = Vec::new();
-    let mut refusals = Vec::new();
 
     // One directory configured as both settings is read once, through the
     // package repository, so its files load as package specs. Reading it twice
@@ -102,7 +103,7 @@ pub(crate) fn collect_packages<R: PackageRepository>(
     if !same_directory {
         match dotfiles_repo.list_packages() {
             Ok(output) => {
-                note_unparsable(&output, &mut warnings);
+                invalid_in_dotfiles = output.invalid_packages().cloned().collect();
                 unparsable_in_dotfiles = unparsable_paths(&output);
                 dotfiles_packages = output.valid_packages().cloned().collect();
             }
@@ -110,41 +111,55 @@ pub(crate) fn collect_packages<R: PackageRepository>(
                 use directory::UnlistedDotfilesDirectory as Unlisted;
 
                 // Whether it refuses is the classification's to say, so `config
-                // validate` reaches the same verdict by asking it.
-                let unlisted = Unlisted::classify(error, dotfiles_directory_is_expected);
-                if unlisted.refuses_collection() {
-                    refusals.push(CollectionRefusal::UnreadableDotfilesDirectory);
-                }
-                match unlisted {
+                // validate` reaches the same verdict by asking it. Two refusals
+                // rather than one so the sentence a user reads says which one
+                // happened: one asserts a directory is there and unreadable, the
+                // other cannot say even that.
+                match Unlisted::classify(error, dotfiles_directory_is_expected) {
                     Unlisted::OrdinarilyAbsent => {}
                     Unlisted::Absent { path, reason } => {
-                        warnings.push(ApplyWarning::AbsentDotfilesDirectory { path, reason });
+                        findings.push(Finding::Warning(ApplyWarning::AbsentDotfilesDirectory {
+                            path,
+                            reason,
+                        }))
                     }
-                    // Pushed as different warnings so the sentence a user reads
-                    // says which one happened: one asserts a directory is there and
-                    // unreadable, the other cannot say even that.
-                    Unlisted::Unlistable(error) => {
-                        warnings.push(ApplyWarning::UnreadableRepository(error));
-                    }
-                    Unlisted::Unknown(error) => {
-                        warnings.push(ApplyWarning::UncheckableRepository(error));
-                    }
+                    Unlisted::Unlistable(error) => findings.push(Finding::Refusal(
+                        CollectionRefusal::UnlistableDotfilesDirectory(error),
+                    )),
+                    Unlisted::Unknown(error) => findings.push(Finding::Refusal(
+                        CollectionRefusal::UncheckableDotfilesDirectory(error),
+                    )),
                 }
             }
         }
     }
 
+    // A package file that does not parse is dropped by `valid_packages`, and
+    // silence there is dangerous for this command specifically: apply is what
+    // people run, and a dotfile that quietly stops deploying surfaces much
+    // later as an authentication failure nobody traces back to a typo. A listing
+    // keeps every file and refuses none, so for it each is only worth a word.
     if collision == NameCollision::KeepBoth {
+        findings.extend(
+            invalid_in_packages
+                .into_iter()
+                .chain(invalid_in_dotfiles)
+                .map(|invalid| Finding::Warning(ApplyWarning::SkippedSpec(invalid))),
+        );
         packages.extend(dotfiles_packages);
         return Ok(Collected {
             packages,
-            warnings,
-            refusals,
+            findings,
             unrefused_ambiguities: Vec::new(),
             set_aside: Vec::new(),
         });
     }
 
+    // Refusals are found in this order: the dotfiles directory above, then
+    // packages/ ambiguities, packages/ unparsable specs, dotfiles/ ambiguities and
+    // dotfiles/ unparsable specs. Two consumers read the first refusal, the
+    // orphan check's notice and `stop_on_error`, so the order names the cause.
+    //
     // Several files in one directory claiming one name are refused as install
     // refuses them, whether each parses or not: deploying any of them picks one by
     // enumeration order, and deploying all of them lets the last overwrite the rest.
@@ -157,10 +172,10 @@ pub(crate) fn collect_packages<R: PackageRepository>(
     for (name, paths) in &packages_claims {
         if paths.len() > 1 {
             if ambiguity_matters(paths, &packages, environment) {
-                refusals.push(CollectionRefusal::AmbiguousName {
+                findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
                     name: name.clone(),
                     paths: paths.clone(),
-                });
+                }));
             } else {
                 unrefused_ambiguities.push((name.clone(), paths.clone()));
             }
@@ -169,11 +184,10 @@ pub(crate) fn collect_packages<R: PackageRepository>(
     packages.retain(|pkg| !is_ambiguous(pkg, &packages_claims));
     // Every packages/ file that failed to parse could have been used, so each is a
     // refusal, one within an ambiguous name too: it needs its own fix.
-    refusals.extend(
-        unparsable_in_packages
-            .iter()
-            .cloned()
-            .map(CollectionRefusal::UnloadableSpec),
+    findings.extend(
+        invalid_in_packages
+            .into_iter()
+            .map(|invalid| Finding::Refusal(CollectionRefusal::UnloadableSpec(invalid))),
     );
 
     // A name packages/ claims is settled in packages/: every dotfiles/ file of that
@@ -206,32 +220,33 @@ pub(crate) fn collect_packages<R: PackageRepository>(
                      packages/ version"
                 )
             };
-            warnings.push(ApplyWarning::Named {
+            findings.push(Finding::Warning(ApplyWarning::Named {
                 name: name.clone(),
                 message: why,
-            });
+            }));
         } else if paths.len() > 1 {
             if ambiguity_matters(paths, &dotfiles_packages, environment) {
-                refusals.push(CollectionRefusal::AmbiguousName {
+                findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
                     name: name.clone(),
                     paths: paths.clone(),
-                });
+                }));
             } else {
                 unrefused_ambiguities.push((name.clone(), paths.clone()));
             }
         }
     }
     // A dotfiles/ file that failed to parse could have been used only where
-    // packages/ does not claim its name.
-    refusals.extend(
-        unparsable_in_dotfiles
-            .into_iter()
-            .filter(|path| {
-                crate::package::spec_name_of(path)
-                    .is_none_or(|name| !packages_claims.contains_key(&name))
-            })
-            .map(CollectionRefusal::UnloadableSpec),
-    );
+    // packages/ does not claim its name; under a claimed name nothing would have
+    // used it, so it is only worth a word.
+    for invalid in invalid_in_dotfiles {
+        let claimed = crate::package::spec_name_of(invalid.package_path())
+            .is_some_and(|name| packages_claims.contains_key(&name));
+        findings.push(if claimed {
+            Finding::Warning(ApplyWarning::SkippedSpec(invalid))
+        } else {
+            Finding::Refusal(CollectionRefusal::UnloadableSpec(invalid))
+        });
+    }
     dotfiles_packages.retain(|pkg| {
         pkg.spec_name()
             .is_none_or(|name| !packages_claims.contains_key(&name))
@@ -241,8 +256,7 @@ pub(crate) fn collect_packages<R: PackageRepository>(
 
     Ok(Collected {
         packages,
-        warnings,
-        refusals,
+        findings,
         unrefused_ambiguities,
         set_aside,
     })
@@ -409,8 +423,10 @@ mod tests {
         let collected = collected_over(&dotfiles);
 
         assert!(matches!(
-            collected.refusals.as_slice(),
-            [CollectionRefusal::UnreadableDotfilesDirectory]
+            collected.findings.as_slice(),
+            [Finding::Refusal(
+                CollectionRefusal::UncheckableDotfilesDirectory(_)
+            )]
         ));
     }
 
@@ -424,10 +440,11 @@ mod tests {
 
         let collected = collected_over(&dotfiles);
 
-        assert!(collected.refusals.is_empty());
         assert!(matches!(
-            collected.warnings.as_slice(),
-            [ApplyWarning::AbsentDotfilesDirectory { .. }]
+            collected.findings.as_slice(),
+            [Finding::Warning(
+                ApplyWarning::AbsentDotfilesDirectory { .. }
+            )]
         ));
     }
 }

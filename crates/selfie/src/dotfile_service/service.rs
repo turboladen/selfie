@@ -28,7 +28,9 @@ use super::drift::handle_check_drift;
 use super::orphan::Catalog;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
-use crate::package::collect::warning::{ApplyWarning, NameCollision, no_such_package};
+use crate::package::collect::warning::{
+    CollectionRefusal, Finding, NameCollision, no_such_package,
+};
 use crate::package::collect::{Collected, collect_all_packages, collect_packages};
 
 /// Whether `package` is the one `folded_name`, already lowercased, names.
@@ -48,16 +50,8 @@ fn other_specs<R: PackageRepository>(
     dotfiles_repo: &R,
     config: &SelfieConfig,
 ) -> super::track::OtherSpecs {
-    use crate::package::collect::warning::CollectionRefusal;
+    use super::track::Unchecked;
 
-    let unusable = |files: &[std::path::PathBuf], name: &str| {
-        let files: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
-        format!(
-            "Could not check {} for an entry deploying this file: they all claim the name \
-             '{name}', so none of them is used",
-            files.join(" and ")
-        )
-    };
     match collect_all_packages(
         package_repo,
         dotfiles_repo,
@@ -65,29 +59,19 @@ fn other_specs<R: PackageRepository>(
         config.environment(),
     ) {
         Ok(collected) => {
-            let mut unchecked: Vec<String> = collected
-                .refusals
+            let unrefused = collected
+                .unrefused_ambiguities
                 .iter()
-                .map(|refusal| match refusal {
-                    CollectionRefusal::UnloadableSpec(path) => format!(
-                        "Could not check {} for an entry deploying this file: it could not be \
-                         loaded",
-                        path.display()
-                    ),
-                    CollectionRefusal::UnreadableDotfilesDirectory => {
-                        "Could not check the standalone dotfiles for an entry deploying this \
-                         file: the dotfiles directory could not be read"
-                            .to_string()
-                    }
-                    CollectionRefusal::AmbiguousName { name, paths } => unusable(paths, name),
+                .map(|(name, paths)| CollectionRefusal::AmbiguousName {
+                    name: name.clone(),
+                    paths: paths.clone(),
                 })
+                .collect::<Vec<_>>();
+            let unchecked: Vec<Unchecked> = collected
+                .refusals()
+                .chain(&unrefused)
+                .map(Unchecked::from)
                 .collect();
-            unchecked.extend(
-                collected
-                    .unrefused_ambiguities
-                    .iter()
-                    .map(|(name, paths)| unusable(paths, name)),
-            );
             super::track::OtherSpecs {
                 packages: collected.packages,
                 unchecked,
@@ -100,27 +84,18 @@ fn other_specs<R: PackageRepository>(
         Err(error) => {
             let mut unchecked = Vec::new();
             if !error.is_absent() {
-                unchecked.push(format!(
-                    "Could not check the package specs for an entry deploying this file: {error}"
-                ));
+                unchecked.push(Unchecked::PackageDirectory(error));
             }
             let packages = match dotfiles_repo.list_packages() {
                 Ok(output) => {
                     unchecked.extend(output.invalid_packages().map(|invalid| {
-                        format!(
-                            "Could not check {} for an entry deploying this file: it could not \
-                             be loaded",
-                            invalid.package_path().display()
-                        )
+                        Unchecked::Unloadable(invalid.package_path().to_path_buf())
                     }));
                     output.valid_packages().cloned().collect()
                 }
                 Err(error) => {
                     if !error.is_absent() {
-                        unchecked.push(format!(
-                            "Could not check the standalone dotfiles for an entry deploying this \
-                             file: {error}"
-                        ));
+                        unchecked.push(Unchecked::DotfilesDirectory(error));
                     }
                     Vec::new()
                 }
@@ -271,10 +246,16 @@ where
             let result = match prepared {
                 Ok(collected) => {
                     let shortfall = super::orphan::shortfall(&collected);
+                    // Counted only by a run over everything; a named run's own
+                    // refusal is its failure.
+                    let refusals: Vec<CollectionRefusal> = if filter.is_none() {
+                        collected.refusals().cloned().collect()
+                    } else {
+                        Vec::new()
+                    };
                     let Collected {
                         packages,
-                        warnings,
-                        refusals,
+                        findings,
                         unrefused_ambiguities,
                         ..
                     } = collected;
@@ -299,24 +280,25 @@ where
                     let unmatched = filter
                         .as_deref()
                         .filter(|_| selected.is_empty())
-                        .map(|name| {
-                            no_such_package(name, &warnings, &refusals, &unrefused_ambiguities)
-                        });
-                    // Drained first, so a skipped spec's own reason precedes the
-                    // failure it explains. A named apply says nothing about a name
-                    // it was not asked for, and sends no refusal: its own is the
-                    // failure, and it counts none of the others.
-                    for warning in warnings {
-                        if filter
-                            .as_deref()
-                            .is_none_or(|name| !warning.is_about_another_name(name))
-                        {
-                            warning.send(&sender).await;
-                        }
-                    }
-                    if filter.is_none() {
-                        for refusal in &refusals {
-                            refusal.send(&sender).await;
+                        .map(|name| no_such_package(name, &findings, &unrefused_ambiguities));
+                    // Drained first, in the order found, so a skipped spec's own
+                    // reason precedes the failure it explains. A named apply says
+                    // nothing about a name it was not asked for, and counts none of
+                    // the refusals: its own is the failure. It does not send an
+                    // ambiguity either, since its failure already names the files.
+                    for finding in &findings {
+                        let sent = match filter.as_deref() {
+                            None => true,
+                            Some(name) => {
+                                !finding.is_about_another_name(name)
+                                    && !matches!(
+                                        finding,
+                                        Finding::Refusal(CollectionRefusal::AmbiguousName { .. })
+                                    )
+                            }
+                        };
+                        if sent {
+                            finding.send(&sender).await;
                         }
                     }
                     if let Some(failure) = unmatched {
@@ -401,25 +383,20 @@ where
             let outcome = match collected {
                 Ok(collected) => {
                     let shortfall = super::orphan::shortfall(&collected);
+                    let refused = collected.refusals().count();
                     let Collected {
-                        packages,
-                        warnings,
-                        refusals,
-                        ..
+                        packages, findings, ..
                     } = collected;
                     // Carries on with what it could collect, and
                     // `handle_check_drift` counts what collection refused.
-                    for warning in warnings {
-                        warning.send(&sender).await;
-                    }
-                    for refusal in &refusals {
-                        refusal.send(&sender).await;
+                    for finding in &findings {
+                        finding.send(&sender).await;
                     }
                     let catalog = Catalog {
                         packages: &packages,
                         shortfall,
                     };
-                    handle_check_drift(catalog, &fs, &config, &sender, &token, refusals.len()).await
+                    handle_check_drift(catalog, &fs, &config, &sender, &token, refused).await
                 }
                 Err(e) => Some(OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
@@ -462,21 +439,24 @@ where
             sender.send_started().await;
 
             let result = match collected {
-                Ok(Collected {
-                    packages, warnings, ..
-                }) => {
+                Ok(collected) => {
                     // A directory selfie found and could not list is fatal HERE.
                     // Apply and drift still have the package dotfiles to act on,
                     // so they count it as a refusal and carry on. A listing has
                     // nothing to carry on to except a table missing every
                     // standalone dotfile.
-                    let unreadable = ApplyWarning::any_unreadable_repository(&warnings);
+                    let unreadable = collected
+                        .refusals()
+                        .any(CollectionRefusal::is_unreadable_directory);
+                    let Collected {
+                        packages, findings, ..
+                    } = collected;
 
                     // Drained before the listing is sent, so a consumer reading
                     // events in order has the caveats in hand before the answer
                     // they qualify.
-                    for warning in warnings {
-                        warning.send(&sender).await;
+                    for finding in &findings {
+                        finding.send(&sender).await;
                     }
 
                     if unreadable {

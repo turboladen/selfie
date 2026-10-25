@@ -43,15 +43,20 @@ pub(crate) enum Shortfall {
 impl std::fmt::Display for Shortfall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Refused(CollectionRefusal::UnloadableSpec(path)) => {
-                write!(f, "spec '{}' could not be loaded", path.display())
+            Self::Refused(CollectionRefusal::UnloadableSpec(error)) => {
+                write!(
+                    f,
+                    "spec '{}' could not be loaded",
+                    error.package_path().display()
+                )
             }
             Self::Refused(CollectionRefusal::AmbiguousName { name, .. }) => {
                 write!(f, "several spec files claim the name '{name}'")
             }
-            Self::Refused(CollectionRefusal::UnreadableDotfilesDirectory) => {
-                f.write_str("the dotfiles directory could not be read")
-            }
+            Self::Refused(
+                CollectionRefusal::UnlistableDotfilesDirectory(_)
+                | CollectionRefusal::UncheckableDotfilesDirectory(_),
+            ) => f.write_str("the dotfiles directory could not be read"),
             Self::SetAside(name) => write!(
                 f,
                 "dotfiles/ spec '{name}' is unused because packages/ claims its name"
@@ -69,13 +74,12 @@ impl std::fmt::Display for Shortfall {
 /// What `collected` knows to be missing from its packages, or `None` if it
 /// holds every spec there is.
 pub(super) fn shortfall(collected: &Collected) -> Option<Shortfall> {
-    if let Some(refusal) = collected.refusals.first() {
+    if let Some(refusal) = collected.refusals().next() {
         Some(Shortfall::Refused(refusal.clone()))
     } else if let Some(name) = collected.set_aside.first() {
         Some(Shortfall::SetAside(name.clone()))
     } else if collected
-        .warnings
-        .iter()
+        .warnings()
         .any(|warning| matches!(warning, ApplyWarning::AbsentDotfilesDirectory { .. }))
     {
         Some(Shortfall::AbsentDotfilesDirectory)
