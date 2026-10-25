@@ -44,7 +44,7 @@ use super::state_file::{
     LoadedState, Recorder, StateLoad, load_deploy_state, read_only_state_warning,
     stopped_before_writing,
 };
-use super::warning::CollectionRefusal;
+use crate::package::collect::warning::CollectionRefusal;
 
 /// What an apply covers.
 pub(super) enum Scope {

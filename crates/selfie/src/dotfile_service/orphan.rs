@@ -16,7 +16,10 @@ use crate::{
 };
 
 use super::state::{DeployEntry, DeployState};
-use super::warning::CollectionRefusal;
+use crate::package::collect::{
+    Collected,
+    warning::{ApplyWarning, CollectionRefusal},
+};
 
 /// Why the targets the collected packages produce may not be all of them, so
 /// that a record missing from them may still belong to an entry.
@@ -60,6 +63,24 @@ impl std::fmt::Display for Shortfall {
                 f.write_str("no package deploys a dotfile in this environment")
             }
         }
+    }
+}
+
+/// What `collected` knows to be missing from its packages, or `None` if it
+/// holds every spec there is.
+pub(super) fn shortfall(collected: &Collected) -> Option<Shortfall> {
+    if let Some(refusal) = collected.refusals.first() {
+        Some(Shortfall::Refused(refusal.clone()))
+    } else if let Some(name) = collected.set_aside.first() {
+        Some(Shortfall::SetAside(name.clone()))
+    } else if collected
+        .warnings
+        .iter()
+        .any(|warning| matches!(warning, ApplyWarning::AbsentDotfilesDirectory { .. }))
+    {
+        Some(Shortfall::AbsentDotfilesDirectory)
+    } else {
+        None
     }
 }
 

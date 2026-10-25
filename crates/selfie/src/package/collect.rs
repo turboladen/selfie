@@ -6,8 +6,10 @@ use std::path::PathBuf;
 
 use crate::package::{Package, port::PackageRepository};
 
-use super::orphan::Shortfall;
-use super::warning::{ApplyWarning, CollectionRefusal, NameCollision};
+pub(crate) mod directory;
+pub(crate) mod warning;
+
+use warning::{ApplyWarning, CollectionRefusal, NameCollision};
 
 /// What collecting the packages an operation covers found.
 pub(crate) struct Collected {
@@ -25,26 +27,6 @@ pub(crate) struct Collected {
     /// Names of dotfiles/ specs left unused because packages/ claims the same
     /// name.
     pub(crate) set_aside: Vec<String>,
-}
-
-impl Collected {
-    /// What collection knows to be missing from `packages`, or `None` if it
-    /// holds every spec there is.
-    pub(crate) fn shortfall(&self) -> Option<Shortfall> {
-        if let Some(refusal) = self.refusals.first() {
-            Some(Shortfall::Refused(refusal.clone()))
-        } else if let Some(name) = self.set_aside.first() {
-            Some(Shortfall::SetAside(name.clone()))
-        } else if self
-            .warnings
-            .iter()
-            .any(|warning| matches!(warning, ApplyWarning::AbsentDotfilesDirectory { .. }))
-        {
-            Some(Shortfall::AbsentDotfilesDirectory)
-        } else {
-            None
-        }
-    }
 }
 
 /// Collect packages from both the main package repository and the dotfiles
@@ -79,7 +61,7 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
 /// **not there** is worth a warning, and nothing else. A directory that could not
 /// be read or classified is refused either way. `environment` decides whether a
 /// name several files claim matters to a deploying caller.
-pub(super) fn collect_packages<R: PackageRepository>(
+pub(crate) fn collect_packages<R: PackageRepository>(
     package_repo: &R,
     dotfiles_repo: &R,
     collision: NameCollision,
@@ -125,7 +107,7 @@ pub(super) fn collect_packages<R: PackageRepository>(
                 dotfiles_packages = output.valid_packages().cloned().collect();
             }
             Err(error) => {
-                use super::directory::UnlistedDotfilesDirectory as Unlisted;
+                use directory::UnlistedDotfilesDirectory as Unlisted;
 
                 // Whether it refuses is the classification's to say, so `config
                 // validate` reaches the same verdict by asking it.
@@ -267,7 +249,7 @@ pub(super) fn collect_packages<R: PackageRepository>(
 }
 
 /// Whether `packages` and `dotfiles` read one directory.
-pub(super) fn same_directory<R: PackageRepository>(packages: &R, dotfiles: &R) -> bool {
+pub(crate) fn same_directory<R: PackageRepository>(packages: &R, dotfiles: &R) -> bool {
     // The directories are compared as the file system resolves them, since a
     // symlink or a different spelling names the same one. A directory that
     // cannot be resolved matches nothing: it is not shown to be the other one.

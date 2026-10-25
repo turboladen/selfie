@@ -4,12 +4,9 @@
 
 use crate::{
     config::SelfieConfig,
-    dotfile_service::{
-        collect::{Collected, collect_all_packages},
-        warning::CollectionRefusal,
-    },
     package::{
         Package, SpecOrigin,
+        collect::{Collected, collect_all_packages, warning::CollectionRefusal},
         event::{EventSender, OperationResult, OperationSuccess, Outcome, ValidationResultData},
         port::PackageRepository,
         service::ProgressTracker,

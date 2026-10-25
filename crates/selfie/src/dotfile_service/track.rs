@@ -440,7 +440,7 @@ where
     // mistyped `dotfiles_directory` into a new directory holding one spec.
     if let Err(error) = dotfiles_repo.find_package_files(name) {
         return OperationResult::Failure(OperationFailure::Generic(
-            super::directory::track_listing_refusal(&error),
+            crate::package::collect::directory::track_listing_refusal(&error),
         ));
     }
 

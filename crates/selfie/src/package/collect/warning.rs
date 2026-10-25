@@ -81,7 +81,7 @@ impl CollectionRefusal {
 // unparsable-spec reporting and the unlistable-directory handling are identical,
 // and only this one question differs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NameCollision {
+pub(crate) enum NameCollision {
     /// The `packages/` copy wins and the other is dropped with a warning.
     PackagesWin,
     /// Both are kept, because both files are there.
@@ -94,7 +94,7 @@ impl ApplyWarning {
     /// Both kinds count. A directory that would not list and a path that would not
     /// classify are alike in the one way that matters to a caller deciding whether
     /// its collection is complete: it is not.
-    pub(super) fn any_unreadable_repository(warnings: &[Self]) -> bool {
+    pub(crate) fn any_unreadable_repository(warnings: &[Self]) -> bool {
         warnings.iter().any(|warning| {
             matches!(
                 warning,
@@ -105,7 +105,7 @@ impl ApplyWarning {
 
     /// Whether this warning is about a package name other than `name`, which a
     /// run asked for `name` alone has no reason to report.
-    pub(super) fn is_about_another_name(&self, name: &str) -> bool {
+    pub(crate) fn is_about_another_name(&self, name: &str) -> bool {
         let about = match self {
             Self::SkippedSpec(error) => crate::package::spec_name_of(error.package_path()),
             Self::Named { name, .. } => Some(name.clone()),
@@ -147,7 +147,7 @@ impl ApplyWarning {
 }
 
 /// The failure for a named apply that no collected package answers.
-pub(super) fn no_such_package(
+pub(crate) fn no_such_package(
     name: &str,
     warnings: &[ApplyWarning],
     refusals: &[CollectionRefusal],

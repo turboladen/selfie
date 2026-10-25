@@ -24,12 +24,12 @@ use crate::{
 };
 
 use super::apply::{APPLY_CANCELED, ApplyContext, Scope, handle_apply};
-use super::collect::{Collected, collect_all_packages, collect_packages};
 use super::drift::handle_check_drift;
 use super::orphan::Catalog;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
-use super::warning::{ApplyWarning, NameCollision, no_such_package};
+use crate::package::collect::warning::{ApplyWarning, NameCollision, no_such_package};
+use crate::package::collect::{Collected, collect_all_packages, collect_packages};
 
 /// Whether `package` is the one `folded_name`, already lowercased, names.
 ///
@@ -48,7 +48,7 @@ fn other_specs<R: PackageRepository>(
     dotfiles_repo: &R,
     config: &SelfieConfig,
 ) -> super::track::OtherSpecs {
-    use super::warning::CollectionRefusal;
+    use crate::package::collect::warning::CollectionRefusal;
 
     let unusable = |files: &[std::path::PathBuf], name: &str| {
         let files: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
@@ -270,7 +270,7 @@ where
 
             let result = match prepared {
                 Ok(collected) => {
-                    let shortfall = collected.shortfall();
+                    let shortfall = super::orphan::shortfall(&collected);
                     let Collected {
                         packages,
                         warnings,
@@ -400,7 +400,7 @@ where
 
             let outcome = match collected {
                 Ok(collected) => {
-                    let shortfall = collected.shortfall();
+                    let shortfall = super::orphan::shortfall(&collected);
                     let Collected {
                         packages,
                         warnings,
@@ -538,8 +538,10 @@ where
         // A directory configured as both is read as the package directory, so a
         // standalone spec written there declares no environment and apply
         // refuses it. The track is refused before anything is written.
-        let shared_directory =
-            super::collect::same_directory(&self.package_repository, &self.dotfiles_repository);
+        let shared_directory = crate::package::collect::same_directory(
+            &self.package_repository,
+            &self.dotfiles_repository,
+        );
         let package_repo = self.package_repository.clone();
         let dotfiles_repo = self.dotfiles_repository.clone();
         let fs = self.filesystem.clone();
