@@ -181,7 +181,14 @@ where
     let package_names: Vec<String> = readable
         .into_iter()
         .filter(|package| package.environments().contains_key(config.environment()))
-        .map(|package| package.name().to_string())
+        // The spec name each audit looks the package up by, not the `name:`
+        // field: lookup resolves a file's name, and a field that disagrees with
+        // it names nothing the lookup finds.
+        .map(|package| {
+            package
+                .spec_name_as_spelled()
+                .unwrap_or_else(|| package.name().to_string())
+        })
         .collect();
 
     let total_packages = package_names.len();
@@ -1544,6 +1551,68 @@ mod tests {
             panic!("expected PackagesAudited, got {result:?}");
         };
         assert_eq!((audited_count, refused_count), (0, 0));
+    }
+
+    // A spec whose `name:` field differs from its file name is audited by the
+    // file's name, the one lookup finds it by.
+    #[tokio::test]
+    async fn audit_all_audits_a_spec_whose_name_field_differs() {
+        use crate::package::port::{ListPackagesOutput, PackageError};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = test_config(temp_dir.path());
+        let path = temp_dir.path().join("nvim.yml");
+        let nvim = PackageBuilder::default()
+            .name("neovim")
+            .environment("test", |b| b.install("echo install").audit_some("echo bun"))
+            .path(&path)
+            .build();
+        let listed = nvim.clone();
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_list_packages()
+            .returning(move || Ok(ListPackagesOutput(vec![Ok(listed.clone())])));
+        let dir = temp_dir.path().to_path_buf();
+        mock_repo.expect_get_package().returning(move |name| {
+            if name == "nvim" {
+                Ok(GetPackage::from_existing(nvim.clone(), path.clone()))
+            } else {
+                Err(PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: dir.clone(),
+                    files_examined: 1,
+                    search_patterns: vec![],
+                }
+                .into())
+            }
+        });
+        let mut mock_runner = MockCommandRunner::new();
+        mock_runner
+            .expect_execute()
+            .returning(|_, _, _| Box::pin(async { Ok(mock_command_output("bun\n", true)) }));
+
+        let (sender, _rx) = test_sender();
+        let mut progress = ProgressTracker::new(1);
+        let token = CancellationToken::new();
+        let result = handle_audit_all(
+            &mock_repo,
+            &config,
+            &mock_runner,
+            &sender,
+            &mut progress,
+            &token,
+        )
+        .await;
+
+        let OperationResult::Success(crate::package::event::OperationSuccess::PackagesAudited {
+            audited_count,
+            error_count,
+            ..
+        }) = result
+        else {
+            panic!("expected PackagesAudited, got {result:?}");
+        };
+        assert_eq!((audited_count, error_count), (1, 0));
     }
 
     // Two files claiming one name are refused once, counted once, and audited
