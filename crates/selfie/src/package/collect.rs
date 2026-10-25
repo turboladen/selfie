@@ -356,6 +356,33 @@ impl<T: Ord> NameTable<T> {
             })
     }
 
+    /// The file used for `name` in the directory `origin` names, if one is.
+    pub(crate) fn used_file(&self, origin: SpecOrigin, name: &str) -> Option<&T> {
+        match origin {
+            SpecOrigin::PackageDirectory => {
+                self.uses_package(name).then(|| &self.packages[name][0])
+            }
+            SpecOrigin::DotfilesDirectory => {
+                self.uses_dotfiles(name).then(|| &self.dotfiles[name][0])
+            }
+            SpecOrigin::Memory => None,
+        }
+    }
+
+    /// The file of every name whose file is used, with the directory it is in:
+    /// the package directory's, then the dotfiles directory's.
+    pub(crate) fn used_files(&self) -> impl Iterator<Item = (SpecOrigin, &T)> {
+        let packages = self.packages.keys().filter_map(|name| {
+            let origin = SpecOrigin::PackageDirectory;
+            Some((origin, self.used_file(origin, name)?))
+        });
+        let dotfiles = self.dotfiles.keys().filter_map(|name| {
+            let origin = SpecOrigin::DotfilesDirectory;
+            Some((origin, self.used_file(origin, name)?))
+        });
+        packages.chain(dotfiles)
+    }
+
     /// Every name either directory claims.
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.packages
@@ -510,6 +537,32 @@ mod tests {
         PackageBuilder,
         port::{ListPackagesOutput, MockPackageRepository},
     };
+
+    // A name used from each directory is listed once; an ambiguous name and a
+    // set-aside dotfiles name are not used, so they are not listed.
+    #[test]
+    fn used_files_skip_ambiguous_and_set_aside_names() {
+        let names = |list: &[&str]| list.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let table = NameTable::of(
+            names(&["a.yml", "b.yml", "b.yaml", "c.yml"]),
+            names(&["c.yml", "d.yml", "e.yml", "e.yaml"]),
+            |name: &String| Some(name.as_str()),
+        );
+
+        let used: Vec<(crate::package::SpecOrigin, &str)> = table
+            .used_files()
+            .map(|(origin, file)| (origin, file.as_str()))
+            .collect();
+
+        assert_eq!(
+            used,
+            [
+                (crate::package::SpecOrigin::PackageDirectory, "a.yml"),
+                (crate::package::SpecOrigin::PackageDirectory, "c.yml"),
+                (crate::package::SpecOrigin::DotfilesDirectory, "d.yml"),
+            ]
+        );
+    }
 
     // A repository holding one spec at `path`, resolving its directory to
     // `resolved`.
