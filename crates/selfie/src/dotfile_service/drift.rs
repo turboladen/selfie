@@ -19,7 +19,8 @@ use crate::{
 };
 
 use super::classify::{
-    Classified, PackageCollisions, Purpose, RepoRead, ResolvedHome, classify_entry, read_repo_file,
+    Classified, CrossSpecCollisions, PackageCollisions, Purpose, RepoRead, ResolvedHome,
+    classify_entry, read_repo_file,
 };
 use super::orphan::{self, Catalog};
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
@@ -83,6 +84,7 @@ where
 
     // Asked once, so every package compares targets against the same home.
     let home = ResolvedHome::of(filesystem);
+    let across = CrossSpecCollisions::of(catalog.packages, &home, config.environment());
     // The same question apply asks, so the two commands cannot answer
     // differently about one file. Drift reporting a package clean while apply
     // refuses it is worse than either answer alone: it sends a reader to run the
@@ -106,7 +108,7 @@ where
         let source_base = super::classify::source_base(config, package);
 
         // The same collisions apply refuses, so drift refuses the same entries.
-        let collisions = PackageCollisions::of(package, &home, config.environment());
+        let collisions = PackageCollisions::of(package, &home, config.environment(), &across);
 
         for scoped in &package.effective_dotfiles(&home, Some(config.environment())) {
             // Between entries. Drift reads and checksums every tracked file, so

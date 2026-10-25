@@ -11728,9 +11728,13 @@ mod target_classification {
         );
         assert!(target.join("inner").exists(), "the directory is left alone");
 
+        // Another directory, since the package already deploys `target` and track
+        // refuses a file another spec deploys before it looks at what is there.
+        let untracked = dirs.target_dir.join("other.toml");
+        std::fs::create_dir_all(untracked.join("inner")).unwrap();
         let track = collect_events(
             dirs.service_with_dotfiles()
-                .track_standalone("other", target.to_str().unwrap())
+                .track_standalone("other", untracked.to_str().unwrap())
                 .await,
         )
         .await;
@@ -13885,12 +13889,10 @@ mod backups_before_overwrite {
         );
     }
 
-    // Two packages may name one target and nothing refuses it. Copying again for
-    // the second entry would replace the user's content with the first entry's
-    // output and then delete the user's copy, so the run would destroy the only
-    // thing worth keeping.
+    // Two packages naming one target are both refused, so the run writes nothing
+    // there and takes no copy: what the user had stays where it was.
     #[tokio::test]
-    async fn two_entries_for_one_target_keep_the_copy_made_before_the_run_wrote() {
+    async fn two_packages_on_one_target_leave_the_users_file_and_take_no_copy() {
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("shared.toml");
         one_entry(&dirs, "first", "from-first", &target, Some("hand-edited"));
@@ -13898,44 +13900,10 @@ mod backups_before_overwrite {
 
         let events = collect_events(dirs.service().apply_all(accepting()).await).await;
 
-        let kept = copies(&dirs.state_dir);
-        assert_eq!(kept.len(), 1, "one copy per target per run: {kept:?}");
-        assert_eq!(
-            kept[0].1, "hand-edited",
-            "the copy must hold what the target held before the run, whichever \
-             package the apply reached first"
-        );
-        let named = reported(&events);
-        assert_eq!(named.len(), 2, "both entries deployed: {events:?}");
-        assert_eq!(
-            named[0], named[1],
-            "both deployments must name the one copy: {named:?}"
-        );
-        assert_eq!(
-            std::path::Path::new(named[0].as_ref().expect("a copy was kept")),
-            kept[0].0
-        );
-    }
-
-    // The run created the target, so the honest answer is that nothing was kept.
-    // Copying for the second entry would keep the first entry's own output and
-    // call it the previous content.
-    #[tokio::test]
-    async fn a_target_this_run_created_is_not_backed_up_by_a_later_entry() {
-        let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("shared.toml");
-        one_entry(&dirs, "first", "from-first", &target, None);
-        one_entry(&dirs, "second", "from-second", &target, None);
-
-        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
-
-        assert!(
-            !dirs.state_dir.join("backups").exists(),
-            "the target did not exist when the run started"
-        );
-        let named = reported(&events);
-        assert_eq!(named.len(), 2, "both entries deployed: {events:?}");
-        assert!(named.iter().all(Option::is_none), "{named:?}");
+        assert!(reported(&events).is_empty(), "nothing deployed: {events:?}");
+        assert_eq!(refused_count(&events), 2, "{events:?}");
+        assert!(copies(&dirs.state_dir).is_empty());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hand-edited");
     }
 }
 
@@ -14109,20 +14077,23 @@ mod track_entry_points_agree {
     #[tokio::test]
     async fn a_plain_target_is_accepted_by_both() {
         let dirs = fixture();
-        let target = dirs.target_dir.join("plain.toml");
-        std::fs::write(&target, "key = 1").unwrap();
-        let target = target.to_str().unwrap();
+        // One file each: once one entry point tracks a file, the other refuses it
+        // as another spec's.
+        let standalone = dirs.target_dir.join("plain.toml");
+        let packaged = dirs.target_dir.join("plain-too.toml");
+        std::fs::write(&standalone, "key = 1").unwrap();
+        std::fs::write(&packaged, "key = 1").unwrap();
 
         for events in [
             collect_events(
                 dirs.service_with_dotfiles()
-                    .track_standalone("fresh", target)
+                    .track_standalone("fresh", standalone.to_str().unwrap())
                     .await,
             )
             .await,
             collect_events(
                 dirs.service_with_dotfiles()
-                    .track_for_package("bat", target)
+                    .track_for_package("bat", packaged.to_str().unwrap())
                     .await,
             )
             .await,
@@ -16719,6 +16690,479 @@ environments:
     }
 }
 
+// Entries of two specs deploying to one target. Neither deploys, each is refused,
+// and drift refuses the same entries: a deploy state records one source per
+// target, so deploying either would flip the record between them.
+mod cross_spec_collisions {
+    use super::*;
+
+    // A package spec `name` with one repository-file entry on `target`, whose
+    // source holds `name`.
+    fn package_on(dirs: &TestDirs, name: &str, target: &str) {
+        std::fs::create_dir_all(dirs.package_dir.join(name)).unwrap();
+        std::fs::write(dirs.package_dir.join(name).join("rc"), name).unwrap();
+        create_package_with_dotfiles(&dirs.package_dir, name, &[(&format!("{name}/rc"), target)]);
+    }
+
+    // A standalone dotfile spec `name` with one entry on `target`.
+    fn standalone_on(dirs: &TestDirs, name: &str, target: &str) {
+        std::fs::create_dir_all(dirs.dotfiles_dir.join(name)).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join(name).join("rc"), name).unwrap();
+        std::fs::write(
+            dirs.dotfiles_dir.join(format!("{name}.yml")),
+            format!("name: {name}\ndotfiles:\n  - source: {name}/rc\n    target: \"{target}\"\n"),
+        )
+        .unwrap();
+    }
+
+    fn collision_messages(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileRefused { refusal, .. }
+                    if refusal.condition == Condition::Collision =>
+                {
+                    Some(refusal.message.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn two_packages_deploying_one_target_deploy_neither() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let target = home.join(".x");
+        package_on(&dirs, "alpha", "~/.x");
+        package_on(&dirs, "beta", "~/.x");
+        package_on(&dirs, "gamma", "~/.other");
+
+        let service = dirs.service_with_home(&home);
+        let apply = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let drift = collect_events(service.check_drift().await).await;
+
+        let both = vec![(Condition::Collision, Location::Entry); 2];
+        assert_eq!(refusals(&apply), both, "{:?}", warning_messages(&apply));
+        assert_eq!(refused_count(&apply), 2);
+        assert!(
+            !target.exists(),
+            "neither entry may write the shared target"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(".other")).unwrap(),
+            "gamma",
+            "an unrelated package still deploys"
+        );
+        for message in collision_messages(&apply) {
+            assert!(
+                message.contains(
+                    "package 'alpha' (dotfiles[0]) and package 'beta' (dotfiles[0]) \
+                                  both deploy to"
+                ),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("'{}'", target.display())),
+                "{message}"
+            );
+            assert!(!message.contains("standalone"), "{message}");
+        }
+        assert_eq!(refusals(&drift), both);
+    }
+
+    // Spelled `~` in the package and absolute in the standalone spec: one target.
+    #[tokio::test]
+    async fn a_package_and_a_standalone_spec_spelling_one_target_differently_are_refused() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let target = home.join(".x");
+        package_on(&dirs, "alpha", "~/.x");
+        standalone_on(&dirs, "loose", &target.display().to_string());
+
+        let apply = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(refused_count(&apply), 2, "{:?}", warning_messages(&apply));
+        assert!(!target.exists());
+        let messages = collision_messages(&apply);
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.starts_with("Skipping '~/.x' in package 'alpha'")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("in standalone dotfile 'loose'")
+                    && !m.contains("in package 'loose'")),
+            "{messages:?}"
+        );
+    }
+
+    // Deploying the one package a run names would overwrite the other spec's file.
+    #[tokio::test]
+    async fn applying_one_package_refuses_its_entry_that_another_spec_deploys() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        package_on(&dirs, "alpha", "~/.x");
+        package_on(&dirs, "beta", "~/.x");
+
+        let apply = collect_events(
+            dirs.service_with_home(&home)
+                .apply("alpha", ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            refusals(&apply),
+            vec![(Condition::Collision, Location::Entry)]
+        );
+        assert!(!home.join(".x").exists());
+    }
+
+    // Nothing of a package refused whole deploys, so it refuses nothing else.
+    #[tokio::test]
+    async fn a_package_refused_whole_does_not_refuse_another_packages_entry() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        package_on(&dirs, "alpha", "~/.x");
+        std::fs::create_dir_all(dirs.package_dir.join("broken")).unwrap();
+        std::fs::write(dirs.package_dir.join("broken").join("rc"), "broken").unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "broken",
+            "name: broken\nconfigs: []\ndotfiles:\n  - source: broken/rc\n    target: \"~/.x\"\n\
+             environments:\n  test:\n    install: \"echo installed\"\n",
+        );
+
+        let apply = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            collision_messages(&apply).is_empty(),
+            "{:?}",
+            warning_messages(&apply)
+        );
+        assert_eq!(std::fs::read_to_string(home.join(".x")).unwrap(), "alpha");
+    }
+
+    // An entry the target rule refuses still names the target, so the other
+    // spec's entry is refused too: every entry sharing a target gets one answer.
+    #[tokio::test]
+    async fn an_entry_refused_for_its_own_reason_still_collides() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        package_on(&dirs, "alpha", "~/.x");
+        std::fs::create_dir_all(dirs.package_dir.join("beta")).unwrap();
+        create_package_with_dotfiles(&dirs.package_dir, "beta", &[("beta/missing", "~/.x")]);
+
+        let apply = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(
+            collision_messages(&apply).len(),
+            2,
+            "{:?}",
+            warning_messages(&apply)
+        );
+        assert!(!home.join(".x").exists());
+    }
+
+    // The control: specs with distinct targets each deploy.
+    #[tokio::test]
+    async fn specs_with_distinct_targets_both_deploy() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        package_on(&dirs, "alpha", "~/.a");
+        standalone_on(&dirs, "loose", "~/.b");
+
+        let apply = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert_eq!(refused_count(&apply), 0, "{:?}", warning_messages(&apply));
+        assert_eq!(std::fs::read_to_string(home.join(".a")).unwrap(), "alpha");
+        assert_eq!(std::fs::read_to_string(home.join(".b")).unwrap(), "loose");
+    }
+}
+
+// A track of a file another spec already deploys would make a second entry for
+// it, which apply then refuses with the first. Track refuses instead, and names
+// the spec that has it.
+mod track_refuses_another_specs_file {
+    use super::*;
+
+    fn package_with(dirs: &TestDirs, name: &str, yaml_dotfiles: &str) {
+        write_package_yaml(
+            &dirs.package_dir,
+            name,
+            &format!(
+                "name: {name}\n{yaml_dotfiles}environments:\n  test:\n    install: \"echo i\"\n  work:\n    install: \"echo i\"\n"
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn tracking_a_file_a_package_deploys_is_refused() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        package_with(
+            &dirs,
+            "ruby",
+            "dotfiles:\n  - source: ruby/gemrc\n    target: \"~/.gemrc\"\n",
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(failure.contains("package 'ruby'"), "{failure}");
+        assert!(
+            failure.contains(&format!(
+                "selfie package track-dotfile ruby {}",
+                file.display()
+            )),
+            "{failure}"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc.yml").exists(),
+            "no spec may be written"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc").exists(),
+            "nothing may be copied"
+        );
+    }
+
+    // Every scope of the other spec counts: its entry for another environment
+    // deploys the file on the machines using that environment.
+    #[tokio::test]
+    async fn tracking_a_file_another_spec_deploys_in_another_environment_is_refused() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "ruby",
+            "name: ruby\nenvironments:\n  test:\n    install: \"echo i\"\n  work:\n    install: \"echo i\"\n    dotfiles:\n      - source: ruby/gemrc\n        target: \"~/.gemrc\"\n",
+        );
+        create_package_with_dotfiles(&dirs.package_dir, "gem", &[]);
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_for_package("gem", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(failure.contains("package 'ruby'"), "{failure}");
+        assert!(!dirs.package_dir.join("gem").join(".gemrc").exists());
+    }
+
+    // Tracking the same file under the same standalone name again finds the spec it
+    // would write, not another spec, and says so.
+    #[tokio::test]
+    async fn a_second_standalone_track_under_one_name_finds_its_own_spec() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        let service = dirs.service_with_home(&home);
+        let first = collect_events(
+            service
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+        assert!(
+            matches!(
+                get_operation_result(&first),
+                Some(OperationResult::Success(_))
+            ),
+            "{first:?}"
+        );
+
+        let again = collect_events(
+            service
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&again);
+        assert!(
+            failure.contains(&format!(
+                "Something is already at {}",
+                dirs.dotfiles_dir.join("gemrc.yml").display()
+            )),
+            "{failure}"
+        );
+        assert!(!failure.contains("already deploys it"), "{failure}");
+    }
+
+    // A name several files claim leaves none of them used, but any of them may
+    // track the file: the track names the files and goes on.
+    #[tokio::test]
+    async fn an_ambiguous_name_is_named_as_unchecked() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        for ext in ["yml", "yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(format!("ruby.{ext}")),
+                "name: ruby\nenvironments:\n  test:\n    install: \"echo i\"\n",
+            )
+            .unwrap();
+        }
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("Could not check")
+                && w.contains("ruby.yml")
+                && w.contains("ruby.yaml")),
+            "{warnings:?}"
+        );
+    }
+
+    // A package directory with nothing at its path holds no specs: no warning, and
+    // the standalone specs are still checked.
+    #[tokio::test]
+    async fn an_absent_package_directory_still_checks_the_standalone_specs() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("old")).unwrap();
+        std::fs::write(
+            dirs.dotfiles_dir.join("old.yml"),
+            "name: old\ndotfiles:\n  - source: old/gemrc\n    target: \"~/.gemrc\"\n",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dirs.package_dir).unwrap();
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(failure.contains("standalone dotfile 'old'"), "{failure}");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().all(|w| !w.contains("Could not check")),
+            "{warnings:?}"
+        );
+    }
+
+    // The remedy is a command to paste, so a target with a space is quoted.
+    #[tokio::test]
+    async fn the_remedy_command_quotes_its_arguments() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join("my rc");
+        std::fs::write(&file, "x").unwrap();
+        package_with(
+            &dirs,
+            "ruby",
+            "dotfiles:\n  - source: ruby/rc\n    target: \"~/my rc\"\n",
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("rc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains(&format!(
+                "selfie package track-dotfile ruby '{}'",
+                file.display()
+            )),
+            "{failure}"
+        );
+    }
+
+    // A spec that does not parse may track the file too. The track names it and
+    // goes on, since refusing for an unrelated broken spec helps nobody.
+    #[tokio::test]
+    async fn an_unparsable_spec_does_not_block_a_track() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        std::fs::write(dirs.package_dir.join("broken.yml"), "{{{\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{:?}",
+            get_operation_result(&events)
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("broken.yml") && w.contains("Could not check")),
+            "{warnings:?}"
+        );
+    }
+}
+
 // The package each deploy-state record names, which is what lets `apply <name>`
 // tell its own records from another package's.
 mod recorded_package {
@@ -16755,36 +17199,6 @@ mod recorded_package {
             .get(&target.display().to_string())
             .expect("the target is recorded");
         assert_eq!(entry.package(), Some("myapp"));
-    }
-
-    // Two packages deploying one content to one target: only the one that wrote
-    // it can be recorded, since nothing afterwards can tell which of the two did.
-    #[tokio::test]
-    async fn apply_records_the_package_that_wrote_a_shared_target() {
-        let dirs = TestDirs::new();
-        let target = dirs.target_dir.join("shared");
-        for name in ["alpha", "beta"] {
-            std::fs::create_dir_all(dirs.package_dir.join(name)).unwrap();
-            std::fs::write(dirs.package_dir.join(name).join("shared"), "same").unwrap();
-            create_package_with_dotfiles(
-                &dirs.package_dir,
-                name,
-                &[(&format!("{name}/shared"), target.to_str().unwrap())],
-            );
-        }
-
-        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-        assert_eq!(refused_count(&events), 0, "{events:?}");
-
-        let state = state_in(&dirs);
-        let package = state
-            .get(&target.display().to_string())
-            .expect("the target is recorded")
-            .package();
-        assert!(
-            matches!(package, Some("alpha" | "beta")),
-            "recorded {package:?}"
-        );
     }
 
     // Track is given the name as typed, which may carry capitals; what it
@@ -17436,26 +17850,24 @@ mod orphans {
 
     // A record written before `package` existed is attributed by the next apply
     // that writes, when exactly one package deploys to it, and not by a dry run.
+    // A target two packages name is refused for both, and its record is left
+    // unattributed rather than guessed.
     #[tokio::test]
     async fn a_legacy_record_is_attributed_by_an_apply() {
         let dirs = TestDirs::new();
         package(&dirs, "alpha", &["a", "shared"]);
         package(&dirs, "beta", &["shared"]);
-        // One content for the shared target, so neither apply rewrites its record.
-        for name in ["alpha", "beta"] {
-            std::fs::write(dirs.package_dir.join(name).join("shared"), "same").unwrap();
-        }
         run_apply_all(&dirs).await;
         let mut state = state_in(&dirs);
-        for key in [target(&dirs, "a"), target(&dirs, "shared")] {
-            let entry = state.get(&key).unwrap().clone();
-            state.record_deployment(&key, entry.source(), entry.checksum(), None, None);
-        }
+        let key = target(&dirs, "a");
+        let entry = state.get(&key).unwrap().clone();
+        state.record_deployment(&key, entry.source(), entry.checksum(), None, None);
         std::fs::write(
             dirs.state_dir.join("deploy-state.yml"),
             selfie::yaml::serialize(&state).unwrap(),
         )
         .unwrap();
+        seed(&dirs, &target(&dirs, "shared"), "alpha/shared", None);
 
         run_dry_run(&dirs).await;
         assert_eq!(
@@ -17464,7 +17876,11 @@ mod orphans {
         );
 
         let events = run_apply_all(&dirs).await;
-        assert_eq!(refused_count(&events), 0, "{events:?}");
+        assert_eq!(
+            refused_count(&events),
+            2,
+            "the shared target's two entries: {events:?}"
+        );
         let state = state_in(&dirs);
         assert_eq!(
             state.get(&target(&dirs, "a")).unwrap().package(),
@@ -17478,29 +17894,18 @@ mod orphans {
     }
 
     // A record that names no base, in sync with its source, gains one from the
-    // next apply that writes, and keeps its package: which package deployed a
-    // shared target is not the apply's to guess.
+    // next apply that writes, and keeps its package.
     #[tokio::test]
     async fn an_apply_places_an_in_sync_record_and_keeps_its_package() {
         let dirs = TestDirs::new();
-        package(&dirs, "alpha", &["a", "shared"]);
-        package(&dirs, "beta", &["shared"]);
-        for name in ["alpha", "beta"] {
-            std::fs::write(dirs.package_dir.join(name).join("shared"), "same").unwrap();
-        }
+        package(&dirs, "alpha", &["a"]);
         run_apply_all(&dirs).await;
-        // Each record keeps its package, so the orphan check has nothing to
+        // The record keeps its package, so the orphan check has nothing to
         // attribute and its own save cannot carry the placement.
         let mut state = state_in(&dirs);
-        let shared_package = state
-            .get(&target(&dirs, "shared"))
-            .unwrap()
-            .package()
-            .map(str::to_string);
-        for key in [target(&dirs, "a"), target(&dirs, "shared")] {
-            let entry = state.get(&key).unwrap().clone();
-            state.record_deployment(&key, "as spelled", entry.checksum(), entry.package(), None);
-        }
+        let key = target(&dirs, "a");
+        let entry = state.get(&key).unwrap().clone();
+        state.record_deployment(&key, "as spelled", entry.checksum(), entry.package(), None);
         std::fs::write(
             dirs.state_dir.join("deploy-state.yml"),
             selfie::yaml::serialize(&state).unwrap(),
@@ -17521,11 +17926,9 @@ mod orphans {
             Some(selfie::package::event::BaseKind::PackageDirectory)
         );
         assert_eq!(a.source(), "alpha/a");
-        let shared = state.get(&target(&dirs, "shared")).unwrap();
-        assert!(shared.base().is_some());
         assert_eq!(
-            shared.package().map(str::to_string),
-            shared_package,
+            a.package(),
+            Some("alpha"),
             "placing a record leaves its package alone"
         );
     }

@@ -218,6 +218,13 @@ the group as an error naming each entry. Validation compares targets without kno
 directory, so two shared entries `~/.x` and `/home/you/.x` pass it, while `apply` and `drift` still
 refuse the pair.
 
+The same holds across specs. When two specs, packages or standalone dotfiles, each deploy to one
+file in the environment in use, `selfie apply` deploys neither: it refuses every such entry, names
+every spec and entry deploying there, and exits non-zero, and `selfie dotfiles drift` refuses the
+same entries. Applying one package by name refuses its entry too, since writing it would overwrite
+the other spec's file. Neither spec takes precedence; remove one of the entries. A package selfie
+refuses whole takes no part, since nothing of it deploys.
+
 `selfie spec validate` reports each override as an informational note, which never fails validation
 or `selfie sync push`. A shared and an environment entry that are one file only for a particular
 home, such as `~/.x` and `/home/you/.x`, get a note naming that home, when that home is `/root` or a
@@ -1451,6 +1458,12 @@ nothing is copied or added. An entry under `environments.<name>.dotfiles` counts
 the current environment; one scoped to another environment does not, so the track adds a shared
 entry, which that environment's entry overrides. The entry's target counts however it is spelled, so
 `~/.gemrc` and the absolute path to the same file are one target.
+
+A file another spec already deploys, in any environment, is refused instead: `selfie apply` refuses
+two specs deploying one file, so a second entry for it would deploy neither. The refusal names the
+spec that has it and, for a package, the `selfie package track-dotfile` command that tracks into it.
+A spec selfie could not read, or one of several files claiming one name, may track the file as well;
+the track names each one it could not check and goes on.
 
 Those three steps are ordered so a failure leaves nothing half-finished. A spec that cannot be saved
 takes the copy with it: selfie removes the file it had just written, so a retry after fixing the

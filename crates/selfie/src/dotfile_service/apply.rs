@@ -31,8 +31,8 @@ use crate::{
 };
 
 use super::classify::{
-    Classified, PackageCollisions, Purpose, RepoFile, RepoRead, ResolvedHome, classify_entry,
-    read_repo_file,
+    Classified, CrossSpecCollisions, PackageCollisions, Purpose, RepoFile, RepoRead, ResolvedHome,
+    classify_entry, read_repo_file,
 };
 use super::deploy_entry::{
     Decided, DeployOutcome, DeployUnit, Ledger, Recorded, deploy_and_record, record_and_save,
@@ -376,11 +376,13 @@ where
 
     // Asked once, so every package compares targets against the same home.
     let home = ResolvedHome::of(filesystem);
+    // Over every collected package, not only the ones this run deploys.
+    let across = CrossSpecCollisions::of(catalog.packages, &home, config.environment());
 
     'packages: for package in packages {
         let dotfiles = package.effective_dotfiles(&home, Some(config.environment()));
         let package_name = package.spec_name();
-        let collisions = PackageCollisions::of(package, &home, config.environment());
+        let collisions = PackageCollisions::of(package, &home, config.environment(), &across);
 
         if dotfiles.is_empty() {
             // A named package with nothing for this environment would otherwise

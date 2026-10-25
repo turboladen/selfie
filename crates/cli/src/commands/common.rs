@@ -87,13 +87,7 @@ pub(crate) fn package_names_and_skipped(
 /// spelled, which lookup resolves ignoring case. `None` for a package with no
 /// spec file name.
 pub(crate) fn file_name_of(package: &selfie::package::Package) -> Option<String> {
-    // `spec_name` decides whether the file names a spec at all; its answer is
-    // folded to lower case, so the stem is taken as the file spells it.
-    package.spec_name()?;
-    package
-        .path()
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
+    package.spec_name_as_spelled()
 }
 
 /// Build the command runner every CLI service uses.

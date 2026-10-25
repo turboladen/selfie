@@ -12,12 +12,12 @@ use crate::{
     fs::{
         filesystem::{FileSystem, FileSystemError},
         target::{
-            TargetPath, TargetRejection, deploy_target, expand_target_path, portable_target,
-            repository_path,
+            HomeDir, TargetPath, TargetRejection, deploy_target, expand_target_path,
+            portable_target, repository_path,
         },
     },
     package::{
-        DotfileEntry, Package,
+        DotfileEntry, Package, SpecOrigin,
         event::{EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount},
         port::{PackageRepoError, PackageRepository},
     },
@@ -28,6 +28,100 @@ use super::refusal::{TargetState, directory_at_target, guard_refusal, read_targe
 use super::state_file::{
     Recorder, StateLoad, StateSaveError, load_deploy_state, save_deploy_state,
 };
+
+/// A spec that already has an entry for a target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tracker {
+    /// The name lookup finds the spec by: its file's stem, as the file spells it.
+    pub spec_name: String,
+    /// The spec file, which is what a user opens to change the entry.
+    pub spec_path: PathBuf,
+    /// The entry's target as the spec spells it.
+    pub target: String,
+    /// Which directory the spec was read from.
+    pub origin: SpecOrigin,
+}
+
+impl Tracker {
+    /// The spec, as a sentence names it: `package 'ruby'` or `standalone dotfile
+    /// 'gemrc'`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self.origin {
+            SpecOrigin::DotfilesDirectory => format!("standalone dotfile '{}'", self.spec_name),
+            SpecOrigin::PackageDirectory | SpecOrigin::Memory => {
+                format!("package '{}'", self.spec_name)
+            }
+        }
+    }
+}
+
+/// Every spec among `packages` with an entry for `target`, in any environment or
+/// none, one per spec.
+///
+/// Targets are compared once `~` is expanded against `home` and `.` and `..` are
+/// resolved as text, so `~/.gemrc` and its absolute form are one target.
+pub fn trackers_of<H: HomeDir + ?Sized>(
+    packages: &[Package],
+    home: &H,
+    target: &TargetPath,
+) -> Vec<Tracker> {
+    // Every scope, not only the current environment's: an entry under another
+    // environment deploys the file on the machines using it, and nothing across
+    // specs overrides another spec's entry.
+    packages
+        .iter()
+        .filter_map(|package| {
+            let (_, entry) = package
+                .dotfiles_with_scope()
+                .into_iter()
+                .find(|(_, entry)| expand_target_path(home, entry.target()) == *target)?;
+            let spec_name = package
+                .spec_name_as_spelled()
+                .unwrap_or_else(|| package.name().to_string());
+            Some(Tracker {
+                spec_name,
+                spec_path: package.path().clone(),
+                target: entry.target().to_string(),
+                origin: package.origin(),
+            })
+        })
+        .collect()
+}
+
+// One shell word, quoted unless the shell leaves every character alone. `try_quote`
+// refuses only a NUL byte, which neither a spec name nor a path can hold.
+fn shell_word(word: &str) -> String {
+    shlex::try_quote(word).map_or_else(|_| word.to_string(), std::borrow::Cow::into_owned)
+}
+
+// The refusal of a track whose file another spec already deploys.
+fn tracked_elsewhere_refusal(target: &str, trackers: &[Tracker]) -> String {
+    let named: Vec<String> = trackers
+        .iter()
+        .map(|tracker| format!("{} ({})", tracker.label(), tracker.spec_path.display()))
+        .collect();
+    let remedy = match trackers {
+        [
+            Tracker {
+                spec_name,
+                origin: SpecOrigin::PackageDirectory,
+                ..
+            },
+        ] => format!(
+            "Track it there with `selfie package track-dotfile {} {}`, or remove that entry \
+             first.",
+            shell_word(spec_name),
+            shell_word(target)
+        ),
+        _ => "Remove the entry from the spec that should not deploy it first.".to_string(),
+    };
+    format!(
+        "Cannot track '{target}': {} already deploys it, and two specs deploying one file are \
+         both refused by apply. {remedy}",
+        named.join(" and ")
+    )
+}
 
 /// Why a name cannot be a directory under the repository, or `None` if it can.
 fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
@@ -311,11 +405,19 @@ struct TrackSpec {
     kind: SpecKind,
 }
 
+/// The other specs a track checks for an entry deploying its file, and what kept
+/// the check from seeing all of them, already worded.
+pub(super) struct OtherSpecs {
+    pub(super) packages: Vec<Package>,
+    pub(super) unchecked: Vec<String>,
+}
+
 /// Handle `track_standalone`: copy the target file into the dotfiles directory,
 /// create a new YAML spec, and record initial deploy state.
 pub(super) async fn handle_track_standalone<R, F>(
     name: &str,
     target_path: &str,
+    others: impl FnOnce() -> OtherSpecs,
     dotfiles_repo: &R,
     filesystem: &F,
     sender: &EventSender,
@@ -362,6 +464,7 @@ where
             kind: SpecKind::New,
         },
         target_path,
+        others(),
         dotfiles_repo,
         filesystem,
         sender,
@@ -375,6 +478,7 @@ where
 pub(super) async fn handle_track_for_package<R, F>(
     package_name: &str,
     target_path: &str,
+    others: impl FnOnce() -> OtherSpecs,
     repo: &R,
     filesystem: &F,
     sender: &EventSender,
@@ -420,6 +524,7 @@ where
             kind: SpecKind::Existing,
         },
         target_path,
+        others(),
         repo,
         filesystem,
         sender,
@@ -437,6 +542,7 @@ where
 async fn handle_track<R, F>(
     mut spec: TrackSpec,
     target_path: &str,
+    others: OtherSpecs,
     repo: &R,
     filesystem: &F,
     sender: &EventSender,
@@ -504,6 +610,28 @@ where
             environment: config.environment().to_string(),
             steps_completed: StepCount::new(1, 1),
         });
+    }
+
+    // Another spec with an entry for this file, in any environment, makes this
+    // track a second one, and apply refuses both. Specs this check could not read
+    // are named and the track goes on: refusing it for an unrelated broken spec
+    // helps nobody, and apply still refuses a collision it would make.
+    for warning in &others.unchecked {
+        sender.send_warning(warning.clone()).await;
+    }
+    // The spec this track writes is not another spec: an existing one answered
+    // above, and a new one's path is refused below if a file is already there.
+    let others_but_this: Vec<Package> = others
+        .packages
+        .into_iter()
+        .filter(|package| *package.path() != spec.spec_path)
+        .collect();
+    let trackers = trackers_of(&others_but_this, filesystem, &expanded_target);
+    if !trackers.is_empty() {
+        return OperationResult::Failure(OperationFailure::Generic(tracked_elsewhere_refusal(
+            target_path,
+            &trackers,
+        )));
     }
 
     // Ahead of the read and every write, so a link or a fifo gets its own sentence
