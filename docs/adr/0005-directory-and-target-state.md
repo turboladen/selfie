@@ -11,6 +11,10 @@ write path is one of the two target classifications unified here, and
 [ADR-0004](0004-named-value-substitution-for-dotfiles.md), whose templated entries are
 secret-bearing and take that same path.
 
+Refined by [0013](0013-two-entries-are-one-target-when-their-expanded-targets-are-equal.md), which
+extends §5's rule for two packages to standalone dotfile specs, counts one refusal per entry rather
+than per target, and replaces §5's paragraph on the scope of track's scan.
+
 ## Context
 
 selfie asks two questions about the file system over and over. What is at a directory path, and what

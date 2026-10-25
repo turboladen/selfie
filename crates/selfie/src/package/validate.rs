@@ -13,11 +13,13 @@ use super::{
 
 /// A home directory that cannot be determined, so `~` stays literal.
 ///
-/// Validation has no file system, so it compares targets with `~` unexpanded.
-/// That still matches identical spellings and ones that differ only lexically,
-/// such as `~/a/../b` and `~/b`.
-// What it cannot match is `~/x` against the absolute path of the same file.
-// Apply compares against the real home and refuses that pair as well.
+/// Validation has no file system, so it compares targets with `~` unexpanded and
+/// `.` and `..` resolved as text resolves them. Two targets it matches name one file
+/// on every machine; two it does not match may still be one file on some machine.
+// "One file" assumes no directory on the way is a symlink, which text cannot see.
+// What it cannot match is `~/x` against the absolute path of the same file, or a
+// pair that meets only after a `..` climbs out of home and back in. Apply compares
+// against the real home and refuses those where they collide.
 struct NoHome;
 
 impl crate::fs::target::HomeDir for NoHome {
@@ -1294,6 +1296,84 @@ environments:
             errors[0].location().is_some(),
             "the error must point at the file"
         );
+    }
+
+    // Two shared entries whose targets climb out of home by different amounts. With
+    // a real home they are two files, so validation, which has none, must not merge
+    // them by dropping the `..` it cannot resolve.
+    #[test]
+    fn validate_does_not_merge_targets_climbing_above_home_differently() {
+        let errors = collision_errors(
+            r"
+name: x
+dotfiles:
+  - source: a/one
+    target: ~/../a/.x
+  - source: a/two
+    target: ~/../../a/.x
+environments:
+  work:
+    install: echo
+",
+        );
+        assert!(errors.is_empty(), "got: {}", messages(&errors));
+        // The mechanism, not only the outcome: the two targets key apart.
+        assert_ne!(
+            crate::fs::target::expand_target_path(&NoHome, "~/../a/.x"),
+            crate::fs::target::expand_target_path(&NoHome, "~/../../a/.x")
+        );
+    }
+
+    // `~/../~/.x` is a directory named `~` beside home, not home: two files on every
+    // machine. A `..` that removed the leading `~` would key both to `~/.x`.
+    #[test]
+    fn a_tilde_named_directory_above_home_is_not_home() {
+        let errors = collision_errors(
+            r"
+name: x
+dotfiles:
+  - source: a/one
+    target: ~/../~/.x
+  - source: a/two
+    target: ~/.x
+environments:
+  work:
+    install: echo
+",
+        );
+        assert!(errors.is_empty(), "got: {}", messages(&errors));
+        assert_ne!(
+            crate::fs::target::expand_target_path(&NoHome, "~/../~/.x"),
+            crate::fs::target::expand_target_path(&NoHome, "~/.x")
+        );
+    }
+
+    // The control for the two above: a pair that differs only lexically below
+    // home, and one that climbs out and back by the same route, are still one file
+    // each, and are still reported.
+    #[test]
+    fn targets_equal_as_text_below_or_above_home_are_still_one_target() {
+        for (first, second) in [("~/a/../.x", "~/.x"), ("~/a/../../b/.x", "~/../b/.x")] {
+            let errors = collision_errors(&format!(
+                r"
+name: x
+dotfiles:
+  - source: a/one
+    target: {first}
+  - source: a/two
+    target: {second}
+environments:
+  work:
+    install: echo
+"
+            ));
+            assert_eq!(
+                errors.len(),
+                1,
+                "{first} and {second}: {}",
+                messages(&errors)
+            );
+        }
     }
 
     // The two spellings differ as strings, so this is not an override; they

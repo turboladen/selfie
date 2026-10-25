@@ -5,7 +5,9 @@ Date: 2026-10-03
 ## Status
 
 Accepted 2026-10-03. Refines [0006](0006-command-output-contract.md), whose verdict and exit codes
-this record does not change.
+this record does not change. Refined by
+[0013](0013-two-entries-are-one-target-when-their-expanded-targets-are-equal.md), whose cross-spec
+refusal uses the `Collision` condition.
 
 ## Context
 

@@ -10,7 +10,9 @@ was asked to cover" that "was not covered", the clause in 0006's definition of F
 [0009](0009-a-status-selfie-cannot-judge-names-why-in-one-type.md), using the reasons it types.
 Refined by
 [0011](0011-an-install-run-settles-each-package-once-and-installs-recommends-in-order.md), which
-decides how often an install run checks and installs a package.
+decides how often an install run checks and installs a package, and by
+[0012](0012-which-spec-files-are-packages-is-decided-once-from-the-files-names.md), which makes "two
+files claim the name" reachable from every listing.
 
 ## Context
 

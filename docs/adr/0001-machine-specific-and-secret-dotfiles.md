@@ -9,6 +9,9 @@ Accepted
 Refined by [ADR-0003](0003-no-deploy-state-for-provider-sourced-dotfiles.md), which specifies the
 deploy-state handling deferred below, and [ADR-0004](0004-named-value-substitution-for-dotfiles.md),
 which revisits the rejection of templating for the case of a secret held within a structured file.
+Refined by [0013](0013-two-entries-are-one-target-when-their-expanded-targets-are-equal.md), under
+which an environment entry replaces a shared entry with the same expanded target, and validation
+reports each override as an informational note.
 
 ## Context
 
