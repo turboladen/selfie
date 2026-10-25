@@ -490,8 +490,9 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         let ambiguous = package_list.names().ambiguous;
         for package in package_list.valid_packages() {
             let spec_name = package.spec_name();
-            // Names compare with case folded, as package lookup resolves them.
-            if package.name().to_lowercase() == target {
+            // The target itself is skipped by its spec name, as lookup resolves
+            // it, with case folded; its `name:` field may say something else.
+            if spec_name.as_deref() == Some(target.as_str()) {
                 continue;
             }
 
@@ -1751,6 +1752,26 @@ mod tests {
         let (_, unreadable) = repo.find_dependent_packages("target").unwrap();
 
         assert_eq!(unreadable.len(), 2, "{unreadable:?}");
+    }
+
+    // The target is left out by its file's name, not its `name:` field, so a
+    // target declaring another name still does not count as its own dependent.
+    #[test]
+    fn the_target_is_skipped_by_its_spec_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("packages");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::write(
+            package_dir.join("nvim.yml"),
+            "name: neovim\nenvironments:\n  test:\n    install: echo n\n    dependencies:\n      - nvim\n",
+        )
+        .unwrap();
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
+
+        let (dependents, _) = repo.find_dependent_packages("nvim").unwrap();
+
+        assert!(dependents.is_empty(), "{dependents:?}");
     }
 
     #[test]
