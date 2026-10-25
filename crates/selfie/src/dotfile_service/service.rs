@@ -41,6 +41,98 @@ fn is_named(package: &Package, folded_name: &str) -> bool {
         .is_some_and(|spec_name| spec_name == folded_name)
 }
 
+/// Every collected spec, for track to check for an entry already deploying its
+/// file, with what the check cannot see worded.
+fn other_specs<R: PackageRepository>(
+    package_repo: &R,
+    dotfiles_repo: &R,
+    config: &SelfieConfig,
+) -> super::track::OtherSpecs {
+    use super::warning::CollectionRefusal;
+
+    let unusable = |files: &[std::path::PathBuf], name: &str| {
+        let files: Vec<String> = files.iter().map(|f| f.display().to_string()).collect();
+        format!(
+            "Could not check {} for an entry deploying this file: they all claim the name \
+             '{name}', so none of them is used",
+            files.join(" and ")
+        )
+    };
+    match collect_all_packages(
+        package_repo,
+        dotfiles_repo,
+        config.dotfiles_directory_is_expected(),
+        config.environment(),
+    ) {
+        Ok(collected) => {
+            let mut unchecked: Vec<String> = collected
+                .refusals
+                .iter()
+                .map(|refusal| match refusal {
+                    CollectionRefusal::UnloadableSpec(path) => format!(
+                        "Could not check {} for an entry deploying this file: it could not be \
+                         loaded",
+                        path.display()
+                    ),
+                    CollectionRefusal::UnreadableDotfilesDirectory => {
+                        "Could not check the standalone dotfiles for an entry deploying this \
+                         file: the dotfiles directory could not be read"
+                            .to_string()
+                    }
+                    CollectionRefusal::AmbiguousName { name, paths } => unusable(paths, name),
+                })
+                .collect();
+            unchecked.extend(
+                collected
+                    .unrefused_ambiguities
+                    .iter()
+                    .map(|(name, paths)| unusable(paths, name)),
+            );
+            super::track::OtherSpecs {
+                packages: collected.packages,
+                unchecked,
+            }
+        }
+        // The package directory would not list, so collection stopped there. The
+        // standalone specs are still checked: they are read through a repository of
+        // their own. A package directory with nothing at its path holds no specs and
+        // is worth no word.
+        Err(error) => {
+            let mut unchecked = Vec::new();
+            if !error.is_absent() {
+                unchecked.push(format!(
+                    "Could not check the package specs for an entry deploying this file: {error}"
+                ));
+            }
+            let packages = match dotfiles_repo.list_packages() {
+                Ok(output) => {
+                    unchecked.extend(output.invalid_packages().map(|invalid| {
+                        format!(
+                            "Could not check {} for an entry deploying this file: it could not \
+                             be loaded",
+                            invalid.package_path().display()
+                        )
+                    }));
+                    output.valid_packages().cloned().collect()
+                }
+                Err(error) => {
+                    if !error.is_absent() {
+                        unchecked.push(format!(
+                            "Could not check the standalone dotfiles for an entry deploying this \
+                             file: {error}"
+                        ));
+                    }
+                    Vec::new()
+                }
+            };
+            super::track::OtherSpecs {
+                packages,
+                unchecked,
+            }
+        }
+    }
+}
+
 /// Concrete implementation of the [`DotfileService`] trait
 ///
 /// Coordinates between the package repository, file system, and application
@@ -448,6 +540,7 @@ where
         // refuses it. The track is refused before anything is written.
         let shared_directory =
             super::collect::same_directory(&self.package_repository, &self.dotfiles_repository);
+        let package_repo = self.package_repository.clone();
         let dotfiles_repo = self.dotfiles_repository.clone();
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -480,6 +573,7 @@ where
                     handle_track_standalone(
                         &name,
                         &target_path,
+                        || other_specs(&package_repo, &dotfiles_repo, &config),
                         &dotfiles_repo,
                         &fs,
                         &sender,
@@ -495,6 +589,7 @@ where
 
     async fn track_for_package(&self, package_name: &str, target_path: &str) -> EventStream {
         let refusal = self.sudo_refusal();
+        let dotfiles_repo = self.dotfiles_repository.clone();
         let repo = self.package_repository.clone();
         let fs = self.filesystem.clone();
         let config = self.config.clone();
@@ -517,6 +612,7 @@ where
                     handle_track_for_package(
                         &package_name,
                         &target_path,
+                        || other_specs(&repo, &dotfiles_repo, &config),
                         &repo,
                         &fs,
                         &sender,

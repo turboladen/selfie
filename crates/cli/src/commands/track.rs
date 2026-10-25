@@ -5,6 +5,7 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
+use selfie::dotfile_service::track::Tracker;
 use std::collections::HashSet;
 
 use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
@@ -141,7 +142,7 @@ pub(crate) async fn handle_track(
 
 /// Report every spec that already tracks a file, and the [`Exit`] for them: the
 /// highest of each one's.
-fn report_existing_trackers(trackers: &[ExistingTracker], display: &DisplayManager) -> Exit {
+fn report_existing_trackers(trackers: &[Tracker], display: &DisplayManager) -> Exit {
     let mut warned = HashSet::new();
     // A fold visits every tracker, so each is reported even after one fails: an
     // `any` would stop printing at the first.
@@ -170,14 +171,15 @@ fn report_existing_trackers(trackers: &[ExistingTracker], display: &DisplayManag
 /// [`Exit::Clean`] otherwise. A warning about the target is printed once,
 /// however many specs track it: `warned` holds the ones already printed.
 fn report_existing_tracker(
-    tracked: &ExistingTracker,
+    tracked: &Tracker,
     display: &DisplayManager,
     warned: &mut HashSet<String>,
 ) -> Exit {
-    let ExistingTracker {
+    let Tracker {
         spec_name,
         spec_path,
         target,
+        ..
     } = tracked;
 
     let fs = RealFileSystem;
@@ -326,16 +328,6 @@ fn suggest_name(file_path: &str) -> String {
     }
 }
 
-/// The spec entry that already tracks the file the caller named.
-struct ExistingTracker {
-    spec_name: String,
-    /// The file to open to change the entry, which a refusal has to name.
-    spec_path: std::path::PathBuf,
-    /// The entry's own target, which differs from the argument: the spec holds
-    /// `~/…` and the caller may name the same file absolutely.
-    target: String,
-}
-
 /// What to tell the user when the dotfiles directory would not list, or `None` when
 /// there is nothing worth saying.
 ///
@@ -423,11 +415,11 @@ fn find_existing_trackers(
     file: &str,
     config: &CliConfig,
     dotfiles_repo: &YamlPackageRepository<RealFileSystem>,
-) -> (Vec<ExistingTracker>, Vec<String>) {
+) -> (Vec<Tracker>, Vec<String>) {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
     let mut skipped = Vec::new();
-    let mut trackers: Vec<ExistingTracker> = Vec::new();
+    let mut packages: Vec<selfie::package::Package> = Vec::new();
     // The two directories may be one, or one may link to the other, so a spec
     // file is counted once however many scans list it.
     let mut seen = HashSet::new();
@@ -466,25 +458,16 @@ fn find_existing_trackers(
         }
 
         // Every spec, not the first: a file two specs track is one the user
-        // has to hear about twice. One entry per spec is enough to name it.
+        // has to hear about twice. The library's matcher, so this and the track
+        // commands find the same trackers.
         for pkg in output.valid_packages() {
-            if let Some((_scope, entry)) = pkg
-                .dotfiles_with_scope()
-                .into_iter()
-                .find(|(_, entry)| selfie::fs::expand_target_path(&fs, entry.target()) == expanded)
-                && seen.insert(
-                    std::fs::canonicalize(pkg.path()).unwrap_or_else(|_| pkg.path().clone()),
-                )
+            if seen.insert(std::fs::canonicalize(pkg.path()).unwrap_or_else(|_| pkg.path().clone()))
             {
-                trackers.push(ExistingTracker {
-                    // The name selfie finds the spec by, which is its file's.
-                    spec_name: common::file_name_of(pkg).unwrap_or_else(|| pkg.name().to_string()),
-                    spec_path: pkg.path().to_path_buf(),
-                    target: entry.target().to_string(),
-                });
+                packages.push(pkg.clone());
             }
         }
     }
+    let trackers = selfie::dotfile_service::track::trackers_of(&packages, &fs, &expanded);
     (trackers, skipped)
 }
 
@@ -519,10 +502,11 @@ mod tests {
         let display = DisplayManager::new(false);
 
         let exit = report_existing_trackers(
-            &[ExistingTracker {
+            &[Tracker {
                 spec_name: "only".to_string(),
                 spec_path: temp.path().join("only.yml"),
                 target: "relative/rc".to_string(),
+                origin: selfie::package::SpecOrigin::PackageDirectory,
             }],
             &display,
         );
@@ -537,10 +521,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("rc");
         std::fs::write(&file, "x").unwrap();
-        let tracker = |spec_name: &str, target: &str| ExistingTracker {
+        let tracker = |spec_name: &str, target: &str| Tracker {
             spec_name: spec_name.to_string(),
             spec_path: temp.path().join(format!("{spec_name}.yml")),
             target: target.to_string(),
+            origin: selfie::package::SpecOrigin::PackageDirectory,
         };
         let display = DisplayManager::new(false);
 

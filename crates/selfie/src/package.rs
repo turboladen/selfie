@@ -1747,6 +1747,16 @@ impl Package {
     pub fn spec_name(&self) -> Option<String> {
         spec_name_of(&self.path)
     }
+
+    /// [`Self::spec_name`] as the file spells it, before case is folded: the name a
+    /// listing or a refusal shows. `None` when the file name is not a spec's.
+    #[must_use]
+    pub fn spec_name_as_spelled(&self) -> Option<String> {
+        self.spec_name()?;
+        self.path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+    }
 }
 
 #[cfg(test)]

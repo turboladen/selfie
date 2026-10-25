@@ -1459,6 +1459,12 @@ the current environment; one scoped to another environment does not, so the trac
 entry, which that environment's entry overrides. The entry's target counts however it is spelled, so
 `~/.gemrc` and the absolute path to the same file are one target.
 
+A file another spec already deploys, in any environment, is refused instead: `selfie apply` refuses
+two specs deploying one file, so a second entry for it would deploy neither. The refusal names the
+spec that has it and, for a package, the `selfie package track-dotfile` command that tracks into it.
+A spec selfie could not read, or one of several files claiming one name, may track the file as well;
+the track names each one it could not check and goes on.
+
 Those three steps are ordered so a failure leaves nothing half-finished. A spec that cannot be saved
 takes the copy with it: selfie removes the file it had just written, so a retry after fixing the
 cause does not trip over a file you never knowingly created. If that removal fails too, selfie says

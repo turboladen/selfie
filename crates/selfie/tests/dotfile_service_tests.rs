@@ -11728,9 +11728,13 @@ mod target_classification {
         );
         assert!(target.join("inner").exists(), "the directory is left alone");
 
+        // Another directory, since the package already deploys `target` and track
+        // refuses a file another spec deploys before it looks at what is there.
+        let untracked = dirs.target_dir.join("other.toml");
+        std::fs::create_dir_all(untracked.join("inner")).unwrap();
         let track = collect_events(
             dirs.service_with_dotfiles()
-                .track_standalone("other", target.to_str().unwrap())
+                .track_standalone("other", untracked.to_str().unwrap())
                 .await,
         )
         .await;
@@ -14073,20 +14077,23 @@ mod track_entry_points_agree {
     #[tokio::test]
     async fn a_plain_target_is_accepted_by_both() {
         let dirs = fixture();
-        let target = dirs.target_dir.join("plain.toml");
-        std::fs::write(&target, "key = 1").unwrap();
-        let target = target.to_str().unwrap();
+        // One file each: once one entry point tracks a file, the other refuses it
+        // as another spec's.
+        let standalone = dirs.target_dir.join("plain.toml");
+        let packaged = dirs.target_dir.join("plain-too.toml");
+        std::fs::write(&standalone, "key = 1").unwrap();
+        std::fs::write(&packaged, "key = 1").unwrap();
 
         for events in [
             collect_events(
                 dirs.service_with_dotfiles()
-                    .track_standalone("fresh", target)
+                    .track_standalone("fresh", standalone.to_str().unwrap())
                     .await,
             )
             .await,
             collect_events(
                 dirs.service_with_dotfiles()
-                    .track_for_package("bat", target)
+                    .track_for_package("bat", packaged.to_str().unwrap())
                     .await,
             )
             .await,
@@ -16895,6 +16902,264 @@ mod cross_spec_collisions {
         assert_eq!(refused_count(&apply), 0, "{:?}", warning_messages(&apply));
         assert_eq!(std::fs::read_to_string(home.join(".a")).unwrap(), "alpha");
         assert_eq!(std::fs::read_to_string(home.join(".b")).unwrap(), "loose");
+    }
+}
+
+// A track of a file another spec already deploys would make a second entry for
+// it, which apply then refuses with the first. Track refuses instead, and names
+// the spec that has it.
+mod track_refuses_another_specs_file {
+    use super::*;
+
+    fn package_with(dirs: &TestDirs, name: &str, yaml_dotfiles: &str) {
+        write_package_yaml(
+            &dirs.package_dir,
+            name,
+            &format!(
+                "name: {name}\n{yaml_dotfiles}environments:\n  test:\n    install: \"echo i\"\n  work:\n    install: \"echo i\"\n"
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn tracking_a_file_a_package_deploys_is_refused() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        package_with(
+            &dirs,
+            "ruby",
+            "dotfiles:\n  - source: ruby/gemrc\n    target: \"~/.gemrc\"\n",
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(failure.contains("package 'ruby'"), "{failure}");
+        assert!(
+            failure.contains(&format!(
+                "selfie package track-dotfile ruby {}",
+                file.display()
+            )),
+            "{failure}"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc.yml").exists(),
+            "no spec may be written"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc").exists(),
+            "nothing may be copied"
+        );
+    }
+
+    // Every scope of the other spec counts: its entry for another environment
+    // deploys the file on the machines using that environment.
+    #[tokio::test]
+    async fn tracking_a_file_another_spec_deploys_in_another_environment_is_refused() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "ruby",
+            "name: ruby\nenvironments:\n  test:\n    install: \"echo i\"\n  work:\n    install: \"echo i\"\n    dotfiles:\n      - source: ruby/gemrc\n        target: \"~/.gemrc\"\n",
+        );
+        create_package_with_dotfiles(&dirs.package_dir, "gem", &[]);
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_for_package("gem", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(failure.contains("package 'ruby'"), "{failure}");
+        assert!(!dirs.package_dir.join("gem").join(".gemrc").exists());
+    }
+
+    // Tracking the same file under the same standalone name again finds the spec it
+    // would write, not another spec, and says so.
+    #[tokio::test]
+    async fn a_second_standalone_track_under_one_name_finds_its_own_spec() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        let service = dirs.service_with_home(&home);
+        let first = collect_events(
+            service
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+        assert!(
+            matches!(
+                get_operation_result(&first),
+                Some(OperationResult::Success(_))
+            ),
+            "{first:?}"
+        );
+
+        let again = collect_events(
+            service
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&again);
+        assert!(
+            failure.contains(&format!(
+                "Something is already at {}",
+                dirs.dotfiles_dir.join("gemrc.yml").display()
+            )),
+            "{failure}"
+        );
+        assert!(!failure.contains("already deploys it"), "{failure}");
+    }
+
+    // A name several files claim leaves none of them used, but any of them may
+    // track the file: the track names the files and goes on.
+    #[tokio::test]
+    async fn an_ambiguous_name_is_named_as_unchecked() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        for ext in ["yml", "yaml"] {
+            std::fs::write(
+                dirs.package_dir.join(format!("ruby.{ext}")),
+                "name: ruby\nenvironments:\n  test:\n    install: \"echo i\"\n",
+            )
+            .unwrap();
+        }
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("Could not check")
+                && w.contains("ruby.yml")
+                && w.contains("ruby.yaml")),
+            "{warnings:?}"
+        );
+    }
+
+    // A package directory with nothing at its path holds no specs: no warning, and
+    // the standalone specs are still checked.
+    #[tokio::test]
+    async fn an_absent_package_directory_still_checks_the_standalone_specs() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("old")).unwrap();
+        std::fs::write(
+            dirs.dotfiles_dir.join("old.yml"),
+            "name: old\ndotfiles:\n  - source: old/gemrc\n    target: \"~/.gemrc\"\n",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dirs.package_dir).unwrap();
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(failure.contains("standalone dotfile 'old'"), "{failure}");
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().all(|w| !w.contains("Could not check")),
+            "{warnings:?}"
+        );
+    }
+
+    // The remedy is a command to paste, so a target with a space is quoted.
+    #[tokio::test]
+    async fn the_remedy_command_quotes_its_arguments() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join("my rc");
+        std::fs::write(&file, "x").unwrap();
+        package_with(
+            &dirs,
+            "ruby",
+            "dotfiles:\n  - source: ruby/rc\n    target: \"~/my rc\"\n",
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("rc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains(&format!(
+                "selfie package track-dotfile ruby '{}'",
+                file.display()
+            )),
+            "{failure}"
+        );
+    }
+
+    // A spec that does not parse may track the file too. The track names it and
+    // goes on, since refusing for an unrelated broken spec helps nobody.
+    #[tokio::test]
+    async fn an_unparsable_spec_does_not_block_a_track() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        std::fs::write(dirs.package_dir.join("broken.yml"), "{{{\n").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_standalone("gemrc", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{:?}",
+            get_operation_result(&events)
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("broken.yml") && w.contains("Could not check")),
+            "{warnings:?}"
+        );
     }
 }
 
