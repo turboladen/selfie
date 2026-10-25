@@ -20,17 +20,41 @@ use std::path::{Component, Path, PathBuf};
 /// normalizes to `etc`, not to itself.
 #[must_use]
 pub(crate) fn normalize_path(path: &Path) -> PathBuf {
+    // Only pop Normal components; never pop past root or a prefix. So reason about
+    // containment only from an absolute path.
+    normalize_with(path, |parts| {
+        if matches!(parts.last(), Some(Component::Normal(_))) {
+            Parent::Pop
+        } else {
+            Parent::Drop
+        }
+    })
+}
+
+/// What a `..` does to the components already kept before it.
+pub(crate) enum Parent {
+    /// Remove the last one.
+    Pop,
+    /// Discard the `..`.
+    Drop,
+    /// Keep the `..` as a component.
+    Keep,
+}
+
+/// [`normalize_path`]'s loop, with what a `..` does decided by `parent` from the
+/// components kept so far.
+pub(crate) fn normalize_with(path: &Path, parent: impl Fn(&[Component<'_>]) -> Parent) -> PathBuf {
     let mut parts: Vec<Component<'_>> = Vec::new();
 
     for component in path.components() {
         match component {
-            Component::ParentDir => {
-                // Only pop Normal components; never pop past root or a prefix.
-                // So reason about containment only from an absolute path.
-                if matches!(parts.last(), Some(Component::Normal(_))) {
+            Component::ParentDir => match parent(&parts) {
+                Parent::Pop => {
                     parts.pop();
                 }
-            }
+                Parent::Drop => {}
+                Parent::Keep => parts.push(component),
+            },
             Component::CurDir => {}
             other => parts.push(other),
         }

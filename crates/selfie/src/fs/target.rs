@@ -5,10 +5,10 @@
 //! carries the argument for why a target must reach a
 //! writer unresolved. This module is the mechanism.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::fs::filesystem::{FileSystem, FileSystemError};
-use crate::paths::normalize_path;
+use crate::paths::{Parent, normalize_path, normalize_with};
 
 /// The user's home directory, and nothing else.
 ///
@@ -106,6 +106,12 @@ impl TargetPath {
 ///
 /// Extra slashes after `~/` are dropped, as a shell drops them: `~//x` is `~/x`.
 ///
+/// A relative result, from a `~` with no home directory to expand it or from a
+/// target that was never absolute, keeps what text alone cannot resolve: a `..`
+/// with nothing before it to remove is kept, and so is one that would remove a
+/// leading `~` the target was written with. Two targets that expand equal then name
+/// one file whatever the home directory turns out to be.
+///
 /// `~user` is not supported. It falls through to the literal path, which is then
 /// relative. This function does **not** refuse it: [`deploy_target`] does, by
 /// name, and every path that deploys or tracks obtains its target from there
@@ -149,8 +155,28 @@ pub fn expand_target_path<H: HomeDir + ?Sized>(home: &H, target: &str) -> Target
     };
 
     TargetPath {
-        path: normalize_path(&raw),
+        path: normalize_target(&raw),
     }
+}
+
+// `normalize_path`, except on a relative path. There a `..` that has nothing to
+// remove is kept, and so is one that would remove the leading `~` of a target
+// written with one: `~` stands for a directory of unknown depth, so dropping either
+// would merge `~/../a/.x` with `~/../../a/.x` and `~/../~/.x` with `~/.x`, pairs
+// that are two files on every machine. Whether the target is `~`-rooted is read off
+// what was written, not off the normalized shape, so `./~/../x` is a directory
+// named `~` and normalizes to `x`. An absolute path is unaffected, since a `..` at
+// its root is the root.
+fn normalize_target(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return normalize_path(path);
+    }
+    let tilde_rooted = path.components().next() == Some(Component::Normal("~".as_ref()));
+    normalize_with(path, |parts| match parts {
+        [Component::Normal(_)] if tilde_rooted => Parent::Keep,
+        [.., Component::Normal(_)] => Parent::Pop,
+        _ => Parent::Keep,
+    })
 }
 
 /// A path *inside* a directory selfie manages, taken exactly as given.
@@ -424,6 +450,31 @@ pub(crate) fn state_file_path<H: HomeDir + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // What text alone can resolve, and what it must keep. Each row is a target as
+    // written and the key it normalizes to.
+    #[test]
+    fn a_target_keeps_what_text_cannot_resolve() {
+        for (written, key) in [
+            ("/../a", "/a"),         // a `..` at the root is the root
+            ("/a/./b/../c", "/a/c"), // absolute, resolved as before
+            ("a/../..", ".."),       // nothing left to remove: kept
+            ("~/a/../.x", "~/.x"),   // below home: resolved
+            ("~/../a/.x", "~/../a/.x"),
+            ("~/../~/..", "~/.."), // the second `~` is a directory named `~`
+            ("./~/../x", "x"),     // not `~`-rooted as written
+        ] {
+            assert_eq!(
+                normalize_target(Path::new(written)),
+                Path::new(key),
+                "{written}"
+            );
+        }
+        assert_ne!(
+            normalize_target(Path::new("./~/../x")),
+            normalize_target(Path::new("~/../x"))
+        );
+    }
 
     // A home directory already in hand, where a mock cannot serve:
     // `mock_expand_path` answers once, and both a rule table expanding `~`
