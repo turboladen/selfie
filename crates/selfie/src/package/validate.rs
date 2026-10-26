@@ -10,12 +10,13 @@ use super::{
     SpecRefusal, TargetCollision, TopLevelKeys, UnknownEntryKey, UnknownKey, dotfile_field,
     environment_field,
 };
+use super::{Override, overrides};
 
 // Validation has no file system, so it compares targets through `NoHome`. What it
 // cannot match is `~/x` against the absolute path of the same file, or a pair that
 // meets only after a `..` climbs out of home and back in. Apply compares against the
 // real home and decides those.
-use crate::fs::target::{NoHome, TargetPath, expand_target_path};
+use crate::fs::target::{NoHome, expand_target_path};
 
 /// A templated dotfile entry whose file has still to be read.
 ///
@@ -629,7 +630,13 @@ impl Package {
                     continue;
                 }
                 let key = expand_target_path(&NoHome, dotfile.target());
-                if shared_keys.contains(&key) {
+                let matches: Vec<(&DotfileEntry, Override)> = self
+                    .dotfiles
+                    .iter()
+                    .zip(&shared_keys)
+                    .map(|(shared, shared_key)| (shared, overrides(&key, shared_key)))
+                    .collect();
+                if matches.iter().any(|(_, o)| matches!(o, Override::Always)) {
                     issues.push(ValidationIssue::info(
                         ValidationErrorCategory::Advisory,
                         &format!("{field}.target"),
@@ -646,8 +653,8 @@ impl Package {
                 // A pair whose keys differ can still be one file on the machine
                 // whose home makes them meet. Validation cannot know that home, so
                 // it names it.
-                for (shared, shared_key) in self.dotfiles.iter().zip(&shared_keys) {
-                    if let Some(home) = Self::home_joining(&key, shared_key) {
+                for (shared, matched) in matches {
+                    if let Override::OnHome(home) = matched {
                         issues.push(ValidationIssue::info(
                             ValidationErrorCategory::Advisory,
                             &format!("{field}.target"),
@@ -684,44 +691,6 @@ impl Package {
         issues.extend(self.report_apply_time_commands());
 
         issues
-    }
-
-    // The home on which `a` and `b`, keys from `expand_target_path` against no home,
-    // name one file: one is absolute and the other `~/` plus a path the absolute one
-    // ends with. A `~` key that climbs out of home with `..` is not judged.
-    fn home_joining(a: &TargetPath, b: &TargetPath) -> Option<PathBuf> {
-        let (absolute, tilde) = match (a.path().is_absolute(), b.path().is_absolute()) {
-            (true, false) => (a.path(), b.path()),
-            (false, true) => (b.path(), a.path()),
-            _ => return None,
-        };
-        let below_home = tilde.strip_prefix("~").ok()?;
-        if below_home.as_os_str().is_empty()
-            || below_home
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return None;
-        }
-        let depth = below_home.components().count();
-        let home: PathBuf = absolute
-            .components()
-            .take(absolute.components().count().checked_sub(depth)?)
-            .collect();
-        (absolute.ends_with(below_home) && Self::is_conventional_home(&home)).then_some(home)
-    }
-
-    // Whether `home` is where a home directory conventionally is: `/root`, or a
-    // direct child of `/Users`, `/home` or `/var/home`. Elsewhere a `~` target the
-    // absolute path ends with is a coincidence of names, such as `/usr/local/bin/x`
-    // and `~/bin/x`, and a note about it would be noise.
-    fn is_conventional_home(home: &std::path::Path) -> bool {
-        home == std::path::Path::new("/root")
-            || home.parent().is_some_and(|parent| {
-                ["/Users", "/home", "/var/home"]
-                    .iter()
-                    .any(|base| parent == std::path::Path::new(base))
-            })
     }
 
     /// Every group of entries that deploy to one target in some environment,
