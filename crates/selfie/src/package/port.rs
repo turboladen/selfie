@@ -1114,12 +1114,11 @@ impl PackageParseKind {
     // Matched here rather than in the adapter, and with no catch-all, so a new
     // kind is a compile error beside the enum -- where whoever adds one is already
     // looking -- rather than in a crate they may never open.
-    //
-    // Adding a kind also means editing the MCP tool descriptions in
-    // `selfie-mcp`, which spell these labels out for callers. Nothing makes
-    // that a compile error, so it is named here instead.
     #[must_use]
     pub fn label(&self) -> &'static str {
+        // Adding a kind also means editing the MCP tool descriptions in
+        // `selfie-mcp`, which spell these labels out for callers. Nothing makes
+        // that a compile error, so it is named here instead.
         match self {
             Self::Yaml { .. } => "yaml",
             Self::Io { .. } => "io",
