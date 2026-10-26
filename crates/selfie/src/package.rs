@@ -432,6 +432,89 @@ pub(crate) fn deploy_to_clause(members: &[String], target: &TargetPath) -> Strin
 /// What to do about a [`TargetCollision`].
 pub(crate) const KEEP_ONE_ENTRY: &str = "Keep one entry per target.";
 
+/// What to do about entries of several specs deploying to one target.
+pub(crate) const KEEP_ONE_ENTRY_ACROSS_SPECS: &str = "Keep one entry for this target, in one spec.";
+
+/// Every one of `found`, a value with the context it was found in, kept once per
+/// `key`, in the order first found, with every context it was found in.
+pub(crate) fn seen_in<E, C, K: Ord>(
+    found: impl IntoIterator<Item = (E, C)>,
+    key: impl Fn(&C) -> K,
+) -> Vec<(C, Vec<E>)> {
+    let mut index: BTreeMap<K, usize> = BTreeMap::new();
+    let mut seen: Vec<(C, Vec<E>)> = Vec::new();
+    for (context, value) in found {
+        match index.entry(key(&value)) {
+            std::collections::btree_map::Entry::Occupied(at) => seen[*at.get()].1.push(context),
+            std::collections::btree_map::Entry::Vacant(at) => {
+                at.insert(seen.len());
+                seen.push((value, vec![context]));
+            }
+        }
+    }
+    seen
+}
+
+/// Whether an environment entry overrides a shared entry, from their targets
+/// expanded against no home.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Override {
+    /// On every home: the two targets are one text.
+    Always,
+    /// Only on the machine whose home is this.
+    OnHome(PathBuf),
+    /// On no home.
+    Never,
+}
+
+/// Whether the environment entry at `env_key` overrides the shared entry at
+/// `shared_key`, both expanded against no home.
+pub(crate) fn overrides(env_key: &TargetPath, shared_key: &TargetPath) -> Override {
+    if env_key == shared_key {
+        Override::Always
+    } else {
+        home_joining(env_key, shared_key).map_or(Override::Never, Override::OnHome)
+    }
+}
+
+// The home on which `a` and `b`, keys from `expand_target_path` against no home,
+// name one file: one is absolute and the other `~/` plus a path the absolute one
+// ends with. A `~` key that climbs out of home with `..` is not judged.
+fn home_joining(a: &TargetPath, b: &TargetPath) -> Option<PathBuf> {
+    let (absolute, tilde) = match (a.path().is_absolute(), b.path().is_absolute()) {
+        (true, false) => (a.path(), b.path()),
+        (false, true) => (b.path(), a.path()),
+        _ => return None,
+    };
+    let below_home = tilde.strip_prefix("~").ok()?;
+    if below_home.as_os_str().is_empty()
+        || below_home
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let depth = below_home.components().count();
+    let home: PathBuf = absolute
+        .components()
+        .take(absolute.components().count().checked_sub(depth)?)
+        .collect();
+    (absolute.ends_with(below_home) && is_conventional_home(&home)).then_some(home)
+}
+
+// Whether `home` is where a home directory conventionally is: `/root`, or a
+// direct child of `/Users`, `/home` or `/var/home`. Elsewhere a `~` target the
+// absolute path ends with is a coincidence of names, such as `/usr/local/bin/x`
+// and `~/bin/x`, and a note about it would be noise.
+fn is_conventional_home(home: &std::path::Path) -> bool {
+    home == std::path::Path::new("/root")
+        || home.parent().is_some_and(|parent| {
+            ["/Users", "/home", "/var/home"]
+                .iter()
+                .any(|base| parent == std::path::Path::new(base))
+        })
+}
+
 /// Every target two or more entries of any one of `lists` resolve to, once `~`
 /// is expanded against `home`. Groups from different lists sharing a target are
 /// merged into one, and an entry listed twice counts once.
@@ -1588,6 +1671,34 @@ impl Package {
         self.effective_dotfiles(home, Some(environment))
             .into_iter()
             .map(|scoped| scoped.entry.clone())
+            .collect()
+    }
+
+    /// The entries of `environment` that deploy on every home: what
+    /// [`Self::effective_dotfiles`] deploys without a home, less each shared
+    /// entry an environment entry may override on some home.
+    pub(crate) fn dotfiles_on_every_home(&self, environment: &str) -> Vec<ScopedEntry<'_>> {
+        let env_keys: Vec<TargetPath> = self
+            .environments
+            .value
+            .get(environment)
+            .map(|env| {
+                env.dotfiles()
+                    .iter()
+                    .map(|entry| expand_target_path(&crate::fs::target::NoHome, entry.target()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.effective_dotfiles(&crate::fs::target::NoHome, Some(environment))
+            .into_iter()
+            .filter(|scoped| {
+                scoped.environment.is_some() || {
+                    let key = expand_target_path(&crate::fs::target::NoHome, scoped.entry.target());
+                    env_keys
+                        .iter()
+                        .all(|env_key| overrides(env_key, &key) == Override::Never)
+                }
+            })
             .collect()
     }
 

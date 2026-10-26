@@ -6,7 +6,7 @@
 //! containment and, for a template entry, the template itself, then what is at the
 //! target. Nothing here runs a command.
 
-use std::collections::HashMap;
+use crate::package::collect::{CrossSpecCollisions, CrossSpecGroup, spec_label};
 use std::path::{Path, PathBuf};
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
     dotfile_service::{deploy::resolve_source_path, resolve::read_template},
     fs::{
         filesystem::{FileSystem, FileSystemError, repository_read_refusal},
-        target::{HomeDir, TargetPath, deploy_target, expand_target_path, repository_path},
+        target::{HomeDir, TargetPath, deploy_target, repository_path},
     },
     package::{
         ContentSource, DotfileEntry, Package, ScopedEntry, SpecOrigin, TargetCollision,
@@ -93,88 +93,6 @@ impl HomeDir for ResolvedHome {
     }
 }
 
-/// Entries of two or more specs that deploy to one target in the environment in
-/// use, every one of which [`classify_entry`] refuses.
-pub(super) struct CrossSpecCollisions<'c> {
-    groups: Vec<CrossSpecGroup<'c>>,
-}
-
-/// One target and the entries of several specs that deploy to it.
-struct CrossSpecGroup<'c> {
-    target: TargetPath,
-    members: Vec<(&'c Package, ScopedEntry<'c>)>,
-}
-
-impl<'c> CrossSpecCollisions<'c> {
-    /// The cross-spec collisions among `packages` in `environment`.
-    // Asked of every collected package, whichever ones the run deploys, since an
-    // entry of the one package a run names can still overwrite another spec's file.
-    pub(super) fn of(packages: &'c [Package], home: &ResolvedHome, environment: &str) -> Self {
-        let mut by_target: HashMap<String, CrossSpecGroup<'c>> = HashMap::new();
-        // A package refused whole takes no part: nothing of it deploys, and its
-        // entries may not be the ones it means. An entry refused for a reason of
-        // its own still does, so every entry sharing the target gets one answer.
-        for package in packages
-            .iter()
-            .filter(|package| !package.is_refused(environment))
-        {
-            for scoped in package.effective_dotfiles(home, Some(environment)) {
-                let target = expand_target_path(home, scoped.entry.target());
-                by_target
-                    .entry(target.state_key())
-                    .or_insert_with(|| CrossSpecGroup {
-                        target,
-                        members: Vec::new(),
-                    })
-                    .members
-                    .push((package, scoped));
-            }
-        }
-        let groups = by_target
-            .into_values()
-            .filter(|group| {
-                group
-                    .members
-                    .iter()
-                    .any(|(package, _)| package.path() != group.members[0].0.path())
-            })
-            .collect();
-        Self { groups }
-    }
-}
-
-impl CrossSpecGroup<'_> {
-    // Matched by the spec's file and the entry's place in it, since a run over one
-    // named package holds its own copy of that package.
-    fn contains(&self, package: &Package, scoped: &ScopedEntry<'_>) -> bool {
-        self.members
-            .iter()
-            .any(|(member, entry)| member.path() == package.path() && entry.is(scoped))
-    }
-
-    // Every member, as `package 'bat' (dotfiles[0])`, in the order collected.
-    fn describe(&self) -> String {
-        let names: Vec<String> = self
-            .members
-            .iter()
-            .map(|(package, scoped)| format!("{} ({})", spec_label(package), scoped.field()))
-            .collect();
-        crate::package::deploy_to_clause(&names, &self.target)
-    }
-}
-
-/// How a refusal names a spec: by the name lookup resolves it by, and as a package
-/// or a standalone dotfile spec.
-fn spec_label(package: &Package) -> String {
-    let name = package
-        .spec_name()
-        .unwrap_or_else(|| package.name().to_string());
-    match package.origin() {
-        SpecOrigin::DotfilesDirectory => format!("standalone dotfile '{name}'"),
-        SpecOrigin::PackageDirectory | SpecOrigin::Memory => format!("package '{name}'"),
-    }
-}
-
 /// A package's entries that share a target in the environment in use, inside the
 /// package or with another spec, which [`classify_entry`] refuses.
 pub(super) struct PackageCollisions<'p> {
@@ -196,14 +114,9 @@ impl<'p> PackageCollisions<'p> {
             package,
             groups: package.target_collisions(home, Some(environment)),
             across: across
-                .groups
+                .groups()
                 .iter()
-                .filter(|group| {
-                    group
-                        .members
-                        .iter()
-                        .any(|(member, _)| member.path() == package.path())
-                })
+                .filter(|group| group.involves(package))
                 .collect(),
         }
     }
@@ -256,11 +169,11 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
         return Err(Refusal::found(
             (Condition::Collision, Location::Entry),
             format!(
-                "Skipping '{}' in {}: {}, {consequence}. Keep one entry for this target, in \
-                 one spec.",
+                "Skipping '{}' in {}: {}, {consequence}. {}",
                 entry.target(),
                 spec_label(collisions.package),
-                group.describe()
+                group.describe(),
+                crate::package::KEEP_ONE_ENTRY_ACROSS_SPECS
             ),
         ));
     }

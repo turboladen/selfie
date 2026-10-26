@@ -4,6 +4,7 @@
 //! A canceled run stops between entries and says so to its caller, so a partial
 //! count is never read as a clean result.
 
+use crate::package::collect::CrossSpecCollisions;
 use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
@@ -19,8 +20,7 @@ use crate::{
 };
 
 use super::classify::{
-    Classified, CrossSpecCollisions, PackageCollisions, Purpose, RepoRead, ResolvedHome,
-    classify_entry, read_repo_file,
+    Classified, PackageCollisions, Purpose, RepoRead, ResolvedHome, classify_entry, read_repo_file,
 };
 use super::orphan::{self, Catalog};
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
@@ -84,7 +84,16 @@ where
 
     // Asked once, so every package compares targets against the same home.
     let home = ResolvedHome::of(filesystem);
-    let across = CrossSpecCollisions::of(catalog.packages, &home, config.environment());
+    let across = CrossSpecCollisions::of(
+        catalog.packages.iter().map(|package| {
+            (
+                package,
+                package.effective_dotfiles(&home, Some(config.environment())),
+            )
+        }),
+        &home,
+        config.environment(),
+    );
     // The same question apply asks, so the two commands cannot answer
     // differently about one file. Drift reporting a package clean while apply
     // refuses it is worse than either answer alone: it sends a reader to run the

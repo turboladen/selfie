@@ -5,6 +5,12 @@
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ValidationIssues(Vec<ValidationIssue>);
 
+impl Extend<ValidationIssue> for ValidationIssues {
+    fn extend<I: IntoIterator<Item = ValidationIssue>>(&mut self, issues: I) {
+        self.0.extend(issues);
+    }
+}
+
 impl ValidationIssues {
     /// Get all validation issues regardless of level
     #[must_use]

@@ -53,15 +53,6 @@ where
         }
     };
 
-    // Every unparsable file is reported, but only the ones apply could have used
-    // are errors: a dotfiles copy a package spec shadows is not one, as it is not
-    // one for apply. Collection refuses exactly those, one refusal per file.
-    //
-    // Anything else collection refused is an error here: an ambiguous name is one
-    // install refuses too, and an unlistable dotfiles directory may hide specs
-    // this run never saw. An ambiguity collection let through, because no file of
-    // it deploys here, is still one install refuses.
-    //
     // The warnings count apart from specs with warnings, since some name no spec
     // at all. It counts every warning-level message collection sends, a refused
     // file's or directory's included; an ambiguous name's is a refusal row only.
@@ -71,6 +62,14 @@ where
     let unrefused = unrefused_ambiguities
         .into_iter()
         .map(|(name, paths)| Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths }));
+    // Every unparsable file is reported, but only the ones apply could have used
+    // are errors: a dotfiles copy a package spec shadows is not one, as it is not
+    // one for apply. Collection refuses exactly those, one refusal per file.
+    //
+    // Anything else collection refused is an error here: an ambiguous name is one
+    // install refuses too, and an unlistable dotfiles directory may hide specs
+    // this run never saw. An ambiguity collection let through, because no file of
+    // it deploys here, is still one install refuses.
     for finding in findings.into_iter().chain(unrefused) {
         match &finding {
             Finding::Warning(_) => collection_warnings += 1,
@@ -102,6 +101,11 @@ where
     let mut error_count: usize = 0;
     let mut warning_count: usize = 0;
 
+    // Collisions across specs are a property of the collection, not of any one
+    // file, so they are asked of every collected spec and reported on each member
+    // this run validates.
+    let mut across = crate::package::validate::cross_spec_issues(&packages, environment);
+
     for package in &valid_packages {
         // A spec is read through the repository that loaded it, which is the one
         // that reads the files it refers to.
@@ -110,8 +114,9 @@ where
         } else {
             repo
         };
-        let issues = &super::validate::all_issues(package, source, environment);
-        let validation_issues = super::validate::issue_payload(issues);
+        let mut issues = super::validate::all_issues(package, source, environment);
+        issues.extend(across.remove(package.path()).unwrap_or_default());
+        let validation_issues = super::validate::issue_payload(&issues);
 
         let outcome = issues.outcome();
         match outcome {

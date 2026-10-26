@@ -10,12 +10,13 @@ use super::{
     SpecRefusal, TargetCollision, TopLevelKeys, UnknownEntryKey, UnknownKey, dotfile_field,
     environment_field,
 };
+use super::{Override, overrides, seen_in};
 
 // Validation has no file system, so it compares targets through `NoHome`. What it
 // cannot match is `~/x` against the absolute path of the same file, or a pair that
 // meets only after a `..` climbs out of home and back in. Apply compares against the
 // real home and decides those.
-use crate::fs::target::{NoHome, TargetPath, expand_target_path};
+use crate::fs::target::{NoHome, expand_target_path};
 
 /// A templated dotfile entry whose file has still to be read.
 ///
@@ -30,6 +31,71 @@ pub struct TemplateReference<'a> {
     pub source: &'a str,
     /// The entry's declared bindings.
     pub vars: &'a BTreeMap<String, String>,
+}
+
+/// The errors for entries of two or more of `packages` that deploy to one target
+/// on every machine, keyed by the spec file each belongs to.
+///
+/// Asked of `environment` and every environment any of `packages` declares. Each
+/// member entry gets one error naming every member, the target, and the
+/// environments where they meet.
+#[must_use]
+pub(crate) fn cross_spec_issues(
+    packages: &[Package],
+    environment: &str,
+) -> BTreeMap<PathBuf, Vec<ValidationIssue>> {
+    use crate::package::collect::CrossSpecCollisions;
+
+    // A standalone spec declares no environment and deploys in every one, so the
+    // environments asked are the union of what any spec declares.
+    let environments: std::collections::BTreeSet<&str> = packages
+        .iter()
+        .flat_map(|package| package.environments().keys().map(String::as_str))
+        .chain(std::iter::once(environment))
+        .collect();
+    // Only entries that deploy on every home take part, so only a pair that is
+    // one file on every machine is reported.
+    let found = environments.into_iter().flat_map(|environment| {
+        let members = packages
+            .iter()
+            .map(|package| (package, package.dotfiles_on_every_home(environment)));
+        CrossSpecCollisions::of(members, &NoHome, environment)
+            .into_groups()
+            .into_iter()
+            .map(move |group| (environment, group))
+    });
+    let merged = seen_in(found, |group| {
+        let mut members: Vec<(PathBuf, String)> = group
+            .members()
+            .iter()
+            .map(|(package, scoped)| (package.path().clone(), scoped.field()))
+            .collect();
+        members.sort();
+        (group.target().state_key(), members)
+    });
+
+    let mut issues: BTreeMap<PathBuf, Vec<ValidationIssue>> = BTreeMap::new();
+    for (group, environments) in merged {
+        let environments: Vec<String> = environments.iter().map(|e| format!("'{e}'")).collect();
+        let message = format!(
+            "Dotfile entries {} in environment {}, so apply deploys none of them there",
+            group.describe(),
+            environments.join(", ")
+        );
+        for (package, scoped) in group.members() {
+            issues
+                .entry(package.path().clone())
+                .or_default()
+                .push(ValidationIssue::error_at(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("{}.target", scoped.field()),
+                    &message,
+                    Some(super::KEEP_ONE_ENTRY_ACROSS_SPECS),
+                    SourceLocation::from_location(scoped.entry.target_location()),
+                ));
+        }
+    }
+    issues
 }
 
 /// Check that every declared variable is actually referenced by its template.
@@ -629,7 +695,13 @@ impl Package {
                     continue;
                 }
                 let key = expand_target_path(&NoHome, dotfile.target());
-                if shared_keys.contains(&key) {
+                let matches: Vec<(&DotfileEntry, Override)> = self
+                    .dotfiles
+                    .iter()
+                    .zip(&shared_keys)
+                    .map(|(shared, shared_key)| (shared, overrides(&key, shared_key)))
+                    .collect();
+                if matches.iter().any(|(_, o)| matches!(o, Override::Always)) {
                     issues.push(ValidationIssue::info(
                         ValidationErrorCategory::Advisory,
                         &format!("{field}.target"),
@@ -646,8 +718,8 @@ impl Package {
                 // A pair whose keys differ can still be one file on the machine
                 // whose home makes them meet. Validation cannot know that home, so
                 // it names it.
-                for (shared, shared_key) in self.dotfiles.iter().zip(&shared_keys) {
-                    if let Some(home) = Self::home_joining(&key, shared_key) {
+                for (shared, matched) in matches {
+                    if let Override::OnHome(home) = matched {
                         issues.push(ValidationIssue::info(
                             ValidationErrorCategory::Advisory,
                             &format!("{field}.target"),
@@ -686,44 +758,6 @@ impl Package {
         issues
     }
 
-    // The home on which `a` and `b`, keys from `expand_target_path` against no home,
-    // name one file: one is absolute and the other `~/` plus a path the absolute one
-    // ends with. A `~` key that climbs out of home with `..` is not judged.
-    fn home_joining(a: &TargetPath, b: &TargetPath) -> Option<PathBuf> {
-        let (absolute, tilde) = match (a.path().is_absolute(), b.path().is_absolute()) {
-            (true, false) => (a.path(), b.path()),
-            (false, true) => (b.path(), a.path()),
-            _ => return None,
-        };
-        let below_home = tilde.strip_prefix("~").ok()?;
-        if below_home.as_os_str().is_empty()
-            || below_home
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return None;
-        }
-        let depth = below_home.components().count();
-        let home: PathBuf = absolute
-            .components()
-            .take(absolute.components().count().checked_sub(depth)?)
-            .collect();
-        (absolute.ends_with(below_home) && Self::is_conventional_home(&home)).then_some(home)
-    }
-
-    // Whether `home` is where a home directory conventionally is: `/root`, or a
-    // direct child of `/Users`, `/home` or `/var/home`. Elsewhere a `~` target the
-    // absolute path ends with is a coincidence of names, such as `/usr/local/bin/x`
-    // and `~/bin/x`, and a note about it would be noise.
-    fn is_conventional_home(home: &std::path::Path) -> bool {
-        home == std::path::Path::new("/root")
-            || home.parent().is_some_and(|parent| {
-                ["/Users", "/home", "/var/home"]
-                    .iter()
-                    .any(|base| parent == std::path::Path::new(base))
-            })
-    }
-
     /// Every group of entries that deploy to one target in some environment,
     /// which apply refuses whole, each group once.
     fn every_target_collision(&self) -> Vec<TargetCollision<'_>> {
@@ -739,19 +773,19 @@ impl Package {
         let contexts =
             std::iter::once(None).chain(environments.iter().map(|(name, _)| Some(*name)));
 
-        let mut collisions: Vec<TargetCollision<'_>> = Vec::new();
-        for collision in contexts.flat_map(|context| self.target_collisions(&NoHome, context)) {
-            let mut key = collision.fields();
-            key.sort();
-            if !collisions.iter().any(|seen| {
-                let mut seen_key = seen.fields();
-                seen_key.sort();
-                seen_key == key
-            }) {
-                collisions.push(collision);
-            }
-        }
-        collisions
+        let found = contexts.flat_map(|context| {
+            self.target_collisions(&NoHome, context)
+                .into_iter()
+                .map(move |collision| (context, collision))
+        });
+        seen_in(found, |collision| {
+            let mut fields = collision.fields();
+            fields.sort();
+            fields
+        })
+        .into_iter()
+        .map(|(collision, _)| collision)
+        .collect()
     }
 
     /// Note how many commands `selfie apply` will run for this package's
