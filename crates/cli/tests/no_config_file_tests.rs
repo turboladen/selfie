@@ -11,7 +11,7 @@ use std::time::Duration;
 
 pub mod common;
 
-use common::sandboxed_command;
+use common::{CLEAN, FAILED, sandboxed_command};
 use tempfile::TempDir;
 
 /// A sandbox with a package directory and deliberately **no** config file.
@@ -22,14 +22,14 @@ fn sandbox_without_config() -> TempDir {
     temp
 }
 
-fn run(temp: &TempDir, args: &[&str]) -> (bool, String) {
+fn run(temp: &TempDir, args: &[&str]) -> (Option<i32>, String) {
     let output = sandboxed_command(temp)
         .timeout(Duration::from_secs(30))
         .args(args)
         .output()
         .unwrap();
     (
-        output.status.success(),
+        output.status.code(),
         format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -43,7 +43,7 @@ fn a_run_with_both_required_flags_needs_no_config_file() {
     let temp = sandbox_without_config();
     let packages = temp.path().join("packages");
 
-    let (ok, combined) = run(
+    let (code, combined) = run(
         &temp,
         &[
             "--environment",
@@ -55,7 +55,7 @@ fn a_run_with_both_required_flags_needs_no_config_file() {
         ],
     );
 
-    assert!(ok, "expected success, got:\n{combined}");
+    assert_eq!(code, Some(CLEAN), "expected success, got:\n{combined}");
     assert!(
         !combined.contains("No configuration file found"),
         "the absent file must not be reported at all, got:\n{combined}"
@@ -68,9 +68,9 @@ fn a_run_with_both_required_flags_needs_no_config_file() {
 fn both_missing_required_settings_are_named() {
     let temp = sandbox_without_config();
 
-    let (ok, combined) = run(&temp, &["package", "list"]);
+    let (code, combined) = run(&temp, &["package", "list"]);
 
-    assert!(!ok, "expected a failure, got:\n{combined}");
+    assert_eq!(code, Some(FAILED), "expected a failure, got:\n{combined}");
     assert!(
         combined.contains("--environment"),
         "the missing environment flag must be named, got:\n{combined}"
@@ -87,9 +87,9 @@ fn both_missing_required_settings_are_named() {
 fn only_the_missing_setting_is_named() {
     let temp = sandbox_without_config();
 
-    let (ok, combined) = run(&temp, &["--environment", "test-env", "package", "list"]);
+    let (code, combined) = run(&temp, &["--environment", "test-env", "package", "list"]);
 
-    assert!(!ok, "expected a failure, got:\n{combined}");
+    assert_eq!(code, Some(FAILED), "expected a failure, got:\n{combined}");
     assert!(
         combined.contains("--package-directory"),
         "the missing flag must be named, got:\n{combined}"
@@ -118,7 +118,7 @@ fn a_fifo_config_is_still_fatal_when_every_flag_is_supplied() {
         .unwrap();
     assert!(status.success(), "mkfifo failed to create the test fixture");
 
-    let (ok, combined) = run(
+    let (code, combined) = run(
         &temp,
         &[
             "--environment",
@@ -130,7 +130,7 @@ fn a_fifo_config_is_still_fatal_when_every_flag_is_supplied() {
         ],
     );
 
-    assert!(!ok, "expected a refusal, got:\n{combined}");
+    assert_eq!(code, Some(FAILED), "expected a refusal, got:\n{combined}");
     assert!(
         combined.contains("not a regular file"),
         "the refusal must survive the flags-only fallback, got:\n{combined}"
@@ -155,7 +155,7 @@ fn a_malformed_config_is_still_fatal_when_every_flag_is_supplied() {
     )
     .unwrap();
 
-    let (ok, combined) = run(
+    let (code, combined) = run(
         &temp,
         &[
             "--environment",
@@ -167,8 +167,9 @@ fn a_malformed_config_is_still_fatal_when_every_flag_is_supplied() {
         ],
     );
 
-    assert!(
-        !ok,
+    assert_eq!(
+        code,
+        Some(FAILED),
         "a config file that cannot be parsed must not be replaced by the flags, got:\n{combined}"
     );
 }
@@ -187,7 +188,7 @@ fn the_optional_directories_keep_their_defaults() {
     )
     .unwrap();
 
-    let (ok, combined) = run(
+    let (code, combined) = run(
         &temp,
         &[
             "--environment",
@@ -199,7 +200,7 @@ fn the_optional_directories_keep_their_defaults() {
         ],
     );
 
-    assert!(ok, "expected success, got:\n{combined}");
+    assert_eq!(code, Some(CLEAN), "expected success, got:\n{combined}");
     // The dotfiles directory is found through the sibling default, because no
     // `--dotfiles-directory` flag is given.
     assert!(
@@ -221,7 +222,7 @@ fn a_tilde_in_a_flag_is_expanded() {
     )
     .unwrap();
 
-    let (ok, combined) = run(
+    let (code, combined) = run(
         &temp,
         &[
             "--environment",
@@ -232,7 +233,11 @@ fn a_tilde_in_a_flag_is_expanded() {
         ],
     );
 
-    assert!(ok, "~ names the sandbox's home directory, got:\n{combined}");
+    assert_eq!(
+        code,
+        Some(CLEAN),
+        "~ names the sandbox's home directory, got:\n{combined}"
+    );
     assert!(
         combined.contains("tilde-probe"),
         "the spec under the expanded directory must be listed, got:\n{combined}"
@@ -248,7 +253,7 @@ fn an_empty_required_flag_counts_as_missing() {
     let temp = sandbox_without_config();
     let packages = temp.path().join("packages");
 
-    let (ok, combined) = run(
+    let (code, combined) = run(
         &temp,
         &[
             "--environment",
@@ -260,8 +265,9 @@ fn an_empty_required_flag_counts_as_missing() {
         ],
     );
 
-    assert!(
-        !ok,
+    assert_eq!(
+        code,
+        Some(FAILED),
         "an empty environment must not be accepted, got:\n{combined}"
     );
     assert!(
@@ -289,7 +295,7 @@ fn a_dangling_config_symlink_is_still_fatal_when_every_flag_is_supplied() {
     )
     .unwrap();
 
-    let (ok, combined) = run(
+    let (code, combined) = run(
         &temp,
         &[
             "--environment",
@@ -301,8 +307,9 @@ fn a_dangling_config_symlink_is_still_fatal_when_every_flag_is_supplied() {
         ],
     );
 
-    assert!(
-        !ok,
+    assert_eq!(
+        code,
+        Some(FAILED),
         "a link that is present must not be replaced by the flags, got:\n{combined}"
     );
     assert!(

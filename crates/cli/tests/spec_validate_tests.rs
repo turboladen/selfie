@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 
 // A fixture value, never a real credential. High-entropy and deliberately not
@@ -36,7 +36,7 @@ fn an_unparsable_spec_shows_the_lines_around_the_failure() {
     let output = sandboxed_command(&temp_dir)
         .args(["spec", "validate", "creds"])
         .assert()
-        .failure()
+        .code(FAILED)
         .get_output()
         .stderr
         .clone();
@@ -118,7 +118,7 @@ fn a_listing_does_not_show_a_window() {
     let output = sandboxed_command(&temp_dir)
         .args(["spec", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .get_output()
         .stdout
         .clone();

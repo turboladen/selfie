@@ -6,7 +6,7 @@
 
 pub mod common;
 
-use common::{FAILED, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, sandboxed_command, setup_default_test_config};
 use predicates::prelude::PredicateBooleanExt;
 use std::fs;
 
@@ -45,7 +45,7 @@ fn spec_edit_leaves_an_existing_file_byte_identical() {
         .env("EDITOR", "true")
         .args(["spec", "edit", "myapp"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     // Byte-for-byte, not "parses the same". The anchor, the comments, the blank
     // line and the key order are exactly what a rewrite would have taken.
@@ -75,7 +75,7 @@ environments:
         .env("EDITOR", "true")
         .args(["spec", "edit", "myapp"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert_eq!(fs::read_to_string(&path).unwrap(), yaml);
 }
@@ -97,7 +97,7 @@ fn spec_edit_does_not_call_an_unparsable_file_missing() {
         .env("EDITOR", "true")
         .args(["spec", "edit", "myapp"])
         .assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicates::str::contains("does not exist").not());
 
     assert_eq!(
@@ -139,7 +139,7 @@ fn spec_edit_opens_a_spec_stored_under_another_case() {
         .env("EDITOR", "true")
         .args(["spec", "edit", "neovim"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stderr(predicates::str::contains("Opening existing package"));
 
     let mut entries: Vec<String> = fs::read_dir(&packages)

@@ -149,7 +149,7 @@ fn spec_info_and_spec_list_show_environments_in_file_order() {
     ] {
         let output = sandboxed_command(&temp_dir).args(args).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(output.status.success(), "{args:?}: {stdout}");
+        assert_eq!(output.status.code(), Some(CLEAN), "{args:?}: {stdout}");
         assert!(
             stdout.contains(&format!("zeta, alpha, *{SELFIE_ENV}, mid")),
             "{args:?}: {stdout}"

@@ -1,6 +1,9 @@
 pub mod common;
 
-use common::{SELFIE_ENV, add_package, get_command, sandboxed_command, setup_default_test_config};
+use common::{
+    CLEAN, FAILED, SELFIE_ENV, USAGE, add_package, get_command, sandboxed_command,
+    setup_default_test_config,
+};
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
 
@@ -8,7 +11,7 @@ use selfie::package::PackageBuilder;
 fn test_cli_help() {
     let mut cmd = get_command();
     cmd.arg("--help");
-    cmd.assert().success().stdout(predicate::str::contains(
+    cmd.assert().code(CLEAN).stdout(predicate::str::contains(
         "Selfie - A personal package manager",
     ));
 }
@@ -17,28 +20,28 @@ fn test_cli_help() {
 fn test_cli_version() {
     let mut cmd = get_command();
     cmd.arg("--version");
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
 fn test_cli_invalid_command() {
     let mut cmd = get_command();
     cmd.arg("invalid-command");
-    cmd.assert().failure();
+    cmd.assert().code(USAGE);
 }
 
 #[test]
 fn test_cli_invalid_subcommand() {
     let mut cmd = get_command();
     cmd.args(["package", "invalid-subcommand"]);
-    cmd.assert().failure();
+    cmd.assert().code(USAGE);
 }
 
 #[test]
 fn test_cli_missing_required_arg() {
     let mut cmd = get_command();
     cmd.args(["package", "install"]); // Missing package_name
-    cmd.assert().failure();
+    cmd.assert().code(USAGE);
 }
 
 #[test]
@@ -46,7 +49,7 @@ fn test_cli_with_environment() {
     let mut cmd = get_command();
     // Just test that the arg is accepted, not that it does anything yet
     cmd.args(["-e", SELFIE_ENV, "help"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -54,14 +57,14 @@ fn test_cli_with_package_directory() {
     let mut cmd = get_command();
     // Just test that the arg is accepted, not that it does anything yet
     cmd.args(["-p", "/test/path", "help"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
 fn test_cli_verbose_flag() {
     let mut cmd = get_command();
     cmd.args(["-v", "help"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -69,7 +72,7 @@ fn test_cli_no_color() {
     let temp_dir = setup_default_test_config();
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["--no-color", "config", "validate"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 // The following tests just check that the CLI accepts these commands,
@@ -80,7 +83,7 @@ fn test_cli_config_validate() {
     let temp_dir = setup_default_test_config();
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["config", "validate"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -95,7 +98,7 @@ fn test_cli_package_list() {
 
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -110,7 +113,7 @@ fn test_cli_spec_info() {
 
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", "test-package"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -129,7 +132,7 @@ fn test_cli_package_check() {
 
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "check", "test-package"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -146,7 +149,7 @@ fn test_cli_package_install() {
 
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "test-package"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -165,7 +168,7 @@ fn test_cli_package_status() {
 
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "status", "test-package"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -173,7 +176,7 @@ fn test_cli_spec_create() {
     let temp_dir = setup_default_test_config();
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "create", "test-package"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -182,7 +185,7 @@ fn test_cli_spec_remove_not_found() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "remove", "nonexistent-package"]);
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("not found"));
 }
 
@@ -198,7 +201,7 @@ fn test_cli_spec_remove_does_not_call_an_unreadable_file_missing() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "remove", "brokenpkg"]);
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("not found").not())
         .stderr(predicate::str::contains("could not load that spec"));
 
@@ -283,5 +286,5 @@ fn test_cli_spec_validate() {
     add_package(&temp_dir, &package);
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "validate", "test-package"]);
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }

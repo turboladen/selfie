@@ -20,7 +20,7 @@ fn test_package_list_empty() {
 
     // Should succeed but not list any packages
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("No packages found."));
 }
 
@@ -40,7 +40,7 @@ fn test_package_list_single_package() {
     cmd.args(["package", "list"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("test-package"));
 }
 
@@ -71,15 +71,12 @@ fn test_package_list_multiple_packages() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
-    // Should list only packages relevant to current environment (package-a and package-b)
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("package-a"))
-        .stdout(predicate::str::contains("package-b"));
-
-    // package-c should NOT be listed since it doesn't support current environment
-    let output = cmd.assert().success().get_output().stdout.clone();
+    // Only the packages that support the current environment are listed.
+    let output = cmd.assert().code(CLEAN).get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
+    assert!(output_str.contains("package-a"), "got:\n{output_str}");
+    assert!(output_str.contains("package-b"), "got:\n{output_str}");
+    // package-c supports only another environment.
     assert!(!output_str.contains("package-c"));
 }
 
@@ -147,7 +144,7 @@ fn test_package_list_different_environments() {
     cmd.args(["package", "list"]);
 
     // Should show only packages relevant to current environment
-    let output = cmd.assert().success().get_output().stdout.clone();
+    let output = cmd.assert().code(CLEAN).get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
 
     // Verify only relevant packages are shown
@@ -173,7 +170,7 @@ fn test_package_list_with_no_color_flag() {
     cmd.args(["--no-color", "package", "list"]);
 
     // Should not contain ANSI color codes
-    let output = cmd.assert().success().get_output().stdout.clone();
+    let output = cmd.assert().code(CLEAN).get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
     assert!(!output_str.contains("\x1B["), "Output: {output_str}");
 }
@@ -198,7 +195,7 @@ fn test_package_list_shows_status() {
 
     // Should contain the package name and a status indicator
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("test-package-with-check"))
         .stdout(predicate::str::contains("Installed"));
 }
@@ -220,7 +217,7 @@ fn test_package_list_shows_no_check_status() {
 
     // Should show the package name and "No check" status
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("no-check-package"))
         .stdout(predicate::str::contains("No check"));
 }
@@ -239,7 +236,7 @@ fn test_package_list_non_existent_directory() {
 
     // Should fail with appropriate error about missing directory
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("does not exist"));
 }
 
@@ -270,7 +267,7 @@ fn test_package_list_all_flag_environment_ordering() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list", "--all"]);
 
-    let output = cmd.assert().success().get_output().stdout.clone();
+    let output = cmd.assert().code(CLEAN).get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
 
     // For bacon: current environment (test-env) should come first, then arch-home
@@ -331,7 +328,7 @@ fn test_package_list_all_flag_shows_all_packages() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
-    let output = cmd.assert().success().get_output().stdout.clone();
+    let output = cmd.assert().code(CLEAN).get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
 
     assert!(output_str.contains("current-env-package"));
@@ -341,7 +338,7 @@ fn test_package_list_all_flag_shows_all_packages() {
     let mut cmd_all = sandboxed_command(&temp_dir);
     cmd_all.args(["package", "list", "--all"]);
 
-    let output_all = cmd_all.assert().success().get_output().stdout.clone();
+    let output_all = cmd_all.assert().code(CLEAN).get_output().stdout.clone();
     let output_all_str = String::from_utf8_lossy(&output_all);
 
     assert!(output_all_str.contains("current-env-package"));
@@ -378,7 +375,7 @@ fn test_package_list_all_flag_not_relevant_status() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list", "--all"]);
 
-    let output = cmd.assert().success().get_output().stdout.clone();
+    let output = cmd.assert().code(CLEAN).get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
 
     // Package not relevant to current environment should show N/A
@@ -427,7 +424,7 @@ fn test_package_list_default_behavior_filters_by_environment() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "list"]);
 
-    let output = cmd.assert().success().get_output().stdout.clone();
+    let output = cmd.assert().code(CLEAN).get_output().stdout.clone();
     let output_str = String::from_utf8_lossy(&output);
 
     // Both packages should be shown since they support current environment
@@ -476,7 +473,7 @@ fn test_package_list_environment_mismatch_shows_stats() {
     cmd.args(["package", "list"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains(
             "No packages found for environment 'test-env'.",
         ))

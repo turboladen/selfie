@@ -13,7 +13,7 @@ pub mod common;
 
 use std::path::Path;
 
-use common::{FAILED, SELFIE_ENV, sandboxed_command};
+use common::{CLEAN, FAILED, SELFIE_ENV, sandboxed_command};
 use tempfile::TempDir;
 
 const MISSING_DIR_WARNING: &str = "standalone dotfiles will not be read";
@@ -134,8 +134,9 @@ fn an_absent_default_dotfiles_directory_is_silent() {
         !combined.to_lowercase().contains(MISSING_DIR_ANY),
         "an unset dotfiles_directory whose default is absent must not be reported, got:\n{combined}"
     );
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(CLEAN),
         "the run must still succeed, got:\n{combined}"
     );
 }
@@ -261,8 +262,9 @@ fn spec_create_succeeds_quietly_when_there_is_no_dotfiles_directory() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(CLEAN),
         "creation must proceed, got:\n{combined}"
     );
     assert!(
@@ -538,7 +540,7 @@ fn dotfiles_track_blames_the_directory_not_the_name_when_it_cannot_be_read() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!output.status.success(), "got:\n{combined}");
+    assert_eq!(output.status.code(), Some(FAILED), "got:\n{combined}");
     assert!(
         combined.contains("cannot tell whether the name is already taken"),
         "the refusal must say the answer is unknown, got:\n{combined}"
@@ -599,7 +601,7 @@ fn spec_create_names_an_unreadable_dotfiles_directory_once() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!output.status.success(), "got:\n{combined}");
+    assert_eq!(output.status.code(), Some(FAILED), "got:\n{combined}");
     assert!(
         combined.contains(&format!(
             "Cannot create 'vim': cannot tell whether the name is already taken: {}",
@@ -633,7 +635,7 @@ fn dotfiles_track_works_before_the_package_directory_exists() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "stderr:\n{stderr}");
+    assert_eq!(output.status.code(), Some(CLEAN), "stderr:\n{stderr}");
     assert!(
         stdout.contains("Now tracking '~/.tracked-rc' in spec 'rc'"),
         "the track must report its answer, stdout:\n{stdout}\nstderr:\n{stderr}"
