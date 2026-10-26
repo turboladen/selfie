@@ -86,19 +86,19 @@ fn irregular_refusal(path: &Path) -> Option<FileSystemError> {
     })
 }
 
-/// What the writer does with whatever is already at the target, and how far its
-/// durability reaches.
+/// What the writer does with whatever is already at the target. Both flush the
+/// parent directory, best effort.
 #[derive(Clone, Copy)]
 enum Replacement {
     /// Replace a symlink that does not resolve to an irregular target; create
-    /// owner-only. The parent directory is not fsynced.
-    // The deploy state is written this way and must stay less durable than the
-    // targets it records: a record outliving the write it describes turns a
-    // lost deploy into a conflict blamed on the user. `save_deploy_state` says
-    // so; losing a secret target's rename costs the deploy, not the data.
+    /// owner-only.
+    // The deploy state, the copy kept before an overwrite, and every secret target
+    // are written this way. The copy is why this flushes its parent: it lands
+    // before the overwrite, so losing its directory entry to a crash that keeps
+    // the overwrite destroys the only remaining copy.
     OwnerOnly,
     /// Refuse a symlink; keep an existing regular file's mode, else create at
-    /// `0o666 & !umask`. The parent directory is fsynced, best effort.
+    /// `0o666 & !umask`.
     KeepingMode,
 }
 
@@ -243,8 +243,7 @@ fn write_by_rename(
     }
 
     // The data is durable; the directory entry naming it is not. A freshly
-    // created file can survive its own fsync and still vanish. `OwnerOnly`
-    // skips this on purpose; see the variant.
+    // created file can survive its own fsync and still vanish.
     //
     // Best-effort, deliberately: opening a directory needs read permission, so
     // a `0o300` directory refuses this open with `EACCES`, and failing here
@@ -252,7 +251,7 @@ fn write_by_rename(
     // `a_write_only_parent_directory_still_succeeds` holds it. Only the
     // immediate parent; on Apple targets std's `sync_all` is `fcntl(F_FULLFSYNC)`,
     // and its failure is swallowed here like any other. Do not claim more.
-    if keep_mode && let Ok(dir) = fs::File::open(parent) {
+    if let Ok(dir) = fs::File::open(parent) {
         let _ = dir.sync_all();
     }
 
@@ -1382,6 +1381,35 @@ mod private_write_tests {
             assert!(!never_created.exists());
             assert_eq!(fs::read(&target).unwrap(), b"secret");
             assert_owner_only(&target);
+        }
+
+        // The parent flush must not turn a working write into a failure here either.
+        // `0o300` lets selfie create a file in the directory and refuses opening it,
+        // so only the flush fails.
+        #[test]
+        fn a_write_only_parent_directory_still_succeeds() {
+            if nix::unistd::Uid::effective().is_root() {
+                eprintln!("SKIP a_write_only_parent_directory_still_succeeds: running as root");
+                return;
+            }
+            let dir = tempdir().unwrap();
+            let parent = dir.path().join("write-only");
+            fs::create_dir(&parent).unwrap();
+            let target = parent.join("creds");
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+
+            let result =
+                RealFileSystem.write_file_private(&tp(&target), b"secret", IfPresent::Replace);
+
+            // Restore before asserting, so a failure still leaves a removable
+            // temporary directory behind.
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+            assert_eq!(
+                result.expect("a write-only parent directory must not fail the write"),
+                Placed::Written
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"secret");
         }
 
         #[test]

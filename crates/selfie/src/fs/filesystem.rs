@@ -323,9 +323,16 @@ pub trait FileSystem: Send + Sync {
     /// Because the file is replaced rather than modified, it does not inherit the
     /// old one's extended attributes, POSIX ACLs, SELinux label, or ownership.
     ///
+    /// # Durability
+    ///
+    /// As [`write_file_no_follow`](FileSystem::write_file_no_follow)'s: returns
+    /// only once the data has been flushed to disk, with a best-effort attempt at
+    /// the parent directory.
+    ///
     /// # Strength of the guarantee
     ///
-    /// The mode is `0o600` masked by the umask — never more permissive.
+    /// The mode is `0o600` masked by the umask — never more permissive. The
+    /// durability is as strong as `write_file_no_follow`'s, and no stronger.
     ///
     /// # Errors
     ///
