@@ -35,8 +35,7 @@ use super::classify::{
     read_repo_file,
 };
 use super::deploy_entry::{
-    Decided, DeployOutcome, DeployUnit, Ledger, Recorded, conflict_diff, deploy_and_record,
-    record_and_save,
+    Decided, DeployUnit, Ledger, Recorded, conflict_diff, deploy_and_record, record_and_save,
 };
 use super::orphan::{self, Catalog};
 use super::port::ApplyOptions;
@@ -118,7 +117,7 @@ impl std::fmt::Display for Stop {
 }
 
 /// How one entry ended, for the loop to tally once.
-enum EntryOutcome {
+pub(super) enum EntryOutcome {
     Deployed,
     /// In sync, or only previewed by a dry run.
     Skipped,
@@ -708,7 +707,7 @@ where
                     }
                 };
 
-                match deploy_and_record(
+                deploy_and_record(
                     filesystem,
                     sender,
                     &mut ledger,
@@ -717,13 +716,6 @@ where
                     &mut backed_up,
                 )
                 .await
-                {
-                    DeployOutcome::Deployed => EntryOutcome::Deployed,
-                    DeployOutcome::Previewed => EntryOutcome::Skipped,
-                    DeployOutcome::Refused => EntryOutcome::Refused,
-                    DeployOutcome::Failed => EntryOutcome::Failed,
-                    DeployOutcome::Unrecorded(reason) => EntryOutcome::Unrecorded(reason),
-                }
             };
 
             match outcome {

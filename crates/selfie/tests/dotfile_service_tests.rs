@@ -4402,11 +4402,8 @@ mod secret_bearing {
     // *Which* renderings count is `test_common::secrets`' decision, not this
     // call site's — see that module for what they are and what they miss.
     #[track_caller]
-    fn assert_no_event_mentions(events: &[PackageEvent], secret: impl AsRef<[u8]>) {
-        let secret = secret.as_ref();
-        for event in events {
-            test_common::assert_secret_free(&format!("{event:?}"), secret, "an event");
-        }
+    pub(super) fn assert_no_event_mentions(events: &[PackageEvent], secret: impl AsRef<[u8]>) {
+        test_common::assert_secret_free(&format!("{events:?}"), secret.as_ref(), "the events");
     }
 
     // A resolver that accepts every conflict.
@@ -7623,7 +7620,7 @@ mod symlinked_targets {
     // `(deployed, skipped, conflict, refused)` — every bucket, because the
     // point of each is that it is not one of the others. A refusal is not a
     // conflict, and since selfie-c28 it is not a skip either.
-    fn deploy_counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
+    pub(super) fn deploy_counts(events: &[PackageEvent]) -> (usize, usize, usize, usize) {
         match get_operation_result(events).expect("no Completed event") {
             OperationResult::Success(OperationSuccess::DotfilesApplied {
                 deployed_count,
@@ -11857,8 +11854,8 @@ mod target_classification {
     }
 
     // A file gone between the guard and the read deploys, as an absent one does.
-    // The file is really there, so a probe-then-read classifier would have called it
-    // present and refused the failed read.
+    // The file is there for the guard, so a probe-then-read classifier would have
+    // called it present and refused the failed read.
     #[tokio::test]
     async fn a_target_that_vanishes_before_the_read_deploys() {
         let dirs = TestDirs::new();
@@ -11866,7 +11863,7 @@ mod target_classification {
         std::fs::write(&target, "WAS HERE").unwrap();
         package_targeting(&dirs, "FROM REPO", &target);
 
-        let fs = RecordsTargetReads::new().staged_read(&target, selfie::fs::TargetRead::Absent);
+        let fs = test_common::PlantsBeforeWrite::vanishing_at_first_read(&target);
         let events = collect_events(
             dirs.service_with_fs(fs.clone(), FakeCommandRunner::new())
                 .apply_all(ApplyOptions::default())
@@ -11874,7 +11871,7 @@ mod target_classification {
         )
         .await;
 
-        assert!(fs.read(&target), "control: the staged read was reached");
+        assert!(fs.vanished(), "control: the read was reached");
         assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
         assert!(
             events
@@ -19883,5 +19880,432 @@ mod entry_failures {
             "the content was already right, so no write of it failed: {messages:?}"
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "TOKEN");
+    }
+}
+
+// Something that appears at a target apply last read as absent, between that read
+// and the rename, is never replaced: the write leaves it in place, and this run
+// reports what is there without writing over it. The race is made deterministic
+// by planting the thing immediately before the write reaches the real writer.
+mod an_appearing_target_is_kept {
+    use super::secret_bearing::{SECRET, assert_no_event_mentions, provider_package};
+    use super::symlinked_targets::deploy_counts;
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering::SeqCst;
+    use test_common::{PLANTED, Plant, PlantsBeforeWrite};
+
+    fn package_targeting(dirs: &TestDirs, content: &str, target: &Path) {
+        let source = dirs.package_dir.join("myapp/config.toml");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(source, content).unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "myapp",
+            &[("myapp/config.toml", target.to_str().unwrap())],
+        );
+    }
+
+    async fn apply(
+        dirs: &TestDirs,
+        fs: &PlantsBeforeWrite,
+        options: ApplyOptions,
+    ) -> Vec<PackageEvent> {
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), runner)
+                .apply_all(options)
+                .await,
+        )
+        .await;
+        assert!(
+            fs.planted(),
+            "control: the write was reached and the plant made"
+        );
+        events
+    }
+
+    fn conflicts(events: &[PackageEvent]) -> Vec<&ConflictReport> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileConflict { detail, .. } => Some(detail),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn appeared_warnings(events: &[PackageEvent], target: &Path) -> usize {
+        let expected = format!("Something appeared at '{}'", target.display());
+        test_common::events::count_events_of_type(events, |event| {
+            matches!(event, PackageEvent::Warning { message, .. }
+                if message.starts_with(&expected) && message.contains("left in place"))
+        })
+    }
+
+    fn recorded(dirs: &TestDirs, target: &Path) -> bool {
+        std::fs::read_to_string(dirs.state_dir.join("deploy-state.yml"))
+            .is_ok_and(|state| state.contains(target.to_str().unwrap()))
+    }
+
+    // A file that differs from the source: kept, reported as a conflict with its
+    // diff and the warning, and neither recorded nor copied aside.
+    #[tokio::test]
+    async fn a_file_appearing_at_a_repository_target_is_kept_and_reported_as_a_conflict() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "FROM REPO\n", &target);
+        let fs = PlantsBeforeWrite::new(&target, Plant::File("WRITTEN BY AN APP\n", 0o644));
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "WRITTEN BY AN APP\n"
+        );
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+        let reports = conflicts(&events);
+        assert_eq!(reports.len(), 1, "{events:?}");
+        assert!(
+            matches!(reports[0], ConflictReport::Diff(diff) if diff.contains("-WRITTEN BY AN APP")),
+            "{reports:?}"
+        );
+        assert_eq!(appeared_warnings(&events, &target), 1, "{events:?}");
+        assert!(
+            !recorded(&dirs, &target),
+            "an unwritten target was recorded"
+        );
+        assert!(
+            !dirs.state_dir.join("backups").exists(),
+            "nothing was overwritten to copy"
+        );
+    }
+
+    // `--yes` accepts a conflict the first read found. This one nobody has seen.
+    #[tokio::test]
+    async fn yes_does_not_overwrite_a_file_that_appeared() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "FROM REPO\n", &target);
+        let fs = PlantsBeforeWrite::new(&target, Plant::File("WRITTEN BY AN APP\n", 0o644));
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+
+        let events = apply(&dirs, &fs, options).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "WRITTEN BY AN APP\n"
+        );
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_file_appearing_with_the_source_content_is_recorded_in_sync() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "FROM REPO\n", &target);
+        let fs = PlantsBeforeWrite::new(&target, Plant::File("FROM REPO\n", 0o644));
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert_eq!(deploy_counts(&events), (0, 1, 0, 0), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PackageEvent::DotfileSkipped {
+                    reason: SkipReason::InSync,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        assert!(
+            recorded(&dirs, &target),
+            "the in-sync target was not recorded"
+        );
+        assert_eq!(
+            appeared_warnings(&events, &target),
+            0,
+            "nothing is left to resolve"
+        );
+    }
+
+    // An accepted conflict re-reads the target after the prompt. When the prompt
+    // removed it, the write creates and so keeps what appears next.
+    #[tokio::test]
+    async fn a_file_appearing_after_a_prompt_that_removed_the_target_is_kept() {
+        struct RemovesThenAccepts(PathBuf);
+        impl selfie::dotfile_service::port::ConflictResolver for RemovesThenAccepts {
+            fn resolve(
+                &self,
+                _target: &str,
+                _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+            ) -> selfie::dotfile_service::port::ConflictResolution {
+                std::fs::remove_file(&self.0).unwrap();
+                selfie::dotfile_service::port::ConflictResolution::Accept
+            }
+        }
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "THE USER'S\n").unwrap();
+        package_targeting(&dirs, "FROM REPO\n", &target);
+        let fs = PlantsBeforeWrite::new(&target, Plant::File("WRITTEN BY AN APP\n", 0o644));
+        let options = ApplyOptions {
+            conflict_resolver: Some(Arc::new(RemovesThenAccepts(target.clone()))),
+            ..Default::default()
+        };
+
+        let events = apply(&dirs, &fs, options).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "WRITTEN BY AN APP\n"
+        );
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_directory_appearing_at_a_repository_target_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "FROM REPO\n", &target);
+        let fs = PlantsBeforeWrite::new(&target, Plant::Directory);
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert!(target.is_dir());
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Directory, Location::Target)]
+        );
+        assert!(failures(&events).is_empty(), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_file_that_appears_and_is_gone_again_fails_a_repository_entry() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "FROM REPO\n", &target);
+        let fs =
+            PlantsBeforeWrite::new(&target, Plant::File("WRITTEN BY AN APP\n", 0o644)).vanishing();
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert_eq!(failures(&events), vec![EntryOperation::Write], "{events:?}");
+        let failure = warning_messages(&events).join("\n");
+        assert!(failure.contains("is gone again"), "{failure}");
+        assert!(!failure.contains("Deployed"), "{failure}");
+        assert!(!target.exists(), "something was written");
+        assert!(!recorded(&dirs, &target));
+    }
+
+    // A secret entry's conflict shows no content, and neither the provider's value
+    // nor what appeared reaches an event.
+    #[tokio::test]
+    async fn a_file_appearing_at_a_secret_target_is_kept_and_reported_as_a_conflict() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs = PlantsBeforeWrite::new(&target, Plant::File(PLANTED, 0o600));
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), PLANTED);
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+        // Control: the provider ran and its one line is what would have been written.
+        assert!(
+            matches!(
+                conflicts(&events)[..],
+                [ConflictReport::Hidden {
+                    resolved_lines: 1,
+                    current_lines: 1
+                }]
+            ),
+            "{events:?}"
+        );
+        assert_eq!(appeared_warnings(&events, &target), 1, "{events:?}");
+        assert_no_event_mentions(&events, SECRET);
+        assert_no_event_mentions(&events, PLANTED);
+    }
+
+    // The only way past a secret conflict is a resolver's answer, and this
+    // conflict is never put to one.
+    #[tokio::test]
+    async fn an_accepting_resolver_does_not_overwrite_a_file_that_appeared_at_a_secret_target() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs = PlantsBeforeWrite::new(&target, Plant::File(PLANTED, 0o600));
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let events = apply(&dirs, &fs, counting_resolver(&asked)).await;
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), PLANTED);
+        assert_eq!(asked.load(SeqCst), 0, "the resolver was asked");
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+    }
+
+    // A link at a secret target is replaced whenever it is found, so one that
+    // appears is too, with the same warning.
+    #[tokio::test]
+    async fn a_link_appearing_at_a_secret_target_is_replaced() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs = PlantsBeforeWrite::new(&target, Plant::DanglingLink);
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        let metadata = std::fs::symlink_metadata(&target).unwrap();
+        assert!(metadata.is_file(), "the link was not replaced");
+        assert_eq!(metadata.permissions().mode() & 0o077, 0);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+        assert_eq!(deploy_counts(&events), (1, 0, 0, 0), "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|warning| warning.contains("symlink")),
+            "{events:?}"
+        );
+        assert!(
+            !target.with_extension("nowhere").exists(),
+            "wrote through the link"
+        );
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    // The same content at a laxer mode is left as it is, warned about, for the next
+    // run's in-sync path to tighten: tightening is a replacing write, and whatever
+    // wrote this file may write it again before that write lands.
+    #[tokio::test]
+    async fn a_file_appearing_with_the_secret_content_at_a_lax_mode_is_left_for_the_next_run() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs = PlantsBeforeWrite::new(&target, Plant::File(SECRET, 0o644));
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        let metadata = std::fs::metadata(&target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o644,
+            "the mode was changed"
+        );
+        assert_eq!(
+            Some(metadata.ino()),
+            fs.planted_inode(),
+            "the file was replaced"
+        );
+        assert_eq!(deploy_counts(&events), (0, 1, 0, 0), "{events:?}");
+        assert_eq!(appeared_warnings(&events, &target), 1, "{events:?}");
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                PackageEvent::DotfileSkipped {
+                    reason: SkipReason::PermissionsTightened | SkipReason::InSync,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        assert!(!recorded(&dirs, &target));
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    // Already owner-only, there is nothing to tighten, and the entry is in sync.
+    #[tokio::test]
+    async fn a_file_appearing_with_the_secret_content_owner_only_is_in_sync() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs = PlantsBeforeWrite::new(&target, Plant::File(SECRET, 0o600));
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert_eq!(deploy_counts(&events), (0, 1, 0, 0), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PackageEvent::DotfileSkipped {
+                    reason: SkipReason::InSync,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        assert_eq!(appeared_warnings(&events, &target), 0, "{events:?}");
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    #[tokio::test]
+    async fn a_directory_appearing_at_a_secret_target_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs = PlantsBeforeWrite::new(&target, Plant::Directory);
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert!(target.is_dir());
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Directory, Location::Target)]
+        );
+        assert!(failures(&events).is_empty(), "{events:?}");
+        assert_no_event_mentions(&events, SECRET);
+    }
+
+    // A repository-file entry refuses a link at its target wherever it is found, so
+    // one that appears is refused too, and the link is left alone.
+    #[tokio::test]
+    async fn a_link_appearing_at_a_repository_target_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        package_targeting(&dirs, "FROM REPO\n", &target);
+        let fs = PlantsBeforeWrite::new(&target, Plant::DanglingLink);
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert!(std::fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert!(
+            !target.with_extension("nowhere").exists(),
+            "wrote through the link"
+        );
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Symlink, Location::Target)]
+        );
+        assert!(!recorded(&dirs, &target));
+    }
+
+    #[tokio::test]
+    async fn a_file_that_appears_and_is_gone_again_fails_a_secret_entry() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs = PlantsBeforeWrite::new(&target, Plant::File(PLANTED, 0o600)).vanishing();
+
+        let events = apply(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert_eq!(failures(&events), vec![EntryOperation::Write], "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|message| message.contains("is gone again")),
+            "{events:?}"
+        );
+        assert!(!target.exists(), "something was written");
+        assert_no_event_mentions(&events, SECRET);
+        assert_no_event_mentions(&events, PLANTED);
     }
 }

@@ -16,7 +16,7 @@ use crate::{
         resolve::{ResolvedContent, resolve_content},
     },
     fs::{
-        filesystem::{FileSystem, FileSystemError, IfPresent},
+        filesystem::{FileSystem, FileSystemError, IfPresent, Placed},
         target::TargetPath,
     },
     package::{
@@ -28,6 +28,7 @@ use crate::{
     },
 };
 
+use super::appeared;
 use super::classify::{SecretEntry, secret_target_link};
 use super::deploy_entry::write_failure;
 use super::port::ApplyOptions;
@@ -218,10 +219,7 @@ where
         // link that appeared meanwhile is replaced like any other; a fifo, socket or
         // device node that appeared, at the target or behind a new link, refuses,
         // since the read would meet it and the writer refuse it.
-        let found = match self.look(target.entry.target(), &target.path).await? {
-            Some(link) => Found::Link(link),
-            None => self.read_before_write(target).await?,
-        };
+        let found = self.find(target).await?;
 
         // A link is replaced whatever is behind it, so there is nothing to compare and
         // nothing to put to a resolver, and both are skipped.
@@ -232,13 +230,7 @@ where
         let current = match found {
             Found::Link(link) => {
                 before_write().map_err(SecretOutcome::StateNotWritable)?;
-                let outcome = self.write(target, &resolved).await;
-                if matches!(outcome, SecretOutcome::Deployed) {
-                    self.sender
-                        .send_warning(replaced_link_warning(target, &link))
-                        .await;
-                }
-                return Ok(outcome);
+                return Ok(self.replace_link(target, &resolved, &link).await);
             }
             Found::Current(current) => current,
         };
@@ -250,7 +242,46 @@ where
         self.settle_conflict(target, &resolved, current.as_deref())
             .await?;
 
-        Ok(self.write(target, &resolved).await)
+        if current.is_some() {
+            return Ok(self.write(target, &resolved).await);
+        }
+        // Nothing was there, so the write replaces nothing: a file that appeared
+        // since is kept rather than overwritten unseen.
+        match self.create(target, &resolved).await {
+            Some(outcome) => Ok(outcome),
+            None => Ok(appeared::settle(&mut SecretAppeared {
+                apply: self,
+                target,
+                resolved: &resolved,
+                before_write,
+            })
+            .await),
+        }
+    }
+
+    /// Look at the target and read it, immediately before a write.
+    async fn find(&self, target: &SecretEntry<'_>) -> Phase<Found> {
+        match self.look(target.entry.target(), &target.path).await? {
+            Some(link) => Ok(Found::Link(link)),
+            None => self.read_before_write(target).await,
+        }
+    }
+
+    /// Replace the link at `target` with the resolved content, and say so once it
+    /// is done.
+    async fn replace_link(
+        &self,
+        target: &SecretEntry<'_>,
+        resolved: &ResolvedContent,
+        link: &Link,
+    ) -> SecretOutcome {
+        let outcome = self.write(target, resolved).await;
+        if matches!(outcome, SecretOutcome::Deployed) {
+            self.sender
+                .send_warning(replaced_link_warning(target, link))
+                .await;
+        }
+        outcome
     }
 
     /// Read the target immediately before the write, and settle what the read found:
@@ -478,13 +509,7 @@ where
             Err(refusal @ FileSystemError::SymlinkedTarget { .. }) => {
                 if let Ok(Some(link)) = classify_link(Some(refusal)) {
                     before_write().map_err(SecretOutcome::StateNotWritable)?;
-                    let outcome = self.write(target, resolved).await;
-                    if matches!(outcome, SecretOutcome::Deployed) {
-                        self.sender
-                            .send_warning(replaced_link_warning(target, &link))
-                            .await;
-                    }
-                    return Err(outcome);
+                    return Err(self.replace_link(target, resolved, &link).await);
                 }
             }
             // The content read above succeeded, so a mode that cannot be read is
@@ -630,11 +655,41 @@ where
     /// Owner-only and atomic: no window in which the credential is
     /// world-readable, and no interrupted write leaving a truncated one behind.
     async fn write(&self, target: &SecretEntry<'_>, resolved: &ResolvedContent) -> SecretOutcome {
-        if let Err(e) =
+        let written =
             self.filesystem
-                .write_file_private(&target.path, &resolved.bytes, IfPresent::Replace)
+                .write_file_private(&target.path, &resolved.bytes, IfPresent::Replace);
+        self.report_write(target, written).await
+    }
+
+    /// Write the resolved content to a target last read as absent, and report it:
+    /// `None`, with nothing reported, when something is there by the time the write
+    /// lands, which is left in place.
+    async fn create(
+        &self,
+        target: &SecretEntry<'_>,
+        resolved: &ResolvedContent,
+    ) -> Option<SecretOutcome> {
+        match self
+            .filesystem
+            .write_file_private(&target.path, &resolved.bytes, IfPresent::Keep)
         {
-            return self.write_failed(target, &e, write_failure(&e)).await;
+            Ok(Placed::Kept) => None,
+            written => Some(self.report_write(target, written).await),
+        }
+    }
+
+    /// Report a write of the resolved content to `target`.
+    async fn report_write(
+        &self,
+        target: &SecretEntry<'_>,
+        written: Result<Placed, FileSystemError>,
+    ) -> SecretOutcome {
+        match written {
+            Ok(Placed::Written) => {}
+            // Nothing was written, so nothing is reported as deployed. Only `create`
+            // keeps what it finds, and it settles that before reporting.
+            Ok(Placed::Kept) => return SecretOutcome::Skipped,
+            Err(e) => return self.write_failed(target, &e, write_failure(&e)).await,
         }
 
         self.sender
@@ -648,6 +703,94 @@ where
         // No deploy state is recorded: a stored checksum of a credential is a
         // confirmation oracle. See ADR-0003.
         SecretOutcome::Deployed
+    }
+}
+
+/// A secret-bearing entry whose write left in place what appeared at its target.
+struct SecretAppeared<'a, 'b, 'g, F, CR> {
+    apply: &'a SecretApply<'b, F, CR>,
+    target: &'a SecretEntry<'a>,
+    resolved: &'a ResolvedContent,
+    before_write: &'a mut BeforeWrite<'g>,
+}
+
+impl<F, CR> appeared::Appeared for SecretAppeared<'_, '_, '_, F, CR>
+where
+    F: FileSystem,
+    CR: CommandRunner,
+{
+    type Outcome = SecretOutcome;
+
+    fn content(&self) -> &[u8] {
+        &self.resolved.bytes
+    }
+
+    fn target(&self) -> &TargetPath {
+        &self.target.path
+    }
+
+    fn sender(&self) -> &EventSender {
+        self.apply.sender
+    }
+
+    // A link is replaced whenever it is found, as for any secret target, so one
+    // that appeared settles here.
+    async fn reread(&mut self) -> Result<Option<Vec<u8>>, SecretOutcome> {
+        match self.apply.find(self.target).await? {
+            Found::Link(link) => {
+                (self.before_write)().map_err(SecretOutcome::StateNotWritable)?;
+                Err(self
+                    .apply
+                    .replace_link(self.target, self.resolved, &link)
+                    .await)
+            }
+            Found::Current(current) => Ok(current),
+        }
+    }
+
+    async fn failed(&mut self, failure: Failure) -> SecretOutcome {
+        self.apply.fail(self.target, failure).await;
+        SecretOutcome::Failed
+    }
+
+    // Matching content at a laxer mode is left for the next run, whose in-sync path
+    // tightens it: tightening means a replacing write, which could destroy whatever
+    // the writer of this file puts there next.
+    async fn in_sync(&mut self) -> SecretOutcome {
+        if matches!(
+            self.apply.filesystem.is_owner_only(&self.target.path),
+            Ok(true)
+        ) {
+            self.apply
+                .sender
+                .send_dotfile_skipped(
+                    &self.target.source,
+                    self.target.path.display(),
+                    SkipReason::InSync,
+                )
+                .await;
+        } else {
+            self.apply
+                .sender
+                .send_warning(appeared::warning(&self.target.path))
+                .await;
+        }
+        SecretOutcome::Skipped
+    }
+
+    // Only the path and the summary reach the events, as for any conflict.
+    async fn conflict(&mut self, current: &[u8]) -> SecretOutcome {
+        let report = secret_conflict_report(&self.resolved.bytes, current);
+        self.apply
+            .sender
+            .send_dotfile_conflict(
+                &self.target.source,
+                self.target.path.display(),
+                report,
+                false,
+            )
+            .await;
+        SecretOutcome::Conflicted
     }
 }
 

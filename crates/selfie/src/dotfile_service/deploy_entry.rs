@@ -4,18 +4,22 @@
 //! put it and anything worth keeping. Nothing here decides whether an entry should
 //! deploy; it carries out a decision already made.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    dotfile_service::{backup, diff::unified_diff},
+    dotfile_service::{appeared, backup, diff::unified_diff},
     fs::{
-        filesystem::{FileSystem, FileSystemError, IfPresent},
+        filesystem::{FileSystem, FileSystemError, IfPresent, Placed},
         target::TargetPath,
     },
-    package::event::{DotfileSource, EntryOperation, EventSender, Failure, Refusal, RepoPath},
+    package::event::{
+        ConflictReport, DotfileSource, EntryOperation, EventSender, Failure, Refusal, RepoPath,
+    },
 };
 
+use super::apply::EntryOutcome;
 use super::refusal::{
     classify_write, guard_refusal, read_target_state, readable_or_refusal, refusal_for,
 };
@@ -60,22 +64,6 @@ pub(super) enum Decided<'a> {
     BeforePrompt,
 }
 
-/// What became of an entry apply decided to write.
-pub(super) enum DeployOutcome {
-    /// Written, and recorded when there is a state to record it in.
-    Deployed,
-    /// A dry run: reported as what it would do, and nothing written.
-    Previewed,
-    /// Refused, and already reported. Nothing was written or recorded.
-    Refused,
-    /// An operation failed, and was already reported. Nothing was recorded.
-    Failed,
-    /// The deploy state could not be written: before the target, so nothing was
-    /// written, or after it, so the target is unrecorded. Carries why the run
-    /// stops.
-    Unrecorded(String),
-}
-
 /// The deploy state an apply reads, and whether the run writes and records.
 ///
 /// Only a real run holds [`Record`](Self::Record), so only a real run writes a
@@ -114,7 +102,7 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
     unit: &DeployUnit<'_>,
     decided: Decided<'_>,
     backed_up: &mut HashMap<String, Option<PathBuf>>,
-) -> DeployOutcome {
+) -> EntryOutcome {
     let Ledger::Record(recorder) = ledger else {
         sender
             .send_dotfile_skipped(
@@ -123,23 +111,32 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
                 crate::package::event::SkipReason::DryRun,
             )
             .await;
-        return DeployOutcome::Previewed;
+        return EntryOutcome::Skipped;
     };
     // The state is written back here, ahead of the backup and the target write,
     // so a state that cannot be written stops the run before this entry writes.
     let mut loaded = match recorder.writable(filesystem) {
         Ok(loaded) => loaded,
-        Err(failure) => return DeployOutcome::Unrecorded(stopped_before_writing(&failure)),
+        Err(failure) => return EntryOutcome::Unrecorded(stopped_before_writing(&failure)),
     };
     match perform_deploy(filesystem, sender, unit, decided, backed_up).await {
         Wrote::Written => {
             match record_and_save(filesystem, &mut loaded, sender, Recorded::Deployed, unit).await {
-                Some(reason) => DeployOutcome::Unrecorded(reason),
-                None => DeployOutcome::Deployed,
+                Some(reason) => EntryOutcome::Unrecorded(reason),
+                None => EntryOutcome::Deployed,
             }
         }
-        Wrote::Refused => DeployOutcome::Refused,
-        Wrote::Failed => DeployOutcome::Failed,
+        Wrote::Refused => EntryOutcome::Refused,
+        Wrote::Failed => EntryOutcome::Failed,
+        Wrote::Kept => {
+            appeared::settle(&mut RepoAppeared {
+                filesystem,
+                sender,
+                loaded: &mut loaded,
+                unit,
+            })
+            .await
+        }
     }
 }
 
@@ -150,6 +147,88 @@ enum Wrote {
     Refused,
     /// The copy or the write failed, and was already reported.
     Failed,
+    /// Something appeared at a target last read as absent, and the write left it
+    /// in place. Nothing is reported yet.
+    Kept,
+}
+
+/// A repository-file entry whose write left in place what appeared at its target.
+struct RepoAppeared<'a, 'w, F> {
+    filesystem: &'a F,
+    sender: &'a EventSender,
+    loaded: &'a mut WritableState<'w>,
+    unit: &'a DeployUnit<'a>,
+}
+
+impl<F: FileSystem> appeared::Appeared for RepoAppeared<'_, '_, F> {
+    type Outcome = EntryOutcome;
+
+    fn content(&self) -> &[u8] {
+        self.unit.source_content.as_bytes()
+    }
+
+    fn target(&self) -> &TargetPath {
+        self.unit.target_path
+    }
+
+    fn sender(&self) -> &EventSender {
+        self.sender
+    }
+
+    async fn reread(&mut self) -> Result<Option<Vec<u8>>, EntryOutcome> {
+        match last_read(self.filesystem, self.unit, Decided::BeforePrompt) {
+            Ok(current) => Ok(current.map(Cow::into_owned)),
+            Err(refusal) => {
+                self.sender
+                    .send_dotfile_refused(self.unit.package_name, self.unit.entry_target, refusal)
+                    .await;
+                Err(EntryOutcome::Refused)
+            }
+        }
+    }
+
+    async fn failed(&mut self, failure: Failure) -> EntryOutcome {
+        self.sender
+            .send_dotfile_failed(self.unit.package_name, self.unit.entry_target, failure)
+            .await;
+        EntryOutcome::Failed
+    }
+
+    // Recorded in sync even for a tracked entry whose record differs, which the
+    // next run would call a conflict: the target holds exactly the source.
+    async fn in_sync(&mut self) -> EntryOutcome {
+        if let Some(reason) = record_and_save(
+            self.filesystem,
+            self.loaded,
+            self.sender,
+            Recorded::InSync,
+            self.unit,
+        )
+        .await
+        {
+            return EntryOutcome::Unrecorded(reason);
+        }
+        self.sender
+            .send_dotfile_skipped(
+                self.unit.event_source,
+                self.unit.target_path.display(),
+                crate::package::event::SkipReason::InSync,
+            )
+            .await;
+        EntryOutcome::Skipped
+    }
+
+    async fn conflict(&mut self, current: &[u8]) -> EntryOutcome {
+        self.sender
+            .send_dotfile_conflict(
+                self.unit.event_source,
+                self.unit.target_path.display(),
+                ConflictReport::Diff(conflict_diff(current, self.unit)),
+                false,
+            )
+            .await;
+        EntryOutcome::Conflicted
+    }
 }
 
 /// Deploy a single config file to its target path and emit events. Records
@@ -167,7 +246,8 @@ async fn perform_deploy<F: FileSystem>(
 
     // `kept` is `Some` only for the entry that actually made the copy, so only it
     // prunes, and only once the write below has landed.
-    let (backup, kept) = match backed_up.get(unit.target_key) {
+    let mut inserted = false;
+    let (backup, kept, if_present) = match backed_up.get(unit.target_key) {
         // This run has already settled this target. Report the copy it made --
         // which holds what the target held before the run touched it -- and make
         // no second one. `None` means the run found nothing there to keep.
@@ -177,41 +257,61 @@ async fn perform_deploy<F: FileSystem>(
         // first entry's output, copies that, and the prune deletes the user's.
         // Two entries can name one target -- an apply covers every package, and
         // the only same-target check anywhere looks inside a single package.
-        Some(existing) => (existing.clone(), None),
-        None => match keep_current(filesystem, unit, decided) {
-            Ok(kept) => {
-                let path = kept.as_ref().map(|kept| kept.path().to_path_buf());
-                // Recorded before the write, not after: a copy that was made and a
-                // target write that then failed still holds what the target held,
-                // so a later entry for this target must report it.
-                backed_up.insert(unit.target_key.to_string(), path.clone());
-                (path, kept)
+        Some(existing) => (
+            existing.clone(),
+            None,
+            // Not read again, so a decision that found the target absent decides.
+            if_present(matches!(decided, Decided::Now(None))),
+        ),
+        None => {
+            let current = match last_read(filesystem, unit, decided) {
+                Ok(current) => current,
+                Err(refusal) => {
+                    sender
+                        .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
+                        .await;
+                    return Wrote::Refused;
+                }
+            };
+            match keep_current(filesystem, unit, current.as_deref()) {
+                Ok(kept) => {
+                    let path = kept.as_ref().map(|kept| kept.path().to_path_buf());
+                    // Recorded before the write, not after: a copy that was made and a
+                    // target write that then failed still holds what the target held,
+                    // so a later entry for this target must report it.
+                    backed_up.insert(unit.target_key.to_string(), path.clone());
+                    inserted = true;
+                    (path, kept, if_present(current.is_none()))
+                }
+                // Left out of `backed_up`, so an entry that kept no copy does not mark
+                // the target as settled for a later one.
+                Err(failure) => {
+                    sender
+                        .send_dotfile_failed(unit.package_name, unit.entry_target, failure)
+                        .await;
+                    return Wrote::Failed;
+                }
             }
-            // Left out of `backed_up`, so an entry that kept no copy does not mark
-            // the target as settled for a later one.
-            Err(NotKept::Refused(refusal)) => {
-                sender
-                    .send_dotfile_refused(unit.package_name, unit.entry_target, refusal)
-                    .await;
-                return Wrote::Refused;
-            }
-            Err(NotKept::Failed(failure)) => {
-                sender
-                    .send_dotfile_failed(unit.package_name, unit.entry_target, failure)
-                    .await;
-                return Wrote::Failed;
-            }
-        },
+        }
     };
 
     // Refuses a symlinked target rather than writing through it: the content would
     // otherwise land wherever the link points, which may be a path chosen by
     // whoever planted it.
-    if let Err(e) = filesystem.write_file_no_follow(
+    let written = filesystem.write_file_no_follow(
         unit.target_path,
         unit.source_content.as_bytes(),
-        IfPresent::Replace,
-    ) {
+        if_present,
+    );
+    if let Ok(Placed::Kept) = written {
+        // The `None` this entry recorded says the run found nothing to keep at a
+        // target that now holds a file, so it goes.
+        if inserted {
+            backed_up.remove(unit.target_key);
+        }
+        return Wrote::Kept;
+    }
+    if let Err(e) = written {
         // Either way nothing is recorded as deployed that was not. An entry already
         // in the state keeps its previous checksum and is stale rather than
         // untracked, which is the honest record: a refusal writes nothing, and a
@@ -260,6 +360,18 @@ async fn perform_deploy<F: FileSystem>(
     Wrote::Written
 }
 
+/// How a write treats anything at its target when it lands: kept when the last
+/// read found the target `absent`, replaced otherwise.
+// Replaces nothing when the last read found nothing, so a file that appeared
+// since is kept rather than destroyed without a copy.
+fn if_present(absent: bool) -> IfPresent {
+    if absent {
+        IfPresent::Keep
+    } else {
+        IfPresent::Replace
+    }
+}
+
 /// Copy the target's content aside, if this overwrite would destroy any.
 ///
 /// `Ok(None)` when there is nothing to keep: nowhere to put a copy, no target,
@@ -267,18 +379,16 @@ async fn perform_deploy<F: FileSystem>(
 ///
 /// # Errors
 ///
-/// Why no copy was kept: the target cannot be read, or the copy cannot be
-/// written. Nothing has been written to the target in either case.
+/// The failure of the copy, which could not be written. Nothing has been
+/// written to the target.
 fn keep_current<F: FileSystem>(
     filesystem: &F,
     unit: &DeployUnit<'_>,
-    decided: Decided<'_>,
-) -> Result<Option<backup::Kept>, NotKept> {
+    current: Option<&[u8]>,
+) -> Result<Option<backup::Kept>, Failure> {
     let Some(root) = unit.backups else {
         return Ok(None);
     };
-
-    let current = last_read(filesystem, unit, decided).map_err(NotKept::Refused)?;
     // Nothing there: nothing to keep, and the write creates it.
     let Some(current) = current else {
         return Ok(None);
@@ -292,9 +402,9 @@ fn keep_current<F: FileSystem>(
         return Ok(None);
     }
 
-    backup::keep(filesystem, root, unit.target_key, &current)
+    backup::keep(filesystem, root, unit.target_key, current)
         .map(Some)
-        .map_err(|e| NotKept::Failed(backup::failure(unit.target_path.path(), &e)))
+        .map_err(|e| backup::failure(unit.target_path.path(), &e))
 }
 
 /// What the target holds as its write is about to happen: `None` for nothing
@@ -303,13 +413,13 @@ fn keep_current<F: FileSystem>(
 /// # Errors
 ///
 /// The refusal of the entry for what a read made now found instead of a file.
-fn last_read<F: FileSystem>(
+fn last_read<'d, F: FileSystem>(
     filesystem: &F,
     unit: &DeployUnit<'_>,
-    decided: Decided<'_>,
-) -> Result<Option<Vec<u8>>, Refusal> {
+    decided: Decided<'d>,
+) -> Result<Option<Cow<'d, [u8]>>, Refusal> {
     match decided {
-        Decided::Now(current) => Ok(current.map(<[u8]>::to_vec)),
+        Decided::Now(current) => Ok(current.map(Cow::Borrowed)),
         // Read again rather than reuse the bytes the decision was made from: the
         // earlier read is what the user was shown, and this one is what the write
         // is about to destroy. Copying the first would keep bytes that are still
@@ -325,6 +435,7 @@ fn last_read<F: FileSystem>(
                 unit.target_path,
                 read_target_state(filesystem, unit.target_path),
             )
+            .map(|current| current.map(Cow::Owned))
         }
     }
 }
@@ -340,14 +451,6 @@ pub(super) fn conflict_diff(current: &[u8], unit: &DeployUnit<'_>) -> String {
         // Relative, as the line above the diff names it.
         &unit.event_source.relative().to_string(),
     )
-}
-
-/// Why [`keep_current`] kept no copy.
-enum NotKept {
-    /// What is at the target bars the entry.
-    Refused(Refusal),
-    /// The copy could not be written.
-    Failed(Failure),
 }
 
 /// The failure of a write to a target, named by `error`.
@@ -427,4 +530,102 @@ pub(super) async fn record_and_save<F: FileSystem>(
          it once the state can be written",
         unit.target_path.display()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::{MockFileSystem, target::repository_path};
+    use crate::package::event::{OperationContext, OperationType};
+
+    const KEY: &str = "/home/me/.config/app.toml";
+
+    fn sender() -> EventSender {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        EventSender::new_with_context(
+            tx,
+            OperationType::DotfileApply,
+            String::new(),
+            String::new(),
+            OperationContext::default(),
+        )
+    }
+
+    // Deploy one repository file to `KEY`, which the decision found absent, through
+    // `fs`, with `backed_up` as the run has it so far.
+    async fn deploy_absent(
+        fs: &MockFileSystem,
+        backed_up: &mut HashMap<String, Option<PathBuf>>,
+    ) -> Wrote {
+        let target = repository_path(Path::new(KEY));
+        let source = DotfileSource::File(RepoPath {
+            base: None,
+            path: PathBuf::from("/repo/app.toml"),
+        });
+        let unit = DeployUnit {
+            event_source: &source,
+            target_path: &target,
+            target_key: KEY,
+            source_content: "content",
+            source_checksum: "checksum",
+            source: "app.toml",
+            package: None,
+            package_name: "app",
+            entry_target: "~/.config/app.toml",
+            backups: Some(Path::new("/state/backups")),
+        };
+        perform_deploy(fs, &sender(), &unit, Decided::Now(None), backed_up).await
+    }
+
+    // A target an earlier entry already settled is written without reading it
+    // again, so its mode comes from the decision: one that found it absent keeps
+    // what is there. Two entries reach this arm only when they share a
+    // deploy-state key, which apply refuses as a collision first, so it is held
+    // here rather than through apply.
+    #[tokio::test]
+    async fn a_target_already_settled_and_last_read_as_absent_keeps_what_is_there() {
+        let mut fs = MockFileSystem::new();
+        fs.expect_write_file_no_follow()
+            .withf(|_, _, if_present| *if_present == IfPresent::Keep)
+            .times(1)
+            .returning(|_, _, _| Ok(Placed::Written));
+        let mut backed_up = HashMap::from([(KEY.to_string(), None)]);
+
+        let wrote = deploy_absent(&fs, &mut backed_up).await;
+
+        assert!(matches!(wrote, Wrote::Written));
+    }
+
+    // The `None` an entry records says the run found nothing to keep at the target.
+    // Once something has appeared there, that is false, so the entry takes it back.
+    #[tokio::test]
+    async fn a_write_that_kept_what_appeared_leaves_the_target_unsettled() {
+        let mut fs = MockFileSystem::new();
+        fs.expect_write_file_no_follow()
+            .times(1)
+            .returning(|_, _, _| Ok(Placed::Kept));
+        let mut backed_up = HashMap::new();
+
+        let wrote = deploy_absent(&fs, &mut backed_up).await;
+
+        assert!(matches!(wrote, Wrote::Kept));
+        assert!(!backed_up.contains_key(KEY), "{backed_up:?}");
+    }
+
+    // What an earlier entry recorded is that entry's, and still true: its copy
+    // holds what the target held before the run touched it.
+    #[tokio::test]
+    async fn a_write_that_kept_what_appeared_leaves_the_earlier_copy_recorded() {
+        let mut fs = MockFileSystem::new();
+        fs.expect_write_file_no_follow()
+            .times(1)
+            .returning(|_, _, _| Ok(Placed::Kept));
+        let copy = PathBuf::from("/state/backups/app.toml/copy");
+        let mut backed_up = HashMap::from([(KEY.to_string(), Some(copy.clone()))]);
+
+        let wrote = deploy_absent(&fs, &mut backed_up).await;
+
+        assert!(matches!(wrote, Wrote::Kept));
+        assert_eq!(backed_up.get(KEY), Some(&Some(copy)), "{backed_up:?}");
+    }
 }
