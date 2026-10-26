@@ -16,7 +16,6 @@ use crate::{
     config::SelfieConfig,
     dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision},
-        diff::unified_diff,
         port::{ConflictDetail, ConflictResolution, put_to_resolver},
         state::DeployState,
     },
@@ -36,7 +35,8 @@ use super::classify::{
     read_repo_file,
 };
 use super::deploy_entry::{
-    Decided, DeployOutcome, DeployUnit, Ledger, Recorded, deploy_and_record, record_and_save,
+    Decided, DeployOutcome, DeployUnit, Ledger, Recorded, conflict_diff, deploy_and_record,
+    record_and_save,
 };
 use super::orphan::{self, Catalog};
 use super::port::ApplyOptions;
@@ -634,19 +634,9 @@ where
                         // a run that accepts without asking reads it nowhere.
                         //
                         // An absent target decides `Deploy`, so a conflict always has
-                        // bytes; the default is never reached. Lossy only for
-                        // display: the checksum above compared the raw bytes.
-                        let render = || {
-                            let target_content =
-                                String::from_utf8_lossy(current.as_deref().unwrap_or_default());
-                            unified_diff(
-                                &target_content,
-                                &source_content,
-                                &target_path.display().to_string(),
-                                // Relative, as the line above the diff names it.
-                                &event_source.relative().to_string(),
-                            )
-                        };
+                        // bytes; the default is never reached.
+                        let render =
+                            || conflict_diff(current.as_deref().unwrap_or_default(), &unit);
                         // Rendered at most once. A declined conflict reaches the
                         // resolver branch and then the reported-conflict branch, and
                         // both read the diff.

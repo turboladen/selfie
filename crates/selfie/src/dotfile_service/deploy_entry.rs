@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::{
-    dotfile_service::backup,
+    dotfile_service::{backup, diff::unified_diff},
     fs::{
         filesystem::{FileSystem, FileSystemError, IfPresent},
         target::TargetPath,
@@ -278,26 +278,7 @@ fn keep_current<F: FileSystem>(
         return Ok(None);
     };
 
-    let current = match decided {
-        Decided::Now(current) => current.map(<[u8]>::to_vec),
-        // Read again rather than reuse the bytes the decision was made from: the
-        // earlier read is what the user was shown, and this one is what the write
-        // is about to destroy. Copying the first would keep bytes that are still
-        // reachable and lose the ones that are not.
-        Decided::BeforePrompt => {
-            // The guard first, as before every read of a target: a fifo or device
-            // node put in place during the prompt must not be opened at all.
-            if let Some(refusal) = guard_refusal(filesystem, unit.target_path) {
-                return Err(NotKept::Refused(refusal_for(unit.source, &refusal)));
-            }
-            readable_or_refusal(
-                unit.source,
-                unit.target_path,
-                read_target_state(filesystem, unit.target_path),
-            )
-            .map_err(NotKept::Refused)?
-        }
-    };
+    let current = last_read(filesystem, unit, decided).map_err(NotKept::Refused)?;
     // Nothing there: nothing to keep, and the write creates it.
     let Some(current) = current else {
         return Ok(None);
@@ -314,6 +295,51 @@ fn keep_current<F: FileSystem>(
     backup::keep(filesystem, root, unit.target_key, &current)
         .map(Some)
         .map_err(|e| NotKept::Failed(backup::failure(unit.target_path.path(), &e)))
+}
+
+/// What the target holds as its write is about to happen: `None` for nothing
+/// there.
+///
+/// # Errors
+///
+/// The refusal of the entry for what a read made now found instead of a file.
+fn last_read<F: FileSystem>(
+    filesystem: &F,
+    unit: &DeployUnit<'_>,
+    decided: Decided<'_>,
+) -> Result<Option<Vec<u8>>, Refusal> {
+    match decided {
+        Decided::Now(current) => Ok(current.map(<[u8]>::to_vec)),
+        // Read again rather than reuse the bytes the decision was made from: the
+        // earlier read is what the user was shown, and this one is what the write
+        // is about to destroy. Copying the first would keep bytes that are still
+        // reachable and lose the ones that are not.
+        Decided::BeforePrompt => {
+            // The guard first, as before every read of a target: a fifo or device
+            // node put in place during the prompt must not be opened at all.
+            if let Some(refusal) = guard_refusal(filesystem, unit.target_path) {
+                return Err(refusal_for(unit.source, &refusal));
+            }
+            readable_or_refusal(
+                unit.source,
+                unit.target_path,
+                read_target_state(filesystem, unit.target_path),
+            )
+        }
+    }
+}
+
+/// The diff a conflict between `current`, the target's bytes, and `unit`'s
+/// source shows.
+pub(super) fn conflict_diff(current: &[u8], unit: &DeployUnit<'_>) -> String {
+    // Lossy only for display: the decision compared the raw bytes.
+    unified_diff(
+        &String::from_utf8_lossy(current),
+        unit.source_content,
+        &unit.target_path.display().to_string(),
+        // Relative, as the line above the diff names it.
+        &unit.event_source.relative().to_string(),
+    )
 }
 
 /// Why [`keep_current`] kept no copy.
