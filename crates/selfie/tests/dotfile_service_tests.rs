@@ -17128,6 +17128,48 @@ mod track_refuses_another_specs_file {
         );
     }
 
+    // A dotfiles directory that cannot be listed may hold a spec tracking the file.
+    // The track says so in the listing error's own words, which name the
+    // directory and what selfie found there, and goes on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_dotfiles_directory_is_named_as_unchecked() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.clone();
+        let file = home.join(".gemrc");
+        std::fs::write(&file, "gem: --no-document").unwrap();
+        create_package_with_dotfiles(&dirs.package_dir, "gem", &[]);
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let _restore = RestoreMode(dirs.dotfiles_dir.clone(), 0o755);
+        if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
+            eprintln!("SKIP: running as root, mode bits ignored");
+            return;
+        }
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .track_for_package("gem", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let warning = warning_messages(&events)
+            .into_iter()
+            .find(|w| w.starts_with("Could not check the standalone dotfiles"))
+            .expect("the unreadable dotfiles directory is named");
+        assert!(
+            warning.contains(&dirs.dotfiles_dir.display().to_string()),
+            "{warning}"
+        );
+        assert!(
+            !warning.contains("the dotfiles directory could not be read"),
+            "{warning}"
+        );
+    }
+
     // A spec that does not parse may track the file too. The track names it and
     // goes on, since refusing for an unrelated broken spec helps nobody.
     #[tokio::test]
@@ -17160,6 +17202,156 @@ mod track_refuses_another_specs_file {
                 .any(|w| w.contains("broken.yml") && w.contains("Could not check")),
             "{warnings:?}"
         );
+    }
+}
+
+// What collecting packages finds leaves in the order found, each finding with its
+// own message, so a reader has every caveat before the answer it qualifies.
+mod collection_findings {
+    use super::*;
+
+    // A spec of `name` in `dir` deploying to `target`.
+    fn spec_in(dir: &std::path::Path, file: &str, name: &str, target: &std::path::Path) {
+        std::fs::write(
+            dir.join(file),
+            format!(
+                "name: {name}\ndotfiles:\n  - source: {name}/rc\n    target: \"{}\"\n\
+                 environments:\n  test:\n    install: \"echo i\"\n",
+                target.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    // Each message leaves in the order its finding was made: a packages/
+    // ambiguity before the duplicate-name warning about a later name, and a
+    // dotfiles/ ambiguity after it.
+    #[tokio::test]
+    async fn collection_findings_leave_in_the_order_found() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join(".x");
+        spec_in(&dirs.package_dir, "aaa.yml", "aaa", &target);
+        spec_in(&dirs.package_dir, "aaa.yaml", "aaa", &target);
+        spec_in(&dirs.package_dir, "mmm.yml", "mmm", &target);
+        spec_in(&dirs.dotfiles_dir, "mmm.yml", "mmm", &target);
+        spec_in(&dirs.dotfiles_dir, "zzz.yml", "zzz", &target);
+        spec_in(&dirs.dotfiles_dir, "zzz.yaml", "zzz", &target);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let refused_name = |name: &str| {
+            events.iter().position(|e| {
+                matches!(e,
+                PackageEvent::PackagesRefused { packages, .. }
+                    if packages.iter().any(|p| p.name == name))
+            })
+        };
+        let duplicate = events
+            .iter()
+            .position(|e| matches!(e,
+                PackageEvent::Warning { message, .. } if message.starts_with("Duplicate name 'mmm'")))
+            .expect("the duplicate-name warning");
+        let aaa = refused_name("aaa").expect("the packages/ ambiguity");
+        let zzz = refused_name("zzz").expect("the dotfiles/ ambiguity");
+        assert!(aaa < duplicate && duplicate < zzz, "{events:?}");
+    }
+
+    // A deployed record no entry produces, so the orphan check has something to
+    // say about a short collection.
+    fn seed_orphan(dirs: &TestDirs) {
+        let mut state = DeployState::empty();
+        let gone = dirs.target_dir.join(".gone");
+        std::fs::write(&gone, "x").unwrap();
+        state.record_deployment(&gone.display().to_string(), "old/rc", "seeded", None, None);
+        std::fs::write(
+            dirs.state_dir.join("deploy-state.yml"),
+            selfie::yaml::serialize(&state).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // With an unparsable packages/ spec and a dotfiles directory selfie cannot
+    // read, the directory is the first refusal: the orphan notice blames it, and
+    // under `stop_on_error` so does the stop.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_dotfiles_directory_is_the_first_refusal() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join(".x");
+        spec_in(&dirs.package_dir, "ok.yml", "ok", &target);
+        std::fs::create_dir_all(dirs.package_dir.join("ok")).unwrap();
+        std::fs::write(dirs.package_dir.join("ok").join("rc"), "ok").unwrap();
+        std::fs::write(dirs.package_dir.join("broken.yml"), "{{{\n").unwrap();
+        seed_orphan(&dirs);
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let _restore = RestoreMode(dirs.dotfiles_dir.clone(), 0o755);
+        if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
+            eprintln!("SKIP: running as root, mode bits ignored");
+            return;
+        }
+
+        let carried_on =
+            collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let notice = warning_messages(&carried_on)
+            .into_iter()
+            .find(|w| w.starts_with("Not checking"))
+            .expect("the orphan check names its shortfall");
+        assert!(
+            notice.contains("the dotfiles directory could not be read"),
+            "{notice}"
+        );
+
+        let dirs = dirs.stopping_on_error(true);
+        let stopped = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        let failure = failure_message(&stopped);
+        assert!(
+            failure.contains("the standalone dotfiles directory could not be read"),
+            "{failure}"
+        );
+    }
+
+    // A named apply still says why the dotfiles directory was not read, though it
+    // counts no refusal of its own for it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_named_apply_still_says_the_dotfiles_directory_could_not_be_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join(".rc");
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app").join("rc"), "rc").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[("app/rc", target.to_str().unwrap())],
+        );
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let _restore = RestoreMode(dirs.dotfiles_dir.clone(), 0o755);
+        if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
+            eprintln!("SKIP: running as root, mode bits ignored");
+            return;
+        }
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .apply("app", ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Failed to load standalone dotfiles")),
+            "{warnings:?}"
+        );
+        assert_eq!(refused_count(&events), 0, "{events:?}");
     }
 }
 

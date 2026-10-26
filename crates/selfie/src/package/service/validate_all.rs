@@ -4,12 +4,12 @@
 
 use crate::{
     config::SelfieConfig,
-    dotfile_service::{
-        collect::{Collected, collect_all_packages},
-        warning::CollectionRefusal,
-    },
     package::{
         Package, SpecOrigin,
+        collect::{
+            Collected, collect_all_packages,
+            warning::{CollectionRefusal, Finding},
+        },
         event::{EventSender, OperationResult, OperationSuccess, Outcome, ValidationResultData},
         port::PackageRepository,
         service::ProgressTracker,
@@ -35,8 +35,7 @@ where
     // spec shadows, or a dotfiles directory it could not list.
     let Collected {
         packages,
-        warnings,
-        refusals,
+        findings,
         unrefused_ambiguities,
         set_aside: _,
     } = match collect_all_packages(
@@ -56,29 +55,39 @@ where
 
     // Every unparsable file is reported, but only the ones apply could have used
     // are errors: a dotfiles copy a package spec shadows is not one, as it is not
-    // one for apply. Collection refuses exactly those, one refusal per file. The
-    // warnings count apart from specs with warnings: some name no spec at all.
-    let collection_warnings = warnings.len();
-    for warning in warnings {
-        warning.send(sender).await;
-    }
-
+    // one for apply. Collection refuses exactly those, one refusal per file.
+    //
     // Anything else collection refused is an error here: an ambiguous name is one
     // install refuses too, and an unlistable dotfiles directory may hide specs
     // this run never saw. An ambiguity collection let through, because no file of
     // it deploys here, is still one install refuses.
+    //
+    // The warnings count apart from specs with warnings, since some name no spec
+    // at all. It counts every warning-level message collection sends, a refused
+    // file's or directory's included; an ambiguous name's is a refusal row only.
+    let mut collection_warnings = 0;
     let mut unparsable = 0;
     let mut uncollected = 0;
     let unrefused = unrefused_ambiguities
         .into_iter()
-        .map(|(name, paths)| CollectionRefusal::AmbiguousName { name, paths });
-    for refusal in refusals.into_iter().chain(unrefused) {
-        if matches!(refusal, CollectionRefusal::UnloadableSpec(_)) {
-            unparsable += 1;
-        } else {
-            uncollected += 1;
-            refusal.send(sender).await;
+        .map(|(name, paths)| Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths }));
+    for finding in findings.into_iter().chain(unrefused) {
+        match &finding {
+            Finding::Warning(_) => collection_warnings += 1,
+            Finding::Refusal(CollectionRefusal::UnloadableSpec(_)) => {
+                collection_warnings += 1;
+                unparsable += 1;
+            }
+            Finding::Refusal(
+                CollectionRefusal::UnlistableDotfilesDirectory(_)
+                | CollectionRefusal::UncheckableDotfilesDirectory(_),
+            ) => {
+                collection_warnings += 1;
+                uncollected += 1;
+            }
+            Finding::Refusal(CollectionRefusal::AmbiguousName { .. }) => uncollected += 1,
         }
+        finding.send(sender).await;
     }
 
     let environment = config.environment();

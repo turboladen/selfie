@@ -44,7 +44,7 @@ use super::state_file::{
     LoadedState, Recorder, StateLoad, load_deploy_state, read_only_state_warning,
     stopped_before_writing,
 };
-use super::warning::CollectionRefusal;
+use crate::package::collect::warning::CollectionRefusal;
 
 /// What an apply covers.
 pub(super) enum Scope {
@@ -93,7 +93,10 @@ impl std::fmt::Display for Stop {
                 "Stopped before applying anything: package '{name}' is refused (stop_on_error is \
                  enabled)"
             ),
-            Self::Collection(CollectionRefusal::UnreadableDotfilesDirectory) => f.write_str(
+            Self::Collection(
+                CollectionRefusal::UnlistableDotfilesDirectory(_)
+                | CollectionRefusal::UncheckableDotfilesDirectory(_),
+            ) => f.write_str(
                 "Stopped before applying anything: the standalone dotfiles directory could not \
                  be read (stop_on_error is enabled)",
             ),
@@ -102,11 +105,11 @@ impl std::fmt::Display for Stop {
                 "Stopped before applying anything: several spec files claim the name '{name}' \
                  (stop_on_error is enabled)"
             ),
-            Self::Collection(CollectionRefusal::UnloadableSpec(path)) => write!(
+            Self::Collection(CollectionRefusal::UnloadableSpec(error)) => write!(
                 f,
                 "Stopped before applying anything: spec '{}' could not be loaded (stop_on_error \
                  is enabled)",
-                path.display()
+                error.package_path().display()
             ),
             Self::Unrecorded(reason) => f.write_str(reason),
         }

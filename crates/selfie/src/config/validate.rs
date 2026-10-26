@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::{
-    dotfile_service::directory::{UnlistedDotfilesDirectory, absent_warning},
     fs::{AbsentReason, DirectoryState, FileSystem},
+    package::collect::directory::{UnlistedDotfilesDirectory, absent_warning},
     package::repository::yaml::list_spec_directory,
     validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues},
 };
