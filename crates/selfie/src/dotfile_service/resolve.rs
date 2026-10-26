@@ -24,13 +24,16 @@ use crate::package::{
     event::{Condition, Location, Refusal},
 };
 
+// The limit in the unit docs/package-files.md states it in, which the error names.
+const MAX_CONTENT_MIB: usize = 8;
+
 /// Upper bound on resolved content.
 ///
 /// This bounds what selfie compares and writes, not what the command produces:
 /// the command runner buffers a command's whole output before this check can run,
 /// as it already does for every install and check command. A genuinely unbounded
 /// provider is therefore still bounded only by the runner's own behavior.
-const MAX_CONTENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CONTENT_BYTES: usize = MAX_CONTENT_MIB * 1024 * 1024;
 
 /// Content resolved for one dotfile entry.
 pub(crate) struct ResolvedContent {
@@ -74,7 +77,7 @@ pub(crate) enum ResolveError {
     UnseparableOutput { command: String },
     #[error("dotfile var '{name}' produced output selfie could not tell from the shell's")]
     UnseparableBinding { name: String },
-    #[error("dotfile content exceeds {MAX_CONTENT_BYTES} bytes")]
+    #[error("dotfile content exceeds {MAX_CONTENT_MIB} MiB")]
     TooLarge,
     #[error(transparent)]
     TemplateUnreadable(#[from] UnreadableTemplate),
@@ -1036,7 +1039,8 @@ mod tests {
 
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
 
-        assert!(err.to_string().contains("exceeds"), "{err}");
+        // The unit docs/package-files.md states the limit in.
+        assert_eq!(err.to_string(), "dotfile content exceeds 8 MiB");
     }
 
     #[tokio::test]
