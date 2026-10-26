@@ -933,6 +933,62 @@ impl ListPackagesOutput {
     pub fn invalid_packages(&self) -> impl Iterator<Item = &PackageParseError> {
         self.0.iter().filter_map(|maybe_p| maybe_p.as_ref().err())
     }
+
+    /// What the name table says about the listed files, asked once: the packages
+    /// a command can use, the names several files claim, one refused row per
+    /// loaded file of such a name, and every name a file claims.
+    #[must_use]
+    pub fn names(&self) -> ListingNames<'_> {
+        let path_of = |result: &Result<Package, PackageParseError>| match result {
+            Ok(package) => package.path().clone(),
+            Err(failure) => failure.package_path().to_path_buf(),
+        };
+        let mut ambiguous =
+            crate::package::group_by_spec_name(self.0.iter().map(path_of), |path: &PathBuf| {
+                path.file_name().and_then(|name| name.to_str())
+            });
+        let claimed = ambiguous.keys().cloned().collect();
+        ambiguous.retain(|_, files| files.len() > 1);
+        let mut usable = Vec::new();
+        let mut rows = Vec::new();
+        for package in self.valid_packages() {
+            match package
+                .spec_name()
+                .and_then(|name| ambiguous.get(&name).map(|files| (name, files)))
+            {
+                Some((name, files)) => {
+                    rows.push(crate::package::event::RefusedSpec::ambiguous_file(
+                        &name,
+                        package.path(),
+                        files,
+                    ))
+                }
+                None => usable.push(package),
+            }
+        }
+        ListingNames {
+            usable,
+            ambiguous,
+            rows,
+            claimed,
+        }
+    }
+}
+
+/// What [`ListPackagesOutput::names`] found.
+#[derive(Debug)]
+pub struct ListingNames<'a> {
+    /// The packages that parsed and whose name no other listed file claims.
+    pub usable: Vec<&'a Package>,
+    /// Every name several listed files claim, loaded or not, with those files,
+    /// sorted. No command uses any file of such a name.
+    pub ambiguous: std::collections::BTreeMap<String, Vec<PathBuf>>,
+    /// One refused row for each loaded file of an ambiguous name, naming every
+    /// file the name's claim covers. A file that did not parse is left to the
+    /// listing's own failure row.
+    pub rows: Vec<crate::package::event::RefusedSpec>,
+    /// Every name a listed file claims, loaded or not.
+    pub claimed: std::collections::BTreeSet<String>,
 }
 
 /// A package file that could not be turned into a package.

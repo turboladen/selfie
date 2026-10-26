@@ -145,18 +145,6 @@ impl CollectionRefusal {
     }
 }
 
-/// What a package name appearing in both directories means to the caller.
-// A parameter rather than two collectors: the reading of both repositories, the
-// unparsable-spec reporting and the unlistable-directory handling are identical,
-// and only this one question differs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NameCollision {
-    /// The `packages/` copy wins and the other is dropped with a warning.
-    PackagesWin,
-    /// Both are kept, because both files are there.
-    KeepBoth,
-}
-
 /// The failure for a named apply that no collected package answers.
 pub(crate) fn no_such_package(
     name: &str,

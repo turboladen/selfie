@@ -437,6 +437,9 @@ fn find_existing_trackers(
     // answer has to be honest about what it did not check for any caller, not
     // only for the one that happens to re-read the directory.
     let repos = [(&package_repo, true), (dotfiles_repo, false)];
+    // The names the package directory claims, which set aside a dotfiles spec of
+    // the same name: apply does not use it, so it tracks nothing.
+    let mut claimed = std::collections::BTreeSet::new();
 
     for (repo, is_package_directory) in repos {
         // A spec selfie could not read may already track this file, and so may
@@ -456,15 +459,33 @@ fn find_existing_trackers(
         for invalid in output.invalid_packages() {
             skipped.push(selfie::package::service::skipped_spec_warning(invalid));
         }
+        let listing = output.names();
+        // A dotfiles spec under a name the package directory claims is set aside,
+        // as apply sets it aside, without a word.
+        let set_aside = |name: &str| !is_package_directory && claimed.contains(name);
+        // A name several files claim is used by no command, but any of its files
+        // may track this one, so each is named as unchecked.
+        for row in &listing.rows {
+            if !set_aside(&row.package_name) {
+                skipped.push(selfie::package::service::ambiguous_spec_warning(row));
+            }
+        }
 
-        // Every spec, not the first: a file two specs track is one the user
-        // has to hear about twice. The library's matcher, so this and the track
-        // commands find the same trackers.
-        for pkg in output.valid_packages() {
-            if seen.insert(std::fs::canonicalize(pkg.path()).unwrap_or_else(|_| pkg.path().clone()))
+        // Every spec apply uses, not the first: a file two specs track is one the
+        // user has to hear about twice. The library's matcher, so this and the
+        // track commands find the same trackers.
+        for pkg in listing.usable {
+            let set_aside = pkg.spec_name().is_some_and(|name| set_aside(&name));
+            if !set_aside
+                && seen.insert(
+                    std::fs::canonicalize(pkg.path()).unwrap_or_else(|_| pkg.path().clone()),
+                )
             {
                 packages.push(pkg.clone());
             }
+        }
+        if is_package_directory {
+            claimed = listing.claimed;
         }
     }
     let trackers = selfie::dotfile_service::track::trackers_of(&packages, &fs, &expanded);
@@ -604,6 +625,87 @@ mod tests {
         assert!(found.is_empty(), "nothing readable tracks that file");
         assert_eq!(skipped.len(), 1, "the unreadable spec must be reported");
         assert!(skipped[0].contains("brokenpkg.yaml"), "got: {}", skipped[0]);
+    }
+
+    // A dotfiles spec a package spec of the same name sets aside deploys nothing,
+    // and neither does a file of a name two files claim, so neither is a tracker.
+    // The ambiguous files are named as unchecked instead.
+    #[test]
+    fn find_existing_trackers_counts_only_specs_apply_uses() {
+        use selfie::config::SelfieConfigBuilder;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let entry = "dotfiles:\n  - source: x/rc\n    target: ~/.config/fish/config.fish\n";
+        std::fs::write(
+            packages.join("fish.yml"),
+            "name: fish\nenvironments:\n  test-env:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        std::fs::write(dotfiles.join("fish.yml"), format!("name: fish\n{entry}")).unwrap();
+        for ext in ["yml", "yaml"] {
+            std::fs::write(
+                packages.join(format!("dup.{ext}")),
+                format!("name: dup\n{entry}environments:\n  test-env:\n    install: \"true\"\n"),
+            )
+            .unwrap();
+        }
+        let dotfiles_repo =
+            YamlPackageRepository::new(RealFileSystem, dotfiles, SpecOrigin::DotfilesDirectory);
+        let config = CliConfig::wrap_for_test(
+            SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(packages)
+                .build(),
+        );
+
+        let (found, skipped) =
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
+
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert!(
+            skipped.iter().all(|w| w.contains("dup.yaml, dup.yml")),
+            "{skipped:?}"
+        );
+    }
+
+    // Dotfiles files claiming one name are set aside whole when a package spec has
+    // the name, as apply sets them aside, so they are not named as unchecked.
+    #[test]
+    fn find_existing_trackers_is_silent_about_a_set_aside_ambiguity() {
+        use selfie::config::SelfieConfigBuilder;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::write(
+            packages.join("fish.yml"),
+            "name: fish\nenvironments:\n  test-env:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        for ext in ["yml", "yaml"] {
+            std::fs::write(dotfiles.join(format!("fish.{ext}")), "name: fish\n").unwrap();
+        }
+        let dotfiles_repo =
+            YamlPackageRepository::new(RealFileSystem, dotfiles, SpecOrigin::DotfilesDirectory);
+        let config = CliConfig::wrap_for_test(
+            SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(packages)
+                .build(),
+        );
+
+        let (found, skipped) =
+            find_existing_trackers("~/.config/fish/config.fish", &config, &dotfiles_repo);
+
+        assert!(found.is_empty(), "{found:?}");
+        assert!(skipped.is_empty(), "{skipped:?}");
     }
 
     // The control: with every spec readable, a run that finds no tracker has
@@ -760,6 +862,37 @@ mod tests {
         let (names, skipped) = load_package_names(&repo).unwrap();
         assert_eq!(names, vec!["alacritty", "fnm", "zsh"]);
         assert!(skipped.is_empty());
+    }
+
+    // A name two files claim is refused by every command, so the picker does not
+    // offer it, and says why.
+    #[test]
+    fn the_track_picker_does_not_offer_an_ambiguous_name() {
+        use selfie::package::PackageBuilder;
+        use selfie::package::port::{ListPackagesOutput, MockPackageRepository};
+
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(|| {
+            Ok(ListPackagesOutput::from_packages(
+                ["bat.yml", "bat.yaml", "fnm.yml"]
+                    .into_iter()
+                    .map(|file| {
+                        PackageBuilder::default()
+                            .name(file.split('.').next().unwrap())
+                            .path(format!("/packages/{file}"))
+                            .build()
+                    })
+                    .collect(),
+            ))
+        });
+
+        let (names, skipped) = load_package_names(&repo).unwrap();
+        assert_eq!(names, vec!["fnm"]);
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert!(
+            skipped.iter().all(|w| w.contains("bat.yaml, bat.yml")),
+            "{skipped:?}"
+        );
     }
 
     // The picker cannot offer a spec selfie could not read, so the caller has to

@@ -309,15 +309,16 @@ where
             });
         }
 
-        // Validate changed YAML files before proposing commits.
+        // Validate changed YAML files before proposing commits. The spec
+        // directories are read once, for the validation and the grouping below.
         let environment = self.config.environment();
-        validate_changed_packages(
+        let specs = SpecDirectories::resolve(
             &repo_info.root,
             self.config.package_directory(),
             &self.config.dotfiles_directory(),
-            &all_changed,
-            environment,
-        )?;
+        )
+        .read();
+        validate_changes_against(&specs, &all_changed, environment)?;
 
         if options.batch {
             let files: Vec<PathBuf> = all_changed.iter().map(|(p, _)| p.clone()).collect();
@@ -342,7 +343,7 @@ where
         // layout. Built from the root, this set is empty whenever specs live in a
         // subdirectory, and every dotfile source is reported ungrouped instead of
         // committed with its package.
-        let spec_names = spec_names(&self.config, &repo_info.root);
+        let spec_names = specs.spec_names();
         let (commits, warnings) = group_changes_by_package(all_changed, options, &spec_names);
 
         Ok(PrepareResult {
@@ -718,45 +719,6 @@ enum FileChangeKind {
     Deleted,
 }
 
-// Spec files in `dir` that resolve to one package name, grouped under that
-// name. Only groups of two or more are returned.
-//
-// A collision is a property of the directory, not of any one file, so the
-// per-file validation cannot see it: each colliding file is individually valid.
-fn colliding_specs(dir: &Path) -> Vec<(String, Vec<String>)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        // An unreadable directory is not this check's business to report; the
-        // per-file validation already fails on anything it cannot read.
-        return Vec::new();
-    };
-
-    let names = entries
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| is_spec_file(Path::new(name)));
-
-    group_name_collisions(names)
-}
-
-// Split from the directory read so it can be tested on any file system. Two
-// extensions of one name exist anywhere, but a host that folds case cannot hold
-// two capitalizations of one name at all, so a test building real files reaches
-// only half of what this groups.
-//
-// Grouping is by folded *stem*, matching how the package repository resolves a
-// name: capitalization and the choice of `.yml` or `.yaml` are both invisible
-// to it, so `Neovim.yml`, `neovim.yml` and `neovim.yaml` are three files
-// claiming one package.
-fn group_name_collisions<I>(names: I) -> Vec<(String, Vec<String>)>
-where
-    I: IntoIterator<Item = String>,
-{
-    crate::package::group_by_spec_name(names, |name: &String| Some(name.as_str()))
-        .into_iter()
-        .filter(|(_, names)| names.len() > 1)
-        .collect()
-}
-
 // Both flavors leave the package unresolvable, but only one destroys a file, so
 // the refusals do not say the same thing. Two capitalizations of one file name
 // cannot both survive a checkout on a case-insensitive file system; two
@@ -782,22 +744,20 @@ fn name_collision_message(names: &[String]) -> String {
     }
 }
 
-/// Validate all changed YAML package files, returning [`SyncError::ValidationFailed`]
-/// if any have errors.
+/// Validate all changed YAML package files in the spec directories `specs` lists,
+/// returning [`SyncError::ValidationFailed`] if any have errors.
 ///
-/// Only non-deleted specs in `package_dir` or `dotfiles_dir` are validated —
+/// Only non-deleted specs in the package or dotfiles directory are validated —
 /// deleted files are obviously not parseable, and neither a dotfile source nor
 /// YAML belonging to some other tool has this schema to validate against. A
-/// spec in `dotfiles_dir` is validated as a standalone dotfile spec.
+/// spec in the dotfiles directory is validated as a standalone dotfile spec.
 ///
 /// Informational notices are excluded. This is a gate on pushing, and an `Info`
 /// issue is by definition not a defect — a package with a provider-sourced
 /// dotfile always carries one, so counting it here would block `sync push` for
 /// every correct package that uses the feature.
-fn validate_changed_packages(
-    repo_root: &Path,
-    package_dir: &Path,
-    dotfiles_dir: &Path,
+fn validate_changes_against(
+    specs: &SpecListing,
     changes: &[(PathBuf, FileChangeKind)],
     environment: &str,
 ) -> Result<(), SyncError> {
@@ -809,7 +769,8 @@ fn validate_changed_packages(
         repo_root,
         package_dir,
         dotfiles_dir,
-    } = SpecDirectories::resolve(repo_root, package_dir, dotfiles_dir);
+    } = &specs.directories;
+    let table = &specs.table;
 
     // A spec is a direct child of the package directory or the dotfiles
     // directory, which is where the repositories load them from and how deep they
@@ -819,7 +780,6 @@ fn validate_changed_packages(
     // directory is asked first, so a directory configured as both holds package
     // specs, as apply reads it. A dotfiles spec whose name a package spec claims
     // is one apply does not use, so it is not checked, as validate skips it.
-    let package_spec_names = spec_names_in(&package_dir);
     let spec_origin = |path: &Path| {
         let full = repo_root.join(path);
         let parent = full.parent()?;
@@ -832,8 +792,7 @@ fn validate_changed_packages(
                 .file_name()
                 .and_then(|name| name.to_str())
                 .and_then(crate::package::spec_name_from_file_name)?;
-            (!package_spec_names.contains(&name))
-                .then_some(crate::package::SpecOrigin::DotfilesDirectory)
+            (!table.is_set_aside(&name)).then_some(crate::package::SpecOrigin::DotfilesDirectory)
         } else {
             None
         }
@@ -846,22 +805,18 @@ fn validate_changed_packages(
     // them. Refusing the push is the only place the damage can still be
     // prevented, since the machine that loses a spec is the one that pulls.
     // Scanning the repo root instead would report two unrelated YAML files as one
-    // package. A dotfiles name the package directory claims is one apply does not
-    // use, so its files are not scanned, as they are not validated.
-    let dotfiles_collisions = dotfiles_dir.iter().flat_map(|dir| {
-        colliding_specs(dir)
-            .into_iter()
-            .filter(|(name, _)| !package_spec_names.contains(name))
-            .map(move |collision| (dir.as_path(), collision))
-    });
-    for (dir, (_name, names)) in colliding_specs(&package_dir)
-        .into_iter()
-        .map(|collision| (package_dir.as_path(), collision))
-        .chain(dotfiles_collisions)
-    {
-        let relative = dir.strip_prefix(&repo_root).unwrap_or(dir);
+    // package.
+    for (_name, files) in table.ambiguous() {
+        // Refused whether or not its files deploy anything, since the machine that
+        // pulls cannot resolve the name either way.
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|file| file.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        let relative = files[0].strip_prefix(repo_root).unwrap_or(&files[0]);
         failures.push(PackageValidationFailure {
-            path: relative.join(&names[0]).display().to_string(),
+            path: relative.display().to_string(),
             issues: vec![PackageValidationIssue {
                 level: crate::validation::ValidationLevel::Error,
                 category: PushIssueCategory::NameCollision,
@@ -1223,16 +1178,26 @@ fn is_spec_file(path: &Path) -> bool {
 /// A standalone spec's sources sit in a directory named for it, as a package's
 /// do, so a change to one is grouped with its spec and announced on pull.
 fn spec_names(config: &SelfieConfig, repo_root: &Path) -> BTreeSet<String> {
-    let directories = SpecDirectories::resolve(
+    SpecDirectories::resolve(
         repo_root,
         config.package_directory(),
         &config.dotfiles_directory(),
-    );
-    let mut names = spec_names_in(&directories.package_dir);
-    if let Some(dotfiles_dir) = &directories.dotfiles_dir {
-        names.extend(spec_names_in(dotfiles_dir));
+    )
+    .read()
+    .spec_names()
+}
+
+/// The spec directories a push carries, and the name table of what is in them.
+struct SpecListing {
+    directories: SpecDirectories,
+    table: crate::package::collect::NameTable<PathBuf>,
+}
+
+impl SpecListing {
+    /// The folded name of every spec either directory holds.
+    fn spec_names(&self) -> BTreeSet<String> {
+        self.table.names().map(str::to_string).collect()
     }
-    names
 }
 
 /// The directories a push carries specs from, resolved.
@@ -1246,6 +1211,24 @@ struct SpecDirectories {
 }
 
 impl SpecDirectories {
+    /// Read each directory once, into the name table every check of a push asks.
+    fn read(self) -> SpecListing {
+        let dotfiles = self
+            .dotfiles_dir
+            .as_deref()
+            .map(spec_files_in)
+            .unwrap_or_default();
+        let table = crate::package::collect::NameTable::of(
+            spec_files_in(&self.package_dir),
+            dotfiles,
+            |path: &PathBuf| path.file_name().and_then(|name| name.to_str()),
+        );
+        SpecListing {
+            directories: self,
+            table,
+        }
+    }
+
     fn resolve(repo_root: &Path, package_dir: &Path, dotfiles_dir: &Path) -> Self {
         // Every path is resolved before any is compared. They arrive by different
         // routes -- the git adapter canonicalizes the root it discovers, while a
@@ -1267,29 +1250,25 @@ impl SpecDirectories {
     }
 }
 
-/// The folded names of every spec sitting directly in `spec_dir`, a directory a
-/// repository loads specs from rather than the repo root.
-///
-/// Built once per operation. Grouping consults it for each changed file, so
-/// reading the directory inside that loop would cost one `read_dir` per change.
-fn spec_names_in(spec_dir: &Path) -> BTreeSet<String> {
+/// Every entry sitting directly in `spec_dir` whose name is valid UTF-8, or none
+/// when the directory cannot be read.
+fn spec_files_in(spec_dir: &Path) -> Vec<PathBuf> {
     // Reading the directory rather than probing `{name}.yml` and `{name}.yaml`.
     // Those two paths answer for one capitalization only, so a spec stored as
     // `Starship.YML` left `starship/starship.toml` unmatched on a
     // case-sensitive file system and matched on a case-insensitive one -- the
     // per-machine split that folding names exists to remove.
+    //
+    // An unreadable directory is not this check's business to report; the
+    // per-file validation already fails on anything it cannot read.
     let Ok(entries) = std::fs::read_dir(spec_dir) else {
-        return BTreeSet::new();
+        return Vec::new();
     };
 
     entries
         .flatten()
-        .filter_map(|entry| {
-            let file_name = entry.file_name();
-            file_name
-                .to_str()
-                .and_then(crate::package::spec_name_from_file_name)
-        })
+        .filter(|entry| entry.file_name().to_str().is_some())
+        .map(|entry| entry.path())
         .collect()
 }
 
@@ -1528,9 +1507,34 @@ fn categorize_pull_changes(
     (updated, added, removed)
 }
 
+// The push gate over the spec directories at these paths, for tests that drive it
+// one call at a time.
+#[cfg(test)]
+fn gate(
+    repo_root: &Path,
+    package_dir: &Path,
+    dotfiles_dir: &Path,
+    changes: &[(PathBuf, FileChangeKind)],
+    environment: &str,
+) -> Result<(), SyncError> {
+    validate_changes_against(
+        &SpecDirectories::resolve(repo_root, package_dir, dotfiles_dir).read(),
+        changes,
+        environment,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The folded names of the specs in `dir`, through the listing a push reads,
+    // with no dotfiles directory beside it.
+    fn spec_names_in(dir: &Path) -> BTreeSet<String> {
+        SpecDirectories::resolve(dir, dir, Path::new("/nonexistent/dotfiles"))
+            .read()
+            .spec_names()
+    }
 
     // ─── collect_drift_summary's verdict ─────────────────────────────────────
 
@@ -3039,7 +3043,7 @@ mod push_validation_tests {
 
     #[test]
     fn an_informational_notice_does_not_block_a_push() {
-        // `validate_changed_packages` fails the push on ANY issue it collects, so
+        // `validate_changes_against` fails the push on ANY issue it collects, so
         // an informational notice reaching that list would block `sync push` for
         // every package using a provider-sourced dotfile — which is every correct
         // use of the feature.
@@ -3051,7 +3055,7 @@ mod push_validation_tests {
              - command: op read op://Private/token\n    target: ~/.creds\n",
         );
 
-        let result = validate_changed_packages(
+        let result = gate(
             temp.path(),
             temp.path(),
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -3076,7 +3080,7 @@ mod push_validation_tests {
              - source: a.tpl\n    command: op read x\n    target: ~/.creds\n",
         );
 
-        let result = validate_changed_packages(
+        let result = gate(
             temp.path(),
             temp.path(),
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -3104,7 +3108,7 @@ mod push_validation_tests {
              target: ~/.creds\nenvironments: {oops\n",
         );
 
-        let result = validate_changed_packages(
+        let result = gate(
             temp.path(),
             temp.path(),
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -3763,7 +3767,20 @@ mod name_collision_tests {
         assert_eq!(names, vec!["starship"], "got: {names:?}");
     }
 
-    use super::{colliding_specs, group_name_collisions, name_collision_message};
+    use super::{SpecDirectories, name_collision_message};
+    use crate::package::collect::NameTable;
+
+    // The names several of `packages` and `dotfiles` claim, with the files, as the
+    // push gate is handed them.
+    fn ambiguous_in(packages: &[&str], dotfiles: &[&str]) -> Vec<(String, Vec<String>)> {
+        let owned = |names: &[&str]| names.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        NameTable::of(owned(packages), owned(dotfiles), |name: &String| {
+            Some(name.as_str())
+        })
+        .ambiguous()
+        .map(|(name, files)| (name.to_string(), files.to_vec()))
+        .collect()
+    }
 
     // A push ships specs to a machine that will run `apply` on them. Sending one
     // apply refuses means the receiving machine finds out, which is the failure
@@ -3776,7 +3793,7 @@ mod name_collision_tests {
     const UNREADABLE_TOP_LEVEL: &str = "extra:\n  ? [a, b]\n  : v\n";
 
     fn push_result(spec: &str) -> Result<(), super::SyncError> {
-        use super::{FileChangeKind, validate_changed_packages};
+        use super::{FileChangeKind, gate};
         use std::path::PathBuf;
 
         let root = tempfile::tempdir().unwrap();
@@ -3788,7 +3805,7 @@ mod name_collision_tests {
             PathBuf::from("packages/myapp.yml"),
             FileChangeKind::Modified,
         )];
-        validate_changed_packages(
+        gate(
             root.path(),
             &packages,
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -3963,7 +3980,7 @@ environments:
 
     #[test]
     fn a_push_touching_a_colliding_directory_is_refused() {
-        use super::{FileChangeKind, validate_changed_packages};
+        use super::{FileChangeKind, gate};
         use std::path::PathBuf;
 
         let root = tempfile::tempdir().unwrap();
@@ -3987,7 +4004,7 @@ environments:
         )];
         // `packages`, not the root: that is where this fixture puts the specs,
         // and the scan looks where the repository loads them from.
-        let result = validate_changed_packages(
+        let result = gate(
             root.path(),
             &packages,
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -4021,13 +4038,39 @@ environments:
             return;
         }
 
-        let groups = colliding_specs(dir.path());
-        assert_eq!(groups.len(), 1, "got: {groups:?}");
-        assert_eq!(groups[0].1, vec!["Neovim.yml", "neovim.yml"]);
+        let listing =
+            SpecDirectories::resolve(dir.path(), dir.path(), std::path::Path::new("/nonexistent"))
+                .read();
+        let groups: Vec<Vec<String>> = listing
+            .table
+            .ambiguous()
+            .map(|(_, files)| {
+                files
+                    .iter()
+                    .map(|file| file.file_name().unwrap().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(groups, [vec!["Neovim.yml", "neovim.yml"]]);
     }
 
     fn group(names: &[&str]) -> Vec<(String, Vec<String>)> {
-        group_name_collisions(names.iter().map(|s| (*s).to_string()))
+        ambiguous_in(names, &[])
+    }
+
+    // A dotfiles name the package directory claims is set aside, so its files are
+    // not an ambiguity the gate refuses, however many there are; one the package
+    // directory does not claim is.
+    #[test]
+    fn a_set_aside_dotfiles_name_is_not_an_ambiguity() {
+        assert!(ambiguous_in(&["ruby.yml"], &["ruby.yml", "ruby.yaml"]).is_empty());
+        assert_eq!(
+            ambiguous_in(&["ruby.yml"], &["zed.yml", "zed.yaml"]),
+            vec![(
+                "zed".to_string(),
+                vec!["zed.yaml".to_string(), "zed.yml".to_string()]
+            )]
+        );
     }
 
     // The pair a push must refuse. Both names are reported, so the message can
@@ -4068,7 +4111,7 @@ environments:
     // reaches the same state without one.
     #[test]
     fn a_package_directory_named_through_a_symlink_is_still_validated() {
-        use super::{FileChangeKind, validate_changed_packages};
+        use super::{FileChangeKind, gate};
 
         let temp = tempfile::tempdir().unwrap();
         let real_root = temp.path().join("repo");
@@ -4087,7 +4130,7 @@ environments:
             PathBuf::from("packages/neovim.yml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(
+        let result = gate(
             &repo_root,
             &linked_root.join("packages"),
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -4115,7 +4158,7 @@ environments:
     // compares names.
     #[test]
     fn yaml_that_is_not_a_spec_does_not_fail_a_push() {
-        use super::{FileChangeKind, validate_changed_packages};
+        use super::{FileChangeKind, gate};
 
         let root = tempfile::tempdir().unwrap();
         let packages = root.path().join("packages");
@@ -4131,7 +4174,7 @@ environments:
             PathBuf::from(".github/workflows/ci.yml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(
+        let result = gate(
             root.path(),
             &packages,
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -4150,7 +4193,7 @@ environments:
     // that directory without descending into it.
     #[test]
     fn yaml_below_the_package_directory_is_not_a_spec() {
-        use super::{FileChangeKind, validate_changed_packages};
+        use super::{FileChangeKind, gate};
 
         let root = tempfile::tempdir().unwrap();
         let packages = root.path().join("packages");
@@ -4165,7 +4208,7 @@ environments:
             PathBuf::from("packages/starship/config.yml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(
+        let result = gate(
             root.path(),
             &packages,
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -4190,7 +4233,7 @@ environments:
     // Skipping is loud, because a quietly-skipped test reads as a passing one.
     #[test]
     fn a_dotfile_source_finds_its_spec_under_any_capitalization() {
-        use super::{spec_named, spec_names_in};
+        use super::{SpecDirectories, spec_named};
 
         let root = tempfile::tempdir().unwrap();
         let spec = "name: starship\nenvironments:\n  test-env:\n    install: \"true\"\n";
@@ -4204,7 +4247,13 @@ environments:
             return;
         }
 
-        let spec_names = spec_names_in(root.path());
+        let spec_names = SpecDirectories::resolve(
+            root.path(),
+            root.path(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .read()
+        .spec_names();
 
         assert!(
             spec_named(&spec_names, "starship").is_some(),
@@ -4221,7 +4270,7 @@ environments:
     // case-insensitive file system too. Nothing here needs a skip.
     #[test]
     fn a_push_touching_two_extensions_of_one_name_is_refused() {
-        use super::{FileChangeKind, validate_changed_packages};
+        use super::{FileChangeKind, gate};
         use std::path::PathBuf;
 
         let root = tempfile::tempdir().unwrap();
@@ -4235,7 +4284,7 @@ environments:
         );
 
         let changes = vec![(PathBuf::from("neovim.yml"), FileChangeKind::Modified)];
-        let result = validate_changed_packages(
+        let result = gate(
             root.path(),
             root.path(),
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -4317,7 +4366,7 @@ environments:
     // place specs live.
     #[test]
     fn a_push_carrying_only_dotfile_sources_still_sees_a_collision() {
-        use super::{FileChangeKind, validate_changed_packages};
+        use super::{FileChangeKind, gate};
         use std::path::PathBuf;
 
         let root = tempfile::tempdir().unwrap();
@@ -4341,7 +4390,7 @@ environments:
             PathBuf::from("starship/starship.toml"),
             FileChangeKind::Modified,
         )];
-        let result = validate_changed_packages(
+        let result = gate(
             root.path(),
             root.path(),
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -4363,7 +4412,7 @@ environments:
     // that holds no specs and lets the collision through.
     #[test]
     fn a_package_directory_below_the_repo_root_is_still_scanned() {
-        use super::{FileChangeKind, validate_changed_packages};
+        use super::{FileChangeKind, gate};
         use std::path::PathBuf;
 
         let root = tempfile::tempdir().unwrap();
@@ -4375,7 +4424,7 @@ environments:
 
         std::fs::write(root.path().join("README.md"), "hi\n").unwrap();
         let changes = vec![(PathBuf::from("README.md"), FileChangeKind::Modified)];
-        let result = validate_changed_packages(
+        let result = gate(
             root.path(),
             &packages,
             std::path::Path::new("/nonexistent/dotfiles"),
@@ -4418,7 +4467,7 @@ environments:
 mod standalone_specs {
     use std::path::{Path, PathBuf};
 
-    use super::{FileChangeKind, spec_names, validate_changed_packages};
+    use super::{FileChangeKind, gate, spec_names};
 
     // A repository holding `packages/` and `dotfiles/`.
     fn repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -4435,7 +4484,7 @@ mod standalone_specs {
 
     fn push(root: &Path, packages: &Path, dotfiles: &Path, changed: &str) -> String {
         let changes = vec![(PathBuf::from(changed), FileChangeKind::Modified)];
-        match validate_changed_packages(root, packages, dotfiles, &changes, "test") {
+        match gate(root, packages, dotfiles, &changes, "test") {
             Ok(()) => String::new(),
             Err(error) => format!("{error:?}"),
         }

@@ -55,7 +55,10 @@ where
         }
     };
 
-    let valid_packages: Vec<_> = list_output.valid_packages().collect();
+    // A name several files claim is no package: each loaded file of it is a
+    // refused row, and one that did not parse keeps its own failure row.
+    let names = list_output.names();
+    let valid_packages = names.usable;
     let invalid_packages: Vec<_> = list_output.invalid_packages().collect();
 
     // Sort packages alphabetically by name before processing
@@ -74,7 +77,11 @@ where
     };
     let (sorted_packages, refused) =
         crate::package::refusal::separate_refused(sorted_packages, shown);
-    let refused: Vec<RefusedSpec> = refused.into_iter().map(|(_, spec)| spec).collect();
+    let refused: Vec<RefusedSpec> = names
+        .rows
+        .into_iter()
+        .chain(refused.into_iter().map(|(_, spec)| spec))
+        .collect();
 
     // Calculate environment statistics from all valid packages (before filtering)
     let mut environment_stats: HashMap<String, usize> = HashMap::new();

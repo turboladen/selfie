@@ -9,7 +9,7 @@ use crate::package::{Package, port::PackageRepository};
 pub(crate) mod directory;
 pub(crate) mod warning;
 
-use warning::{ApplyWarning, CollectionRefusal, Finding, NameCollision};
+use warning::{ApplyWarning, CollectionRefusal, Finding};
 
 /// What collecting the packages an operation covers found.
 pub(crate) struct Collected {
@@ -45,39 +45,18 @@ impl Collected {
 }
 
 /// Collect packages from both the main package repository and the dotfiles
-/// repository, returning a combined list and what collecting them found. The
-/// caller sends each [`Finding`] once its event stream is up.
-// Findings are returned rather than emitted because collection happens before
-// the event channel exists.
-pub(crate) fn collect_all_packages<R: PackageRepository>(
-    package_repo: &R,
-    dotfiles_repo: &R,
-    dotfiles_directory_is_expected: bool,
-    environment: &str,
-) -> Result<Collected, crate::package::port::PackageListError> {
-    collect_packages(
-        package_repo,
-        dotfiles_repo,
-        NameCollision::PackagesWin,
-        dotfiles_directory_is_expected,
-        environment,
-    )
-}
-
-/// Collect from both repositories, deciding what a name in both means.
-///
-/// Deploying has to choose one, because two packages cannot both own a name.
-/// Listing must not: both files exist, and a caller asking what is on disk is
-/// asking about the files rather than about what would win.
+/// repository, returning the packages a deploy would use and what collecting
+/// them found. The caller sends each [`Finding`] once its event stream is up.
 ///
 /// `dotfiles_directory_is_expected` decides whether a dotfiles directory that is
 /// **not there** is worth a warning, and nothing else. A directory that could not
 /// be read or classified is refused either way. `environment` decides whether a
 /// name several files claim matters to a deploying caller.
-pub(crate) fn collect_packages<R: PackageRepository>(
+// Findings are returned rather than emitted because collection happens before
+// the event channel exists.
+pub(crate) fn collect_all_packages<R: PackageRepository>(
     package_repo: &R,
     dotfiles_repo: &R,
-    collision: NameCollision,
     dotfiles_directory_is_expected: bool,
     environment: &str,
 ) -> Result<Collected, crate::package::port::PackageListError> {
@@ -134,27 +113,6 @@ pub(crate) fn collect_packages<R: PackageRepository>(
         }
     }
 
-    // A package file that does not parse is dropped by `valid_packages`, and
-    // silence there is dangerous for this command specifically: apply is what
-    // people run, and a dotfile that quietly stops deploying surfaces much
-    // later as an authentication failure nobody traces back to a typo. A listing
-    // keeps every file and refuses none, so for it each is only worth a word.
-    if collision == NameCollision::KeepBoth {
-        findings.extend(
-            invalid_in_packages
-                .into_iter()
-                .chain(invalid_in_dotfiles)
-                .map(|invalid| Finding::Warning(ApplyWarning::SkippedSpec(invalid))),
-        );
-        packages.extend(dotfiles_packages);
-        return Ok(Collected {
-            packages,
-            findings,
-            unrefused_ambiguities: Vec::new(),
-            set_aside: Vec::new(),
-        });
-    }
-
     // Refusals are found in this order: the dotfiles directory above, then
     // packages/ ambiguities, packages/ unparsable specs, dotfiles/ ambiguities and
     // dotfiles/ unparsable specs. Two consumers read the first refusal, the
@@ -163,26 +121,38 @@ pub(crate) fn collect_packages<R: PackageRepository>(
     // Several files in one directory claiming one name are refused as install
     // refuses them, whether each parses or not: deploying any of them picks one by
     // enumeration order, and deploying all of them lets the last overwrite the rest.
-    // Asked only where one package must win a name; a listing keeps every file,
-    // since every file is there.
-    let packages_claims = claims(&packages, &unparsable_in_packages);
+    let table = NameTable::of(
+        packages
+            .iter()
+            .map(|pkg| pkg.path().clone())
+            .chain(unparsable_in_packages.iter().cloned()),
+        dotfiles_packages
+            .iter()
+            .map(|pkg| pkg.path().clone())
+            .chain(unparsable_in_dotfiles.iter().cloned()),
+        |path: &PathBuf| path.file_name().and_then(|name| name.to_str()),
+    );
     let loaded_in_packages: HashSet<String> =
         packages.iter().filter_map(Package::spec_name).collect();
     let mut unrefused_ambiguities = Vec::new();
-    for (name, paths) in &packages_claims {
-        if paths.len() > 1 {
-            if ambiguity_matters(paths, &packages, environment) {
+    for (name, _, claim) in table.package_claims() {
+        if let Claim::Ambiguous(paths) = claim {
+            let ambiguity = (name.to_string(), paths.to_vec());
+            if ambiguity_matters(paths, &packages.iter().collect::<Vec<_>>(), environment) {
                 findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
-                    name: name.clone(),
-                    paths: paths.clone(),
+                    name: ambiguity.0,
+                    paths: ambiguity.1,
                 }));
             } else {
-                unrefused_ambiguities.push((name.clone(), paths.clone()));
+                unrefused_ambiguities.push(ambiguity);
             }
         }
     }
-    packages.retain(|pkg| !is_ambiguous(pkg, &packages_claims));
-    // Every packages/ file that failed to parse could have been used, so each is a
+    packages.retain(|pkg| pkg.spec_name().is_none_or(|name| table.uses_package(&name)));
+    // A package file that does not parse is dropped by `valid_packages`, and
+    // silence there is dangerous: a dotfile that quietly stops deploying surfaces
+    // much later as an authentication failure nobody traces back to a typo. Every
+    // packages/ file that failed to parse could have been used, so each is a
     // refusal, one within an ambiguous name too: it needs its own fix.
     findings.extend(
         invalid_in_packages
@@ -197,13 +167,12 @@ pub(crate) fn collect_packages<R: PackageRepository>(
     // name several packages/ files claim, still claims it: deploying the dotfiles/
     // copy in its place would apply a file the user did not mean. The reason names
     // the first thing to fix in packages/: an ambiguity before a failed parse.
-    let dotfiles_claims = claims(&dotfiles_packages, &unparsable_in_dotfiles);
     let mut set_aside = Vec::new();
-    for (name, paths) in &dotfiles_claims {
-        if let Some(in_packages) = packages_claims.get(name) {
+    for (name, _, claim) in table.dotfiles_claims() {
+        if let Claim::SetAside(in_packages) = claim {
             // The packages/ spec may deploy nothing this one does, so nothing
             // collected stands in for this file's entries.
-            set_aside.push(name.clone());
+            set_aside.push(name.to_string());
             let why = if in_packages.len() > 1 {
                 format!(
                     "Not using '{name}' from dotfiles/: packages/ has more than one spec by that \
@@ -221,17 +190,22 @@ pub(crate) fn collect_packages<R: PackageRepository>(
                 )
             };
             findings.push(Finding::Warning(ApplyWarning::Named {
-                name: name.clone(),
+                name: name.to_string(),
                 message: why,
             }));
-        } else if paths.len() > 1 {
-            if ambiguity_matters(paths, &dotfiles_packages, environment) {
+        } else if let Claim::Ambiguous(paths) = claim {
+            let ambiguity = (name.to_string(), paths.to_vec());
+            if ambiguity_matters(
+                paths,
+                &dotfiles_packages.iter().collect::<Vec<_>>(),
+                environment,
+            ) {
                 findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
-                    name: name.clone(),
-                    paths: paths.clone(),
+                    name: ambiguity.0,
+                    paths: ambiguity.1,
                 }));
             } else {
-                unrefused_ambiguities.push((name.clone(), paths.clone()));
+                unrefused_ambiguities.push(ambiguity);
             }
         }
     }
@@ -240,7 +214,7 @@ pub(crate) fn collect_packages<R: PackageRepository>(
     // used it, so it is only worth a word.
     for invalid in invalid_in_dotfiles {
         let claimed = crate::package::spec_name_of(invalid.package_path())
-            .is_some_and(|name| packages_claims.contains_key(&name));
+            .is_some_and(|name| table.is_set_aside(&name));
         findings.push(if claimed {
             Finding::Warning(ApplyWarning::SkippedSpec(invalid))
         } else {
@@ -249,8 +223,7 @@ pub(crate) fn collect_packages<R: PackageRepository>(
     }
     dotfiles_packages.retain(|pkg| {
         pkg.spec_name()
-            .is_none_or(|name| !packages_claims.contains_key(&name))
-            && !is_ambiguous(pkg, &dotfiles_claims)
+            .is_none_or(|name| table.uses_dotfiles(&name))
     });
     packages.extend(dotfiles_packages);
 
@@ -281,15 +254,114 @@ fn unparsable_paths(output: &crate::package::port::ListPackagesOutput) -> Vec<Pa
         .collect()
 }
 
-/// Every file in one directory, loaded or not, grouped by the name it claims.
-fn claims(packages: &[Package], unparsable: &[PathBuf]) -> BTreeMap<String, Vec<PathBuf>> {
-    let files = packages
-        .iter()
-        .map(|pkg| pkg.path().to_path_buf())
-        .chain(unparsable.iter().cloned());
-    crate::package::group_by_spec_name(files, |path: &PathBuf| {
-        path.file_name().and_then(|name| name.to_str())
-    })
+/// What each folded name means across the two spec directories, from the files'
+/// names alone: which files claim it in each directory. A name several files of
+/// one directory claim is ambiguous, and a dotfiles-directory file under a name
+/// the package directory claims is set aside.
+pub(crate) struct NameTable<T> {
+    packages: BTreeMap<String, Vec<T>>,
+    dotfiles: BTreeMap<String, Vec<T>>,
+}
+
+/// What the table says about one name in one directory.
+pub(crate) enum Claim<'t, T> {
+    /// One file claims it, and that file is used.
+    One,
+    /// Several files of the directory claim it, so none of them is used. Carries
+    /// the files, sorted.
+    Ambiguous(&'t [T]),
+    /// A dotfiles-directory name the package directory also claims, so no
+    /// dotfiles file of it is used. Carries the package directory's files.
+    SetAside(&'t [T]),
+}
+
+impl<T: Ord> NameTable<T> {
+    /// The table of `packages` and `dotfiles`, whose file names `file_name` gives.
+    /// An item naming no spec is left out.
+    pub(crate) fn of(
+        packages: impl IntoIterator<Item = T>,
+        dotfiles: impl IntoIterator<Item = T>,
+        file_name: impl Fn(&T) -> Option<&str>,
+    ) -> Self {
+        Self {
+            packages: crate::package::group_by_spec_name(packages, &file_name),
+            dotfiles: crate::package::group_by_spec_name(dotfiles, &file_name),
+        }
+    }
+
+    /// Every name the package directory claims, in order, with its files and
+    /// what the table says about it.
+    pub(crate) fn package_claims(&self) -> impl Iterator<Item = (&str, &[T], Claim<'_, T>)> {
+        self.packages.iter().map(|(name, files)| {
+            let claim = if files.len() > 1 {
+                Claim::Ambiguous(files)
+            } else {
+                Claim::One
+            };
+            (name.as_str(), files.as_slice(), claim)
+        })
+    }
+
+    /// Every name the dotfiles directory claims, in order, with its files and
+    /// what the table says about it. A set-aside name is never ambiguous.
+    pub(crate) fn dotfiles_claims(&self) -> impl Iterator<Item = (&str, &[T], Claim<'_, T>)> {
+        self.dotfiles.iter().map(|(name, files)| {
+            let claim = match self.set_aside_by(name) {
+                Some(by) => Claim::SetAside(by),
+                None if files.len() > 1 => Claim::Ambiguous(files),
+                None => Claim::One,
+            };
+            (name.as_str(), files.as_slice(), claim)
+        })
+    }
+
+    /// Whether a dotfiles-directory file of `name` is set aside, because the
+    /// package directory claims the name.
+    pub(crate) fn is_set_aside(&self, name: &str) -> bool {
+        self.set_aside_by(name).is_some()
+    }
+
+    // The package directory's files that set a dotfiles name aside, the one rule
+    // every set-aside answer comes from.
+    fn set_aside_by(&self, name: &str) -> Option<&[T]> {
+        self.packages.get(name).map(Vec::as_slice)
+    }
+
+    /// Whether the package directory's file of `name` is the one used.
+    pub(crate) fn uses_package(&self, name: &str) -> bool {
+        self.packages
+            .get(name)
+            .is_some_and(|files| files.len() == 1)
+    }
+
+    /// Whether the dotfiles directory's file of `name` is the one used.
+    pub(crate) fn uses_dotfiles(&self, name: &str) -> bool {
+        !self.is_set_aside(name)
+            && self
+                .dotfiles
+                .get(name)
+                .is_some_and(|files| files.len() == 1)
+    }
+
+    /// Every ambiguous name with its files: the package directory's first, then
+    /// the dotfiles directory's that are not set aside. Whether a command refuses
+    /// each one is its own verdict.
+    pub(crate) fn ambiguous(&self) -> impl Iterator<Item = (&str, &[T])> {
+        self.package_claims()
+            .chain(self.dotfiles_claims())
+            .filter_map(|(name, _, claim)| match claim {
+                Claim::Ambiguous(files) => Some((name, files)),
+                Claim::One | Claim::SetAside(_) => None,
+            })
+    }
+
+    /// Every name either directory claims.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.packages
+            .keys()
+            .chain(self.dotfiles.keys())
+            .map(String::as_str)
+    }
 }
 
 /// Whether a name the files at `paths` all claim matters to a run in
@@ -298,7 +370,7 @@ fn claims(packages: &[Package], unparsable: &[PathBuf]) -> BTreeMap<String, Vec<
 /// that parsed.
 // A pair of install-only specs is left to install, which refuses the name
 // itself: apply and drift would deploy and check nothing from either file.
-fn ambiguity_matters(paths: &[PathBuf], loaded: &[Package], environment: &str) -> bool {
+pub(crate) fn ambiguity_matters(paths: &[PathBuf], loaded: &[&Package], environment: &str) -> bool {
     paths.iter().any(|path| {
         loaded
             .iter()
@@ -311,13 +383,6 @@ fn ambiguity_matters(paths: &[PathBuf], loaded: &[Package], environment: &str) -
                         .is_some_and(|env| !env.dotfiles().is_empty())
             })
     })
-}
-
-/// Whether more than one file in `claims` claims `pkg`'s name.
-fn is_ambiguous(pkg: &Package, claims: &BTreeMap<String, Vec<PathBuf>>) -> bool {
-    pkg.spec_name()
-        .and_then(|name| claims.get(&name))
-        .is_some_and(|paths| paths.len() > 1)
 }
 
 #[cfg(test)]
@@ -350,8 +415,7 @@ mod tests {
         packages: &MockPackageRepository,
         dotfiles: &MockPackageRepository,
     ) -> Vec<PathBuf> {
-        let collected =
-            collect_packages(packages, dotfiles, NameCollision::KeepBoth, false, "test").unwrap();
+        let collected = collect_all_packages(packages, dotfiles, false, "test").unwrap();
         collected
             .packages
             .iter()
@@ -376,13 +440,13 @@ mod tests {
     #[test]
     fn two_unresolved_directories_are_both_read() {
         let packages = repo_holding("/packages/spec.yml", None);
-        let dotfiles = repo_holding("/dotfiles/spec.yml", None);
+        let dotfiles = repo_holding("/dotfiles/other.yml", None);
 
         assert_eq!(
             collected_paths(&packages, &dotfiles),
             [
                 PathBuf::from("/packages/spec.yml"),
-                PathBuf::from("/dotfiles/spec.yml")
+                PathBuf::from("/dotfiles/other.yml")
             ]
         );
     }
@@ -402,14 +466,7 @@ mod tests {
 
     fn collected_over(dotfiles: &MockPackageRepository) -> Collected {
         let packages = repo_holding("/packages/spec.yml", None);
-        collect_packages(
-            &packages,
-            dotfiles,
-            NameCollision::PackagesWin,
-            true,
-            "test",
-        )
-        .unwrap()
+        collect_all_packages(&packages, dotfiles, true, "test").unwrap()
     }
 
     // A loop gives nothing to classify, so what is behind it is unknown and may

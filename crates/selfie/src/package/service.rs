@@ -81,6 +81,17 @@ pub fn skipped_spec_warning(invalid: &super::port::PackageParseError) -> String 
     )
 }
 
+/// The warning for a spec file a listing leaves out because several files claim
+/// its name, as [`skipped_spec_warning`] words one that did not parse.
+#[must_use]
+pub fn ambiguous_spec_warning(row: &crate::package::event::RefusedSpec) -> String {
+    format!(
+        "Skipping package file {}: {}",
+        row.path.display(),
+        row.reason
+    )
+}
+
 /// Helper for tracking progress through operation steps
 ///
 /// Provides a simple mechanism for tracking and reporting progress through
