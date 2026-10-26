@@ -1152,8 +1152,8 @@ mod recommends_after_the_root_stops_loading {
     }
 
     impl PackageRepository for RootStopsLoading {
-        fn resolved_directory(&self) -> Option<PathBuf> {
-            self.inner.resolved_directory()
+        fn directory_identity(&self) -> Option<selfie::fs::FileIdentity> {
+            self.inner.directory_identity()
         }
 
         fn home_directory(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {

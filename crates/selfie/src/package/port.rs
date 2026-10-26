@@ -114,12 +114,12 @@ pub trait PackageRepository: Send + Sync {
         target_package: &str,
     ) -> Result<(Vec<Package>, Vec<PackageParseError>), PackageRepoError>;
 
-    /// The directory this repository reads, as the file system resolves it, or
-    /// `None` when it cannot be resolved, such as when nothing is there.
+    /// The identity of the directory this repository reads, or `None` when it
+    /// cannot be found, such as when nothing is there.
     ///
     /// Two repositories answering the same `Some` read one directory, however
     /// each was configured. `None` says nothing about another repository.
-    fn resolved_directory(&self) -> Option<PathBuf>;
+    fn directory_identity(&self) -> Option<crate::fs::FileIdentity>;
 
     /// The home directory dotfile targets expand against, as the repository's
     /// file system reports it.

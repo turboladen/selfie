@@ -238,11 +238,11 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
 
 /// Whether `packages` and `dotfiles` read one directory.
 pub(crate) fn same_directory<R: PackageRepository>(packages: &R, dotfiles: &R) -> bool {
-    // The directories are compared as the file system resolves them, since a
-    // symlink or a different spelling names the same one. A directory that
-    // cannot be resolved matches nothing: it is not shown to be the other one.
+    // The directories are compared by identity, since a symlink, a firmlink, a
+    // bind mount or a different spelling names the same one. A directory with no
+    // identity matches nothing: it is not shown to be the other one.
     matches!(
-        (packages.resolved_directory(), dotfiles.resolved_directory()),
+        (packages.directory_identity(), dotfiles.directory_identity()),
         (Some(packages), Some(dotfiles)) if packages == dotfiles
     )
 }
@@ -564,9 +564,9 @@ mod tests {
         );
     }
 
-    // A repository holding one spec at `path`, resolving its directory to
-    // `resolved`.
-    fn repo_holding(path: &str, resolved: Option<&str>) -> MockPackageRepository {
+    // A repository holding one spec at `path`, its directory having the identity
+    // `identity`.
+    fn repo_holding(path: &str, identity: Option<u64>) -> MockPackageRepository {
         let package = PackageBuilder::default()
             .name("spec")
             .environment("test", |b| b.install("true"))
@@ -575,8 +575,8 @@ mod tests {
         let mut repo = MockPackageRepository::new();
         repo.expect_list_packages()
             .returning(move || Ok(ListPackagesOutput(vec![Ok(package.clone())])));
-        repo.expect_resolved_directory()
-            .return_const(resolved.map(PathBuf::from));
+        repo.expect_directory_identity()
+            .return_const(identity.map(|inode| crate::fs::FileIdentity::new(1, inode)));
         repo
     }
 
@@ -593,9 +593,9 @@ mod tests {
     }
 
     #[test]
-    fn one_resolved_directory_is_read_once() {
-        let packages = repo_holding("/packages/spec.yml", Some("/real"));
-        let dotfiles = repo_holding("/dotfiles/spec.yml", Some("/real"));
+    fn one_directory_identity_is_read_once() {
+        let packages = repo_holding("/packages/spec.yml", Some(7));
+        let dotfiles = repo_holding("/dotfiles/spec.yml", Some(7));
 
         assert_eq!(
             collected_paths(&packages, &dotfiles),
@@ -603,11 +603,11 @@ mod tests {
         );
     }
 
-    // Neither directory resolves, so neither is shown to be the other, and both
-    // are read. Treating two unknowns as equal would drop the dotfiles directory
-    // whenever resolution failed on both sides.
+    // Neither directory has an identity, so neither is shown to be the other, and
+    // both are read. Treating two unknowns as equal would drop the dotfiles
+    // directory whenever both lookups failed.
     #[test]
-    fn two_unresolved_directories_are_both_read() {
+    fn two_directories_without_identity_are_both_read() {
         let packages = repo_holding("/packages/spec.yml", None);
         let dotfiles = repo_holding("/dotfiles/other.yml", None);
 
@@ -629,7 +629,7 @@ mod tests {
                 state.clone(),
             ))
         });
-        repo.expect_resolved_directory().return_const(None);
+        repo.expect_directory_identity().return_const(None);
         repo
     }
 

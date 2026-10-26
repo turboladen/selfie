@@ -757,6 +757,13 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.canonicalize(path)
     }
 
+    fn identity(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<selfie::fs::FileIdentity, selfie::fs::FileSystemError> {
+        self.0.identity(path)
+    }
+
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.0.config_dir()
     }
@@ -1057,6 +1064,13 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         self.inner.canonicalize(path)
     }
 
+    fn identity(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<selfie::fs::FileIdentity, selfie::fs::FileSystemError> {
+        self.inner.identity(path)
+    }
+
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.config_dir()
     }
@@ -1155,6 +1169,12 @@ impl selfie::fs::FileSystem for HomeAt {
     }
     fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.0.canonicalize(path)
+    }
+    fn identity(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<selfie::fs::FileIdentity, selfie::fs::FileSystemError> {
+        self.0.identity(path)
     }
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.0.config_dir()
@@ -1275,6 +1295,13 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
         self.inner.canonicalize(path)
     }
 
+    fn identity(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<selfie::fs::FileIdentity, selfie::fs::FileSystemError> {
+        self.inner.identity(path)
+    }
+
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.config_dir()
     }
@@ -1389,6 +1416,13 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
 
     fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.canonicalize(path)
+    }
+
+    fn identity(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<selfie::fs::FileIdentity, selfie::fs::FileSystemError> {
+        self.inner.identity(path)
     }
 
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
@@ -1508,6 +1542,13 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         self.inner.canonicalize(path)
     }
 
+    fn identity(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<selfie::fs::FileIdentity, selfie::fs::FileSystemError> {
+        self.inner.identity(path)
+    }
+
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.config_dir()
     }
@@ -1617,6 +1658,12 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
     }
     fn canonicalize(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.canonicalize(path)
+    }
+    fn identity(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<selfie::fs::FileIdentity, selfie::fs::FileSystemError> {
+        self.inner.identity(path)
     }
     fn config_dir(&self) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.config_dir()
@@ -7938,6 +7985,12 @@ mod symlinked_targets {
             }
             fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
                 self.0.canonicalize(path)
+            }
+            fn identity(
+                &self,
+                path: &std::path::Path,
+            ) -> Result<selfie::fs::FileIdentity, FileSystemError> {
+                self.0.identity(path)
             }
             fn config_dir(&self) -> Result<PathBuf, FileSystemError> {
                 self.0.config_dir()
@@ -16281,6 +16334,41 @@ mod one_directory_configured_as_both {
         assert!(message.contains("is the package directory"), "{message}");
         assert!(message.contains("selfie track"), "{message}");
         assert!(message.contains("dotfiles_directory"), "{message}");
+        assert!(!dirs.package_dir.join("gemrc.yml").exists());
+    }
+
+    // The package directory under another name that resolving links does not
+    // unify with it: on macOS, through the `/System/Volumes/Data` firmlink. Only
+    // the directory's identity shows the two are one. Skipping is loud, since a
+    // quietly skipped test reads as a passing one.
+    #[tokio::test]
+    async fn an_alias_links_do_not_resolve_is_still_the_package_directory() {
+        let (mut dirs, _target) = shared();
+        let canonical = std::fs::canonicalize(&dirs.package_dir).unwrap();
+        let alias =
+            std::path::Path::new("/System/Volumes/Data").join(canonical.strip_prefix("/").unwrap());
+        if !alias.is_dir() || std::fs::canonicalize(&alias).unwrap() == canonical {
+            eprintln!(
+                "SKIPPED an_alias_links_do_not_resolve_is_still_the_package_directory: \
+                 this system has no firmlink that resolving links leaves apart"
+            );
+            return;
+        }
+        dirs.dotfiles_dir = alias;
+        let tracked = dirs.target_dir.join(".gemrc");
+        std::fs::write(&tracked, "x").unwrap();
+
+        let listed = collect_events(dirs.service_with_dotfiles().list().await).await;
+        let tracking = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("gemrc", tracked.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(duplicate_warnings(&listed).is_empty(), "{listed:?}");
+        let message = failure_message(&tracking);
+        assert!(message.contains("is the package directory"), "{message}");
         assert!(!dirs.package_dir.join("gemrc.yml").exists());
     }
 
