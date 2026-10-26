@@ -20288,6 +20288,43 @@ mod an_appearing_target_is_kept {
         assert!(!recorded(&dirs, &target));
     }
 
+    // Track's copy into the dotfiles directory is checked absent first. A file that
+    // appears there before the copy lands is the user's, refused as one the check
+    // found, and no spec is written.
+    #[tokio::test]
+    async fn track_keeps_a_file_that_appears_where_its_copy_goes() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+        let source = dirs.dotfiles_dir.join("gemrc").join("gemrc");
+        let fs = PlantsBeforeWrite::new(&source, Plant::File("SOMEONE ELSE'S\n", 0o644));
+
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), FakeCommandRunner::new())
+                .track_standalone("gemrc", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            fs.planted(),
+            "control: the copy was reached and the plant made"
+        );
+        let failure = failure_message(&events);
+        assert!(
+            failure.contains("Source file already exists at"),
+            "{failure}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&source).unwrap(),
+            "SOMEONE ELSE'S\n"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("gemrc.yml").exists(),
+            "a refused copy still wrote the spec"
+        );
+    }
+
     #[tokio::test]
     async fn a_file_that_appears_and_is_gone_again_fails_a_secret_entry() {
         let dirs = TestDirs::new();
