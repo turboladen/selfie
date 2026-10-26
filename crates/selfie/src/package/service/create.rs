@@ -301,6 +301,7 @@ mod tests {
                 packages_path: PathBuf::from("/packages"),
                 files_examined: 0,
                 search_patterns: vec![],
+                declared_by: Vec::new(),
             }
             .into())
         });
@@ -540,6 +541,7 @@ mod tests {
                 packages_path: PathBuf::from("/packages"),
                 files_examined: 0,
                 search_patterns: vec![],
+                declared_by: Vec::new(),
             }
             .into())
         });
@@ -634,6 +636,7 @@ mod tests {
                 packages_path: PathBuf::from("/packages"),
                 files_examined: 0,
                 search_patterns: vec![],
+                declared_by: Vec::new(),
             }
             .into())
         });
@@ -799,6 +802,7 @@ mod tests {
                     packages_path: PathBuf::from("/packages"),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             }

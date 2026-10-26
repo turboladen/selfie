@@ -148,6 +148,7 @@ impl CollectionRefusal {
 /// The failure for a named apply that no collected package answers.
 pub(crate) fn no_such_package(
     name: &str,
+    packages: &[crate::package::Package],
     findings: &[Finding],
     unrefused_ambiguities: &[(String, Vec<PathBuf>)],
 ) -> OperationFailure {
@@ -206,8 +207,19 @@ pub(crate) fn no_such_package(
     } else {
         NoSuchPackageReason::NotFound
     };
+    // Only where no file answers to the name: an ambiguous or unloadable one
+    // has its own remedy, and a hint beside it would point elsewhere.
+    let declared_by = match reason {
+        NoSuchPackageReason::NotFound
+        | NoSuchPackageReason::MaybeInUnlistableDirectory
+        | NoSuchPackageReason::MaybeInUncheckableDirectory => {
+            crate::package::port::declaring_name(name, packages)
+        }
+        NoSuchPackageReason::NotLoaded | NoSuchPackageReason::Ambiguous { .. } => Vec::new(),
+    };
     OperationFailure::NoSuchPackage {
         name: name.to_string(),
         reason,
+        declared_by,
     }
 }

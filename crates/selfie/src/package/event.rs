@@ -1312,6 +1312,9 @@ pub enum OperationFailure {
     NoSuchPackage {
         name: String,
         reason: NoSuchPackageReason,
+        /// The specs whose `name:` field answers to the name, which the
+        /// sentence points at when no file is named for it.
+        declared_by: Vec<crate::package::port::NameDeclaration>,
     },
     /// An install command succeeded and the package's check command, run
     /// afterwards, still says it is not installed.
@@ -1524,17 +1527,27 @@ impl std::fmt::Display for OperationFailure {
                 package_name,
                 reason,
             } => f.write_str(&reason.refusal(package_name)),
-            OperationFailure::NoSuchPackage { name, reason } => match reason {
-                NoSuchPackageReason::NotFound => write!(f, "No package named '{name}' was found"),
+            OperationFailure::NoSuchPackage {
+                name,
+                reason,
+                declared_by,
+            } => match reason {
+                NoSuchPackageReason::NotFound => write!(
+                    f,
+                    "No package named '{name}' was found{}",
+                    crate::package::port::name_field_hint(declared_by)
+                ),
                 NoSuchPackageReason::MaybeInUnlistableDirectory => write!(
                     f,
-                    "No package named '{name}' was found. A dotfiles directory could not be \
-                     listed, so it may be there."
+                    "No package named '{name}' was found{}. A dotfiles directory could not be \
+                     listed, so it may be there.",
+                    crate::package::port::name_field_hint(declared_by)
                 ),
                 NoSuchPackageReason::MaybeInUncheckableDirectory => write!(
                     f,
-                    "No package named '{name}' was found. A dotfiles directory could not be \
-                     checked, so whether it is there is unknown."
+                    "No package named '{name}' was found{}. A dotfiles directory could not be \
+                     checked, so whether it is there is unknown.",
+                    crate::package::port::name_field_hint(declared_by)
                 ),
                 NoSuchPackageReason::NotLoaded => write!(
                     f,
@@ -2791,6 +2804,7 @@ impl OperationFailure {
             packages_path,
             files_examined,
             search_patterns,
+            declared_by: Vec::new(),
         })
     }
 
@@ -4397,6 +4411,27 @@ pub(crate) fn every_check_failure() -> [CheckFailure; 6] {
 mod tests {
     use super::*;
 
+    // A dotfiles directory that could not be listed does not hide a `name:`
+    // field the packages already answer with.
+    #[test]
+    fn a_maybe_elsewhere_failure_carries_the_name_field_hint() {
+        let failure = OperationFailure::NoSuchPackage {
+            name: "neovim".to_string(),
+            reason: NoSuchPackageReason::MaybeInUnlistableDirectory,
+            declared_by: vec![crate::package::port::NameDeclaration {
+                path: "/repo/packages/nvim.yml".into(),
+                name: "neovim".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            failure.to_string(),
+            "No package named 'neovim' was found. packages/nvim.yml declares `name: neovim`; a \
+             package is named by its file, so use 'nvim'. A dotfiles directory could not be \
+             listed, so it may be there."
+        );
+    }
+
     // A package seen first unanswered and then as an error keeps the error, so
     // the status fails rather than reading as a finding.
     #[test]
@@ -4451,6 +4486,7 @@ mod tests {
             packages_path: "/packages".into(),
             files_examined: 0,
             search_patterns: Vec::new(),
+            declared_by: Vec::new(),
         })
         .into_lookup_failure()
         .expect("a lookup returns this error");

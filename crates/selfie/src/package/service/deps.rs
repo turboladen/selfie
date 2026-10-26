@@ -211,7 +211,9 @@ where
             // The root package was named by the user, so the repository's own
             // error already says everything there is to say about it.
             if path.len() < 2 {
-                return OperationFailure::from(repo_err);
+                return OperationFailure::from(crate::package::port::with_name_hint(
+                    repo, repo_err,
+                ));
             }
 
             let parent = path[path.len() - 2].clone();
@@ -651,6 +653,9 @@ mod tests {
     #[tokio::test]
     async fn test_root_package_not_found() {
         let mut repo = MockPackageRepository::new();
+        // The not-found failure asks the listing for a `name:` hint.
+        repo.expect_list_packages()
+            .returning(|| Ok(crate::package::port::ListPackagesOutput(Vec::new())));
         repo.expect_get_package()
             .withf(|name| name == "nonexistent")
             .returning(|_| {
@@ -659,6 +664,7 @@ mod tests {
                     packages_path: std::path::PathBuf::from("/tmp"),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             });
@@ -689,6 +695,7 @@ mod tests {
                     packages_path: std::path::PathBuf::from("/tmp"),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             });
@@ -978,6 +985,7 @@ mod tests {
                     packages_path: std::path::PathBuf::from("/tmp"),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             });
@@ -1013,6 +1021,7 @@ mod tests {
                     packages_path: std::path::PathBuf::from("/tmp"),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             });

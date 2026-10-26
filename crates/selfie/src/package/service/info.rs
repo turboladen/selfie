@@ -60,7 +60,9 @@ where
             pkg
         }
         Err(err) => {
-            return OperationResult::Failure(err.into());
+            return OperationResult::Failure(
+                crate::package::port::with_name_hint(repo, err).into(),
+            );
         }
     };
 
@@ -167,7 +169,9 @@ where
             pkg
         }
         Err(err) => {
-            return OperationResult::Failure(err.into());
+            return OperationResult::Failure(
+                crate::package::port::with_name_hint(repo, err).into(),
+            );
         }
     };
 
@@ -754,6 +758,7 @@ environments:
                     packages_path: temp_dir.path().to_path_buf(),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             }
@@ -834,6 +839,7 @@ environments:
                     packages_path: temp_dir.path().to_path_buf(),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             }
@@ -1024,6 +1030,7 @@ environments:
                     packages_path: temp_dir.path().to_path_buf(),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             }
@@ -1118,6 +1125,7 @@ environments:
                     packages_path: temp_dir.path().to_path_buf(),
                     files_examined: 0,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             }

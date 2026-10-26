@@ -2338,6 +2338,7 @@ mod tests {
             result: OperationResult::Failure(OperationFailure::NoSuchPackage {
                 name: "bat".to_string(),
                 reason: NoSuchPackageReason::NotLoaded,
+                declared_by: Vec::new(),
             }),
         }];
 
@@ -2357,6 +2358,7 @@ mod tests {
                 reason: NoSuchPackageReason::Ambiguous {
                     conflicting_paths: vec!["/p/bat.yaml".into(), "/p/bat.yml".into()],
                 },
+                declared_by: Vec::new(),
             }),
         }];
 

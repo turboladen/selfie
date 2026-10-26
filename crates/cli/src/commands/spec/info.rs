@@ -324,6 +324,7 @@ mod tests {
                     packages_path: "/packages".into(),
                     files_examined: 0,
                     search_patterns: Vec::new(),
+                    declared_by: Vec::new(),
                 })
                 .into_lookup_failure()
                 .expect("a lookup returns this error"),

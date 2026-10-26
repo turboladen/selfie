@@ -1539,6 +1539,7 @@ mod tests {
                     packages_path: std::path::PathBuf::from("/test/packages"),
                     files_examined: 0,
                     search_patterns: vec!["new-package.yml".to_string()],
+                    declared_by: Vec::new(),
                 }
                 .into())
             });

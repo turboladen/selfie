@@ -47,7 +47,8 @@ are accepted.
 
 selfie resolves a package from the **file name**, not from this field, so `Neovim.yml` answers to
 `neovim` whatever `name:` says. `selfie spec validate` reports a disagreement between the two as a
-warning and still loads the file.
+warning and still loads the file. A command given a name no file answers to, but some spec's `name:`
+does, says which file declares it and the name to use instead.
 
 ```yaml
 name: ripgrep # for file ripgrep.yaml

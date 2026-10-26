@@ -99,7 +99,7 @@ where
         Err(err) if err.means_no_such_package() => match dotfiles_repo.get_package(package_name) {
             Ok(found) => (Ok(found), dotfiles_repo),
             Err(other) if other.names_an_unusable_spec() => (Err(other), dotfiles_repo),
-            Err(_) => (Err(err), repo),
+            Err(_) => (Err(crate::package::port::with_name_hint(repo, err)), repo),
         },
         from_packages => (from_packages, repo),
     };

@@ -26,7 +26,11 @@ where
 
     let get_package = match repo.get_package(package_name) {
         Ok(pkg) => pkg,
-        Err(err) => return OperationResult::Failure(err.into()),
+        Err(err) => {
+            return OperationResult::Failure(
+                crate::package::port::with_name_hint(repo, err).into(),
+            );
+        }
     };
 
     let file_path = get_package.file_path().to_path_buf();
@@ -300,6 +304,10 @@ mod tests {
     #[tokio::test]
     async fn test_remove_not_found() {
         let mut mock_repo = MockPackageRepository::new();
+        // The not-found failure asks the listing for a `name:` hint.
+        mock_repo
+            .expect_list_packages()
+            .returning(|| Ok(crate::package::port::ListPackagesOutput(Vec::new())));
         let config = test_config();
         let (sender, _rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
@@ -311,6 +319,7 @@ mod tests {
                     packages_path: PathBuf::from("/test/packages"),
                     files_examined: 0,
                     search_patterns: vec!["nonexistent.yml".to_string()],
+                    declared_by: Vec::new(),
                 },
             ))
         });
