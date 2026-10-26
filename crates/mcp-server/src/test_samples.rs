@@ -18,6 +18,7 @@ pub(crate) fn not_found() -> UnknownStatus {
         packages_path: "/packages".into(),
         files_examined: 0,
         search_patterns: Vec::new(),
+        declared_by: Vec::new(),
     })
 }
 

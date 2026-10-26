@@ -31,7 +31,11 @@ where
 
     let get_package = match repo.get_package(package_name) {
         Ok(pkg) => pkg,
-        Err(err) => return OperationResult::Failure(err.into()),
+        Err(err) => {
+            return OperationResult::Failure(
+                crate::package::port::with_name_hint(repo, err).into(),
+            );
+        }
     };
 
     let file_path = get_package.file_path().to_path_buf();

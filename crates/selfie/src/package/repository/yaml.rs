@@ -125,7 +125,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 
     /// Filter a list of paths to those named `{name}.yml` or `{name}.yaml`,
     /// ignoring case in both the stem and the extension.
-    fn filter_matching_packages(name: &str, entries: Vec<PathBuf>) -> Vec<PathBuf> {
+    fn filter_matching_packages(name: &str, entries: &[PathBuf]) -> Vec<PathBuf> {
         // Case-insensitive because specs sync across machines. A directory
         // holding both `Neovim.yml` and `neovim.yml` is legal on a
         // case-sensitive file system and collapses to a single file when
@@ -138,13 +138,14 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         // package.
         let wanted = name.to_lowercase();
         let mut matches: Vec<PathBuf> = entries
-            .into_iter()
+            .iter()
             .filter(|path| {
                 path.file_name()
                     .and_then(|n| n.to_str())
                     .and_then(crate::package::spec_name_from_file_name)
                     .is_some_and(|spec_name| spec_name == wanted)
             })
+            .cloned()
             .collect();
 
         // Sorted because more than one match is rendered into the ambiguity
@@ -302,7 +303,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
         let entries = list_spec_directory(&self.fs, &self.package_dir)?;
         let files_examined = entries.len();
-        let package_files = Self::filter_matching_packages(name, entries);
+        let package_files = Self::filter_matching_packages(name, &entries);
 
         if package_files.is_empty() {
             return Err(PackageError::PackageNotFound {
@@ -310,6 +311,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
                 packages_path: self.package_dir.clone(),
                 files_examined,
                 search_patterns,
+                declared_by: Vec::new(),
             }
             .into());
         }
@@ -351,7 +353,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
 
     fn find_package_files(&self, name: &str) -> Result<Vec<PathBuf>, PackageListError> {
         let entries = list_spec_directory(&self.fs, &self.package_dir)?;
-        Ok(Self::filter_matching_packages(name, entries))
+        Ok(Self::filter_matching_packages(name, &entries))
     }
 
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
@@ -560,9 +562,9 @@ mod tests {
         }
 
         fn matches(name: &str, files: &[&str]) -> Vec<String> {
-            let entries = files.iter().map(PathBuf::from).collect();
+            let entries: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
             YamlPackageRepository::<crate::fs::MockFileSystem>::filter_matching_packages(
-                name, entries,
+                name, &entries,
             )
             .iter()
             .map(|p| p.display().to_string())
@@ -655,6 +657,75 @@ mod tests {
 
         assert_eq!(package.package.name(), "ripgrep");
         assert_eq!(package.package.environments().len(), 1);
+    }
+
+    // The lookup's not-found failure for `requested`, with its hint, over a
+    // `packages` directory holding each of `specs` as (file stem, `name:` value).
+    fn lookup_failure_for(specs: &[(&str, &str)], requested: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let packages = dir.path().join("packages");
+        std::fs::create_dir(&packages).unwrap();
+        for (stem, declared) in specs {
+            std::fs::write(
+                packages.join(format!("{stem}.yml")),
+                format!("name: {declared}\nenvironments:\n  test:\n    install: \"true\"\n"),
+            )
+            .unwrap();
+        }
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            packages.clone(),
+            SpecOrigin::PackageDirectory,
+        );
+        let error =
+            crate::package::port::with_name_hint(&repo, repo.get_package(requested).unwrap_err());
+        let message = error.to_string();
+        message[message.find("Package `").unwrap()..]
+            .replace(&packages.display().to_string(), "DIR")
+    }
+
+    // The named lookup behind every other command carries the same hint.
+    #[test]
+    fn a_lookup_by_a_name_field_suggests_the_file_name() {
+        assert_eq!(
+            lookup_failure_for(&[("nvim", "NeoVim")], "neovim"),
+            "Package `neovim` not found in path DIR. packages/nvim.yml declares `name: \
+             NeoVim`; a package is named by its file, so use 'nvim'"
+        );
+    }
+
+    // With no `name:` field answering, the sentence carries no hint.
+    #[test]
+    fn a_lookup_by_an_unknown_name_has_no_hint() {
+        assert_eq!(
+            lookup_failure_for(&[("nvim", "nvim")], "neovim"),
+            "Package `neovim` not found in path DIR"
+        );
+    }
+
+    // Two specs declaring the name are both named, and each name to use once.
+    #[test]
+    fn two_specs_declaring_a_name_are_joined() {
+        assert_eq!(
+            lookup_failure_for(&[("nvim", "neovim"), ("vi", "NeoVim")], "neovim"),
+            "Package `neovim` not found in path DIR. packages/nvim.yml declares `name: \
+             neovim` and packages/vi.yml declares `name: NeoVim`; a package is named by its \
+             file, so use 'nvim' or 'vi'"
+        );
+    }
+
+    // A `name:` holding an escape and a newline is printed escaped, so the file's
+    // text cannot drive the terminal.
+    #[test]
+    fn a_control_character_in_a_name_field_is_escaped() {
+        let message =
+            lookup_failure_for(&[("nvim", "\"neo\\u001b[2J\\nvim\"")], "neo\u{1b}[2J\nvim");
+        let hint = &message[message.find("declares").unwrap()..];
+        assert!(!hint.contains(['\u{1b}', '\n']), "{hint:?}");
+        assert!(
+            message.contains("declares `name: neo\\u{1b}[2J\\nvim`"),
+            "{message:?}"
+        );
     }
 
     #[test]
@@ -2084,6 +2155,7 @@ environments:
             packages_path: package_dir.clone(),
             files_examined: 0,
             search_patterns: vec!["missing.yml".to_string()],
+            declared_by: Vec::new(),
         };
         assert!(not_found_error.to_string().contains("missing"));
         assert!(not_found_error.to_string().contains("/packages"));

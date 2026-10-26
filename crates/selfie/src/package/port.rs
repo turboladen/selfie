@@ -646,6 +646,98 @@ pub(crate) fn ambiguous_name_sentence(name: &str, directory: &Path, paths: &[Pat
     )
 }
 
+/// A spec whose `name:` field answers to a name its file is not named for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameDeclaration {
+    /// The spec file.
+    pub path: PathBuf,
+    /// Its `name:` field, as written.
+    pub name: String,
+}
+
+/// Every one of `packages` whose `name:` field folds to `name`, in order of
+/// path.
+///
+/// Asked only once no file answers to `name`, so every match is a spec whose
+/// file is named for something else.
+pub(crate) fn declaring_name(name: &str, packages: &[Package]) -> Vec<NameDeclaration> {
+    let wanted = name.to_lowercase();
+    let mut declared: Vec<NameDeclaration> = packages
+        .iter()
+        .filter(|package| package.name().to_lowercase() == wanted)
+        .map(|package| NameDeclaration {
+            path: package.path().clone(),
+            name: package.name().to_string(),
+        })
+        .collect();
+    declared.sort_by(|a, b| a.path.cmp(&b.path));
+    declared
+}
+
+/// `error` with the specs of `repo` whose `name:` field answers to the name it
+/// could not find, when it is a lookup's not-found failure; any other error as
+/// it is.
+///
+/// Parses every spec `repo` lists, so it is for a failure about to reach the
+/// user, never for a lookup whose not-found is an answer.
+pub(crate) fn with_name_hint<R: PackageRepository + ?Sized>(
+    repo: &R,
+    error: PackageRepoError,
+) -> PackageRepoError {
+    let PackageRepoError::PackageError(mut boxed) = error else {
+        return error;
+    };
+    if let PackageError::PackageNotFound {
+        name, declared_by, ..
+    } = boxed.as_mut()
+    {
+        // A listing that fails gives no hint; the not-found answer stands alone.
+        let listed: Vec<Package> = repo
+            .list_packages()
+            .map(|output| output.0.into_iter().filter_map(Result::ok).collect())
+            .unwrap_or_default();
+        *declared_by = declaring_name(name, &listed);
+    }
+    PackageRepoError::PackageError(boxed)
+}
+
+/// The sentence a not-found failure appends for `declared`, naming each file
+/// and the name to use instead, or nothing when `declared` is empty.
+pub(crate) fn name_field_hint(declared: &[NameDeclaration]) -> String {
+    if declared.is_empty() {
+        return String::new();
+    }
+    // The file by its directory and name, as `packages/nvim.yml`, so a reader
+    // with both directories can tell which one holds it.
+    let file = |d: &NameDeclaration| {
+        let name = d.path.file_name().map(Path::new).unwrap_or(&d.path);
+        d.path
+            .parent()
+            .and_then(Path::file_name)
+            .map_or_else(|| name.to_path_buf(), |dir| Path::new(dir).join(name))
+            .display()
+            .to_string()
+    };
+    // The `name:` field is text from a file, so control characters are escaped
+    // before it reaches a terminal.
+    let claims: Vec<String> = declared
+        .iter()
+        .map(|d| format!("{} declares `name: {}`", file(d), d.name.escape_debug()))
+        .collect();
+    // Each name appears once without deduplicating: two files claiming one name
+    // are ambiguous, and an ambiguous name is never collected or looked up.
+    let names: Vec<String> = declared
+        .iter()
+        .filter_map(|d| crate::package::spec_name_of(&d.path))
+        .map(|name| format!("'{name}'"))
+        .collect();
+    format!(
+        ". {}; a package is named by its file, so use {}",
+        claims.join(" and "),
+        names.join(" or ")
+    )
+}
+
 /// [`ambiguous_name_sentence`] for files that all sit in one directory, named
 /// by the first file's.
 pub(crate) fn ambiguous_files_sentence(name: &str, paths: &[PathBuf]) -> String {
@@ -678,7 +770,11 @@ fn format_conflicting_paths(paths: &[PathBuf]) -> String {
 #[derive(Error, Debug, Clone)]
 pub enum PackageError {
     /// No package with the specified name could be found
-    #[error("Package `{name}` not found in path {}", packages_path.display())]
+    #[error(
+        "Package `{name}` not found in path {}{}",
+        packages_path.display(),
+        name_field_hint(declared_by)
+    )]
     #[allow(clippy::doc_link_with_quotes)]
     PackageNotFound {
         name: String,
@@ -687,6 +783,9 @@ pub enum PackageError {
         files_examined: usize,
         /// Search patterns used (e.g., ["package.yml", "package.yaml"])
         search_patterns: Vec<String>,
+        /// The specs whose `name:` field answers to `name`, though no file is
+        /// named for it.
+        declared_by: Vec<NameDeclaration>,
     },
 
     /// Multiple package files found with the same name, creating ambiguity
@@ -1114,12 +1213,11 @@ impl PackageParseKind {
     // Matched here rather than in the adapter, and with no catch-all, so a new
     // kind is a compile error beside the enum -- where whoever adds one is already
     // looking -- rather than in a crate they may never open.
-    //
-    // Adding a kind also means editing the MCP tool descriptions in
-    // `selfie-mcp`, which spell these labels out for callers. Nothing makes
-    // that a compile error, so it is named here instead.
     #[must_use]
     pub fn label(&self) -> &'static str {
+        // Adding a kind also means editing the MCP tool descriptions in
+        // `selfie-mcp`, which spell these labels out for callers. Nothing makes
+        // that a compile error, so it is named here instead.
         match self {
             Self::Yaml { .. } => "yaml",
             Self::Io { .. } => "io",
@@ -1174,6 +1272,7 @@ mod tests {
                     packages_path: "/packages".into(),
                     files_examined: 0,
                     search_patterns: Vec::new(),
+                    declared_by: Vec::new(),
                 }),
                 LookupKind::NotFound,
             ),

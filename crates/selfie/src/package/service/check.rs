@@ -113,7 +113,9 @@ where
                 .await;
             Ok(pkg)
         }
-        Err(err) => Err(Box::new(OperationResult::Failure(err.into()))),
+        Err(err) => Err(Box::new(OperationResult::Failure(
+            crate::package::port::with_name_hint(repo, err).into(),
+        ))),
     }
 }
 

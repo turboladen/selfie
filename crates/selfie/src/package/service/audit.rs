@@ -1582,6 +1582,7 @@ mod tests {
                     packages_path: dir.clone(),
                     files_examined: 1,
                     search_patterns: vec![],
+                    declared_by: Vec::new(),
                 }
                 .into())
             }

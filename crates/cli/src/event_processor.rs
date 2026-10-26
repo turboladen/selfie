@@ -326,15 +326,10 @@ impl EventProcessor {
                     self.display.collect_error(error_detail);
 
                     match err {
-                        OperationFailure::Package(PackageError::PackageNotFound {
-                            name,
-                            packages_path,
-                            ..
-                        }) => {
-                            self.display.print_error(format!(
-                                "Package `{name}` not found in path {}",
-                                packages_path.display()
-                            ));
+                        // The library's sentence, so its hint about a `name:` field
+                        // reaches the terminal.
+                        OperationFailure::Package(error @ PackageError::PackageNotFound { .. }) => {
+                            self.display.print_error(error.to_string());
                         }
                         OperationFailure::PackageList(listing) => {
                             // The reason, not "not found". A plain file or a dangling

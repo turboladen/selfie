@@ -2769,6 +2769,7 @@ environments:
                 "test-package.yml".to_string(),
                 "test-package.yaml".to_string(),
             ],
+            declared_by: Vec::new(),
         };
 
         // Test that the error message contains the package name and path
@@ -2783,6 +2784,7 @@ environments:
                 packages_path,
                 files_examined,
                 search_patterns,
+                ..
             } => {
                 assert_eq!(name, "test-package");
                 assert_eq!(
@@ -2966,6 +2968,7 @@ environments:
             packages_path: PathBuf::from("/debug/packages"),
             files_examined: 42,
             search_patterns: vec!["debug-package.yml".to_string()],
+            declared_by: Vec::new(),
         };
 
         // Demonstrate how to extract context for debugging/logging
@@ -2975,6 +2978,7 @@ environments:
                 packages_path,
                 files_examined,
                 search_patterns,
+                ..
             } => {
                 format!(
                     "Package '{}' not found in '{}' after examining {} files with patterns: {:?}",

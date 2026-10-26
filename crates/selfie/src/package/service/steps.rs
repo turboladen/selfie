@@ -32,7 +32,7 @@ where
             sender.send_trace("Package found").await;
             Ok(package)
         }
-        Err(e) => Err(e),
+        Err(e) => Err(crate::package::port::with_name_hint(repo, e)),
     }
 }
 

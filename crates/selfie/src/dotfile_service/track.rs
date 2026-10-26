@@ -556,7 +556,9 @@ where
     // the package and the directory it searched.
     let package_blob = match repo.get_package(package_name) {
         Ok(blob) => blob,
-        Err(e) => return OperationResult::Failure(e.into()),
+        Err(e) => {
+            return OperationResult::Failure(crate::package::port::with_name_hint(repo, e).into());
+        }
     };
 
     let spec_path = package_blob.file_path().to_path_buf();

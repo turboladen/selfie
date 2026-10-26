@@ -278,7 +278,9 @@ where
                     let unmatched = filter
                         .as_deref()
                         .filter(|_| selected.is_empty())
-                        .map(|name| no_such_package(name, &findings, &unrefused_ambiguities));
+                        .map(|name| {
+                            no_such_package(name, &packages, &findings, &unrefused_ambiguities)
+                        });
                     // Drained first, in the order found, so a skipped spec's own
                     // reason precedes the failure it explains. A named apply says
                     // nothing about a name it was not asked for, and counts none of

@@ -187,6 +187,42 @@ name: "incomplete-package"
         ));
 }
 
+// The terminal shows the library's hint when a `name:` field answers the name.
+#[test]
+fn spec_info_by_a_name_field_suggests_the_file_name() {
+    let temp_dir = setup_default_test_config();
+    fs::write(
+        temp_dir.path().join("packages").join("nvim.yml"),
+        format!("name: NeoVim\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["spec", "info", "neovim"]);
+
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "packages/nvim.yml declares `name: NeoVim`; a package is named by its file, so use 'nvim'",
+    ));
+}
+
+// A named apply prints the same hint.
+#[test]
+fn apply_by_a_name_field_suggests_the_file_name() {
+    let temp_dir = setup_default_test_config();
+    fs::write(
+        temp_dir.path().join("packages").join("nvim.yml"),
+        format!("name: NeoVim\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["apply", "neovim"]);
+
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "packages/nvim.yml declares `name: NeoVim`; a package is named by its file, so use 'nvim'",
+    ));
+}
+
 #[test]
 fn test_package_not_found_error() {
     let temp_dir = setup_default_test_config();

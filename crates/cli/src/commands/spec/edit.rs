@@ -577,6 +577,7 @@ mod tests {
                     packages_path: PathBuf::from("/test/packages"),
                     files_examined: 0,
                     search_patterns: vec!["nonexistent.yml".to_string()],
+                    declared_by: Vec::new(),
                 }
                 .into())
             });

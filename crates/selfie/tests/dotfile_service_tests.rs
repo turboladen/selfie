@@ -2580,12 +2580,54 @@ fn assert_no_such_package(
     expected_reason: selfie::package::event::NoSuchPackageReason,
 ) {
     match get_operation_result(events) {
-        Some(OperationResult::Failure(OperationFailure::NoSuchPackage { name, reason })) => {
+        Some(OperationResult::Failure(OperationFailure::NoSuchPackage {
+            name, reason, ..
+        })) => {
             assert_eq!(name, expected_name);
             assert_eq!(*reason, expected_reason);
         }
         other => panic!("expected NoSuchPackage, got: {other:?}"),
     }
+}
+
+// The failure for a name only a `name:` field answers to, from apply.
+async fn apply_failure_for(declared: &str, requested: &str) -> String {
+    let dirs = TestDirs::new();
+    write_package_yaml(
+        &dirs.package_dir,
+        "nvim",
+        &format!("name: {declared}\nenvironments:\n  test:\n    install: \"true\"\n"),
+    );
+    let events = collect_events(
+        dirs.service()
+            .apply(requested, ApplyOptions::default())
+            .await,
+    )
+    .await;
+    match get_operation_result(&events) {
+        Some(OperationResult::Failure(failure)) => failure.to_string(),
+        other => panic!("expected a failure, got: {other:?}"),
+    }
+}
+
+// The hint names the file to use, compared with case folded, and never the
+// `name:` field as the thing to run.
+#[tokio::test]
+async fn apply_by_a_name_field_suggests_the_file_name() {
+    assert_eq!(
+        apply_failure_for("NeoVim", "neovim").await,
+        "No package named 'neovim' was found. packages/nvim.yml declares `name: NeoVim`; a \
+         package is named by its file, so use 'nvim'"
+    );
+}
+
+// With no `name:` field answering, the sentence carries no hint.
+#[tokio::test]
+async fn apply_by_an_unknown_name_has_no_hint() {
+    assert_eq!(
+        apply_failure_for("nvim", "neovim").await,
+        "No package named 'neovim' was found"
+    );
 }
 
 #[tokio::test]
