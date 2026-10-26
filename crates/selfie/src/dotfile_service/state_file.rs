@@ -16,7 +16,7 @@ use crate::{
     dotfile_service::state::DeployState,
     fs::{
         AbsentReason, DirectoryState,
-        filesystem::{FileSystem, FileSystemError},
+        filesystem::{FileSystem, FileSystemError, IfPresent},
         target::{StatePathError, TargetPath, state_file_path},
     },
     yaml::ParseFailure,
@@ -570,7 +570,8 @@ fn write_state<F: FileSystem>(filesystem: &F, loaded: &LoadedState) -> Result<()
     // `write_file_no_follow` is durable before `record_deployment` runs (selfie-aub).
     let yaml = crate::yaml::serialize(&loaded.state).map_err(StateSaveError::Serialize)?;
     filesystem
-        .write_file_private(&loaded.path, yaml.as_bytes())
+        .write_file_private(&loaded.path, yaml.as_bytes(), IfPresent::Replace)
+        .map(drop)
         .map_err(|source| StateSaveError::Write {
             path: loaded.path.path().to_path_buf(),
             cause: source,
@@ -1379,7 +1380,7 @@ mod tests {
     #[test]
     fn a_failed_write_names_the_file_in_its_own_words() {
         let mut fs = filesystem_without_the_state_file();
-        fs.expect_write_file_private().returning(|_, _| {
+        fs.expect_write_file_private().returning(|_, _, _| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
                 std::io::Error::other("disk full"),
             )))

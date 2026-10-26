@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     dotfile_service::backup,
     fs::{
-        filesystem::{FileSystem, FileSystemError},
+        filesystem::{FileSystem, FileSystemError, IfPresent},
         target::TargetPath,
     },
     package::event::{DotfileSource, EntryOperation, EventSender, Failure, Refusal, RepoPath},
@@ -207,9 +207,11 @@ async fn perform_deploy<F: FileSystem>(
     // Refuses a symlinked target rather than writing through it: the content would
     // otherwise land wherever the link points, which may be a path chosen by
     // whoever planted it.
-    if let Err(e) =
-        filesystem.write_file_no_follow(unit.target_path, unit.source_content.as_bytes())
-    {
+    if let Err(e) = filesystem.write_file_no_follow(
+        unit.target_path,
+        unit.source_content.as_bytes(),
+        IfPresent::Replace,
+    ) {
         // Either way nothing is recorded as deployed that was not. An entry already
         // in the state keeps its previous checksum and is stale rather than
         // untracked, which is the honest record: a refusal writes nothing, and a

@@ -16,7 +16,7 @@ use crate::{
         resolve::{ResolvedContent, resolve_content},
     },
     fs::{
-        filesystem::{FileSystem, FileSystemError},
+        filesystem::{FileSystem, FileSystemError, IfPresent},
         target::TargetPath,
     },
     package::{
@@ -515,9 +515,9 @@ where
 
         // Same content, written the one way that establishes the mode atomically.
         before_write().map_err(SecretOutcome::StateNotWritable)?;
-        if let Err(e) = self
-            .filesystem
-            .write_file_private(&target.path, &resolved.bytes)
+        if let Err(e) =
+            self.filesystem
+                .write_file_private(&target.path, &resolved.bytes, IfPresent::Replace)
         {
             // The error already names the target; naming it in the head too
             // would print the path twice.
@@ -630,9 +630,9 @@ where
     /// Owner-only and atomic: no window in which the credential is
     /// world-readable, and no interrupted write leaving a truncated one behind.
     async fn write(&self, target: &SecretEntry<'_>, resolved: &ResolvedContent) -> SecretOutcome {
-        if let Err(e) = self
-            .filesystem
-            .write_file_private(&target.path, &resolved.bytes)
+        if let Err(e) =
+            self.filesystem
+                .write_file_private(&target.path, &resolved.bytes, IfPresent::Replace)
         {
             return self.write_failed(target, &e, write_failure(&e)).await;
         }

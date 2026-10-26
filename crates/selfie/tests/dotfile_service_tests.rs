@@ -701,16 +701,18 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.0.write_file_private(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.0.write_file_private(path, data, if_present)
     }
 
     fn write_file_no_follow(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.0.write_file_no_follow(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.0.write_file_no_follow(path, data, if_present)
     }
 
     fn symlink_refusal(
@@ -974,16 +976,18 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_private(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data, if_present)
     }
 
     fn write_file_no_follow(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data, if_present)
     }
 
     fn symlink_refusal(
@@ -1133,15 +1137,17 @@ impl selfie::fs::FileSystem for HomeAt {
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.0.write_file_private(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.0.write_file_private(path, data, if_present)
     }
     fn write_file_no_follow(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.0.write_file_no_follow(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.0.write_file_no_follow(path, data, if_present)
     }
     fn symlink_refusal(
         &self,
@@ -1246,16 +1252,18 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_private(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data, if_present)
     }
 
     fn write_file_no_follow(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data, if_present)
     }
 
     fn irregular_target_refusal(
@@ -1364,16 +1372,18 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_private(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data, if_present)
     }
 
     fn write_file_no_follow(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data, if_present)
     }
 
     fn irregular_target_refusal(
@@ -1493,16 +1503,18 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_private(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_private(path, data, if_present)
     }
 
     fn write_file_no_follow(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data, if_present)
     }
 
     fn irregular_target_refusal(
@@ -1585,7 +1597,8 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
         use std::sync::atomic::Ordering::SeqCst;
         if path.path() == self.state_file
             && self
@@ -1597,7 +1610,7 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
                 std::io::Error::other("state directory is not writable"),
             )));
         }
-        self.inner.write_file_private(path, data)
+        self.inner.write_file_private(path, data, if_present)
     }
 
     fn irregular_target_refusal(
@@ -1629,8 +1642,9 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
-    ) -> Result<(), selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data)
+        if_present: selfie::fs::IfPresent,
+    ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.inner.write_file_no_follow(path, data, if_present)
     }
     fn symlink_refusal(
         &self,
@@ -7999,16 +8013,18 @@ mod symlinked_targets {
                 &self,
                 path: &TargetPath,
                 data: &[u8],
-            ) -> Result<(), FileSystemError> {
-                self.0.write_file_private(path, data)
+                if_present: selfie::fs::IfPresent,
+            ) -> Result<selfie::fs::Placed, FileSystemError> {
+                self.0.write_file_private(path, data, if_present)
             }
             fn write_file_no_follow(
                 &self,
                 path: &TargetPath,
                 data: &[u8],
-            ) -> Result<(), FileSystemError> {
+                if_present: selfie::fs::IfPresent,
+            ) -> Result<selfie::fs::Placed, FileSystemError> {
                 self.1.fetch_add(1, Ordering::SeqCst);
-                self.0.write_file_no_follow(path, data)
+                self.0.write_file_no_follow(path, data, if_present)
             }
             fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
                 self.0.is_owner_only(path)

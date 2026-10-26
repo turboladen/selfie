@@ -6,7 +6,7 @@ use std::{
 use crate::{
     fs::{
         DirectoryState, FileSystem,
-        filesystem::{FileSystemError, repository_read_refusal},
+        filesystem::{FileSystemError, IfPresent, repository_read_refusal},
         target::repository_path,
     },
     package::{
@@ -436,7 +436,12 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // The direction is inward, so the refusal is re-worded rather than
         // rendered as-is. See `PackageRepoError::UnwritablePath`.
         self.fs
-            .write_file_no_follow(&repository_path(path), yaml_content.as_bytes())
+            .write_file_no_follow(
+                &repository_path(path),
+                yaml_content.as_bytes(),
+                IfPresent::Replace,
+            )
+            .map(drop)
             .map_err(|e| match &e {
                 FileSystemError::SymlinkedTarget { points_to, .. } => {
                     PackageRepoError::UnwritablePath {
@@ -2588,8 +2593,8 @@ environments:
         // Mock the write to fail
         let expected = package_path.clone();
         fs.expect_write_file_no_follow()
-            .withf(move |target, _| target.path() == expected)
-            .returning(|_, _| {
+            .withf(move |target, _, _| target.path() == expected)
+            .returning(|_, _, _| {
                 Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
                     std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
                 )))
@@ -2616,10 +2621,11 @@ environments:
         let mut fs = MockFileSystem::default();
         fs.mock_directories_exist();
         let sink = Arc::clone(&written);
-        fs.expect_write_file_no_follow().returning(move |_, data| {
-            sink.lock().unwrap().extend_from_slice(data);
-            Ok(())
-        });
+        fs.expect_write_file_no_follow()
+            .returning(move |_, data, _| {
+                sink.lock().unwrap().extend_from_slice(data);
+                Ok(crate::fs::Placed::Written)
+            });
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         repo.save_package(&package, &package_path)
@@ -2692,7 +2698,7 @@ environments:
         );
 
         fs.expect_write_file_no_follow()
-            .returning(move |_, _| Err(refusal.clone()));
+            .returning(move |_, _, _| Err(refusal.clone()));
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         repo.save_package(&package, &package_path)

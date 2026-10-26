@@ -10,7 +10,7 @@ use crate::{
     config::SelfieConfig,
     dotfile_service::deploy::compute_checksum,
     fs::{
-        filesystem::{FileSystem, FileSystemError},
+        filesystem::{FileSystem, FileSystemError, IfPresent},
         target::{
             HomeDir, TargetPath, TargetRejection, deploy_target, expand_target_path,
             portable_target, repository_path,
@@ -848,9 +848,11 @@ where
         }
     };
 
-    if let Err(e) =
-        filesystem.write_file_no_follow(&repository_path(&source_path), content.as_bytes())
-    {
+    if let Err(e) = filesystem.write_file_no_follow(
+        &repository_path(&source_path),
+        content.as_bytes(),
+        IfPresent::Replace,
+    ) {
         return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
             &source_path,
             &e,
