@@ -874,6 +874,17 @@ content, and the new file does not carry over the old one's extended attributes,
 a target owned by another user, or given another group, comes back owned by you. A dotfile kept as a
 hard link into another directory stops being one on the first apply that writes it.
 
+A target that was not there when selfie looked is created without replacing anything. If a file
+appears there before selfie's write lands, an app writing its first config for example, selfie
+leaves it in place and writes nothing to that target in this run: a file with different content is
+reported as a conflict, with a warning, even under `--yes` or a resolver that accepts; one that
+already matches is in sync, except that a secret-bearing one that is not owner-only is left with a
+warning, for the next run to tighten; a symlink at a secret-bearing target is replaced as any is,
+unless a fifo, socket or device node is behind it, which is refused. The next `selfie apply` treats
+it as any other existing target. On a volume that supports neither an exclusive rename nor, on
+Linux, hard links, or in a sandbox that refuses the exclusive rename, selfie looks once more just
+before an ordinary rename, which narrows the window rather than closing it.
+
 ### What an overwrite keeps
 
 [Writing a target](#how-targets-are-written) replaces it, so what it held is gone once the write

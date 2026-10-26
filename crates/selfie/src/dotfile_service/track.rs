@@ -10,7 +10,7 @@ use crate::{
     config::SelfieConfig,
     dotfile_service::deploy::compute_checksum,
     fs::{
-        filesystem::{FileSystem, FileSystemError},
+        filesystem::{FileSystem, FileSystemError, IfPresent, Placed},
         target::{
             HomeDir, TargetPath, TargetRejection, deploy_target, expand_target_path,
             portable_target, repository_path,
@@ -829,11 +829,14 @@ where
     let source_path = source_dir.join(&filename);
     let relative_source = format!("{}/{filename}", spec.name);
 
-    if filesystem.path_exists(&source_path) {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
+    let already_exists = || {
+        OperationResult::Failure(OperationFailure::Generic(format!(
             "Source file already exists at {}. Remove it first, or track a different file.",
             source_path.display()
-        )));
+        )))
+    };
+    if filesystem.path_exists(&source_path) {
+        return already_exists();
     }
 
     // Written back after every refusal above and just before the first write, so
@@ -848,13 +851,21 @@ where
         }
     };
 
-    if let Err(e) =
-        filesystem.write_file_no_follow(&repository_path(&source_path), content.as_bytes())
-    {
-        return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
-            &source_path,
-            &e,
-        )));
+    // Replaces nothing: a file that appeared since the check above is the user's,
+    // and is refused as one the check found.
+    match filesystem.write_file_no_follow(
+        &repository_path(&source_path),
+        content.as_bytes(),
+        IfPresent::Keep,
+    ) {
+        Ok(Placed::Written) => {}
+        Ok(Placed::Kept) => return already_exists(),
+        Err(e) => {
+            return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
+                &source_path,
+                &e,
+            )));
+        }
     }
 
     let recorded_target = portable_target(filesystem, &expanded_target);

@@ -16,7 +16,7 @@ use crate::{
     dotfile_service::state::DeployState,
     fs::{
         AbsentReason, DirectoryState,
-        filesystem::{FileSystem, FileSystemError},
+        filesystem::{FileSystem, FileSystemError, IfPresent},
         target::{StatePathError, TargetPath, state_file_path},
     },
     yaml::ParseFailure,
@@ -559,18 +559,15 @@ pub(super) fn save_deploy_state<F: FileSystem>(
 }
 
 fn write_state<F: FileSystem>(filesystem: &F, loaded: &LoadedState) -> Result<(), StateSaveError> {
-    // Deliberately less durable than `write_file_no_follow`: both sync the file's
-    // data before renaming, and `write_file_private` skips the directory fsync,
-    // which is the safe direction. Losing this file costs nothing -- the next run
-    // re-derives it.
-    //
-    // Do not "fix" that by syncing harder. A record only lies when it outlives the
-    // write it describes, so making the state survive a crash the target write did
-    // not would widen that window. The ordering is established at the other end:
-    // `write_file_no_follow` is durable before `record_deployment` runs (selfie-aub).
+    // A record only lies when it outlives the write it describes. Both writers
+    // flush the file, and try to flush its parent, before returning, and a target
+    // is written before its record, so the state is no more durable than the
+    // writes it records unless a target's parent cannot be opened for the flush.
+    // Keep that order (selfie-aub).
     let yaml = crate::yaml::serialize(&loaded.state).map_err(StateSaveError::Serialize)?;
     filesystem
-        .write_file_private(&loaded.path, yaml.as_bytes())
+        .write_file_private(&loaded.path, yaml.as_bytes(), IfPresent::Replace)
+        .map(drop)
         .map_err(|source| StateSaveError::Write {
             path: loaded.path.path().to_path_buf(),
             cause: source,
@@ -1379,7 +1376,7 @@ mod tests {
     #[test]
     fn a_failed_write_names_the_file_in_its_own_words() {
         let mut fs = filesystem_without_the_state_file();
-        fs.expect_write_file_private().returning(|_, _| {
+        fs.expect_write_file_private().returning(|_, _, _| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
                 std::io::Error::other("disk full"),
             )))

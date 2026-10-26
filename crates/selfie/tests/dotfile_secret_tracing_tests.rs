@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use tempfile::TempDir;
-use test_common::FakeCommandRunner;
+use test_common::{FakeCommandRunner, PLANTED, Plant, PlantsBeforeWrite};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -93,6 +93,7 @@ async fn no_tracing_record_contains_a_resolved_secret() {
 
     let provider_target = target_dir.join("provider.conf");
     let template_target = target_dir.join("template.conf");
+    let appeared_target = target_dir.join("appeared.conf");
 
     std::fs::create_dir_all(package_dir.join("creds")).unwrap();
     std::fs::write(package_dir.join("creds/t.tpl"), "key: {{ v }}\n").unwrap();
@@ -101,9 +102,11 @@ async fn no_tracing_record_contains_a_resolved_secret() {
         format!(
             "name: creds\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
              - command: \"op read x\"\n    target: \"{}\"\n  \
-             - source: \"creds/t.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read y\"\n",
+             - source: \"creds/t.tpl\"\n    target: \"{}\"\n    vars:\n      v: \"op read y\"\n  \
+             - command: \"op read z\"\n    target: \"{}\"\n",
             provider_target.display(),
-            template_target.display()
+            template_target.display(),
+            appeared_target.display()
         ),
     )
     .unwrap();
@@ -124,7 +127,9 @@ async fn no_tracing_record_contains_a_resolved_secret() {
     );
     let runner = FakeCommandRunner::new()
         .succeeding("op read x", SECRET.as_bytes())
-        .succeeding("op read y", SECRET.as_bytes());
+        .succeeding("op read y", SECRET.as_bytes())
+        .succeeding("op read z", SECRET.as_bytes());
+    let fs = PlantsBeforeWrite::new(&appeared_target, Plant::File(PLANTED, 0o600));
     let dotfiles_repo = YamlPackageRepository::new(
         RealFileSystem,
         config.dotfiles_directory(),
@@ -133,7 +138,7 @@ async fn no_tracing_record_contains_a_resolved_secret() {
     let service = DotfileServiceImpl::new(
         repo,
         dotfiles_repo,
-        RealFileSystem,
+        fs.clone(),
         runner,
         config,
         CancellationToken::new(),
@@ -155,6 +160,12 @@ async fn no_tracing_record_contains_a_resolved_secret() {
         format!("key: {SECRET}\n"),
         "the template entry should have been deployed"
     );
+    assert!(fs.planted(), "nothing appeared");
+    assert_eq!(
+        std::fs::read_to_string(&appeared_target).unwrap(),
+        PLANTED,
+        "what appeared should have been kept"
+    );
     assert!(
         events.iter().any(|e| matches!(
             e,
@@ -169,4 +180,5 @@ async fn no_tracing_record_contains_a_resolved_secret() {
         "the subscriber captured nothing, so this test proves nothing"
     );
     test_common::assert_secret_free(&log, SECRET, "a tracing record");
+    test_common::assert_secret_free(&log, PLANTED, "a tracing record");
 }

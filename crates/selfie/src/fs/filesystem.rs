@@ -221,6 +221,37 @@ fn clone_io_error(error: &io::Error) -> io::Error {
     io::Error::new(error.kind(), error.to_string())
 }
 
+/// What a write does with anything already at its target when the rename that
+/// puts the new file in place lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IfPresent {
+    /// Replace it.
+    Replace,
+    /// Leave it in place, write nothing, and answer [`Placed::Kept`]. For a
+    /// target the caller last found absent, so that something appearing there
+    /// since is never replaced unseen.
+    ///
+    /// A guarantee where the volume supports an exclusive rename, and on Linux
+    /// also where it lacks one but supports hard links. Elsewhere it is a
+    /// mitigation, not a guarantee: the writer looks at the target once more,
+    /// without following a link, immediately before an ordinary rename, and
+    /// something that appears between that look and the rename is replaced. A
+    /// write to an absent target on such a volume still succeeds. A sandbox that
+    /// refuses the exclusive rename itself with `EPERM` gets the same mitigation.
+    Keep,
+}
+
+/// What a write did at its target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "a write that kept what was at its target wrote nothing"]
+pub enum Placed {
+    /// The new file is at the target.
+    Written,
+    /// Under [`IfPresent::Keep`], something was at the target when the rename
+    /// landed. It is left there, and nothing was written.
+    Kept,
+}
+
 /// Port for file system operations. Every file system interaction in the selfie
 /// library goes through it.
 ///
@@ -234,6 +265,8 @@ fn clone_io_error(error: &io::Error) -> io::Error {
 /// | [`write_file_no_follow`](FileSystem::write_file_no_follow) | refused, as an error | kept | yes |
 ///
 /// Secret-bearing content takes the first; everything else takes the second.
+/// Each takes an [`IfPresent`] saying whether the rename may replace what is at
+/// the target, and answers with the [`Placed`] that says whether it did.
 /// Neither follows a link at the final component, and neither renames over a
 /// fifo, socket or device node, including one a link resolves to. Both still
 /// follow symlinked **parent** directories — a planted directory symlink can
@@ -290,9 +323,16 @@ pub trait FileSystem: Send + Sync {
     /// Because the file is replaced rather than modified, it does not inherit the
     /// old one's extended attributes, POSIX ACLs, SELinux label, or ownership.
     ///
+    /// # Durability
+    ///
+    /// As [`write_file_no_follow`](FileSystem::write_file_no_follow)'s: returns
+    /// only once the data has been flushed to disk, with a best-effort attempt at
+    /// the parent directory.
+    ///
     /// # Strength of the guarantee
     ///
-    /// The mode is `0o600` masked by the umask — never more permissive.
+    /// The mode is `0o600` masked by the umask — never more permissive. The
+    /// durability is as strong as `write_file_no_follow`'s, and no stronger.
     ///
     /// # Errors
     ///
@@ -307,7 +347,12 @@ pub trait FileSystem: Send + Sync {
     /// Like [`write_file_no_follow`](FileSystem::write_file_no_follow), this
     /// cannot succeed on an existing file inside a directory the caller cannot
     /// write to: an atomic replace must create a sibling first.
-    fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
+    fn write_file_private(
+        &self,
+        path: &TargetPath,
+        data: &[u8],
+        if_present: IfPresent,
+    ) -> Result<Placed, FileSystemError>;
 
     /// Write a file, refusing a symlink at the final component. The ordinary
     /// writer, and the only one for content that is not a credential.
@@ -349,8 +394,10 @@ pub trait FileSystem: Send + Sync {
     /// directory flush covers only the immediate parent.
     ///
     /// The refusals are decided when the write is checked. A symlink or fifo
-    /// planted after that is replaced by the rename, never followed or opened,
-    /// and the write succeeds.
+    /// planted after that is never followed or opened: under
+    /// [`IfPresent::Replace`] the rename replaces it and the write succeeds, and
+    /// under [`IfPresent::Keep`] it is left in place, within that variant's
+    /// guarantee.
     ///
     /// # Errors
     ///
@@ -363,7 +410,12 @@ pub trait FileSystem: Send + Sync {
     /// replaced, and a file in a directory the caller cannot write to is not.
     /// In a directory with the sticky bit set, a file owned by another user is
     /// not replaced either, because rename there requires owning the file.
-    fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError>;
+    fn write_file_no_follow(
+        &self,
+        path: &TargetPath,
+        data: &[u8],
+        if_present: IfPresent,
+    ) -> Result<Placed, FileSystemError>;
 
     /// The refusal [`write_file_no_follow`](FileSystem::write_file_no_follow) would
     /// give for `path`, if it would refuse
@@ -883,8 +935,8 @@ impl MockFileSystem {
     {
         let path_buf = PathBuf::from(path);
         self.expect_write_file_no_follow()
-            .withf(move |target, _| target.path() == path_buf)
-            .returning(|_, _| Ok(()));
+            .withf(move |target, _, _| target.path() == path_buf)
+            .returning(|_, _, _| Ok(Placed::Written));
     }
 
     /// Succeed when removing `path`.

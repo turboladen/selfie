@@ -31,6 +31,7 @@
 //! - `template` — Named-value substitution for templated dotfiles
 //! - `state_file` — Reading and writing the deploy-state file
 
+mod appeared;
 mod apply;
 mod backup;
 mod classify;

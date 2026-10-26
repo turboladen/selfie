@@ -10,8 +10,8 @@ use std::{
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
 use super::filesystem::{
-    AbsentReason, DirectoryState, FileSystem, FileSystemError, OpenRefusal, RepositoryRead,
-    TargetRead, parent_dir,
+    AbsentReason, DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent,
+    OpenRefusal, Placed, RepositoryRead, TargetRead, parent_dir,
 };
 use super::target::TargetPath;
 
@@ -86,19 +86,19 @@ fn irregular_refusal(path: &Path) -> Option<FileSystemError> {
     })
 }
 
-/// What the writer does with whatever is already at the target, and how far its
-/// durability reaches.
+/// What the writer does with whatever is already at the target. Both flush the
+/// parent directory, best effort.
 #[derive(Clone, Copy)]
 enum Replacement {
     /// Replace a symlink that does not resolve to an irregular target; create
-    /// owner-only. The parent directory is not fsynced.
-    // The deploy state is written this way and must stay less durable than the
-    // targets it records: a record outliving the write it describes turns a
-    // lost deploy into a conflict blamed on the user. `save_deploy_state` says
-    // so; losing a secret target's rename costs the deploy, not the data.
+    /// owner-only.
+    // The deploy state, the copy kept before an overwrite, and every secret target
+    // are written this way. The copy is why this flushes its parent: it lands
+    // before the overwrite, so losing its directory entry to a crash that keeps
+    // the overwrite destroys the only remaining copy.
     OwnerOnly,
     /// Refuse a symlink; keep an existing regular file's mode, else create at
-    /// `0o666 & !umask`. The parent directory is fsynced, best effort.
+    /// `0o666 & !umask`.
     KeepingMode,
 }
 
@@ -108,19 +108,15 @@ enum Replacement {
 ///
 /// A refusal for an irregular target, or for a symlink under `KeepingMode`,
 /// present when checked; or an IO error naming `path` for anything else.
-fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), FileSystemError> {
+fn write_by_rename(
+    path: &Path,
+    data: &[u8],
+    how: Replacement,
+    if_present: IfPresent,
+) -> Result<Placed, FileSystemError> {
     use std::io::Write as _;
 
-    // The temporary file's name is random and the rename carries no path at all,
-    // so failures would otherwise name a file the operator never chose -- or
-    // nothing. Re-tag them with the target. `kind()` is preserved; only the raw
-    // OS error number is lost, which nothing here consumes.
-    let target_err = |e: std::io::Error| {
-        FileSystemError::IoError(Arc::new(std::io::Error::new(
-            e.kind(),
-            format!("{}: {e}", path.display()),
-        )))
-    };
+    let target_err = |e: io::Error| FileSystemError::IoError(tagged(path, &e));
 
     // A target whose directory does not exist yet is created rather than refused.
     // See `parent_dir` for why the bare-relative-name case needs normalizing.
@@ -151,9 +147,9 @@ fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), Fil
     })?;
 
     // Refusals are decided here, before a temporary file exists, so a refused
-    // write leaves nothing beside the target. They are about the path as it is
-    // now: a link or fifo planted after this point is replaced by the rename
-    // below, never followed or opened, and the write succeeds.
+    // write leaves nothing beside the target. A link or fifo planted after this
+    // point is never followed or opened: `Replace` renames over it, and `Keep`
+    // leaves it and fails, outside the mitigation's window (`rename_keeping`).
     //
     // Symlink first: a link to a fifo would otherwise be reported as a fifo,
     // naming the wrong problem and suggesting the wrong fix. The irregular
@@ -230,29 +226,24 @@ fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), Fil
     // (selfie-aub). Ordering is the fix, so it belongs here, before the record.
     tmp.as_file().sync_all().map_err(target_err)?;
 
-    // Replaces the target by rename, so readers see either the old file or the
+    // Puts the file in place by rename, so readers see either the old file or the
     // complete new one, and a symlink at the final component is replaced rather
     // than followed.
-    tmp.persist(path).map_err(|e| {
-        // `EISDIR`: a directory took the target's place after the checks, and a
-        // file cannot be renamed over one.
-        if e.error.kind() == io::ErrorKind::IsADirectory {
-            let cause = Arc::new(std::io::Error::new(
-                e.error.kind(),
-                format!("{}: {}", path.display(), e.error),
-            ));
-            FileSystemError::DirectoryTarget {
-                path: path.to_path_buf(),
-                cause,
-            }
-        } else {
-            target_err(e.error)
+    let placed = match if_present {
+        IfPresent::Replace => tmp
+            .persist(path)
+            .map(|_| Placed::Written)
+            .map_err(|e| rename_failure(path, e.error))?,
+        IfPresent::Keep => {
+            rename_keeping(tmp, path, |tmp, path| tmp.persist_noclobber(path).map(drop))?
         }
-    })?;
+    };
+    if placed == Placed::Kept {
+        return Ok(placed);
+    }
 
     // The data is durable; the directory entry naming it is not. A freshly
-    // created file can survive its own fsync and still vanish. `OwnerOnly`
-    // skips this on purpose; see the variant.
+    // created file can survive its own fsync and still vanish.
     //
     // Best-effort, deliberately: opening a directory needs read permission, so
     // a `0o300` directory refuses this open with `EACCES`, and failing here
@@ -260,11 +251,130 @@ fn write_by_rename(path: &Path, data: &[u8], how: Replacement) -> Result<(), Fil
     // `a_write_only_parent_directory_still_succeeds` holds it. Only the
     // immediate parent; on Apple targets std's `sync_all` is `fcntl(F_FULLFSYNC)`,
     // and its failure is swallowed here like any other. Do not claim more.
-    if keep_mode && let Ok(dir) = fs::File::open(parent) {
+    if let Ok(dir) = fs::File::open(parent) {
         let _ = dir.sync_all();
     }
 
-    Ok(())
+    Ok(Placed::Written)
+}
+
+/// `error`, worded to name `path`, keeping its kind.
+// The temporary file's name is random and the rename carries no path at all, so
+// a failure would otherwise name a file the operator never chose, or nothing.
+// Only the raw OS error number is lost, which nothing here consumes.
+fn tagged(path: &Path, error: &io::Error) -> Arc<io::Error> {
+    Arc::new(io::Error::new(
+        error.kind(),
+        format!("{}: {error}", path.display()),
+    ))
+}
+
+/// The error for a rename into `path` that failed with `error`.
+fn rename_failure(path: &Path, error: io::Error) -> FileSystemError {
+    let cause = tagged(path, &error);
+    // `EISDIR`: a directory took the target's place after the checks, and a file
+    // cannot be renamed over one.
+    if error.kind() == io::ErrorKind::IsADirectory {
+        FileSystemError::DirectoryTarget {
+            path: path.to_path_buf(),
+            cause,
+        }
+    } else {
+        FileSystemError::IoError(cause)
+    }
+}
+
+/// Rename `tmp` into `path` unless something is there, through `no_clobber`:
+/// [`Placed::Kept`] when something is.
+///
+/// # Errors
+///
+/// The rename's own failure.
+// `no_clobber` is tempfile's `persist_noclobber` in production and injected in
+// tests, since no volume on a CI runner lacks an exclusive rename. tempfile tries
+// `renameat2(RENAME_NOREPLACE)` on Linux and `renameatx_np(RENAME_EXCL)` on Apple,
+// and falls back to `link` then `unlink` only on `ENOSYS` or `EINVAL`, which on
+// Apple an unsupported volume does not return: it answers `ENOTSUP`.
+fn rename_keeping(
+    tmp: tempfile::NamedTempFile,
+    path: &Path,
+    no_clobber: impl FnOnce(tempfile::NamedTempFile, &Path) -> Result<(), tempfile::PersistError>,
+) -> Result<Placed, FileSystemError> {
+    let temporary = tmp.path().to_path_buf();
+    let error = match no_clobber(tmp, path) {
+        Ok(()) => {
+            remove_second_name(&temporary, path);
+            return Ok(Placed::Written);
+        }
+        Err(error) => error,
+    };
+    // The temporary file is inside `error`, so every return below unlinks it.
+    if error.error.kind() == io::ErrorKind::AlreadyExists {
+        return Ok(Placed::Kept);
+    }
+    if !exclusive_rename_unsupported(&error.error) {
+        return Err(rename_failure(path, error.error));
+    }
+    tracing::debug!(
+        directory = %parent_dir(path).display(),
+        errno = ?error.error.raw_os_error(),
+        "no exclusive rename here; looking once more before an ordinary rename",
+    );
+    // The mitigation: this volume cannot refuse the rename itself, so look once
+    // more and rename only into nothing. What appears after this look is replaced.
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => error
+            .file
+            .persist(path)
+            .map(|_| Placed::Written)
+            .map_err(|e| rename_failure(path, e.error)),
+        Ok(_) => Ok(Placed::Kept),
+        Err(e) => Err(rename_failure(path, e)),
+    }
+}
+
+/// Whether `error` says the volume cannot rename exclusively or link, rather
+/// than that the rename went wrong.
+// `ENOTSUP` is Apple's answer to `RENAME_EXCL` on a volume without it; `EPERM`,
+// `EOPNOTSUPP` and `ENOSYS` are what `link` gives on a volume without hard links.
+// `EPERM` stays although a sandbox can refuse the exclusive rename alone with it
+// and allow the plain one: dropping it would fail every first write to a Linux
+// volume without hard links. A slice, not a `match`: on Linux nix's `ENOTSUP` is
+// an alias of `EOPNOTSUPP`, so the second pattern is unreachable there.
+fn exclusive_rename_unsupported(error: &io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| UNSUPPORTED.contains(&nix::errno::Errno::from_raw(code)))
+}
+
+/// The errnos [`exclusive_rename_unsupported`] answers true for.
+const UNSUPPORTED: [nix::errno::Errno; 4] = [
+    nix::errno::Errno::ENOTSUP,
+    nix::errno::Errno::EOPNOTSUPP,
+    nix::errno::Errno::EPERM,
+    nix::errno::Errno::ENOSYS,
+];
+
+/// Remove `temporary` if it is still a second name for the file now at `path`.
+///
+/// tempfile's link fallback ignores a failed `unlink` of the temporary name, which
+/// under the private writer leaves a second name for a credential. Best effort,
+/// and only when both names are one regular file, so it never removes anything a
+/// successful rename freed the name for.
+fn remove_second_name(temporary: &Path, path: &Path) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let identity = |metadata: &fs::Metadata| FileIdentity::of(metadata.dev(), metadata.ino());
+    // Almost always gone, so the target is looked at only when it is not.
+    let Ok(left) = fs::symlink_metadata(temporary) else {
+        return;
+    };
+    let Ok(placed) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if left.is_file() && placed.is_file() && identity(&left) == identity(&placed) {
+        let _ = fs::remove_file(temporary);
+    }
 }
 
 /// The shallowest component of `path` that is not a directory.
@@ -548,12 +658,22 @@ impl FileSystem for RealFileSystem {
         }
     }
 
-    fn write_file_private(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
-        write_by_rename(path.path(), data, Replacement::OwnerOnly)
+    fn write_file_private(
+        &self,
+        path: &TargetPath,
+        data: &[u8],
+        if_present: IfPresent,
+    ) -> Result<Placed, FileSystemError> {
+        write_by_rename(path.path(), data, Replacement::OwnerOnly, if_present)
     }
 
-    fn write_file_no_follow(&self, path: &TargetPath, data: &[u8]) -> Result<(), FileSystemError> {
-        write_by_rename(path.path(), data, Replacement::KeepingMode)
+    fn write_file_no_follow(
+        &self,
+        path: &TargetPath,
+        data: &[u8],
+        if_present: IfPresent,
+    ) -> Result<Placed, FileSystemError> {
+        write_by_rename(path.path(), data, Replacement::KeepingMode, if_present)
     }
 
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
@@ -1077,9 +1197,12 @@ mod private_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("creds");
 
-        RealFileSystem
-            .write_file_private(&tp(&target), b"secret")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"secret");
     }
@@ -1090,9 +1213,12 @@ mod private_write_tests {
         let target = dir.path().join("creds");
         fs::write(&target, b"a much longer previous value").unwrap();
 
-        RealFileSystem
-            .write_file_private(&tp(&target), b"new")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_private(&tp(&target), b"new", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         // Not merely overwritten in place: nothing of the old value survives.
         assert_eq!(fs::read(&target).unwrap(), b"new");
@@ -1103,9 +1229,12 @@ mod private_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("nested").join("deeper").join("creds");
 
-        RealFileSystem
-            .write_file_private(&tp(&target), b"secret")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"secret");
     }
@@ -1115,9 +1244,12 @@ mod private_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("creds");
 
-        RealFileSystem
-            .write_file_private(&tp(&target), b"")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_private(&tp(&target), b"", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"");
     }
@@ -1127,9 +1259,12 @@ mod private_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("creds");
 
-        RealFileSystem
-            .write_file_private(&tp(&target), b"secret")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         assert_eq!(entries(dir.path()), ["creds"]);
     }
@@ -1143,7 +1278,7 @@ mod private_write_tests {
         let target = dir.path().join("creds");
         fs::create_dir(&target).unwrap();
 
-        let err = RealFileSystem.write_file_private(&tp(&target), b"secret");
+        let err = RealFileSystem.write_file_private(&tp(&target), b"secret", IfPresent::Replace);
 
         assert!(err.is_err());
         assert_eq!(entries(dir.path()), ["creds"]);
@@ -1171,9 +1306,12 @@ mod private_write_tests {
             let dir = tempdir().unwrap();
             let target = dir.path().join("creds");
 
-            RealFileSystem
-                .write_file_private(&tp(&target), b"secret")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             assert_owner_only(&target);
         }
@@ -1185,9 +1323,12 @@ mod private_write_tests {
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
 
-            RealFileSystem
-                .write_file_private(&tp(&target), b"new")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_private(&tp(&target), b"new", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             // `OpenOptions::mode` applies only when a file is created, so an
             // implementation that opens the target directly would silently leave
@@ -1204,9 +1345,12 @@ mod private_write_tests {
             let target = dir.path().join("creds");
             std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
 
-            RealFileSystem
-                .write_file_private(&tp(&target), b"secret")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             assert_eq!(fs::read(&elsewhere).unwrap(), b"untouched");
             assert!(
@@ -1226,14 +1370,46 @@ mod private_write_tests {
             let target = dir.path().join("creds");
             std::os::unix::fs::symlink(&never_created, &target).unwrap();
 
-            RealFileSystem
-                .write_file_private(&tp(&target), b"secret")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             // `fs::write` would have created the file the symlink points at.
             assert!(!never_created.exists());
             assert_eq!(fs::read(&target).unwrap(), b"secret");
             assert_owner_only(&target);
+        }
+
+        // The parent flush must not turn a working write into a failure here either.
+        // `0o300` lets selfie create a file in the directory and refuses opening it,
+        // so only the flush fails.
+        #[test]
+        fn a_write_only_parent_directory_still_succeeds() {
+            if nix::unistd::Uid::effective().is_root() {
+                eprintln!("SKIP a_write_only_parent_directory_still_succeeds: running as root");
+                return;
+            }
+            let dir = tempdir().unwrap();
+            let parent = dir.path().join("write-only");
+            fs::create_dir(&parent).unwrap();
+            let target = parent.join("creds");
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+
+            let result =
+                RealFileSystem.write_file_private(&tp(&target), b"secret", IfPresent::Replace);
+
+            // Restore before asserting, so a failure still leaves a removable
+            // temporary directory behind.
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+
+            assert_eq!(
+                result.expect("a write-only parent directory must not fail the write"),
+                Placed::Written
+            );
+            assert_eq!(fs::read(&target).unwrap(), b"secret");
         }
 
         #[test]
@@ -1247,9 +1423,12 @@ mod private_write_tests {
             let held = fs::File::open(&target).unwrap();
             let before = fs::metadata(&target).unwrap().ino();
 
-            RealFileSystem
-                .write_file_private(&tp(&target), b"new")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_private(&tp(&target), b"new", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             let after = fs::metadata(&target).unwrap().ino();
             assert_ne!(
@@ -1271,7 +1450,7 @@ mod private_write_tests {
             nix::unistd::mkfifo(&target, nix::sys::stat::Mode::S_IRWXU).unwrap();
 
             let err = RealFileSystem
-                .write_file_private(&tp(&target), b"secret")
+                .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
                 .unwrap_err();
 
             match err {
@@ -1307,7 +1486,7 @@ mod private_write_tests {
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
 
             let err = RealFileSystem
-                .write_file_private(&tp(&target), b"secret")
+                .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
                 .unwrap_err();
 
             // Restore before asserting, so a failure still leaves a removable
@@ -1355,9 +1534,12 @@ mod private_write_tests {
 
             let target = dir.path().join("creds");
 
-            RealFileSystem
-                .write_file_private(&tp(&target), b"secret")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_private(&tp(&target), b"secret", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             assert_eq!(fs::read(&target).unwrap(), b"secret");
             assert_owner_only(&target);
@@ -1391,9 +1573,12 @@ mod no_follow_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("config");
 
-        RealFileSystem
-            .write_file_no_follow(&tp(&target), b"content")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_no_follow(&tp(&target), b"content", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"content");
     }
@@ -1404,9 +1589,12 @@ mod no_follow_write_tests {
         let target = dir.path().join("config");
         fs::write(&target, b"a much longer previous value").unwrap();
 
-        RealFileSystem
-            .write_file_no_follow(&tp(&target), b"new")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_no_follow(&tp(&target), b"new", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         // Nothing of the old value survives past the new one.
         assert_eq!(fs::read(&target).unwrap(), b"new");
@@ -1417,9 +1605,12 @@ mod no_follow_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("nested").join("deeper").join("config");
 
-        RealFileSystem
-            .write_file_no_follow(&tp(&target), b"content")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_no_follow(&tp(&target), b"content", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"content");
     }
@@ -1429,9 +1620,12 @@ mod no_follow_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("config");
 
-        RealFileSystem
-            .write_file_no_follow(&tp(&target), b"")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_no_follow(&tp(&target), b"", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"");
     }
@@ -1441,9 +1635,12 @@ mod no_follow_write_tests {
         let dir = tempdir().unwrap();
         let target = dir.path().join("config");
 
-        RealFileSystem
-            .write_file_no_follow(&tp(&target), b"content")
-            .unwrap();
+        assert_eq!(
+            RealFileSystem
+                .write_file_no_follow(&tp(&target), b"content", IfPresent::Replace)
+                .unwrap(),
+            Placed::Written
+        );
 
         assert_eq!(entries(dir.path()), ["config"]);
     }
@@ -1456,7 +1653,7 @@ mod no_follow_write_tests {
         let target = dir.path().join("config");
         fs::create_dir(&target).unwrap();
 
-        let err = RealFileSystem.write_file_no_follow(&tp(&target), b"content");
+        let err = RealFileSystem.write_file_no_follow(&tp(&target), b"content", IfPresent::Replace);
 
         assert!(err.is_err());
         assert_eq!(entries(dir.path()), ["config"]);
@@ -1469,7 +1666,7 @@ mod no_follow_write_tests {
         fs::create_dir(&target).unwrap();
 
         let err = RealFileSystem
-            .write_file_no_follow(&tp(&target), b"content")
+            .write_file_no_follow(&tp(&target), b"content", IfPresent::Replace)
             .unwrap_err();
 
         // Named as what is there. Misclassifying it would report "target is a
@@ -1492,7 +1689,7 @@ mod no_follow_write_tests {
             std::os::unix::fs::symlink(&destination, &target).unwrap();
 
             let err = RealFileSystem
-                .write_file_no_follow(&tp(&target), b"content")
+                .write_file_no_follow(&tp(&target), b"content", IfPresent::Replace)
                 .unwrap_err();
 
             assert!(matches!(err, FileSystemError::SymlinkedTarget { .. }));
@@ -1514,7 +1711,7 @@ mod no_follow_write_tests {
             std::os::unix::fs::symlink(&never_created, &target).unwrap();
 
             let err = RealFileSystem
-                .write_file_no_follow(&tp(&target), b"content")
+                .write_file_no_follow(&tp(&target), b"content", IfPresent::Replace)
                 .unwrap_err();
 
             assert!(matches!(err, FileSystemError::SymlinkedTarget { .. }));
@@ -1531,7 +1728,7 @@ mod no_follow_write_tests {
             std::os::unix::fs::symlink(&destination, &target).unwrap();
 
             match RealFileSystem
-                .write_file_no_follow(&tp(&target), b"content")
+                .write_file_no_follow(&tp(&target), b"content", IfPresent::Replace)
                 .unwrap_err()
             {
                 FileSystemError::SymlinkedTarget { path, points_to } => {
@@ -1584,9 +1781,12 @@ mod no_follow_write_tests {
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&target, fs::Permissions::from_mode(0o767)).unwrap();
 
-            RealFileSystem
-                .write_file_no_follow(&tp(&target), b"new")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_no_follow(&tp(&target), b"new", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             assert_eq!(mode_of(&target), 0o767);
         }
@@ -1616,9 +1816,12 @@ mod no_follow_write_tests {
             }
 
             let target = dir.path().join("config");
-            RealFileSystem
-                .write_file_no_follow(&tp(&target), b"content")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_no_follow(&tp(&target), b"content", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             assert_eq!(mode_of(&target), mode_of(&control));
         }
@@ -1631,9 +1834,16 @@ mod no_follow_write_tests {
             let linked = dir.path().join("linked");
             std::os::unix::fs::symlink(&real, &linked).unwrap();
 
-            RealFileSystem
-                .write_file_no_follow(&tp(&linked.join("config")), b"content")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_no_follow(
+                        &tp(&linked.join("config")),
+                        b"content",
+                        IfPresent::Replace
+                    )
+                    .unwrap(),
+                Placed::Written
+            );
 
             // Asserted rather than only documented, so the limitation cannot be
             // quietly overstated later: the symlink check covers the final
@@ -1654,9 +1864,12 @@ mod no_follow_write_tests {
             let held = fs::File::open(&target).unwrap();
             let before = fs::metadata(&target).unwrap().ino();
 
-            RealFileSystem
-                .write_file_no_follow(&tp(&target), b"new")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_no_follow(&tp(&target), b"new", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             // A truncate-in-place writer that fails part way leaves the user's
             // file holding whatever it got to. Replacing the name is what makes a
@@ -1690,7 +1903,7 @@ mod no_follow_write_tests {
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o500)).unwrap();
 
             let err = RealFileSystem
-                .write_file_no_follow(&tp(&target), b"new")
+                .write_file_no_follow(&tp(&target), b"new", IfPresent::Replace)
                 .unwrap_err();
 
             // Restore before asserting, so a failure still leaves a removable
@@ -1721,9 +1934,12 @@ mod no_follow_write_tests {
             fs::write(&target, b"old").unwrap();
             fs::set_permissions(&target, fs::Permissions::from_mode(0o444)).unwrap();
 
-            RealFileSystem
-                .write_file_no_follow(&tp(&target), b"new")
-                .unwrap();
+            assert_eq!(
+                RealFileSystem
+                    .write_file_no_follow(&tp(&target), b"new", IfPresent::Replace)
+                    .unwrap(),
+                Placed::Written
+            );
 
             assert_eq!(fs::read(&target).unwrap(), b"new");
             assert_eq!(mode_of(&target), 0o444);
@@ -1750,13 +1966,17 @@ mod no_follow_write_tests {
             let target = parent.join("config");
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
 
-            let result = RealFileSystem.write_file_no_follow(&tp(&target), b"content");
+            let result =
+                RealFileSystem.write_file_no_follow(&tp(&target), b"content", IfPresent::Replace);
 
             // Restore before asserting, so a failure still leaves a removable
             // temporary directory behind.
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
 
-            result.expect("a write-only parent directory must not fail the write");
+            assert_eq!(
+                result.expect("a write-only parent directory must not fail the write"),
+                Placed::Written
+            );
             assert_eq!(fs::read(&target).unwrap(), b"content");
         }
     }
@@ -1916,9 +2136,10 @@ mod irregular_targets {
         let dir = tempdir().unwrap();
         let fifo = fifo_in(dir.path());
 
-        let result =
-            with_deadline(move || RealFileSystem.write_file_no_follow(&tp(&fifo), b"data"))
-                .expect("writing a readerless fifo must not block");
+        let result = with_deadline(move || {
+            RealFileSystem.write_file_no_follow(&tp(&fifo), b"data", IfPresent::Replace)
+        })
+        .expect("writing a readerless fifo must not block");
 
         match result {
             Err(FileSystemError::IrregularTarget { kind, .. }) => {
@@ -1946,9 +2167,10 @@ mod irregular_targets {
             .expect("a reader may open a fifo with O_NONBLOCK before any writer");
 
         let target = fifo.clone();
-        let result =
-            with_deadline(move || RealFileSystem.write_file_no_follow(&tp(&target), b"data"))
-                .expect("the open cannot block while a reader is attached");
+        let result = with_deadline(move || {
+            RealFileSystem.write_file_no_follow(&tp(&target), b"data", IfPresent::Replace)
+        })
+        .expect("the open cannot block while a reader is attached");
 
         match result {
             Err(FileSystemError::IrregularTarget { kind, .. }) => {
@@ -1970,7 +2192,7 @@ mod irregular_targets {
     #[test]
     fn the_writer_refuses_a_character_device() {
         let err = RealFileSystem
-            .write_file_no_follow(&tp(Path::new("/dev/null")), b"data")
+            .write_file_no_follow(&tp(Path::new("/dev/null")), b"data", IfPresent::Replace)
             .unwrap_err();
 
         match err {
@@ -2755,7 +2977,7 @@ mod typed_failure_tests {
         let path = link.join("config");
 
         let read = RealFileSystem.read_file_no_follow(&target(&path));
-        let written = RealFileSystem.write_file_no_follow(&target(&path), b"x");
+        let written = RealFileSystem.write_file_no_follow(&target(&path), b"x", IfPresent::Replace);
 
         assert!(
             matches!(&read, Ok(TargetRead::BelowNonDirectory { parent: Some(p) }) if *p == link),
@@ -2818,7 +3040,8 @@ mod typed_failure_tests {
         fs::write(&file, "PLAIN").unwrap();
 
         for path in [file.join("config"), file.join("deeper").join("config")] {
-            let written = RealFileSystem.write_file_no_follow(&target(&path), b"x");
+            let written =
+                RealFileSystem.write_file_no_follow(&target(&path), b"x", IfPresent::Replace);
             assert!(
                 matches!(
                     &written,
@@ -2838,7 +3061,7 @@ mod typed_failure_tests {
         fs::create_dir(&path).unwrap();
         fs::write(path.join("inner"), "kept").unwrap();
 
-        let written = RealFileSystem.write_file_private(&target(&path), b"x");
+        let written = RealFileSystem.write_file_private(&target(&path), b"x", IfPresent::Replace);
 
         assert!(
             matches!(written, Err(FileSystemError::DirectoryTarget { .. })),
@@ -2859,7 +3082,11 @@ mod typed_failure_tests {
         fs::create_dir(&locked).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
 
-        let written = RealFileSystem.write_file_no_follow(&target(&locked.join("config")), b"x");
+        let written = RealFileSystem.write_file_no_follow(
+            &target(&locked.join("config")),
+            b"x",
+            IfPresent::Replace,
+        );
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
 
         assert!(
@@ -2923,5 +3150,197 @@ mod typed_failure_tests {
             matches!(read, Err(RepositoryRead::Undetermined(_))),
             "{read:?}"
         );
+    }
+}
+
+// Tests for `IfPresent::Keep`. The first four run the platform's exclusive rename
+// on the platform they run on: `renameat2(RENAME_NOREPLACE)` on Linux, in CI, and
+// `renameatx_np(RENAME_EXCL)` on macOS. A regular file at the target passes every
+// refusal check, so only the rename can refuse it.
+#[cfg(test)]
+mod keep_write_tests {
+    use std::os::unix::fs::{MetadataExt as _, symlink};
+
+    use super::*;
+    use tempfile::tempdir;
+
+    // Both writers, so a test cannot pass for one and miss the other.
+    fn writers() -> [(&'static str, Replacement); 2] {
+        [
+            ("private", Replacement::OwnerOnly),
+            ("no-follow", Replacement::KeepingMode),
+        ]
+    }
+
+    #[test]
+    fn keep_leaves_a_regular_file_present_at_the_rename() {
+        for (name, how) in writers() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("config");
+            fs::write(&target, b"written by an app").unwrap();
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+
+            let result = write_by_rename(&target, b"from selfie", how, IfPresent::Keep);
+
+            assert!(matches!(result, Ok(Placed::Kept)), "{name}: {result:?}");
+            assert_eq!(fs::read(&target).unwrap(), b"written by an app", "{name}");
+            assert_eq!(mode_of(&target), 0o640, "{name}");
+            assert_eq!(entries(dir.path()), ["config"], "{name}: debris left");
+        }
+    }
+
+    // The no-follow writer refuses a link before the rename, so only the private
+    // writer reaches the rename with one there.
+    #[test]
+    fn keep_leaves_a_dangling_link_present_at_the_rename() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("creds");
+        symlink(dir.path().join("nowhere"), &target).unwrap();
+
+        let result = write_by_rename(&target, b"secret", Replacement::OwnerOnly, IfPresent::Keep);
+
+        assert!(matches!(result, Ok(Placed::Kept)), "{result:?}");
+        assert_eq!(fs::read_link(&target).unwrap(), dir.path().join("nowhere"));
+        assert!(
+            !dir.path().join("nowhere").exists(),
+            "wrote through the link"
+        );
+        assert_eq!(entries(dir.path()), ["creds"]);
+    }
+
+    #[test]
+    fn keep_creates_an_absent_target_as_replace_does() {
+        for (name, how) in writers() {
+            let dir = tempdir().unwrap();
+            let kept = dir.path().join("kept");
+            let replaced = dir.path().join("replaced");
+
+            assert_eq!(
+                write_by_rename(&kept, b"content", how, IfPresent::Keep).unwrap(),
+                Placed::Written
+            );
+            assert_eq!(
+                write_by_rename(&replaced, b"content", how, IfPresent::Replace).unwrap(),
+                Placed::Written
+            );
+
+            assert_eq!(fs::read(&kept).unwrap(), b"content", "{name}");
+            assert_eq!(mode_of(&kept), mode_of(&replaced), "{name}");
+            assert_eq!(entries(dir.path()), ["kept", "replaced"], "{name}");
+        }
+    }
+
+    #[test]
+    fn keep_leaves_a_directory_present_at_the_rename() {
+        for (name, how) in writers() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("config");
+            fs::create_dir(&target).unwrap();
+            fs::write(target.join("inside"), b"kept").unwrap();
+
+            let result = write_by_rename(&target, b"from selfie", how, IfPresent::Keep);
+
+            assert!(matches!(result, Ok(Placed::Kept)), "{name}: {result:?}");
+            assert_eq!(fs::read(target.join("inside")).unwrap(), b"kept", "{name}");
+            assert_eq!(entries(dir.path()), ["config"], "{name}: debris left");
+        }
+    }
+
+    // A temporary file beside `target`, as the writer makes one.
+    fn temporary_beside(target: &Path, data: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".selfie-")
+            .tempfile_in(target.parent().unwrap())
+            .unwrap();
+        tmp.write_all(data).unwrap();
+        tmp
+    }
+
+    // What `persist_noclobber` returns on a volume that cannot rename exclusively.
+    fn unsupported(
+        errno: nix::errno::Errno,
+    ) -> impl FnOnce(tempfile::NamedTempFile, &Path) -> Result<(), tempfile::PersistError> {
+        move |file, _| {
+            Err(tempfile::PersistError {
+                error: io::Error::from_raw_os_error(errno as i32),
+                file,
+            })
+        }
+    }
+
+    #[test]
+    fn an_unsupported_exclusive_rename_falls_back_to_a_rename_when_the_target_is_still_absent() {
+        use nix::errno::Errno;
+
+        // Literals, not `UNSUPPORTED`: dropping one from the set must fail here.
+        for errno in [
+            Errno::ENOTSUP,
+            Errno::EOPNOTSUPP,
+            Errno::EPERM,
+            Errno::ENOSYS,
+        ] {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("config");
+            let tmp = temporary_beside(&target, b"from selfie");
+
+            assert_eq!(
+                rename_keeping(tmp, &target, unsupported(errno)).unwrap(),
+                Placed::Written
+            );
+
+            assert_eq!(fs::read(&target).unwrap(), b"from selfie", "{errno}");
+            assert_eq!(entries(dir.path()), ["config"], "{errno}: debris left");
+        }
+    }
+
+    #[test]
+    fn an_unsupported_exclusive_rename_keeps_what_the_last_look_finds() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("config");
+        let tmp = temporary_beside(&target, b"from selfie");
+        let planted = target.clone();
+        let refuse = unsupported(nix::errno::Errno::ENOTSUP);
+
+        let result = rename_keeping(tmp, &target, move |file, path| {
+            fs::write(&planted, b"written by an app").unwrap();
+            refuse(file, path)
+        });
+
+        assert!(matches!(result, Ok(Placed::Kept)), "{result:?}");
+        assert_eq!(fs::read(&target).unwrap(), b"written by an app");
+        assert_eq!(entries(dir.path()), ["config"], "debris left");
+    }
+
+    #[test]
+    fn exclusive_rename_unsupported_is_false_for_any_other_failure() {
+        use nix::errno::Errno;
+
+        for errno in [Errno::EEXIST, Errno::EACCES, Errno::EXDEV, Errno::EIO] {
+            let error = io::Error::from_raw_os_error(errno as i32);
+            assert!(!exclusive_rename_unsupported(&error), "{errno}");
+        }
+        assert!(!exclusive_rename_unsupported(&io::Error::other("no errno")));
+    }
+
+    // The cleanup after tempfile's link fallback removes the temporary name only
+    // while it is a second name for the file just put in place.
+    #[test]
+    fn a_second_name_is_removed_only_when_it_is_the_placed_file() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("config");
+        let linked = dir.path().join(".selfie-linked");
+        let other = dir.path().join(".selfie-other");
+        fs::write(&target, b"placed").unwrap();
+        fs::hard_link(&target, &linked).unwrap();
+        fs::write(&other, b"someone else's").unwrap();
+
+        remove_second_name(&linked, &target);
+        remove_second_name(&other, &target);
+
+        assert!(!linked.exists(), "the second name survived");
+        assert_eq!(fs::read(&other).unwrap(), b"someone else's");
+        assert_eq!(fs::metadata(&target).unwrap().nlink(), 1);
     }
 }

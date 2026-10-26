@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::dotfile_service::deploy::compute_checksum;
 use crate::fs::{
-    filesystem::{FileSystem, FileSystemError},
+    filesystem::{FileSystem, FileSystemError, IfPresent},
     target::repository_path,
 };
 use crate::package::event::{EntryOperation, Failure};
@@ -115,7 +115,9 @@ fn keep_at<F: FileSystem>(
     // repository-file entry -- the entry says where selfie writes, not what the
     // user had there first. Only the file is owner-only; `create_dir_all` gives
     // the directories `0o777 & !umask`.
-    filesystem.write_file_private(&repository_path(&path), current)?;
+    filesystem
+        .write_file_private(&repository_path(&path), current, IfPresent::Replace)
+        .map(drop)?;
 
     // Nothing is removed here. An earlier run's copy may be the only record of
     // content that is nowhere else, while this one holds what is still at the
@@ -299,7 +301,8 @@ mod tests {
     #[test]
     fn keeping_a_copy_removes_nothing() {
         let mut fs = MockFileSystem::default();
-        fs.expect_write_file_private().returning(|_, _| Ok(()));
+        fs.expect_write_file_private()
+            .returning(|_, _, _| Ok(crate::fs::Placed::Written));
         // No `list_directory` and no `remove_file` expectation, so reaching either
         // panics rather than passing quietly.
 
@@ -317,7 +320,8 @@ mod tests {
     #[test]
     fn a_prune_failure_is_reported_and_is_not_a_refusal() {
         let mut fs = MockFileSystem::default();
-        fs.expect_write_file_private().returning(|_, _| Ok(()));
+        fs.expect_write_file_private()
+            .returning(|_, _, _| Ok(crate::fs::Placed::Written));
         // Neither name can be the timestamped file just written, so both are
         // offered to `remove_file`.
         fs.expect_list_directory()
@@ -345,7 +349,8 @@ mod tests {
     #[test]
     fn pruning_keeps_the_copy_it_was_called_on() {
         let mut fs = MockFileSystem::default();
-        fs.expect_write_file_private().returning(|_, _| Ok(()));
+        fs.expect_write_file_private()
+            .returning(|_, _, _| Ok(crate::fs::Placed::Written));
         let removed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = std::sync::Arc::clone(&removed);
         fs.expect_remove_file().returning(move |path| {
@@ -377,9 +382,9 @@ mod tests {
         let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let seen = std::sync::Arc::clone(&written);
         let mut fs = MockFileSystem::default();
-        fs.expect_write_file_private().returning(move |path, _| {
+        fs.expect_write_file_private().returning(move |path, _, _| {
             seen.lock().unwrap().push(path.path().to_path_buf());
-            Ok(())
+            Ok(crate::fs::Placed::Written)
         });
 
         let root = Path::new("/state/backups");
@@ -408,7 +413,8 @@ mod tests {
     #[test]
     fn a_copy_is_named_timestamp_then_suffix() {
         let mut fs = MockFileSystem::default();
-        fs.expect_write_file_private().returning(|_, _| Ok(()));
+        fs.expect_write_file_private()
+            .returning(|_, _, _| Ok(crate::fs::Placed::Written));
 
         let stamp = "20260920T143005.117Z";
         let kept = keep_at(
