@@ -1,6 +1,6 @@
 pub mod common;
 
-use common::{FAILED, sandboxed_command, setup_default_test_config, setup_test_config};
+use common::{CLEAN, FAILED, sandboxed_command, setup_default_test_config, setup_test_config};
 use predicates::prelude::*;
 
 #[test]
@@ -11,7 +11,7 @@ fn test_validate_valid_config() {
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicates::str::contains("Configuration is valid"));
 }
 
@@ -32,7 +32,7 @@ fn config_validate_reports_the_dotfiles_and_state_directories() {
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicates::str::contains(format!(
             "dotfiles_directory: {}",
             written.join("dotfiles").display()
@@ -58,7 +58,7 @@ package_directory: "/test/packages"
     // Validate's own row, not the refusal every other command gives. The rows
     // and the verdict are this command's answer, so they are on stdout.
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stdout(predicates::str::contains("Validation failed."))
         .stdout(predicates::str::contains(
             "The `environment` setting is missing",
@@ -98,7 +98,7 @@ package_directory: "relative/path"
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stdout(predicates::str::contains("relative and cannot be resolved"));
 }
 
@@ -166,7 +166,7 @@ fn a_state_directory_not_there_yet_is_a_note_not_a_warning() {
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicates::str::contains("is not there yet"))
         .stdout(predicates::str::contains("Configuration is valid."))
         .stderr(predicates::str::contains("Validation failed.").not());

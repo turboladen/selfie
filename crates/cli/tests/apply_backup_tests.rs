@@ -6,7 +6,7 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_test_config};
+use common::{CLEAN, SELFIE_ENV, sandboxed_command, setup_test_config};
 use tempfile::TempDir;
 
 // A sandbox holding one package with one dotfile, its source, and its target.
@@ -65,7 +65,7 @@ fn an_overwrite_tells_you_where_the_previous_content_went() {
     let output = sandboxed_command(&temp)
         .args(["apply", "--yes"])
         .assert()
-        .success();
+        .code(CLEAN);
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
 
     assert!(
@@ -106,7 +106,7 @@ fn deploying_to_a_new_target_announces_no_copy() {
     let output = sandboxed_command(&temp)
         .args(["apply", "--yes"])
         .assert()
-        .success();
+        .code(CLEAN);
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
 
     assert!(
@@ -129,7 +129,7 @@ fn a_skipped_dotfile_names_its_target() {
     let output = sandboxed_command(&temp)
         .args(["apply", "--yes"])
         .assert()
-        .success();
+        .code(CLEAN);
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
 
     let skipped: Vec<&str> = stdout.lines().filter(|line| line.contains('⊘')).collect();

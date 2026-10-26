@@ -1,6 +1,6 @@
 pub mod common;
 
-use common::{SELFIE_ENV, add_package, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, SELFIE_ENV, add_package, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
 
@@ -21,7 +21,7 @@ fn test_package_install() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "test-package"]);
 
-    cmd.assert().success().stdout(predicate::str::contains(
+    cmd.assert().code(CLEAN).stdout(predicate::str::contains(
         "Package 'test-package' installation completed successfully",
     ));
 }
@@ -55,7 +55,7 @@ fn test_failing_recommend_does_not_fail_parent_install() {
     // install is a waiting step naming it, and its failure a warning, both on
     // stderr.
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stderr(predicate::str::contains(
             "Running the install command for broken-rec",
         ))
@@ -90,7 +90,7 @@ fn test_no_recommends_flag_skips_recommends() {
 
     // Should succeed without any recommend output
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("Installing recommended").not());
 }
 
@@ -124,7 +124,7 @@ fn package_install_runs_in_a_package_directory_with_a_quote_and_a_space() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["package", "install", "marked"]);
 
-    cmd.assert().success().stdout(predicate::str::contains(
+    cmd.assert().code(CLEAN).stdout(predicate::str::contains(
         "Package 'marked' installation completed successfully",
     ));
 }

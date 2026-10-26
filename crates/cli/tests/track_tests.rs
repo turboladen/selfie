@@ -449,7 +449,7 @@ fn a_second_track_of_a_name_says_the_spec_exists() {
         .args(["dotfiles", "track", "rc", first.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(tracked.status.success(), "{tracked:?}");
+    assert_eq!(tracked.status.code(), Some(CLEAN), "{tracked:?}");
 
     let output = sandboxed_command(&temp_dir)
         .args(["dotfiles", "track", "rc", second.to_str().unwrap()])

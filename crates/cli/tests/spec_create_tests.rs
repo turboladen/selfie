@@ -21,7 +21,7 @@ fn spec_create_writes_a_package_that_does_not_exist() {
     sandboxed_command(&temp)
         .args(["spec", "create", "brandnew"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert!(
         path.exists(),
@@ -67,7 +67,7 @@ fn spec_create_refuses_a_name_the_loader_would_refuse() {
     sandboxed_command(&temp)
         .args(["spec", "create", "my tool"])
         .assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicates::str::contains(
             "Refusing to create 'my tool': it is not a valid spec name",
         ));
@@ -145,7 +145,7 @@ fn spec_create_does_not_replace_a_file_stored_under_another_normalization() {
     sandboxed_command(&temp)
         .args(["spec", "create", NFD])
         .assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicates::str::contains("not a valid spec name"));
 
     let entries: Vec<String> = fs::read_dir(&packages)

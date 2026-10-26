@@ -2,7 +2,7 @@ pub mod common;
 
 use std::fs;
 
-use common::{sandboxed_command, setup_default_test_config};
+use common::{CLEAN, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 
 // `spec list` prints its own `Invalid: {path}` label before the reason, so a
@@ -23,7 +23,7 @@ fn an_invalid_spec_is_named_once_in_the_listing() {
     let output = sandboxed_command(&temp_dir)
         .args(["spec", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .get_output()
         .stdout
         .clone();
@@ -53,7 +53,7 @@ fn an_invalid_spec_does_not_quote_its_own_contents() {
     sandboxed_command(&temp_dir)
         .args(["spec", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("creds.yml"))
         .stdout(predicate::str::contains("op://").not())
         .stdout(predicate::str::contains("vault").not());

@@ -14,7 +14,7 @@ pub mod common;
 
 use std::{fs, path::Path};
 
-use common::{SELFIE_ENV, USAGE, sandboxed_command};
+use common::{CLEAN, FAILED, SELFIE_ENV, USAGE, sandboxed_command};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -149,7 +149,7 @@ fn the_package_directory_flag_beats_the_config_file() {
         .arg(temp.path().join("flag-packages"))
         .args(["package", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("from-flag-pkg"))
         .stdout(predicate::str::contains("from-config-pkg").not());
 }
@@ -165,7 +165,7 @@ fn the_package_directory_flag_works_after_the_subcommand() {
         .args(["package", "list", "-p"])
         .arg(temp.path().join("flag-packages"))
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("from-flag-pkg"))
         .stdout(predicate::str::contains("from-config-pkg").not());
 }
@@ -179,7 +179,7 @@ fn without_a_flag_the_config_files_package_directory_decides() {
     sandboxed_command(&temp)
         .args(["package", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("from-config-pkg"))
         .stdout(predicate::str::contains("from-flag-pkg").not());
 }
@@ -199,7 +199,7 @@ fn a_partial_config_file_takes_the_rest_from_flags() {
         .arg(temp.path().join("flag-packages"))
         .args(["package", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("from-flag-pkg"));
 }
 
@@ -214,7 +214,7 @@ fn a_partial_config_file_without_flags_names_both_settings() {
     sandboxed_command(&temp)
         .args(["package", "list"])
         .assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains(config.display().to_string()))
         .stderr(predicate::str::contains("`environment:` (--environment)"))
         .stderr(predicate::str::contains(
@@ -240,7 +240,7 @@ fn a_misspelled_required_key_is_named_before_the_refusal() {
     sandboxed_command(&temp)
         .args(["package", "list"])
         .assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains(
             "`envronment` is not a recognized setting",
         ))
@@ -256,7 +256,7 @@ fn an_empty_environment_flag_keeps_the_files_value() {
     sandboxed_command(&temp)
         .args(["--environment", "", "package", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("from-config-pkg"));
 }
 
@@ -282,7 +282,7 @@ fn the_dotfiles_directory_flag_beats_the_sibling_default() {
         .arg(temp.path().join("flag-dotfiles"))
         .args(["dotfiles", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("flagged-src.txt"))
         .stdout(predicate::str::contains("default-src.txt").not());
 }
@@ -297,7 +297,7 @@ fn without_a_flag_the_sibling_dotfiles_directory_decides() {
     sandboxed_command(&temp)
         .args(["dotfiles", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("default-src.txt"))
         .stdout(predicate::str::contains("flagged-src.txt").not());
 }
@@ -314,7 +314,7 @@ fn the_dotfiles_directory_flag_beats_the_config_file() {
         .arg(temp.path().join("flag-dotfiles"))
         .args(["dotfiles", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("flagged-src.txt"))
         .stdout(predicate::str::contains("config-src.txt").not());
 }
@@ -329,7 +329,7 @@ fn without_a_flag_the_config_files_dotfiles_directory_decides() {
     sandboxed_command(&temp)
         .args(["dotfiles", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("config-src.txt"))
         .stdout(predicate::str::contains("flagged-src.txt").not())
         .stdout(predicate::str::contains("default-src.txt").not());
@@ -375,7 +375,7 @@ fn the_state_directory_flag_decides_where_deploy_state_lands() {
         .arg(temp.path().join("flag-state"))
         .args(["apply", "-y"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert_state_records_the_fixture(
         &temp.path().join("flag-state/deploy-state.yml"),
@@ -399,7 +399,7 @@ fn without_a_flag_deploy_state_lands_under_home() {
     sandboxed_command(&temp)
         .args(["apply", "-y"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert_state_records_the_fixture(
         &temp.path().join(".local/state/selfie/deploy-state.yml"),
@@ -425,7 +425,7 @@ fn the_state_directory_flag_beats_the_config_file() {
         .arg(temp.path().join("flag-state"))
         .args(["apply", "-y"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert_state_records_the_fixture(
         &temp.path().join("flag-state/deploy-state.yml"),
@@ -449,7 +449,7 @@ fn a_state_directory_flag_naming_a_missing_directory_creates_it() {
         .arg(&missing)
         .args(["apply", "-y"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert_state_records_the_fixture(&missing.join("deploy-state.yml"), temp.path());
 }
@@ -468,7 +468,7 @@ fn a_state_directory_flag_naming_a_file_is_refused() {
         .arg(&occupied)
         .args(["apply", "-y"])
         .assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains(occupied.to_str().unwrap()))
         .stderr(predicate::str::contains("is a regular file"));
 
@@ -489,7 +489,7 @@ fn a_tilde_state_directory_flag_lands_under_home() {
         .current_dir(temp.path())
         .args(["--state-directory=~/state", "apply", "-y"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert_state_records_the_fixture(&temp.path().join("state/deploy-state.yml"), temp.path());
     assert!(
@@ -509,7 +509,7 @@ fn a_tilde_user_state_directory_is_refused_and_creates_nothing() {
         .current_dir(temp.path())
         .args(["--state-directory=~nosuchuser/state", "apply", "-y"])
         .assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("~nosuchuser/state"))
         .stderr(predicate::str::contains("not an absolute path"));
 
@@ -533,7 +533,7 @@ fn a_whitespace_package_directory_flag_keeps_the_files_value() {
         .current_dir(temp.path())
         .args(["-p", " ", "package", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("from-config-pkg"));
 }
 
@@ -547,7 +547,7 @@ fn a_relative_package_directory_flag_is_taken_from_the_working_directory() {
         .current_dir(temp.path())
         .args(["-p", "flag-packages", "package", "list"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("from-flag-pkg"));
 }
 
@@ -561,7 +561,7 @@ fn a_relative_state_directory_flag_is_taken_from_the_working_directory() {
         .current_dir(temp.path())
         .args(["--state-directory", "rel-state", "apply", "-y"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert_state_records_the_fixture(&temp.path().join("rel-state/deploy-state.yml"), temp.path());
 }
@@ -573,7 +573,7 @@ fn without_a_flag_the_config_files_state_directory_decides() {
     sandboxed_command(&temp)
         .args(["apply", "-y"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     assert_state_records_the_fixture(
         &temp.path().join("config-state/deploy-state.yml"),
@@ -597,7 +597,7 @@ fn a_tilde_target_is_written_under_the_sandboxed_home() {
         .arg(temp.path().join("flag-state"))
         .args(["apply", "-y"])
         .assert()
-        .success();
+        .code(CLEAN);
 
     let target = temp.path().join("sentinel-target");
     assert!(
@@ -620,7 +620,7 @@ fn config_validate_reports_the_file_not_the_flag() {
         .arg(temp.path().join("flag-packages"))
         .args(["config", "validate"])
         .assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("config-packages"))
         .stdout(predicate::str::contains("flag-packages").not());
 }

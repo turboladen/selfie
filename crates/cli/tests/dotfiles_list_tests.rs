@@ -9,7 +9,7 @@
 
 pub mod common;
 
-use common::{SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{FAILED, SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // Write a package whose single dotfile is refused, and one that is not.
 fn write_packages(base: &tempfile::TempDir) {
@@ -130,8 +130,9 @@ fn an_unreadable_dotfiles_directory_fails_the_listing() {
     std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(FAILED),
         "listing reported success; stderr was: {stderr}"
     );
     // Both halves. The cause on its own leaves the user to work out what it

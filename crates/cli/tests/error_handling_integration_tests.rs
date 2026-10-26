@@ -3,8 +3,8 @@ pub mod common;
 use std::{fs, io::Write};
 
 use common::{
-    FAILED, FOUND, SELFIE_ENV, add_package, get_command, sandboxed_command, set_one_second_timeout,
-    setup_default_test_config, setup_test_config,
+    CLEAN, FAILED, FOUND, SELFIE_ENV, USAGE, add_package, get_command, sandboxed_command,
+    set_one_second_timeout, setup_default_test_config, setup_test_config,
 };
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
@@ -23,7 +23,7 @@ fn test_missing_config_file_error() {
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("No configuration file found"));
 }
 
@@ -44,7 +44,7 @@ fn test_invalid_yaml_config_error() {
 
     // The parser's own sentence and where it stopped, never the line itself.
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains(
             "unclosed bracket '[' at line 1, column 15",
         ))
@@ -64,7 +64,7 @@ command_timeout: 30
     cmd.args(["config", "validate"]);
 
     // The issues are `config validate`'s answer, on stdout.
-    cmd.assert().failure().stdout(predicate::str::contains(
+    cmd.assert().code(FAILED).stdout(predicate::str::contains(
         "The `environment` setting is missing",
     ));
 }
@@ -82,7 +82,7 @@ command_timeout: 30
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stdout(predicate::str::contains("relative and cannot be resolved"));
 }
 
@@ -104,7 +104,7 @@ fn test_package_directory_not_found_error() {
     // Nothing at the path is the one case `mkdir -p` answers, so it is the one case
     // offered the command.
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("does not exist"))
         .stderr(predicate::str::contains("mkdir -p --"))
         .stdout(predicate::str::contains("mkdir -p").not());
@@ -131,7 +131,7 @@ command_timeout: 30
     // assertion is the one that fails if every state is described as "not found"
     // again, since the first would still pass on a sentence carrying the path.
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains(
             "is below /dev/null, which is not a directory",
         ))
@@ -200,7 +200,7 @@ fn spec_info_by_a_name_field_suggests_the_file_name() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", "neovim"]);
 
-    cmd.assert().failure().stderr(predicate::str::contains(
+    cmd.assert().code(FAILED).stderr(predicate::str::contains(
         "packages/nvim.yml declares `name: NeoVim`; a package is named by its file, so use 'nvim'",
     ));
 }
@@ -218,7 +218,7 @@ fn apply_by_a_name_field_suggests_the_file_name() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["apply", "neovim"]);
 
-    cmd.assert().failure().stderr(predicate::str::contains(
+    cmd.assert().code(FAILED).stderr(predicate::str::contains(
         "packages/nvim.yml declares `name: NeoVim`; a package is named by its file, so use 'nvim'",
     ));
 }
@@ -230,7 +230,7 @@ fn test_package_not_found_error() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["spec", "info", "nonexistent-package"]);
 
-    cmd.assert().failure().stderr(predicate::str::contains(
+    cmd.assert().code(FAILED).stderr(predicate::str::contains(
         "Package `nonexistent-package` not found in path",
     ));
 }
@@ -255,7 +255,7 @@ environments:
     cmd.args(["spec", "validate", "invalid-package"]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("Parse error in package"));
 }
 
@@ -336,7 +336,7 @@ fn test_package_install_missing_environment_error() {
     cmd.args(["package", "install", "wrong-env-package"]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("doesn't support environment"))
         .stderr(predicate::str::contains("Available environments"))
         .stdout(predicate::str::is_empty());
@@ -352,7 +352,7 @@ fn test_invalid_command_error() {
     cmd.arg("invalid-command");
 
     cmd.assert()
-        .failure()
+        .code(USAGE)
         .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
@@ -362,7 +362,7 @@ fn test_invalid_subcommand_error() {
     cmd.args(["package", "invalid-subcommand"]);
 
     cmd.assert()
-        .failure()
+        .code(USAGE)
         .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
@@ -372,7 +372,7 @@ fn test_missing_required_argument_error() {
     cmd.args(["package", "install"]); // Missing package_name
 
     cmd.assert()
-        .failure()
+        .code(USAGE)
         .stderr(predicate::str::contains("required"));
 }
 
@@ -382,7 +382,7 @@ fn test_invalid_flag_combination_error() {
     cmd.args(["--invalid-flag", "package", "list"]);
 
     cmd.assert()
-        .failure()
+        .code(USAGE)
         .stderr(predicate::str::contains("unexpected"));
 }
 
@@ -397,8 +397,8 @@ fn test_environment_override_error() {
     let mut cmd = sandboxed_command(&temp_dir);
     cmd.args(["-e", "nonexistent-env", "package", "list"]);
 
-    // Should succeed but show packages don't have the environment
-    cmd.assert().success();
+    // An environment no package names is not an error.
+    cmd.assert().code(CLEAN);
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn test_invalid_package_directory_override_error() {
     // remedy is also asserted for what it must *not* name: `selfie config` takes
     // a subcommand, so it cannot set the directory.
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains(
             "is below /dev/null, which is not a directory",
         ))
@@ -454,7 +454,7 @@ fn test_duplicate_package_names_error() {
     cmd.args(["spec", "info", "duplicate-package"]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("not found in path"));
 }
 
@@ -484,7 +484,7 @@ fn test_config_file_read_permission_denied() {
     cmd.args(["config", "validate"]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("No configuration file found"));
 }
 
@@ -500,7 +500,7 @@ fn test_empty_package_name_error() {
     cmd.args(["spec", "info", ""]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("not found in path"));
 }
 
@@ -512,7 +512,7 @@ fn test_package_name_with_special_characters() {
     cmd.args(["spec", "info", "package/with/slashes"]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("not found in path"));
 }
 
@@ -525,7 +525,7 @@ fn test_very_long_package_name_error() {
     cmd.args(["spec", "info", &long_name]);
 
     cmd.assert()
-        .failure()
+        .code(FAILED)
         .stderr(predicate::str::contains("not found in path"));
 }
 
@@ -574,7 +574,7 @@ fn test_broken_terminal_output_handling() {
     cmd.args(["package", "list"]);
 
     // Should succeed even if output handling has issues
-    cmd.assert().success();
+    cmd.assert().code(CLEAN);
 }
 
 // =============================================================================

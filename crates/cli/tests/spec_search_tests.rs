@@ -1,6 +1,6 @@
 pub mod common;
 
-use common::{SELFIE_ENV, add_package, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, SELFIE_ENV, add_package, sandboxed_command, setup_default_test_config};
 use predicates::prelude::*;
 use selfie::package::PackageBuilder;
 
@@ -26,7 +26,7 @@ fn test_spec_search_by_name() {
     cmd.args(["spec", "search", "ripgrep"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("ripgrep"))
         .stdout(predicate::str::contains("node").not());
 }
@@ -53,7 +53,7 @@ fn test_spec_search_by_description() {
     cmd.args(["spec", "search", "runtime"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("node"))
         .stdout(predicate::str::contains("ripgrep").not());
 }
@@ -73,7 +73,7 @@ fn test_spec_search_case_insensitive() {
     cmd.args(["spec", "search", "RIPGREP"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("ripgrep"));
 }
 
@@ -91,7 +91,7 @@ fn test_spec_search_no_matches() {
     cmd.args(["spec", "search", "nonexistent"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("No specs found"));
 }
 
@@ -103,7 +103,7 @@ fn test_spec_search_empty_directory() {
     cmd.args(["spec", "search", "anything"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("No specs found"));
 }
 
@@ -123,7 +123,7 @@ fn test_spec_search_matches_across_environments() {
     cmd.args(["spec", "search", "apt-tool"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("apt-tool"));
 }
 
@@ -148,6 +148,6 @@ fn test_spec_search_reports_the_specs_it_could_not_read() {
     cmd.args(["spec", "search", "nothingmatchesthis"]);
 
     cmd.assert()
-        .success()
+        .code(CLEAN)
         .stdout(predicate::str::contains("brokenpkg"));
 }

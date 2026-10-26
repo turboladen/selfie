@@ -10,7 +10,7 @@ use std::time::Duration;
 
 pub mod common;
 
-use common::{FOUND, sandboxed_command};
+use common::{CLEAN, FAILED, FOUND, sandboxed_command};
 
 /// A fifo at the configuration path, which every command reads before doing
 /// anything else.
@@ -48,8 +48,9 @@ fn a_fifo_config_file_does_not_hang_the_cli() {
         .unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(FAILED),
         "expected a refusal, got success. stderr: {stderr}"
     );
     assert!(
@@ -107,8 +108,9 @@ fn a_dangling_config_symlink_is_not_reported_as_absent() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(
-        !output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(FAILED),
         "expected a refusal, got:\n{combined}"
     );
     assert!(
@@ -154,8 +156,9 @@ fn a_config_symlink_that_resolves_is_read_normally() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(CLEAN),
         "expected success, got:\n{combined}"
     );
     assert!(
@@ -398,8 +401,9 @@ fn an_ordinary_config_file_is_read_normally() {
         !stderr.contains("not a regular file"),
         "a regular file was refused: {stderr}"
     );
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(CLEAN),
         "expected success on a valid config. stderr: {stderr}"
     );
 }
