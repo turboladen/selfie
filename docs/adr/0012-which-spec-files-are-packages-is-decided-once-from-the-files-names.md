@@ -167,7 +167,9 @@ rows. Nothing branches on it, and the sentence already reaches an assistant thro
   validates and which names it refuses, by construction.
 - The dotfile service exports no collection; its warning type holds only what apply raises.
 - The file system port gains a question about whether two directories are one; the repository's
-  canonicalized-directory method goes.
+  canonicalized-directory method goes. On a file system that does not report stable inode numbers,
+  such as some FUSE, virtiofs and NFS mounts, two directories can share an identity and be taken as
+  one.
 - A not-found failure in any named command may carry the hint in §4.
 
 Reopen when a spec directory can hold specs in subdirectories, since the table assumes one level; or

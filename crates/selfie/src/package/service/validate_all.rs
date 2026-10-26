@@ -185,7 +185,7 @@ mod tests {
     // A dotfiles directory holding nothing, which no test here is about.
     fn empty_dotfiles() -> MockPackageRepository {
         let mut repo = MockPackageRepository::new();
-        repo.expect_resolved_directory().return_const(None);
+        repo.expect_directory_identity().return_const(None);
         repo.expect_list_packages()
             .returning(|| Ok(crate::package::port::ListPackagesOutput(Vec::new())));
         repo
@@ -231,7 +231,7 @@ mod tests {
         });
 
         let (sender, mut rx) = test_sender();
-        repo.expect_resolved_directory().return_const(None);
+        repo.expect_directory_identity().return_const(None);
         let _ = handle_validate_all(
             &repo,
             &empty_dotfiles(),
@@ -289,7 +289,7 @@ mod tests {
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
-        mock_repo.expect_resolved_directory().return_const(None);
+        mock_repo.expect_directory_identity().return_const(None);
         let result = handle_validate_all(
             &mock_repo,
             &empty_dotfiles(),
@@ -348,7 +348,7 @@ mod tests {
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(2);
 
-        mock_repo.expect_resolved_directory().return_const(None);
+        mock_repo.expect_directory_identity().return_const(None);
         let result = handle_validate_all(
             &mock_repo,
             &empty_dotfiles(),

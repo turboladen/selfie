@@ -556,6 +556,22 @@ pub trait FileSystem: Send + Sync {
     /// any component, link resolution fails, or any other IO error occurs.
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
 
+    /// The identity of the file at `path`, following links. Two paths answering
+    /// equal identities name one file, however each is spelled or mounted.
+    ///
+    /// For configured repository directories. **Never call this on a deploy
+    /// target**: it follows links, so it answers for whatever a link points to.
+    ///
+    /// On a file system that does not report stable inode numbers, such as some
+    /// FUSE, virtiofs and NFS mounts, two different files can share an identity
+    /// and be taken as one.
+    ///
+    /// # Errors
+    ///
+    /// [`FileSystemError`] if the path does not exist, permission is denied on
+    /// any component, or any other IO error occurs.
+    fn identity(&self, path: &Path) -> Result<FileIdentity, FileSystemError>;
+
     /// The current user's configuration directory, by platform convention —
     /// `~/.config` on Unix-like systems.
     ///
@@ -564,6 +580,29 @@ pub trait FileSystem: Send + Sync {
     /// [`FileSystemError`] if the home directory cannot be determined or the
     /// configuration directory cannot be accessed.
     fn config_dir(&self) -> Result<PathBuf, FileSystemError>;
+}
+
+/// What makes two paths one file. Equal identities name one file; nothing else
+/// about the value means anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    /// The identity of the file numbered `inode` on the device numbered `device`,
+    /// for a test double of [`FileSystem`].
+    #[cfg(any(test, feature = "with_mocks"))]
+    #[must_use]
+    pub const fn new(device: u64, inode: u64) -> Self {
+        Self::of(device, inode)
+    }
+
+    /// The identity of the file numbered `inode` on the device numbered `device`.
+    pub(crate) const fn of(device: u64, inode: u64) -> Self {
+        Self { device, inode }
+    }
 }
 
 /// Every way a file system operation here can fail.

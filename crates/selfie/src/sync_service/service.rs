@@ -313,6 +313,7 @@ where
         // directories are read once, for the validation and the grouping below.
         let environment = self.config.environment();
         let specs = SpecDirectories::resolve(
+            &crate::fs::RealFileSystem,
             &repo_info.root,
             self.config.package_directory(),
             &self.config.dotfiles_directory(),
@@ -828,6 +829,16 @@ fn validate_changes_against(
         });
     }
 
+    // Asked only when a spec changed, since only a changed spec is refused for it.
+    let changes_a_spec = changes
+        .iter()
+        .any(|(path, kind)| *kind != FileChangeKind::Deleted && spec_origin(path).is_some());
+    let across = if changes_a_spec {
+        collisions_across(specs, environment)
+    } else {
+        std::collections::BTreeMap::new()
+    };
+
     for (path, kind) in changes {
         if *kind == FileChangeKind::Deleted {
             continue;
@@ -839,72 +850,23 @@ fn validate_changes_against(
         let abs_path = repo_root.join(path);
         let path_str = path.display().to_string();
 
-        let content = match std::fs::read_to_string(&abs_path) {
-            Ok(c) => c,
-            Err(e) => {
+        let package = match load_spec(&abs_path, origin) {
+            Ok(package) => package,
+            Err(issue) => {
                 failures.push(PackageValidationFailure {
                     path: path_str,
-                    issues: vec![PackageValidationIssue {
-                        level: crate::validation::ValidationLevel::Error,
-                        category: PushIssueCategory::FileError,
-                        field: "-".to_string(),
-                        message: format!("failed to read: {e}"),
-                        location: None,
-                        suggestion: None,
-                    }],
+                    issues: vec![issue],
                 });
                 continue;
             }
         };
-
-        let mut package: crate::package::Package = match crate::yaml::parse(&content) {
-            Ok(p) => p,
-            Err(e) => {
-                // The location is its own field here, so the message must not repeat
-                // it. `ParseFailure` appends it when rendered, so the sentence is
-                // built from the parts rather than rendered and cut back down.
-                let location = e.location();
-                let message = e.reason();
-
-                failures.push(PackageValidationFailure {
-                    path: path_str,
-                    issues: vec![PackageValidationIssue {
-                        level: crate::validation::ValidationLevel::Error,
-                        category: PushIssueCategory::ParseError,
-                        field: "-".to_string(),
-                        message,
-                        location,
-                        suggestion: None,
-                    }],
-                });
-                continue;
-            }
-        };
-        package.set_source(abs_path, content, origin);
 
         let result = package.validate(environment);
         let issues: Vec<PackageValidationIssue> = result
             .issues()
             .all_issues()
             .iter()
-            .filter_map(|i| {
-                // Exhaustive, with no wildcard, so a level added later fails the
-                // build here, the one place that has to decide whether it blocks a
-                // push. A `!= Info` filter would silently block every push on it.
-                match i.level() {
-                    crate::validation::ValidationLevel::Error
-                    | crate::validation::ValidationLevel::Warning => {}
-                    crate::validation::ValidationLevel::Info => return None,
-                }
-                Some(PackageValidationIssue {
-                    level: i.level(),
-                    category: PushIssueCategory::Validation(i.category()),
-                    field: i.field().to_string(),
-                    message: i.message().to_string(),
-                    location: i.location(),
-                    suggestion: i.suggestion().cloned(),
-                })
-            })
+            .filter_map(push_issue)
             .collect();
 
         // The same question apply asks, so a push cannot ship a file the machine
@@ -915,6 +877,19 @@ fn validate_changes_against(
         let mut issues = issues;
         if let Some(refusal) = package.spec_refusal(environment) {
             issues.extend(apply_refusal_issue(&refusal, &issues));
+        }
+        // A changed spec deploying a file another spec deploys would be refused
+        // with it on the machine that pulls. Only a changed spec is refused here: a
+        // collision between two unchanged specs is not this push's to block.
+        // Matched through the table, by directory and folded name, so a change
+        // spelled differently from the listed file still finds its collisions.
+        let listed = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(crate::package::spec_name_from_file_name)
+            .and_then(|name| table.used_file(origin, &name));
+        if let Some(found) = listed.and_then(|file| across.get(file)) {
+            issues.extend(found.iter().filter_map(push_issue));
         }
 
         if !issues.is_empty() {
@@ -1179,12 +1154,84 @@ fn is_spec_file(path: &Path) -> bool {
 /// do, so a change to one is grouped with its spec and announced on pull.
 fn spec_names(config: &SelfieConfig, repo_root: &Path) -> BTreeSet<String> {
     SpecDirectories::resolve(
+        &crate::fs::RealFileSystem,
         repo_root,
         config.package_directory(),
         &config.dotfiles_directory(),
     )
     .read()
     .spec_names()
+}
+
+/// The collisions across specs among every spec `specs` lists that apply would
+/// use, keyed by the listed file each is an error on. A spec that does not load
+/// takes no part.
+fn collisions_across(
+    specs: &SpecListing,
+    environment: &str,
+) -> std::collections::BTreeMap<PathBuf, Vec<crate::validation::ValidationIssue>> {
+    let packages: Vec<crate::package::Package> = specs
+        .table
+        .used_files()
+        .filter_map(|(origin, file)| load_spec(file, origin).ok())
+        .collect();
+    crate::package::validate::cross_spec_issues(&packages, environment)
+}
+
+/// The spec at `path`, read and parsed, its source set to `path` and `origin`,
+/// or the issue that refuses it when it cannot be read or parsed.
+fn load_spec(
+    path: &Path,
+    origin: crate::package::SpecOrigin,
+) -> Result<crate::package::Package, super::port::PackageValidationIssue> {
+    use super::port::{PackageValidationIssue, PushIssueCategory};
+
+    let refusal = |category, message, location| PackageValidationIssue {
+        level: crate::validation::ValidationLevel::Error,
+        category,
+        field: "-".to_string(),
+        message,
+        location,
+        suggestion: None,
+    };
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        refusal(
+            PushIssueCategory::FileError,
+            format!("failed to read: {e}"),
+            None,
+        )
+    })?;
+    // The location is its own field here, so the message must not repeat it.
+    // `ParseFailure` appends it when rendered, so the sentence is built from the
+    // parts rather than rendered and cut back down.
+    let mut package: crate::package::Package = crate::yaml::parse(&content)
+        .map_err(|e| refusal(PushIssueCategory::ParseError, e.reason(), e.location()))?;
+    package.set_source(path.to_path_buf(), content, origin);
+    Ok(package)
+}
+
+/// `issue` as a push reports it, or `None` for a level that does not block a
+/// push.
+fn push_issue(
+    issue: &crate::validation::ValidationIssue,
+) -> Option<super::port::PackageValidationIssue> {
+    use crate::validation::ValidationLevel;
+
+    // Exhaustive, with no wildcard, so a level added later fails the build here,
+    // the one place that has to decide whether it blocks a push. A `!= Info`
+    // filter would silently block every push on it.
+    match issue.level() {
+        ValidationLevel::Error | ValidationLevel::Warning => {}
+        ValidationLevel::Info => return None,
+    }
+    Some(super::port::PackageValidationIssue {
+        level: issue.level(),
+        category: super::port::PushIssueCategory::Validation(issue.category()),
+        field: issue.field().to_string(),
+        message: issue.message().to_string(),
+        location: issue.location(),
+        suggestion: issue.suggestion().cloned(),
+    })
 }
 
 /// The spec directories a push carries, and the name table of what is in them.
@@ -1229,19 +1276,45 @@ impl SpecDirectories {
         }
     }
 
-    fn resolve(repo_root: &Path, package_dir: &Path, dotfiles_dir: &Path) -> Self {
+    fn resolve<F: crate::fs::FileSystem + ?Sized>(
+        fs: &F,
+        repo_root: &Path,
+        package_dir: &Path,
+        dotfiles_dir: &Path,
+    ) -> Self {
         // Every path is resolved before any is compared. They arrive by different
         // routes -- the git adapter canonicalizes the root it discovers, while a
         // package directory is kept as written, symlinks and all -- so one
         // symlinked path, or a `/tmp` that resolves to `/private/tmp`, makes the
         // same directory compare unequal to itself, and the per-file gate,
         // credential egress included, stops running.
-        let resolve =
-            |path: &Path| dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let resolve = |path: &Path| fs.canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let repo_root = resolve(repo_root);
-        let package_dir = resolve(package_dir);
-        let dotfiles_dir = Some(resolve(dotfiles_dir))
-            .filter(|dir| *dir != package_dir && dir.starts_with(&repo_root));
+        let identity = |path: &Path| fs.identity(path).ok();
+        // Resolving links does not unify every alias: a path through a macOS
+        // firmlink or a Linux bind mount stays apart from the repo root's. A
+        // directory with an ancestor that is the repo root by identity is
+        // respelled below the root, so every later comparison sees one spelling.
+        let root = identity(&repo_root);
+        let respell = |dir: PathBuf| {
+            if dir.starts_with(&repo_root) || root.is_none() {
+                return dir;
+            }
+            let below = dir
+                .ancestors()
+                .find(|ancestor| identity(ancestor) == root)
+                .and_then(|ancestor| dir.strip_prefix(ancestor).ok())
+                .map(|below| repo_root.join(below));
+            below.unwrap_or(dir)
+        };
+        let package_dir = respell(resolve(package_dir));
+        let package_identity = identity(&package_dir);
+        let same_as_packages = |dir: &PathBuf| match package_identity {
+            Some(packages) => identity(dir) == Some(packages),
+            None => *dir == package_dir,
+        };
+        let dotfiles_dir = Some(respell(resolve(dotfiles_dir)))
+            .filter(|dir| !same_as_packages(dir) && dir.starts_with(&repo_root));
         Self {
             repo_root,
             package_dir,
@@ -1518,7 +1591,13 @@ fn gate(
     environment: &str,
 ) -> Result<(), SyncError> {
     validate_changes_against(
-        &SpecDirectories::resolve(repo_root, package_dir, dotfiles_dir).read(),
+        &SpecDirectories::resolve(
+            &crate::fs::RealFileSystem,
+            repo_root,
+            package_dir,
+            dotfiles_dir,
+        )
+        .read(),
         changes,
         environment,
     )
@@ -1531,9 +1610,14 @@ mod tests {
     // The folded names of the specs in `dir`, through the listing a push reads,
     // with no dotfiles directory beside it.
     fn spec_names_in(dir: &Path) -> BTreeSet<String> {
-        SpecDirectories::resolve(dir, dir, Path::new("/nonexistent/dotfiles"))
-            .read()
-            .spec_names()
+        SpecDirectories::resolve(
+            &crate::fs::RealFileSystem,
+            dir,
+            dir,
+            Path::new("/nonexistent/dotfiles"),
+        )
+        .read()
+        .spec_names()
     }
 
     // ─── collect_drift_summary's verdict ─────────────────────────────────────
@@ -4038,9 +4122,13 @@ environments:
             return;
         }
 
-        let listing =
-            SpecDirectories::resolve(dir.path(), dir.path(), std::path::Path::new("/nonexistent"))
-                .read();
+        let listing = SpecDirectories::resolve(
+            &crate::fs::RealFileSystem,
+            dir.path(),
+            dir.path(),
+            std::path::Path::new("/nonexistent"),
+        )
+        .read();
         let groups: Vec<Vec<String>> = listing
             .table
             .ambiguous()
@@ -4248,6 +4336,7 @@ environments:
         }
 
         let spec_names = SpecDirectories::resolve(
+            &crate::fs::RealFileSystem,
             root.path(),
             root.path(),
             std::path::Path::new("/nonexistent"),
@@ -4488,6 +4577,193 @@ mod standalone_specs {
             Ok(()) => String::new(),
             Err(error) => format!("{error:?}"),
         }
+    }
+
+    // The dotfiles directory configured through the `/System/Volumes/Data`
+    // firmlink, which resolving links leaves apart from the repo root, is still
+    // the repository's, so a broken spec in it fails the push. Skipping is loud,
+    // since a quietly skipped test reads as a passing one.
+    #[test]
+    fn a_dotfiles_directory_reached_through_a_firmlink_is_still_gated() {
+        let (root, packages, dotfiles) = repo();
+        let canonical = std::fs::canonicalize(&dotfiles).unwrap();
+        let alias = Path::new("/System/Volumes/Data").join(canonical.strip_prefix("/").unwrap());
+        if !alias.is_dir() || std::fs::canonicalize(&alias).unwrap() == canonical {
+            eprintln!(
+                "SKIPPED a_dotfiles_directory_reached_through_a_firmlink_is_still_gated: this \
+                 system has no firmlink that resolving links leaves apart"
+            );
+            return;
+        }
+        std::fs::write(
+            dotfiles.join("gemrc.yml"),
+            format!("{STANDALONE}    extra: x\n"),
+        )
+        .unwrap();
+
+        let error = push(root.path(), &packages, &alias, "dotfiles/gemrc.yml");
+
+        assert!(error.contains("dotfiles/gemrc.yml"), "{error}");
+        assert!(error.contains("extra"), "{error}");
+    }
+
+    // A file system on which `/alias` is `/repo` and `/repo/also-packages` is
+    // `/repo/packages`, and nothing resolves as a link.
+    fn aliasing() -> crate::fs::MockFileSystem {
+        let mut fs = crate::fs::MockFileSystem::new();
+        fs.expect_canonicalize()
+            .returning(|_| Err(crate::fs::FileSystemError::HomeDirNotFound));
+        fs.expect_identity().returning(|path| {
+            let inode = match path.to_str() {
+                Some("/repo" | "/alias") => 1,
+                Some("/repo/packages" | "/repo/also-packages") => 2,
+                Some("/repo/dotfiles" | "/alias/dotfiles") => 3,
+                _ => return Err(crate::fs::FileSystemError::HomeDirNotFound),
+            };
+            Ok(crate::fs::FileIdentity::new(1, inode))
+        });
+        fs
+    }
+
+    // A directory below another name for the repo root is respelled below the
+    // root, so it is the repository's.
+    #[test]
+    fn a_directory_below_an_alias_of_the_root_is_inside_the_repository() {
+        let dirs = super::SpecDirectories::resolve(
+            &aliasing(),
+            Path::new("/repo"),
+            Path::new("/repo/packages"),
+            Path::new("/alias/dotfiles"),
+        );
+
+        assert_eq!(
+            dirs.dotfiles_dir.as_deref(),
+            Some(Path::new("/repo/dotfiles"))
+        );
+    }
+
+    // A dotfiles directory that is the package directory under another name holds
+    // package specs, so the push has no dotfiles directory.
+    #[test]
+    fn a_dotfiles_directory_that_is_the_package_directory_is_none() {
+        let dirs = super::SpecDirectories::resolve(
+            &aliasing(),
+            Path::new("/repo"),
+            Path::new("/repo/packages"),
+            Path::new("/repo/also-packages"),
+        );
+
+        assert_eq!(dirs.package_dir, Path::new("/repo/packages"));
+        assert_eq!(dirs.dotfiles_dir, None);
+    }
+
+    // A package spec deploying the standalone spec's file.
+    const ALSO_GEMRC: &str = "name: alpha\nenvironments:\n  test:\n    install: \"true\"\n\
+                              dotfiles:\n  - source: alpha/rc\n    target: ~/.gemrc\n";
+
+    // The machine that pulls would refuse both entries, so the push carrying the
+    // changed one is refused, naming both specs.
+    #[test]
+    fn a_changed_spec_deploying_another_specs_file_fails_the_push() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(packages.join("alpha.yml"), ALSO_GEMRC).unwrap();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "dotfiles/gemrc.yml");
+
+        assert!(error.contains("dotfiles/gemrc.yml"), "{error}");
+        assert!(error.contains("package 'alpha'"), "{error}");
+        assert!(error.contains("standalone dotfile 'gemrc'"), "{error}");
+    }
+
+    // The errors a failed push reported, one per refused entry.
+    fn collision_errors(error: &str) -> usize {
+        error.matches("so apply deploys none of them there").count()
+    }
+
+    // Two package specs meet as a package and a standalone spec do.
+    #[test]
+    fn two_package_specs_on_one_target_fail_the_push() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(packages.join("alpha.yml"), ALSO_GEMRC).unwrap();
+        std::fs::write(
+            packages.join("beta.yml"),
+            ALSO_GEMRC.replace("alpha", "beta"),
+        )
+        .unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "packages/beta.yml");
+
+        assert!(error.contains("package 'alpha'"), "{error}");
+        assert!(error.contains("package 'beta'"), "{error}");
+        assert_eq!(collision_errors(&error), 1, "{error}");
+    }
+
+    // A push changing both members refuses each once.
+    #[test]
+    fn a_push_changing_both_members_refuses_each_once() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(packages.join("alpha.yml"), ALSO_GEMRC).unwrap();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+        let changes = vec![
+            (
+                PathBuf::from("packages/alpha.yml"),
+                FileChangeKind::Modified,
+            ),
+            (PathBuf::from("dotfiles/gemrc.yml"), FileChangeKind::Added),
+        ];
+
+        let error = format!(
+            "{:?}",
+            gate(root.path(), &packages, &dotfiles, &changes, "test")
+        );
+
+        assert_eq!(collision_errors(&error), 2, "{error}");
+    }
+
+    // A machine using another environment would refuse the pair, so the push is
+    // refused whichever environment this machine uses.
+    #[test]
+    fn a_collision_only_in_another_environment_fails_the_push() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(
+            packages.join("alpha.yml"),
+            "name: alpha\nenvironments:\n  test:\n    install: \"true\"\n  work:\n    \
+             install: \"true\"\n    dotfiles:\n      - source: alpha/rc\n        \
+             target: ~/.gemrc\n",
+        )
+        .unwrap();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "packages/alpha.yml");
+
+        assert!(error.contains("in environment 'work'"), "{error}");
+        assert_eq!(collision_errors(&error), 1, "{error}");
+    }
+
+    // A collision between two specs this push does not touch is not its to block.
+    #[test]
+    fn a_collision_between_unchanged_specs_does_not_block_the_push() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(packages.join("alpha.yml"), ALSO_GEMRC).unwrap();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "README.md");
+
+        assert!(error.is_empty(), "{error}");
+    }
+
+    // A spec that does not parse deploys nothing, so it collides with nothing; the
+    // changed spec beside it passes.
+    #[test]
+    fn an_unparsable_spec_takes_no_part_in_a_collision() {
+        let (root, packages, dotfiles) = repo();
+        std::fs::write(packages.join("alpha.yml"), format!("{ALSO_GEMRC}  - [\n")).unwrap();
+        std::fs::write(dotfiles.join("gemrc.yml"), STANDALONE).unwrap();
+
+        let error = push(root.path(), &packages, &dotfiles, "dotfiles/gemrc.yml");
+
+        assert!(error.is_empty(), "{error}");
     }
 
     #[test]

@@ -5,7 +5,8 @@ pub mod target;
 pub use self::filesystem::FileSystem;
 pub use self::filesystem::FileSystemError;
 pub use self::filesystem::{
-    AbsentReason, DirectoryState, OpenRefusal, RepositoryRead, TargetRead, shell_quote,
+    AbsentReason, DirectoryState, FileIdentity, OpenRefusal, RepositoryRead, TargetRead,
+    shell_quote,
 };
 pub use self::real::RealFileSystem;
 pub use self::target::{

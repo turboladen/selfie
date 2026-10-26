@@ -714,6 +714,16 @@ impl FileSystem for RealFileSystem {
             .map_err(|e| FileSystemError::IoError(Arc::new(e)))
     }
 
+    // Device and inode rather than a resolved path: resolving links does not
+    // unify a macOS firmlink or a Linux bind mount with the path it aliases, and
+    // the device and inode do.
+    fn identity(&self, path: &Path) -> Result<crate::fs::FileIdentity, FileSystemError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = fs::metadata(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
+        Ok(crate::fs::FileIdentity::of(metadata.dev(), metadata.ino()))
+    }
+
     fn config_dir(&self) -> Result<PathBuf, FileSystemError> {
         // Check for environment variable override first
         if let Ok(dir) = std::env::var("SELFIE_CONFIG_DIR") {
@@ -880,6 +890,23 @@ mod tests {
         let non_existent = dir.path().join("non_existent");
         let err = fs.canonicalize(&non_existent).unwrap_err();
         assert!(matches!(err, FileSystemError::IoError(_)));
+    }
+
+    // A directory and a symlink to it are one file; a second directory is not.
+    #[test]
+    fn identity_follows_links_and_tells_directories_apart() {
+        let fs = RealFileSystem;
+        let dir = tempdir().unwrap();
+        let one = dir.path().join("one");
+        let other = dir.path().join("other");
+        let link = dir.path().join("link");
+        fs::create_dir(&one).unwrap();
+        fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&one, &link).unwrap();
+
+        assert_eq!(fs.identity(&one).unwrap(), fs.identity(&link).unwrap());
+        assert_ne!(fs.identity(&one).unwrap(), fs.identity(&other).unwrap());
+        assert!(fs.identity(&dir.path().join("missing")).is_err());
     }
 
     #[test]

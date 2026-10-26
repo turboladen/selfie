@@ -231,7 +231,8 @@ refuses whole takes no part, since nothing of it deploys. `selfie spec validate 
 a pair as an error on each spec, for every environment where they meet, comparing targets without
 your home directory as validation always does, so a shared entry that an environment entry may
 override on some home takes no part. `selfie spec validate <name>` checks one spec alone; only
-`--all` checks across specs.
+`--all` checks across specs. `selfie sync push` refuses a push that changes one of the pair, and
+lets through one that changes neither.
 
 `selfie spec validate` reports each override as an informational note, which never fails validation
 or `selfie sync push`. A shared and an environment entry that are one file only for a particular

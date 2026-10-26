@@ -242,10 +242,8 @@ fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError
 }
 
 impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
-    // A configured repository directory, never a deploy target, so resolving its
-    // links is what the answer is for.
-    fn resolved_directory(&self) -> Option<PathBuf> {
-        self.fs.canonicalize(&self.package_dir).ok()
+    fn directory_identity(&self) -> Option<crate::fs::FileIdentity> {
+        self.fs.identity(&self.package_dir).ok()
     }
 
     fn home_directory(&self) -> Result<PathBuf, FileSystemError> {
