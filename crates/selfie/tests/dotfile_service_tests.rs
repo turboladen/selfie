@@ -758,7 +758,7 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
     }
 }
 
-// `RealFileSystem` that records every path a target read is asked for, and stages
+// `RealFileSystem` that records every path a target read or write is asked for, and stages
 // answers the disk cannot give on demand: a chosen first read of a path, a
 // pre-command check that sees no directory or no open refusal, symlink or irregular
 // questions that miss what is there for the first few looks, a fifo appearing
@@ -771,6 +771,7 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
 struct RecordsTargetReads {
     inner: RealFileSystem,
     reads: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    writes: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
     staged_read: Option<(PathBuf, selfie::fs::TargetRead)>,
     repository_gone_after: Option<(PathBuf, std::sync::Arc<std::sync::atomic::AtomicUsize>)>,
     cancel_when_gone: Option<CancellationToken>,
@@ -796,6 +797,7 @@ impl RecordsTargetReads {
         Self {
             inner: RealFileSystem,
             reads: std::sync::Arc::default(),
+            writes: std::sync::Arc::default(),
             staged_read: None,
             repository_gone_after: None,
             cancel_when_gone: None,
@@ -895,6 +897,15 @@ impl RecordsTargetReads {
         self.reads.lock().unwrap().iter().any(|read| read == path)
     }
 
+    // Whether either writer was asked to write `path`, whatever it then did.
+    fn wrote(&self, path: &std::path::Path) -> bool {
+        self.writes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|write| write == path)
+    }
+
     fn record_read(&self, path: &std::path::Path) -> Option<selfie::fs::TargetRead> {
         let first = self.reads_of(path) == 0;
         self.reads.lock().unwrap().push(path.to_path_buf());
@@ -965,6 +976,7 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         data: &[u8],
         if_present: selfie::fs::IfPresent,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.writes.lock().unwrap().push(path.path().to_path_buf());
         self.inner.write_file_private(path, data, if_present)
     }
 
@@ -974,6 +986,7 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         data: &[u8],
         if_present: selfie::fs::IfPresent,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
+        self.writes.lock().unwrap().push(path.path().to_path_buf());
         self.inner.write_file_no_follow(path, data, if_present)
     }
 
@@ -19969,10 +19982,17 @@ mod an_appearing_target_is_kept {
     }
 
     fn appeared_warnings(events: &[PackageEvent], target: &Path) -> usize {
-        let expected = format!("Something appeared at '{}'", target.display());
+        left_in_place_warnings(
+            events,
+            &format!("Something appeared at '{}'", target.display()),
+        )
+    }
+
+    // How many warnings start with `opening` and say what they name was left in place.
+    fn left_in_place_warnings(events: &[PackageEvent], opening: &str) -> usize {
         test_common::events::count_events_of_type(events, |event| {
             matches!(event, PackageEvent::Warning { message, .. }
-                if message.starts_with(&expected) && message.contains("left in place"))
+                if message.starts_with(opening) && message.contains("left in place"))
         })
     }
 
@@ -20066,33 +20086,67 @@ mod an_appearing_target_is_kept {
         );
     }
 
+    // A resolver standing in for a user who changes the target while the prompt
+    // waits for them, then accepts. Counts each change that completed, so a change
+    // that panicked, which the run sees as no answer, leaves the count short.
+    struct ChangesThenAccepts {
+        asked: Arc<std::sync::atomic::AtomicUsize>,
+        change: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl ChangesThenAccepts {
+        // Options whose resolver makes `change` and accepts, and the count of its
+        // prompts.
+        fn options(
+            change: impl Fn() + Send + Sync + 'static,
+        ) -> (ApplyOptions, Arc<std::sync::atomic::AtomicUsize>) {
+            let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let resolver = ChangesThenAccepts {
+                asked: Arc::clone(&asked),
+                change: Box::new(change),
+            };
+            let options = ApplyOptions {
+                conflict_resolver: Some(Arc::new(resolver)),
+                ..Default::default()
+            };
+            (options, asked)
+        }
+    }
+
+    impl selfie::dotfile_service::port::ConflictResolver for ChangesThenAccepts {
+        fn resolve(
+            &self,
+            _target: &str,
+            _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
+        ) -> selfie::dotfile_service::port::ConflictResolution {
+            (self.change)();
+            self.asked.fetch_add(1, SeqCst);
+            selfie::dotfile_service::port::ConflictResolution::Accept
+        }
+    }
+
+    // Options whose resolver removes `target` and accepts, and the count of its
+    // prompts.
+    fn removing(target: &Path) -> (ApplyOptions, Arc<std::sync::atomic::AtomicUsize>) {
+        let path = target.to_path_buf();
+        ChangesThenAccepts::options(move || std::fs::remove_file(&path).unwrap())
+    }
+
     // An accepted conflict re-reads the target after the prompt. When the prompt
     // removed it, the write creates and so keeps what appears next.
     #[tokio::test]
     async fn a_file_appearing_after_a_prompt_that_removed_the_target_is_kept() {
-        struct RemovesThenAccepts(PathBuf);
-        impl selfie::dotfile_service::port::ConflictResolver for RemovesThenAccepts {
-            fn resolve(
-                &self,
-                _target: &str,
-                _detail: selfie::dotfile_service::port::ConflictDetail<'_>,
-            ) -> selfie::dotfile_service::port::ConflictResolution {
-                std::fs::remove_file(&self.0).unwrap();
-                selfie::dotfile_service::port::ConflictResolution::Accept
-            }
-        }
-
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("config.toml");
         std::fs::write(&target, "THE USER'S\n").unwrap();
         package_targeting(&dirs, "FROM REPO\n", &target);
         let fs = PlantsBeforeWrite::new(&target, Plant::File("WRITTEN BY AN APP\n", 0o644));
-        let options = ApplyOptions {
-            conflict_resolver: Some(Arc::new(RemovesThenAccepts(target.clone()))),
-            ..Default::default()
-        };
+
+        let (options, asked) = removing(&target);
 
         let events = apply(&dirs, &fs, options).await;
+
+        assert_eq!(asked.load(SeqCst), 1, "control: the conflict was put once");
 
         assert_eq!(
             std::fs::read_to_string(&target).unwrap(),
@@ -20440,5 +20494,388 @@ mod an_appearing_target_is_kept {
         assert!(!target.exists(), "something was written");
         assert_no_event_mentions(&events, SECRET);
         assert_no_event_mentions(&events, PLANTED);
+    }
+
+    // What a secret target holds before the prompt. Two lines, where the provider's
+    // value and `PLANTED` are one each, so a report counting two lines describes
+    // this seed and not what replaced it.
+    const SEED: &str = "seed-line-one\nseed-line-two\n";
+
+    // A secret entry over `target` seeded with `SEED`, on the real file system, whose
+    // conflict prompt makes `change` and then accepts. Asserts the prompt was put
+    // once: the control that the run reached the window under test.
+    async fn apply_changing(
+        dirs: &TestDirs,
+        target: &Path,
+        change: impl Fn() + Send + Sync + 'static,
+    ) -> Vec<PackageEvent> {
+        std::fs::write(target, SEED).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let (options, asked) = ChangesThenAccepts::options(change);
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let events =
+            collect_events(dirs.service_with_runner(runner).apply_all(options).await).await;
+        assert_eq!(asked.load(SeqCst), 1, "control: the conflict was put once");
+        events
+    }
+
+    // How many warnings say `target` changed while its prompt was open and was left.
+    fn changed_warnings(events: &[PackageEvent], target: &Path) -> usize {
+        left_in_place_warnings(
+            events,
+            &format!(
+                "'{}' changed while selfie was asking about it",
+                target.display()
+            ),
+        )
+    }
+
+    // A secret target removed while the prompt was open is created rather than
+    // replaced, and a file that appears just before it lands is kept and
+    // reported, as on the repository-file path.
+    #[tokio::test]
+    async fn a_file_appearing_after_a_prompt_that_removed_a_secret_target_is_kept() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SEED).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs = PlantsBeforeWrite::new(&target, Plant::File(PLANTED, 0o600));
+
+        let (options, asked) = removing(&target);
+
+        let events = apply(&dirs, &fs, options).await;
+
+        assert_eq!(asked.load(SeqCst), 1, "control: the conflict was put once");
+
+        assert_no_event_mentions(&events, SECRET);
+        assert_no_event_mentions(&events, PLANTED);
+        assert!(
+            std::fs::read_to_string(&target).unwrap() == PLANTED,
+            "the file that appeared after the prompt was replaced"
+        );
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+        assert!(
+            matches!(
+                conflicts(&events)[..],
+                [ConflictReport::Hidden {
+                    resolved_lines: 1,
+                    current_lines: 1
+                }]
+            ),
+            "{events:?}"
+        );
+        assert_eq!(appeared_warnings(&events, &target), 1, "{events:?}");
+        assert_eq!(changed_warnings(&events, &target), 0, "{events:?}");
+    }
+
+    // Accepting answered for the bytes the prompt showed. Different bytes put there
+    // while it was open are a credential nobody was asked about, and a secret target
+    // keeps no copy, so they are left and reported, and the next run asks.
+    #[tokio::test]
+    async fn a_secret_target_changed_during_the_prompt_is_left_and_reported() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let path = target.clone();
+
+        let events = apply_changing(&dirs, &target, move || {
+            std::fs::write(&path, PLANTED).unwrap();
+        })
+        .await;
+
+        assert_no_event_mentions(&events, SECRET);
+        assert_no_event_mentions(&events, PLANTED);
+        assert!(
+            std::fs::read_to_string(&target).unwrap() == PLANTED,
+            "the bytes put there during the prompt were replaced"
+        );
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+        // One current line is what the prompt's change left, not the seed's two:
+        // the report describes the bytes read after the prompt.
+        assert!(
+            matches!(
+                conflicts(&events)[..],
+                [ConflictReport::Hidden {
+                    resolved_lines: 1,
+                    current_lines: 1
+                }]
+            ),
+            "{events:?}"
+        );
+        assert_eq!(changed_warnings(&events, &target), 1, "{events:?}");
+        assert_eq!(appeared_warnings(&events, &target), 0, "{events:?}");
+    }
+
+    // The prompt's change put the provider's own value there, at a laxer mode. That
+    // is settled as any target found in sync is, by tightening it to owner-only.
+    #[tokio::test]
+    async fn a_secret_target_changed_to_the_resolved_content_at_a_lax_mode_is_tightened() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let path = target.clone();
+
+        let events = apply_changing(&dirs, &target, move || {
+            std::fs::write(&path, SECRET).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        })
+        .await;
+
+        assert_no_event_mentions(&events, SECRET);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the credential was left readable by others"
+        );
+        assert_eq!(deploy_counts(&events), (0, 1, 0, 0), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PackageEvent::DotfileSkipped {
+                    reason: SkipReason::PermissionsTightened,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        assert_eq!(changed_warnings(&events, &target), 0, "{events:?}");
+        assert_eq!(appeared_warnings(&events, &target), 0, "{events:?}");
+    }
+
+    // A secret entry over `target` seeded with `SEED`, on `RecordsTargetReads`, whose
+    // conflict prompt makes `change` and then accepts. Runs on a thread of its own
+    // under a deadline, since a fifo the run opened would block it. Asserts the
+    // prompt was put once.
+    fn apply_recorded(
+        dirs: &TestDirs,
+        target: &Path,
+        fs: RecordsTargetReads,
+        change: impl Fn() + Send + Sync + 'static,
+    ) -> (Vec<PackageEvent>, RecordsTargetReads) {
+        std::fs::write(target, SEED).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let (options, asked) = ChangesThenAccepts::options(change);
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_fs(fs.clone(), runner);
+        let events = within_deadline(std::time::Duration::from_secs(10), move || async move {
+            collect_events(service.apply_all(options).await).await
+        })
+        .expect("apply must not block on what was planted during the prompt");
+        assert_eq!(asked.load(SeqCst), 1, "control: the conflict was put once");
+        (events, fs)
+    }
+
+    // The look after the prompt refuses the fifo, so neither a read nor a write is
+    // asked for. The writer refuses one too, so the refusal alone would not show
+    // that the look was taken.
+    #[test]
+    fn a_fifo_planted_at_a_secret_target_during_the_prompt_is_refused() {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let path = target.clone();
+
+        let (events, fs) = apply_recorded(&dirs, &target, RecordsTargetReads::new(), move || {
+            std::fs::remove_file(&path).unwrap();
+            nix::unistd::mkfifo(&path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        });
+
+        assert_no_event_mentions(&events, SECRET);
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Irregular, Location::Target)]
+        );
+        let warnings = warning_messages(&events);
+        assert!(
+            warnings.iter().any(|w| w.contains("named pipe (fifo)")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            fs.reads_of(&target),
+            1,
+            "the target was opened after the prompt"
+        );
+        assert!(!fs.wrote(&target), "a write was attempted over the fifo");
+        assert!(
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_fifo(),
+            "the fifo is left in place"
+        );
+    }
+
+    // A directory put there during the prompt is refused by the look after it, and
+    // no write is asked for.
+    #[test]
+    fn a_directory_planted_at_a_secret_target_during_the_prompt_is_refused() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let path = target.clone();
+
+        let (events, fs) = apply_recorded(&dirs, &target, RecordsTargetReads::new(), move || {
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+        });
+
+        assert_no_event_mentions(&events, SECRET);
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Directory, Location::Target)]
+        );
+        assert!(
+            !fs.wrote(&target),
+            "a write was attempted over the directory"
+        );
+        assert!(target.is_dir(), "the directory is left in place");
+    }
+
+    // The prompt's change put the provider's own value there, owner-only. That is
+    // in sync, nothing is written, and nothing needs a warning.
+    #[tokio::test]
+    async fn a_secret_target_changed_to_the_resolved_content_owner_only_is_in_sync() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let path = target.clone();
+        let changed_inode = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let recorded = Arc::clone(&changed_inode);
+
+        let events = apply_changing(&dirs, &target, move || {
+            std::fs::write(&path, SECRET).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            recorded.store(std::fs::metadata(&path).unwrap().ino(), SeqCst);
+        })
+        .await;
+
+        assert_no_event_mentions(&events, SECRET);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().ino(),
+            changed_inode.load(SeqCst),
+            "the in-sync target was rewritten"
+        );
+        assert_eq!(deploy_counts(&events), (0, 1, 0, 0), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PackageEvent::DotfileSkipped {
+                    reason: SkipReason::InSync,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        assert_eq!(changed_warnings(&events, &target), 0, "{events:?}");
+        assert_eq!(appeared_warnings(&events, &target), 0, "{events:?}");
+    }
+
+    // The prompt's change put the provider's own value there, and a link takes its
+    // place just before the mode check. The in-sync settlement replaces a link it
+    // finds there, as it does before a prompt.
+    #[test]
+    fn a_link_swapped_in_after_the_prompt_before_the_mode_check_is_replaced() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let destination = dirs.target_dir.join("elsewhere");
+        std::fs::write(&destination, "THE LINK'S\n").unwrap();
+        let fs = RecordsTargetReads::new().link_before_mode_check(&target, &destination);
+        let path = target.clone();
+
+        let (events, _) = apply_recorded(&dirs, &target, fs, move || {
+            std::fs::write(&path, SECRET).unwrap();
+        });
+
+        assert_no_event_mentions(&events, SECRET);
+        let metadata = std::fs::symlink_metadata(&target).unwrap();
+        assert!(metadata.is_file(), "the link was not replaced");
+        assert_eq!(metadata.permissions().mode() & 0o077, 0);
+        assert_eq!(deploy_counts(&events), (1, 0, 0, 0), "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|warning| warning.contains("which was a symlink")),
+            "{events:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            "THE LINK'S\n",
+            "wrote through the link"
+        );
+        assert_eq!(changed_warnings(&events, &target), 0, "{events:?}");
+    }
+
+    // A link is replaced wherever the secret path finds one, and says so.
+    #[tokio::test]
+    async fn a_link_planted_at_a_secret_target_during_the_prompt_is_replaced() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let path = target.clone();
+
+        let events = apply_changing(&dirs, &target, move || {
+            std::fs::remove_file(&path).unwrap();
+            std::os::unix::fs::symlink(path.with_extension("nowhere"), &path).unwrap();
+        })
+        .await;
+
+        assert_no_event_mentions(&events, SECRET);
+        let metadata = std::fs::symlink_metadata(&target).unwrap();
+        assert!(metadata.is_file(), "the link was not replaced");
+        assert_eq!(metadata.permissions().mode() & 0o077, 0);
+        assert!(
+            std::fs::read_to_string(&target).unwrap() == SECRET,
+            "control: the provider's value was written"
+        );
+        assert_eq!(deploy_counts(&events), (1, 0, 0, 0), "{events:?}");
+        assert!(
+            warning_messages(&events)
+                .iter()
+                .any(|warning| warning.contains("which was a symlink")),
+            "{events:?}"
+        );
+        assert!(
+            !target.with_extension("nowhere").exists(),
+            "wrote through the link"
+        );
+    }
+
+    // A credential selfie cannot read is never overwritten, however late it became
+    // unreadable. A rename would replace it without a look at what it held.
+    #[tokio::test]
+    async fn a_secret_target_made_unreadable_during_the_prompt_is_refused() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        // Root reads through the mode bits, so there is nothing unreadable to refuse.
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!(
+                "SKIP a_secret_target_made_unreadable_during_the_prompt_is_refused: running as root"
+            );
+            return;
+        }
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        let _restore = RestoreMode(target.clone(), 0o600);
+        let path = target.clone();
+
+        let events = apply_changing(&dirs, &target, move || {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        })
+        .await;
+
+        assert_no_event_mentions(&events, SECRET);
+        let metadata = std::fs::metadata(&target).unwrap();
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o000,
+            "the unreadable target was replaced"
+        );
+        assert_eq!(
+            refusals(&events),
+            vec![(Condition::Unreadable, Location::Target)]
+        );
+        assert_eq!(deploy_counts(&events), (0, 0, 0, 1), "{events:?}");
+        let inode = metadata.ino();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::metadata(&target).unwrap().ino(), inode);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), SEED);
     }
 }

@@ -67,7 +67,9 @@ pub enum ConflictDetail<'a> {
 pub trait ConflictResolver: Send + Sync {
     /// Decide what to do about the conflict at `target`.
     ///
-    /// [`Accept`](ConflictResolution::Accept) overwrites the target.
+    /// [`Accept`](ConflictResolution::Accept) overwrites the target as `detail`
+    /// showed it; a target that changes before the write may be settled by what it
+    /// then holds rather than overwritten.
     /// [`Skip`](ConflictResolution::Skip) keeps it, and the conflict is then
     /// reported with `declined` set, which tells a consumer the conflict was
     /// already put to whoever decides and need not be shown again. So return

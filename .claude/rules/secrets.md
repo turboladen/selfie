@@ -254,9 +254,15 @@ Test egress at the **boundary**, not by listing known paths:
   reveal can never show one as empty. A link present at either check is never read through, not for
   a comparison and not for the owner-only check, which does not follow either: a link put at the
   target after the read is replaced, never reported in sync on its destination's mode. Both
-  questions are asked **twice**, once before the provider command and once immediately before the
-  read, because the first answers are stale by the time the target is read, and the read refuses a
-  target that became unreadable in between. The read itself is `read_file_no_follow`, which opens
+  questions are asked before the provider command and again immediately before the read, because the
+  first answers are stale by the time the target is read, and the read refuses a target that became
+  unreadable in between. An accepted conflict asks them once more, with another read, after the
+  prompt, since the user answered about the bytes read before it. That last look replaces a link and
+  refuses what the looks refuse, as every look does. Of what the read then finds, the write replaces
+  only the bytes the prompt showed, and creates with `IfPresent::Keep` when nothing is there. The
+  resolved content goes through `settle_in_sync` like any in-sync target, and other bytes are left
+  in place as an unasked conflict. The read narrows the race and does not close it: a write landing
+  between it and the rename is still replaced. The read itself is `read_file_no_follow`, which opens
   with `O_NOFOLLOW` and `O_NONBLOCK` and checks the descriptor's type, so a link or fifo planted
   after the last check is refused by the read rather than followed or waited on; a link it finds is
   replaced like one a check found. The checks stay: opening a device node can have side effects, and

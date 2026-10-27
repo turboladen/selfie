@@ -1,6 +1,8 @@
-//! Settling a target that something appeared at while it was being written, which
-//! the write left in place. One policy for both content classes: this run writes
-//! nothing over what appeared, and leaves any prompt or copy to the next run.
+//! Settling a target that holds bytes nobody has seen: something that appeared
+//! while the target was being written, which the write left in place, or a secret
+//! target that changed while its conflict prompt was open. One policy for both
+//! content classes: this run writes nothing over it, and leaves any prompt or copy
+//! to the next run.
 
 use std::future::Future;
 
@@ -15,6 +17,9 @@ pub(super) enum During {
     /// It appeared after the last read found the target absent, and the write
     /// kept it.
     Write,
+    /// It was put there while a conflict prompt about the target's earlier bytes
+    /// was open.
+    Prompt,
 }
 
 /// One entry's side of settling a target that appeared: how it reads the target
@@ -69,7 +74,8 @@ pub(super) async fn settle<A: Appeared + Send>(entry: &mut A) -> A::Outcome {
 
 /// Settle `entry`, whose target holds `current`, which nobody has seen and which
 /// got there `during` that window: in sync when it is the content, else a conflict
-/// that is reported, not resolved. Writes nothing over it.
+/// that is reported, not resolved. Writes nothing over it, and never puts the
+/// conflict to a resolver or to `--yes`.
 pub(super) async fn settle_present<A: Appeared + Send>(
     entry: &mut A,
     current: &[u8],
@@ -91,6 +97,7 @@ pub(super) fn warning(target: &TargetPath, during: During) -> String {
     let target = target.display();
     let what = match during {
         During::Write => format!("Something appeared at '{target}' while selfie was writing it"),
+        During::Prompt => format!("'{target}' changed while selfie was asking about it"),
     };
     format!("{what}, and was left in place. Run apply again to settle it.")
 }
