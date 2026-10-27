@@ -1199,6 +1199,10 @@ mod recommends_after_the_root_stops_loading {
             self.inner.save_package(package, path)
         }
 
+        fn create_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
+            self.inner.create_package(package, path)
+        }
+
         fn remove_package(&self, name: &str) -> Result<(), PackageRepoError> {
             self.inner.remove_package(name)
         }

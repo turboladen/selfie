@@ -6,7 +6,7 @@ use std::{
 use crate::{
     fs::{
         DirectoryState, FileSystem,
-        filesystem::{FileSystemError, IfPresent, repository_read_refusal},
+        filesystem::{FileSystemError, IfPresent, Placed, repository_read_refusal},
         target::repository_path,
     },
     package::{
@@ -201,6 +201,117 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 
         Ok(package)
     }
+
+    // The one body behind `save_package` and `create_package`, so the rewrite
+    // guards and the symlink rewording cover both.
+    fn write_package(
+        &self,
+        package: &Package,
+        path: &Path,
+        if_present: IfPresent,
+    ) -> Result<Placed, PackageRepoError> {
+        // A write serializes the file from the struct, dropping every key it does not
+        // model. In a dotfile entry that key is what refuses the entry, so writing
+        // would launder a refused entry into a deployable one: `var:` for `vars:`
+        // vanishes and the next apply writes the unrendered template over the
+        // target. The guard sits here because this is where the key is destroyed,
+        // so a new caller cannot forget it (selfie-6lz4).
+        //
+        // `unknown_entry_keys` walks every scope, so these paths are the ones
+        // `selfie spec validate` reports for the same file.
+        let unknown = package.unknown_entry_keys();
+        if !unknown.is_empty() {
+            let fields: Vec<&str> = unknown.iter().map(|u| u.field.as_str()).collect();
+            return Err(PackageRepoError::UnknownDotfileFields {
+                path: path.to_path_buf(),
+                fields: fields.join(", "),
+            });
+        }
+
+        // The same refusal above the entries. `_dotfiles:` takes every entry under
+        // it, `audt:` takes the user's command text, and a top level selfie could
+        // not read back may hide either (selfie-ebvx).
+        //
+        // Asked of `listing_refusal`, so a writer and apply cannot reach different
+        // conclusions about one key. Field names rather than the rendered sentence,
+        // because this error names the file and the caller needs the keys.
+        match package.listing_refusal() {
+            Some(SpecRefusal::UnknownTopLevelKeys(unknown)) => {
+                let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
+                return Err(PackageRepoError::UnknownTopLevelFields {
+                    path: path.to_path_buf(),
+                    fields: fields.join(", "),
+                });
+            }
+            Some(SpecRefusal::UnknownEnvironmentKeys(environments)) => {
+                let fields: Vec<String> = environments
+                    .iter()
+                    .flat_map(|(environment, keys)| {
+                        keys.iter()
+                            .map(|key| crate::package::environment_field(environment, &key.key))
+                    })
+                    .collect();
+                return Err(PackageRepoError::UnknownEnvironmentFields {
+                    path: path.to_path_buf(),
+                    fields: fields.join(", "),
+                });
+            }
+            Some(SpecRefusal::UncheckedTopLevel(error)) => {
+                return Err(PackageRepoError::UncheckedTopLevel {
+                    path: path.to_path_buf(),
+                    error,
+                });
+            }
+            // Unreachable while `listing_refusal` composes only the three rules
+            // above. A missing environment is a deployment rule, not a writing one:
+            // a spec declaring none is still the user's text.
+            //
+            // Named rather than left to a catch-all, so a new `SpecRefusal` variant
+            // fails to compile here. Widening `listing_refusal` to return a variant
+            // already named here is NOT caught, and that path is now shared with the
+            // listing, so a change made for the listing's benefit reaches this write
+            // silently.
+            Some(SpecRefusal::NoEnvironments(_)) | None => {}
+        }
+
+        // Serialize the package to YAML
+        let yaml_content =
+            crate::yaml::serialize(package).map_err(PackageRepoError::Unserializable)?;
+
+        // Write the YAML content to the specified path.
+        //
+        // `write_file_no_follow` rather than a plain write: a symlink at `path`
+        // would otherwise be followed and the package YAML written wherever it
+        // points. A link planted after the callers' checks would otherwise be
+        // followed and the file created at the planter's chosen path
+        // (selfie-yw7i).
+        //
+        // The direction is inward, so the refusal is re-worded rather than
+        // rendered as-is. See `PackageRepoError::UnwritablePath`.
+        self.fs
+            .write_file_no_follow(&repository_path(path), yaml_content.as_bytes(), if_present)
+            .map_err(|e| match &e {
+                FileSystemError::SymlinkedTarget { points_to, .. } => {
+                    PackageRepoError::UnwritablePath {
+                        path: path.to_path_buf(),
+                        reason: match points_to {
+                            Some(dest) => {
+                                format!("it is a symlink to '{}'", dest.display())
+                            }
+                            None => "it is a symlink".to_string(),
+                        },
+                    }
+                }
+                FileSystemError::IrregularTarget { kind, .. } => PackageRepoError::UnwritablePath {
+                    path: path.to_path_buf(),
+                    reason: format!("it is a {kind}"),
+                },
+                // Not a refusal -- a permission problem, a full disk. The
+                // filesystem's own message already names the path and the
+                // failure, so it is passed through rather than reworded.
+                _ => PackageRepoError::FileSystemError(e),
+            })
+    }
 }
 
 // Everything that stops a spec file reaching the parser, whether selfie declined
@@ -294,8 +405,9 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     // A path can be taken by something that answers to no package name at all:
     // a directory, a `.txt` file, or a spec the name folding does not reach.
     // Only the file system knows, so ask it rather than compare names.
+    // `path_exists` follows links, so a dangling one is asked about separately.
     fn path_is_occupied(&self, path: &Path) -> bool {
-        self.fs.path_exists(path)
+        self.fs.path_exists(path) || self.fs.symlink_refusal(&repository_path(path)).is_some()
     }
 
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
@@ -357,114 +469,25 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
-        // A save rewrites the file from the struct, dropping every key it does not
-        // model. In a dotfile entry that key is what refuses the entry, so writing
-        // would launder a refused entry into a deployable one: `var:` for `vars:`
-        // vanishes and the next apply writes the unrendered template over the
-        // target. The guard sits here because this is where the key is destroyed,
-        // so a new caller cannot forget it (selfie-6lz4).
-        //
-        // `unknown_entry_keys` walks every scope, so these paths are the ones
-        // `selfie spec validate` reports for the same file.
-        let unknown = package.unknown_entry_keys();
-        if !unknown.is_empty() {
-            let fields: Vec<&str> = unknown.iter().map(|u| u.field.as_str()).collect();
-            return Err(PackageRepoError::UnknownDotfileFields {
+        match self.write_package(package, path, IfPresent::Replace)? {
+            Placed::Written => Ok(()),
+            // A replacing write does not keep what it finds. If one ever answers
+            // that it did, nothing was written, and the caller must hear so.
+            Placed::Kept => Err(PackageRepoError::Occupied {
                 path: path.to_path_buf(),
-                fields: fields.join(", "),
-            });
+            }),
         }
+    }
 
-        // The same refusal above the entries. `_dotfiles:` takes every entry under
-        // it, `audt:` takes the user's command text, and a top level selfie could
-        // not read back may hide either (selfie-ebvx).
-        //
-        // Asked of `listing_refusal`, so a writer and apply cannot reach different
-        // conclusions about one key. Field names rather than the rendered sentence,
-        // because this error names the file and the caller needs the keys.
-        match package.listing_refusal() {
-            Some(SpecRefusal::UnknownTopLevelKeys(unknown)) => {
-                let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
-                return Err(PackageRepoError::UnknownTopLevelFields {
-                    path: path.to_path_buf(),
-                    fields: fields.join(", "),
-                });
-            }
-            Some(SpecRefusal::UnknownEnvironmentKeys(environments)) => {
-                let fields: Vec<String> = environments
-                    .iter()
-                    .flat_map(|(environment, keys)| {
-                        keys.iter()
-                            .map(|key| crate::package::environment_field(environment, &key.key))
-                    })
-                    .collect();
-                return Err(PackageRepoError::UnknownEnvironmentFields {
-                    path: path.to_path_buf(),
-                    fields: fields.join(", "),
-                });
-            }
-            Some(SpecRefusal::UncheckedTopLevel(error)) => {
-                return Err(PackageRepoError::UncheckedTopLevel {
-                    path: path.to_path_buf(),
-                    error,
-                });
-            }
-            // Unreachable while `listing_refusal` composes only the three rules
-            // above. A missing environment is a deployment rule, not a writing one:
-            // a spec declaring none is still the user's text.
-            //
-            // Named rather than left to a catch-all, so a new `SpecRefusal` variant
-            // fails to compile here. Widening `listing_refusal` to return a variant
-            // already named here is NOT caught, and that path is now shared with the
-            // listing, so a change made for the listing's benefit reaches this write
-            // silently.
-            Some(SpecRefusal::NoEnvironments(_)) | None => {}
+    // `IfPresent::Keep` is the whole mechanism: the rename into place refuses an
+    // existing name, within that variant's guarantee per volume.
+    fn create_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
+        match self.write_package(package, path, IfPresent::Keep)? {
+            Placed::Written => Ok(()),
+            Placed::Kept => Err(PackageRepoError::Occupied {
+                path: path.to_path_buf(),
+            }),
         }
-
-        // Serialize the package to YAML
-        let yaml_content =
-            crate::yaml::serialize(package).map_err(PackageRepoError::Unserializable)?;
-
-        // Write the YAML content to the specified path.
-        //
-        // `write_file_no_follow` rather than a plain write: a symlink at `path`
-        // would otherwise be followed and the package YAML written wherever it
-        // points. The `path_exists` checks guarding the callers *follow* symlinks,
-        // so a dangling one passes them and the write then creates the file at the
-        // planter's chosen path (selfie-yw7i).
-        //
-        // The direction is inward, so the refusal is re-worded rather than
-        // rendered as-is. See `PackageRepoError::UnwritablePath`.
-        self.fs
-            .write_file_no_follow(
-                &repository_path(path),
-                yaml_content.as_bytes(),
-                IfPresent::Replace,
-            )
-            .map(drop)
-            .map_err(|e| match &e {
-                FileSystemError::SymlinkedTarget { points_to, .. } => {
-                    PackageRepoError::UnwritablePath {
-                        path: path.to_path_buf(),
-                        reason: match points_to {
-                            Some(dest) => {
-                                format!("it is a symlink to '{}'", dest.display())
-                            }
-                            None => "it is a symlink".to_string(),
-                        },
-                    }
-                }
-                FileSystemError::IrregularTarget { kind, .. } => PackageRepoError::UnwritablePath {
-                    path: path.to_path_buf(),
-                    reason: format!("it is a {kind}"),
-                },
-                // Not a refusal -- a permission problem, a full disk. The
-                // filesystem's own message already names the path and the
-                // failure, so it is passed through rather than reworded.
-                _ => PackageRepoError::FileSystemError(e),
-            })?;
-
-        Ok(())
     }
 
     fn remove_package(&self, name: &str) -> Result<(), PackageRepoError> {
@@ -2218,6 +2241,153 @@ environments:
         // Test saving the package
         let result = repo.save_package(&package, &package_path);
         assert!(result.is_ok());
+    }
+
+    // A package named `name` with nothing in it, to be written at `path`.
+    fn empty_package(name: &str, path: &Path) -> Package {
+        crate::package::PackageBuilder::default()
+            .name(name)
+            .path(path)
+            .build()
+    }
+
+    // A replacing write that answers it kept what it found wrote nothing, so the
+    // save must fail rather than report success.
+    #[test]
+    fn a_save_whose_write_kept_what_was_there_fails() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("app.yml");
+        fs.expect_write_file_no_follow()
+            .returning(|_, _, _| Ok(Placed::Kept));
+
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+        let err = repo
+            .save_package(&empty_package("app", &package_path), &package_path)
+            .expect_err("a write that kept what was there must not report a save");
+
+        assert!(
+            matches!(&err, PackageRepoError::Occupied { path } if *path == package_path),
+            "got: {err:?}"
+        );
+    }
+
+    // The choice each writer hands the file system, pinned on a mock so it does
+    // not depend on what the test volume can do: a rewrite replaces, a create
+    // never does.
+    #[test]
+    fn save_replaces_and_create_keeps() {
+        for (create, expected) in [(false, IfPresent::Replace), (true, IfPresent::Keep)] {
+            let mut fs = MockFileSystem::default();
+            fs.mock_directories_exist();
+            let package_dir = PathBuf::from("/test/packages");
+            let package_path = package_dir.join("app.yml");
+            fs.expect_write_file_no_follow()
+                .times(1)
+                .withf(move |_, _, if_present| *if_present == expected)
+                .returning(|_, _, _| Ok(Placed::Written));
+
+            let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+            let package = empty_package("app", &package_path);
+            let result = if create {
+                repo.create_package(&package, &package_path)
+            } else {
+                repo.save_package(&package, &package_path)
+            };
+            assert!(result.is_ok(), "create={create}: {result:?}");
+        }
+    }
+
+    // A real file, and a real directory, at the path a new spec would take: both
+    // are left exactly as they were, and the refusal names the path.
+    #[test]
+    fn create_package_leaves_whatever_is_at_the_path() {
+        let temp = TempDir::new().unwrap();
+        let package_dir = temp.path().to_path_buf();
+        let file = package_dir.join("app.yml");
+        std::fs::write(&file, "name: app # the user's own\n").unwrap();
+        let directory = package_dir.join("dir.yml");
+        std::fs::create_dir(&directory).unwrap();
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
+
+        for (name, path) in [("app", &file), ("dir", &directory)] {
+            let err = repo
+                .create_package(&empty_package(name, path), path)
+                .expect_err("an occupied path must refuse the create");
+            assert!(
+                matches!(&err, PackageRepoError::Occupied { path: refused } if refused == path),
+                "got: {err:?}"
+            );
+            assert!(
+                err.to_string().contains(&path.display().to_string()),
+                "the refusal must name the path: {err}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "name: app # the user's own\n"
+        );
+        assert!(directory.is_dir());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+    }
+
+    // A link at the path occupies it whether or not it resolves: a dangling one
+    // is something a write there would refuse.
+    #[test]
+    fn a_dangling_link_occupies_its_path() {
+        let temp = TempDir::new().unwrap();
+        let package_dir = temp.path().to_path_buf();
+        let link = package_dir.join("app.yml");
+        std::os::unix::fs::symlink(package_dir.join("nowhere.yml"), &link).unwrap();
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            package_dir.clone(),
+            SpecOrigin::PackageDirectory,
+        );
+
+        assert!(repo.path_is_occupied(&link));
+        assert!(!repo.path_is_occupied(&package_dir.join("free.yml")));
+    }
+
+    // The control: where nothing is, the create writes the spec.
+    #[test]
+    fn create_package_writes_where_nothing_is() {
+        let temp = TempDir::new().unwrap();
+        let package_dir = temp.path().to_path_buf();
+        let path = package_dir.join("app.yml");
+        let repo =
+            YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory);
+
+        repo.create_package(&empty_package("app", &path), &path)
+            .expect("an absent path must be created");
+
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("name: app")
+        );
+    }
+
+    // A create runs the rewrite guards too, before anything is written.
+    #[test]
+    fn create_package_refuses_an_entry_carrying_an_unrecognized_key() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("creds.yml");
+        fs.expect_write_file_no_follow().times(0);
+
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+        let err = repo
+            .create_package(&package_with_typo(), &package_path)
+            .expect_err("a package with an unrecognized dotfile key must not be written");
+
+        assert!(
+            matches!(err, PackageRepoError::UnknownDotfileFields { .. }),
+            "got: {err:?}"
+        );
     }
 
     // A package YAML with one well-formed dotfile and one carrying `var:`.
