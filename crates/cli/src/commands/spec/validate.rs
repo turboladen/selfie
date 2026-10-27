@@ -1,6 +1,10 @@
 use selfie::package::{
-    event::{Outcome, PackageEvent, ValidationResultData},
-    service::SpecService,
+    event::{
+        CollectionRefusal, OperationResult, OperationSuccess, Outcome, PackageEvent,
+        ValidationResultData,
+    },
+    port::PackageParseError,
+    service::{SpecService, skipped_spec_warning},
 };
 
 use crate::display_manager::Channel;
@@ -45,12 +49,129 @@ pub(crate) async fn handle_validate_all(
     let event_stream = service.validate_all().await;
 
     let processor = EventProcessor::new(display.clone());
+    let mut skipped = Vec::new();
     let result = processor
         .process_events(event_stream, |event| {
-            handle_validate_event(event, config, display)
+            handle_validate_all_event(event, &mut skipped, config, display)
         })
         .await;
+    // A stream that ended without a result, as one does when the task running it
+    // panics, still names what the run skipped.
+    print_skipped(&mut skipped, &[], display);
     result.exit
+}
+
+// A skipped spec is held until the result says whether it is one the run could
+// not validate. If it is, the result names it, and printing the skip line as well
+// would name it twice, the first time far above the results. If it is not, as for
+// a dotfiles spec a package spec shadows, the skip line is the only mention.
+fn handle_validate_all_event(
+    event: &PackageEvent,
+    skipped: &mut Vec<PackageParseError>,
+    config: &CliConfig,
+    display: &DisplayManager,
+) -> bool {
+    match event {
+        PackageEvent::SpecSkipped { error, .. } => {
+            skipped.push(error.clone());
+            true
+        }
+        PackageEvent::Completed { result, .. } => {
+            let unvalidated = match result {
+                OperationResult::Success(OperationSuccess::SpecsValidated {
+                    unvalidated, ..
+                }) => unvalidated.as_slice(),
+                _ => &[],
+            };
+            print_skipped(skipped, unvalidated, display);
+            display_unvalidated(unvalidated, config, display);
+            // The summary is the shared handler's, and comes last.
+            false
+        }
+        // A canceled run sends no result, so nothing it skipped is listed there,
+        // and every skip line prints above the cancel line.
+        PackageEvent::Canceled { .. } => {
+            print_skipped(skipped, &[], display);
+            false
+        }
+        _ => handle_validate_event(event, config, display),
+    }
+}
+
+/// Print and drop the skip line for each of `skipped` that `unvalidated` does not
+/// list.
+fn print_skipped(
+    skipped: &mut Vec<PackageParseError>,
+    unvalidated: &[CollectionRefusal],
+    display: &DisplayManager,
+) {
+    for error in skipped.drain(..) {
+        if !unvalidated
+            .iter()
+            .any(|refusal| names_file(refusal, &error))
+        {
+            display.print_warning(skipped_spec_warning(&error));
+        }
+    }
+}
+
+/// Whether `refusal` is the spec file `error` reports.
+fn names_file(refusal: &CollectionRefusal, error: &PackageParseError) -> bool {
+    matches!(refusal, CollectionRefusal::UnloadableSpec(refused)
+        if refused.package_path() == error.package_path())
+}
+
+/// One entry in the issues section for something the run could not validate.
+struct UnvalidatedIssue {
+    /// The group's label: the file, the name or the directory.
+    label: String,
+    /// The word the results use for it.
+    category: &'static str,
+    field: &'static str,
+    message: String,
+    location: Option<selfie::yaml::SourceLocation>,
+}
+
+impl UnvalidatedIssue {
+    fn of(refusal: &CollectionRefusal) -> Option<Self> {
+        match refusal {
+            CollectionRefusal::UnloadableSpec(error) => Some(Self {
+                label: error.package_path().display().to_string(),
+                category: "unparsable",
+                field: error.kind().label(),
+                message: error.reason(),
+                location: error.location(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Print the issues section's groups for what the run could not validate.
+fn display_unvalidated(
+    unvalidated: &[CollectionRefusal],
+    config: &CliConfig,
+    display: &DisplayManager,
+) {
+    let issues: Vec<UnvalidatedIssue> = unvalidated
+        .iter()
+        .filter_map(UnvalidatedIssue::of)
+        .collect();
+    let groups: Vec<ValidationGroup<'_>> = issues
+        .iter()
+        .map(|issue| ValidationGroup {
+            label: &issue.label,
+            rows: vec![ValidationRow {
+                level: selfie::validation::ValidationLevel::Error,
+                category: issue.category.to_string(),
+                field: issue.field,
+                message: &issue.message,
+                location: issue.location,
+                suggestion: None,
+            }],
+        })
+        .collect();
+    display_validation_groups(&groups, config.use_colors(), display, Channel::Stdout);
 }
 
 fn handle_validate_event(
@@ -133,4 +254,74 @@ fn display_validation_issues_table(
     }];
 
     display_validation_groups(&groups, config.use_colors(), display, Channel::Stdout);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use selfie::package::{
+        event::{EventStream, OperationContext, OperationInfo, metadata::OperationType},
+        port::PackageParseKind,
+        service::MockSpecService,
+    };
+
+    fn info() -> OperationInfo {
+        OperationInfo {
+            id: uuid::Uuid::new_v4(),
+            operation_type: OperationType::SpecValidateAll,
+            package_name: "all".to_string(),
+            environment: "test".to_string(),
+            context: OperationContext::default(),
+            timestamp: std::time::Instant::now(),
+        }
+    }
+
+    // A run canceled after it skipped a spec still names it, above the cancel
+    // line: a canceled run sends no result, so a held skip line may not wait for
+    // one.
+    #[tokio::test]
+    async fn a_canceled_run_still_names_the_spec_it_skipped() {
+        let events = vec![
+            PackageEvent::SpecSkipped {
+                operation_info: info(),
+                error: PackageParseError::new(
+                    "/p/creds.yml",
+                    PackageParseKind::Unreadable {
+                        reason: "a fifo".to_string(),
+                    },
+                ),
+            },
+            PackageEvent::Canceled {
+                operation_info: info(),
+                reason: "Ctrl+C".to_string(),
+            },
+        ];
+        let mut service = MockSpecService::new();
+        service.expect_validate_all().return_once(move || {
+            Box::pin(async move { Box::pin(futures::stream::iter(events)) as EventStream })
+        });
+        let config = CliConfig::wrap_for_test(
+            selfie::config::SelfieConfigBuilder::default()
+                .environment("test")
+                .build(),
+        );
+        let display = DisplayManager::new(false);
+
+        let exit = handle_validate_all(&service, &config, &display).await;
+
+        let out: String = display
+            .printed()
+            .into_iter()
+            .map(|(_, line)| line + "\n")
+            .collect();
+        assert_eq!(exit, Exit::Canceled, "{out}");
+        let at = |text: &str| {
+            out.find(text)
+                .unwrap_or_else(|| panic!("no {text:?} in: {out}"))
+        };
+        assert!(
+            at("Skipping package file /p/creds.yml") < at("Operation canceled"),
+            "{out}"
+        );
+    }
 }

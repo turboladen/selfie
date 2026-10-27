@@ -1692,6 +1692,69 @@ mod tests {
         serde_json::from_str(text).unwrap()
     }
 
+    // The shape `selfie_spec_validate_all` returns over a run with a spec that does
+    // not parse, an ambiguous name and a shadowed dotfiles spec: the row types,
+    // counted, and the result's keys. The message is pinned as well. Its two other
+    // warnings are the shadowed spec and the notice that packages/ wins its name;
+    // the unparsable spec is counted once, as unparsable.
+    #[tokio::test]
+    async fn validate_all_reports_each_unvalidated_file_in_a_fixed_shape() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        let spec = "name: X\nenvironments:\n  test:\n    install: \"true\"\n";
+        std::fs::write(packages.join("good.yml"), spec.replace('X', "good")).unwrap();
+        std::fs::write(packages.join("nv.yml"), spec.replace('X', "nv")).unwrap();
+        std::fs::write(packages.join("nv.yaml"), spec.replace('X', "nv")).unwrap();
+        std::fs::write(packages.join("broken.yml"), "environments: {oops\n").unwrap();
+        // Shadowed by the package spec of the same name, so it is only a warning.
+        std::fs::write(dotfiles.join("good.yaml"), "name: good\nenvironments: [\n").unwrap();
+
+        let server = server_over(&packages, Some(&dotfiles));
+        let json = tool_json(&server.spec_validate_all().await.unwrap());
+
+        let mut types: Vec<&str> = json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["type"].as_str().unwrap())
+            .collect();
+        types.sort_unstable();
+        assert_eq!(
+            types,
+            [
+                "package_refused",
+                "spec_skipped",
+                "spec_skipped",
+                "validation_result",
+                "warning",
+            ],
+            "got: {json}"
+        );
+
+        let mut keys: Vec<&str> = json["result"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["message", "outcome", "status", "steps"],
+            "got: {json}"
+        );
+        assert_eq!(json["result"]["status"], "failed", "got: {json}");
+        assert_eq!(
+            json["result"]["message"],
+            "Spec validation completed in environment 'test': 1 package(s) validated, 0 with \
+             errors, 0 with warnings, 1 unparsable, 1 ambiguous or unlistable, 2 other warning(s)",
+            "got: {json}"
+        );
+    }
+
     // An assistant that asks where dotfiles live gets an answer. Every dotfile
     // tool resolves paths against this directory, and until it was reported the
     // only way to learn it was to infer it from a path in some other result.

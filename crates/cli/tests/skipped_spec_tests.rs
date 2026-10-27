@@ -5,8 +5,9 @@ use std::fs;
 use common::{CLEAN, FAILED, sandboxed_command, setup_default_test_config};
 
 // What every command that enumerates specs prints when it skips one it could not
-// parse. Four commands share one sentence, and these are the only assertions on
-// its bytes.
+// parse. Three commands share one sentence, and these are the only assertions on
+// its bytes. `spec validate --all` names the spec in its results instead, which
+// the last tests here hold it to.
 //
 // They are indifferent to who renders it -- the library's shared helper, or the
 // CLI adapter that calls it -- and that is the point: they fail if the bytes
@@ -38,7 +39,7 @@ fn stderr_of(temp_dir: &tempfile::TempDir, args: &[&str]) -> String {
     String::from_utf8(output).expect("stderr must be UTF-8")
 }
 
-// The sentence itself, on the four commands that emit it.
+// The sentence itself, on the three commands that emit it.
 #[test]
 fn every_enumerating_command_names_the_skipped_spec_the_same_way() {
     let temp_dir = sandbox_with_one_unparsable_spec();
@@ -47,7 +48,6 @@ fn every_enumerating_command_names_the_skipped_spec_the_same_way() {
     let expected = "creds.yml: YAML parsing error: unclosed bracket '{' at line 2, column 15";
 
     for args in [
-        &["spec", "validate", "--all"][..],
         &["package", "audit", "--all"][..],
         &["apply", "--dry-run"][..],
         &["dotfiles", "drift"][..],
@@ -76,7 +76,6 @@ fn a_skipped_spec_is_named_once_on_the_line_that_reports_it() {
     let temp_dir = sandbox_with_one_unparsable_spec();
 
     for args in [
-        &["spec", "validate", "--all"][..],
         &["package", "audit", "--all"][..],
         &["apply", "--dry-run"][..],
         &["dotfiles", "drift"][..],
@@ -104,7 +103,7 @@ fn a_skipped_spec_is_named_once_on_the_line_that_reports_it() {
 #[test]
 fn the_readable_spec_is_still_processed() {
     let temp_dir = sandbox_with_one_unparsable_spec();
-    let stderr = stderr_of(&temp_dir, &["spec", "validate", "--all"]);
+    let stderr = stderr_of(&temp_dir, &["package", "audit", "--all"]);
 
     let skipped: Vec<&str> = stderr
         .lines()
@@ -120,6 +119,48 @@ fn the_readable_spec_is_still_processed() {
         skipped[0].contains("creds.yml"),
         "the skipped spec must be the unparsable one, got: {}",
         skipped[0]
+    );
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["spec", "validate", "--all"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("1 package(s) validated"), "{stdout}");
+}
+
+// `spec validate --all` names a spec it could not parse once, in its results, and
+// prints no skip line for it: the skip line would name the file a second time,
+// above everything else the run printed.
+#[test]
+fn validate_all_names_an_unparsable_spec_once_in_its_results() {
+    let temp_dir = sandbox_with_one_unparsable_spec();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["spec", "validate", "--all"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let both = format!("{stdout}{stderr}");
+
+    assert_eq!(output.status.code(), Some(FAILED), "{both}");
+    assert_eq!(
+        both.lines()
+            .filter(|line| line.contains("Skipping package file"))
+            .count(),
+        0,
+        "{both}"
+    );
+    // The file is named once, as the label of its entry in the results.
+    assert_eq!(both.matches("creds.yml").count(), 1, "{both}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.contains("✗") && line.ends_with("packages/creds.yml"))
+            .count(),
+        1,
+        "{stdout}"
     );
 }
 

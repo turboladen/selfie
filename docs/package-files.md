@@ -1091,8 +1091,8 @@ server carries the reason, the line and the column and none of the file's text**
 answer travels further than your terminal does.
 
 Commands that enumerate specs keep one line per file — a window for each would bury the list they
-exist to print. `selfie spec validate --all` names the broken file; `selfie spec validate <name>`
-shows you where.
+exist to print. `selfie spec validate --all` names the broken file in its results, with the line and
+column; `selfie spec validate <name>` shows you the lines around it.
 
 ### Package files that are not regular files
 

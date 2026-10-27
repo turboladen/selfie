@@ -204,3 +204,93 @@ fn only_a_clean_spec_shows_the_success_card() {
     assert_eq!(cards("clean"), 1);
     assert_eq!(cards("blank"), 0);
 }
+
+// The table printed under the line naming `label` in an issues section: the lines
+// after it that draw a table, up to the next line that does not.
+fn group_under<'a>(stdout: &'a str, label: &str) -> Vec<&'a str> {
+    let mut lines = stdout.lines();
+    let found = lines.by_ref().find(|line| {
+        let line = line.trim_start();
+        (line.starts_with('✗') || line.starts_with('ℹ')) && line.ends_with(label)
+    });
+    assert!(found.is_some(), "no group is labeled {label}: {stdout}");
+    lines
+        .take_while(|line| line.starts_with(['╭', '│', '╞', '├', '╰']))
+        .collect()
+}
+
+fn sandbox_with_an_unparsable_spec() -> tempfile::TempDir {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("packages");
+    fs::write(
+        packages_dir.join("good.yml"),
+        format!(
+            "name: good\nenvironments:\n  {}:\n    install: \"true\"\n",
+            common::SELFIE_ENV
+        ),
+    )
+    .unwrap();
+    fs::write(
+        packages_dir.join("creds.yml"),
+        "name: creds\nenvironments: {oops\n",
+    )
+    .unwrap();
+    temp_dir
+}
+
+// The results say where a spec failed to parse, in the entry labeled with its
+// path, so the summary's unparsable count points at something on screen.
+#[test]
+fn validate_all_says_where_an_unparsable_spec_failed() {
+    let temp_dir = sandbox_with_an_unparsable_spec();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["spec", "validate", "--all"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(FAILED), "{stdout}");
+    let group = group_under(&stdout, "packages/creds.yml");
+    assert_eq!(
+        group
+            .iter()
+            .filter(|line| line.contains("unclosed bracket") && line.contains("line 2, column 15"))
+            .count(),
+        1,
+        "{stdout}"
+    );
+    assert!(stdout.contains("1 unparsable"), "{stdout}");
+}
+
+// A dotfiles spec that does not parse, under a name a package spec claims, is no
+// result of the run: its skip line is its one mention, and it is still printed.
+#[test]
+fn validate_all_still_warns_about_a_shadowed_unparsable_spec() {
+    let temp_dir = sandbox_with_an_unparsable_spec();
+    fs::remove_file(temp_dir.path().join("packages/creds.yml")).unwrap();
+    let dotfiles = temp_dir.path().join("dotfiles");
+    fs::create_dir_all(&dotfiles).unwrap();
+    let config = temp_dir.path().join(".config/selfie/config.yaml");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("dotfiles_directory: {}\n", dotfiles.display()));
+    fs::write(&config, text).unwrap();
+    fs::write(dotfiles.join("good.yaml"), "name: good\nenvironments: [\n").unwrap();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["spec", "validate", "--all"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|line| line.contains("Skipping package file") && line.contains("good.yaml"))
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(!stdout.contains("good.yaml"), "{stdout}");
+}

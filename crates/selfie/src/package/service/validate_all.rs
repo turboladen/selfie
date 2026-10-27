@@ -54,11 +54,11 @@ where
     };
 
     // The warnings count apart from specs with warnings, since some name no spec
-    // at all. It counts every warning-level message collection sends, a refused
-    // file's or directory's included; an ambiguous name's is a refusal row only.
+    // at all. It counts only collection's warnings: whatever collection refused
+    // is in `unvalidated`, which the result names one by one, and counting it
+    // again would leave a warning count pointing at nothing a reader can find.
     let mut collection_warnings = 0;
-    let mut unparsable = 0;
-    let mut uncollected = 0;
+    let mut unvalidated = Vec::new();
     let unrefused = unrefused_ambiguities
         .into_iter()
         .map(|(name, paths)| Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths }));
@@ -71,22 +71,11 @@ where
     // this run never saw. An ambiguity collection let through, because no file of
     // it deploys here, is still one install refuses.
     for finding in findings.into_iter().chain(unrefused) {
-        match &finding {
-            Finding::Warning(_) => collection_warnings += 1,
-            Finding::Refusal(CollectionRefusal::UnloadableSpec(_)) => {
-                collection_warnings += 1;
-                unparsable += 1;
-            }
-            Finding::Refusal(
-                CollectionRefusal::UnlistableDotfilesDirectory(_)
-                | CollectionRefusal::UncheckableDotfilesDirectory(_),
-            ) => {
-                collection_warnings += 1;
-                uncollected += 1;
-            }
-            Finding::Refusal(CollectionRefusal::AmbiguousName { .. }) => uncollected += 1,
-        }
         finding.send(sender).await;
+        match finding {
+            Finding::Warning(_) => collection_warnings += 1,
+            Finding::Refusal(refusal) => unvalidated.push(refusal),
+        }
     }
 
     let environment = config.environment();
@@ -140,8 +129,7 @@ where
     OperationResult::Success(OperationSuccess::specs_validated(
         valid_packages.len(),
         error_count,
-        unparsable,
-        uncollected,
+        unvalidated,
         warning_count,
         collection_warnings,
         environment.to_string(),
@@ -252,6 +240,140 @@ mod tests {
 
         // The control: the scan above proves nothing about a stream that was empty.
         assert_eq!(skipped, 1, "the unparsable spec must have been reported");
+    }
+
+    // What a run reports about the files it read.
+    struct Validated {
+        unvalidated: Vec<CollectionRefusal>,
+        validated: usize,
+        other_warnings: usize,
+    }
+
+    // An empty package directory and dotfiles directory, under a temporary one.
+    fn directories() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        (temp, packages, dotfiles)
+    }
+
+    // The result of validating `packages`, and `dotfiles` as the dotfiles
+    // directory, each read from disk as apply reads them.
+    async fn validated(packages: &std::path::Path, dotfiles: &std::path::Path) -> Validated {
+        use crate::{fs::real::RealFileSystem, package::repository::yaml::YamlPackageRepository};
+
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(packages)
+            .dotfiles_directory(dotfiles.to_path_buf())
+            .build();
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            packages.to_path_buf(),
+            SpecOrigin::PackageDirectory,
+        );
+        let dotfiles_repo = YamlPackageRepository::new(
+            RealFileSystem,
+            dotfiles.to_path_buf(),
+            SpecOrigin::DotfilesDirectory,
+        );
+        let (sender, _rx) = test_sender();
+        let result = handle_validate_all(
+            &repo,
+            &dotfiles_repo,
+            &config,
+            &sender,
+            &mut ProgressTracker::new(2),
+        )
+        .await;
+        match result {
+            OperationResult::Success(OperationSuccess::SpecsValidated {
+                unvalidated,
+                validated_count,
+                other_warning_count,
+                ..
+            }) => Validated {
+                unvalidated,
+                validated: validated_count,
+                other_warnings: other_warning_count,
+            },
+            other => panic!("validation must answer, got: {other:?}"),
+        }
+    }
+
+    const GOOD: &str = "name: good\nenvironments:\n  test:\n    install: \"true\"\n";
+
+    // An unparsable spec is named in the result, where it failed, and is not also
+    // counted as a warning about the run.
+    #[tokio::test]
+    async fn an_unparsable_spec_is_named_in_the_result() {
+        let (_temp, packages, dotfiles) = directories();
+        std::fs::write(packages.join("good.yml"), GOOD).unwrap();
+        std::fs::write(
+            packages.join("creds.yml"),
+            "name: creds\nenvironments: {oops\n",
+        )
+        .unwrap();
+
+        let Validated {
+            unvalidated,
+            validated,
+            other_warnings,
+        } = validated(&packages, &dotfiles).await;
+
+        assert_eq!(validated, 1, "the readable spec is still validated");
+        assert_eq!(other_warnings, 0, "{unvalidated:?}");
+        let [CollectionRefusal::UnloadableSpec(error)] = unvalidated.as_slice() else {
+            panic!("the unparsable spec must be the one refusal, got: {unvalidated:?}");
+        };
+        assert_eq!(error.package_path(), packages.join("creds.yml"));
+        assert_eq!(
+            error.location().map(|at| at.to_string()).as_deref(),
+            Some("line 2, column 15")
+        );
+    }
+
+    // A dotfiles spec that does not parse, under a name a package spec claims, is
+    // one nothing would have used: a warning about the run, not a refusal.
+    #[tokio::test]
+    async fn a_shadowed_unparsable_spec_is_a_warning_and_not_named_as_unvalidated() {
+        let (_temp, packages, dotfiles) = directories();
+        std::fs::write(packages.join("good.yml"), GOOD).unwrap();
+        std::fs::write(dotfiles.join("good.yaml"), "name: good\nenvironments: [\n").unwrap();
+
+        let Validated {
+            unvalidated,
+            validated,
+            other_warnings,
+        } = validated(&packages, &dotfiles).await;
+
+        assert_eq!(validated, 1);
+        assert!(unvalidated.is_empty(), "{unvalidated:?}");
+        // The skipped spec, and the notice that packages/ wins the name.
+        assert_eq!(other_warnings, 2);
+    }
+
+    // A name two spec files claim is named in the result with both files.
+    #[tokio::test]
+    async fn an_ambiguous_name_is_named_in_the_result() {
+        let (_temp, packages, dotfiles) = directories();
+        std::fs::write(packages.join("nv.yml"), GOOD.replace("good", "nv")).unwrap();
+        std::fs::write(packages.join("nv.yaml"), GOOD.replace("good", "nv")).unwrap();
+
+        let Validated {
+            unvalidated,
+            other_warnings,
+            ..
+        } = validated(&packages, &dotfiles).await;
+
+        assert_eq!(other_warnings, 0);
+        let [CollectionRefusal::AmbiguousName { name, paths }] = unvalidated.as_slice() else {
+            panic!("the ambiguous name must be the one refusal, got: {unvalidated:?}");
+        };
+        assert_eq!(name, "nv");
+        assert_eq!(paths, &[packages.join("nv.yaml"), packages.join("nv.yml")]);
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@
 pub mod metadata;
 
 pub use self::metadata::OperationType;
+pub use crate::package::collect::warning::CollectionRefusal;
 
 /// Represents the completion status of steps in an operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1141,16 +1142,17 @@ pub enum OperationSuccess {
         validated_count: usize,
         /// Specs validated with errors.
         error_count: usize,
-        /// Spec files that could not be read or parsed, and so were not
-        /// validated. Each is an error.
-        unparsable_count: usize,
-        /// Names several spec files claim, and directories that could not be
-        /// listed, so that their specs were not validated. Each is an error.
-        uncollected_count: usize,
+        /// What the run could not validate, in the order it was found: spec files
+        /// that could not be read or parsed, names several spec files claim, and
+        /// dotfiles directories that could not be read, so that their specs were
+        /// not validated. Each is an error.
+        unvalidated: Vec<CollectionRefusal>,
         /// Specs validated with warnings.
         warning_count: usize,
-        /// Warnings about the run that belong to no validated spec, such as a
-        /// spec file that could not be used or a missing dotfiles directory.
+        /// Warnings about the run that belong neither to a validated spec nor to
+        /// anything in `unvalidated`, such as a missing dotfiles directory or a
+        /// dotfiles spec that could not be parsed under a name a package spec
+        /// already claims.
         other_warning_count: usize,
         environment: String,
         steps_completed: StepCount,
@@ -1682,6 +1684,86 @@ fn gap_clauses(gaps: &[Gap]) -> String {
     clauses
 }
 
+/// What a validation of every spec found for one spec, or for one file or
+/// directory it could not validate, in the words its summary counts by.
+///
+/// [`Display`](fmt::Display) gives that word: "valid", "warnings", "errors",
+/// "unparsable", "ambiguous" or "unlistable".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecStatus {
+    /// Validated with nothing worse than a notice.
+    Valid,
+    /// Validated with warnings and no errors.
+    Warnings,
+    /// Validated with errors.
+    Errors,
+    /// A spec file that could not be loaded.
+    Unparsable,
+    /// A name several spec files claim.
+    Ambiguous,
+    /// A dotfiles directory that could not be read, whether it could not be
+    /// listed or not even checked.
+    Unlistable,
+}
+
+impl fmt::Display for SpecStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Valid => "valid",
+            Self::Warnings => "warnings",
+            Self::Errors => "errors",
+            Self::Unparsable => "unparsable",
+            Self::Ambiguous => "ambiguous",
+            Self::Unlistable => "unlistable",
+        })
+    }
+}
+
+/// What a validation of every spec could not validate, counted as its summary
+/// counts it.
+struct UnvalidatedCounts {
+    /// Spec files that could not be loaded.
+    unparsable: usize,
+    /// Names several files claim, and dotfiles directories that could not be
+    /// read.
+    uncollected: usize,
+}
+
+impl UnvalidatedCounts {
+    fn of(unvalidated: &[CollectionRefusal]) -> Self {
+        let mut counts = Self {
+            unparsable: 0,
+            uncollected: 0,
+        };
+        for refusal in unvalidated {
+            // No catch-all, so a new status has to say here which count it joins.
+            match refusal.status() {
+                SpecStatus::Unparsable => counts.unparsable += 1,
+                SpecStatus::Ambiguous | SpecStatus::Unlistable => counts.uncollected += 1,
+                // A refusal is never a validated spec's status.
+                SpecStatus::Valid | SpecStatus::Warnings | SpecStatus::Errors => {}
+            }
+        }
+        counts
+    }
+
+    /// Whether a run with `error_count` specs with errors, and these, failed.
+    fn fail_with(&self, error_count: usize) -> bool {
+        error_count + self.unparsable + self.uncollected > 0
+    }
+}
+
+impl From<Outcome> for SpecStatus {
+    /// The status of a spec whose validation came out as `outcome`.
+    fn from(outcome: Outcome) -> Self {
+        match outcome {
+            Outcome::Clean => Self::Valid,
+            Outcome::Found => Self::Warnings,
+            Outcome::Failed => Self::Errors,
+        }
+    }
+}
+
 /// A listing's counts as "3 valid package(s) and 1 refused package(s)", naming
 /// the invalid and refused counts only when either is not zero.
 #[must_use]
@@ -1884,19 +1966,26 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::SpecsValidated {
                 validated_count,
                 error_count,
-                unparsable_count,
-                uncollected_count,
+                unvalidated,
                 warning_count,
                 other_warning_count,
                 environment,
                 ..
             } => {
-                let mut status = if *error_count + *unparsable_count + *uncollected_count > 0 {
+                // Worded by each status's own word, which is the word a result
+                // row with that status shows, so a count and its rows cannot
+                // drift apart.
+                use SpecStatus::{Ambiguous, Errors, Unlistable, Unparsable, Warnings};
+                let counts = UnvalidatedCounts::of(unvalidated);
+                let (unparsable_count, uncollected_count) = (counts.unparsable, counts.uncollected);
+                let mut status = if counts.fail_with(*error_count) {
                     format!(
-                        "{validated_count} package(s) validated, {error_count} with errors, {warning_count} with warnings, {unparsable_count} unparsable, {uncollected_count} ambiguous or unlistable"
+                        "{validated_count} package(s) validated, {error_count} with {Errors}, {warning_count} with {Warnings}, {unparsable_count} {Unparsable}, {uncollected_count} {Ambiguous} or {Unlistable}"
                     )
                 } else if *warning_count > 0 {
-                    format!("{validated_count} package(s) validated, {warning_count} with warnings")
+                    format!(
+                        "{validated_count} package(s) validated, {warning_count} with {Warnings}"
+                    )
                 } else {
                     format!("{validated_count} package(s) validated successfully")
                 };
@@ -2154,8 +2243,7 @@ impl OperationSuccess {
     pub fn specs_validated(
         validated_count: usize,
         error_count: usize,
-        unparsable_count: usize,
-        uncollected_count: usize,
+        unvalidated: Vec<CollectionRefusal>,
         warning_count: usize,
         other_warning_count: usize,
         environment: String,
@@ -2164,8 +2252,7 @@ impl OperationSuccess {
         OperationSuccess::SpecsValidated {
             validated_count,
             error_count,
-            unparsable_count,
-            uncollected_count,
+            unvalidated,
             warning_count,
             other_warning_count,
             environment,
@@ -2604,13 +2691,12 @@ impl OperationSuccess {
             // error like a spec with errors: the run could not validate it.
             OperationSuccess::SpecsValidated {
                 error_count,
-                unparsable_count,
-                uncollected_count,
+                unvalidated,
                 warning_count,
                 other_warning_count,
                 ..
             } => {
-                if *error_count + *unparsable_count + *uncollected_count > 0 {
+                if UnvalidatedCounts::of(unvalidated).fail_with(*error_count) {
                     Outcome::Failed
                 } else if *warning_count > 0 || *other_warning_count > 0 {
                     Outcome::Found
@@ -5110,8 +5196,7 @@ mod tests {
                 OperationSuccess::SpecsValidated {
                     validated_count: 1,
                     error_count: 2,
-                    unparsable_count: 3,
-                    uncollected_count: 4,
+                    unvalidated: vec![unparsable_spec(), ambiguous_name(), unlistable_directory()],
                     warning_count: 5,
                     other_warning_count: 6,
                     environment: env(),
@@ -5288,13 +5373,58 @@ mod tests {
         OperationSuccess::SpecsValidated {
             validated_count: 3,
             error_count: errors,
-            unparsable_count: 0,
-            uncollected_count: 0,
+            unvalidated: Vec::new(),
             warning_count: warnings,
             other_warning_count: 0,
             environment: "test".to_string(),
             steps_completed: StepCount::new(1, 1),
         }
+    }
+
+    fn unparsable_spec() -> CollectionRefusal {
+        CollectionRefusal::UnloadableSpec(crate::package::port::PackageParseError::new(
+            "/p/broken.yml",
+            crate::package::port::PackageParseKind::Unreadable {
+                reason: "a fifo".to_string(),
+            },
+        ))
+    }
+
+    fn ambiguous_name() -> CollectionRefusal {
+        CollectionRefusal::AmbiguousName {
+            name: "nv".to_string(),
+            paths: vec!["/p/nv.yaml".into(), "/p/nv.yml".into()],
+        }
+    }
+
+    fn unlistable_directory() -> CollectionRefusal {
+        CollectionRefusal::UnlistableDotfilesDirectory(crate::package::port::PackageListError::new(
+            "/d".into(),
+            crate::fs::DirectoryState::Unlistable(std::sync::Arc::new(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied,
+            ))),
+        ))
+    }
+
+    // The summary counts a spec file that could not be loaded apart from a name or
+    // a directory, though all three travel in one list.
+    #[test]
+    fn a_validation_summary_counts_unparsable_specs_apart_from_the_rest() {
+        let success = OperationSuccess::specs_validated(
+            1,
+            0,
+            vec![ambiguous_name(), unparsable_spec(), unlistable_directory()],
+            0,
+            0,
+            "test".to_string(),
+            StepCount::new(1, 1),
+        );
+
+        assert_eq!(
+            success.to_string(),
+            "Spec validation completed in environment 'test': 1 package(s) validated, 0 with \
+             errors, 0 with warnings, 1 unparsable, 2 ambiguous or unlistable"
+        );
     }
 
     fn audited_all(
@@ -5406,8 +5536,7 @@ mod tests {
                 OperationSuccess::specs_validated(
                     3,
                     0,
-                    0,
-                    0,
+                    Vec::new(),
                     0,
                     1,
                     "test".to_string(),
@@ -5422,8 +5551,7 @@ mod tests {
                 OperationSuccess::specs_validated(
                     3,
                     0,
-                    1,
-                    0,
+                    vec![unparsable_spec()],
                     0,
                     0,
                     "test".to_string(),
@@ -5436,8 +5564,20 @@ mod tests {
                 OperationSuccess::specs_validated(
                     3,
                     0,
+                    vec![ambiguous_name()],
                     0,
-                    1,
+                    0,
+                    "test".to_string(),
+                    StepCount::new(1, 1),
+                ),
+                Outcome::Failed,
+            ),
+            (
+                "a dotfiles directory that could not be listed",
+                OperationSuccess::specs_validated(
+                    3,
+                    0,
+                    vec![unlistable_directory()],
                     0,
                     0,
                     "test".to_string(),
