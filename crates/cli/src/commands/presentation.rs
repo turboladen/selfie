@@ -1,6 +1,8 @@
 //! How commands lay out what they print: tables, field styling, and the
 //! report for a package that does not support the current environment.
 
+use std::borrow::Cow;
+
 use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 
@@ -14,6 +16,40 @@ pub(crate) fn create_formatted_table() -> Table {
         .load_style(presets::UTF8_FULL_CONDENSED.with_rounded_corners())
         .set_content_arrangement(ContentArrangement::Dynamic);
     table
+}
+
+/// How a table row turned out, which decides its marker.
+pub(crate) enum RowResult {
+    Success,
+    Failure,
+    Warning,
+}
+
+/// The marker cell for a row.
+pub(crate) fn row_marker(result: &RowResult, use_colors: bool) -> Cow<'static, str> {
+    match result {
+        RowResult::Success => {
+            if use_colors {
+                style("✓").green().bold().to_string().into()
+            } else {
+                "✓".into()
+            }
+        }
+        RowResult::Failure => {
+            if use_colors {
+                style("✗").red().bold().to_string().into()
+            } else {
+                "✗".into()
+            }
+        }
+        RowResult::Warning => {
+            if use_colors {
+                style("⚠").yellow().bold().to_string().into()
+            } else {
+                "⚠".into()
+            }
+        }
+    }
 }
 
 /// Environment names in the order given, which is the order the spec file gives
