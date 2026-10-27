@@ -122,20 +122,50 @@ impl<'p> PackageCollisions<'p> {
     }
 }
 
-/// Classify `entry` for `purpose`, or refuse it with the warning it calls for.
-///
-/// Reads what is at the target and, for a template entry, the template; runs no
-/// command. `base_dir` is the directory of the package file the entry came from,
-/// and an entry among `collisions` is refused.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn classify_entry<'e, F: FileSystem>(
-    filesystem: &F,
+/// An entry that passed every check decidable from the entry, its package and
+/// the home directory alone, before anything at its target or in its package is
+/// read.
+pub(super) struct Planned<'e> {
+    /// Where the entry's content comes from.
+    pub(super) content: PlannedContent<'e>,
+    /// The expanded target, which the target rule accepted.
+    pub(super) target: TargetPath,
+    /// How events name the source.
+    pub(super) event_source: DotfileSource,
+}
+
+/// Where a [`Planned`] entry's content comes from.
+pub(super) enum PlannedContent<'e> {
+    /// A file in the package repository.
+    RepoFile {
+        /// The entry's `source` as the package file spells it.
+        source: &'e str,
+        /// `source` resolved against the package file's directory, and inside it.
+        path: PathBuf,
+    },
+    /// A template in the package repository, rendered by running commands.
+    Template {
+        /// The template as the package file spells it.
+        source: &'e str,
+        /// The template resolved against the package file's directory, and
+        /// inside it.
+        path: PathBuf,
+    },
+    /// A command's output.
+    Provider,
+}
+
+/// Run the checks [`classify_entry`] makes before reading anything, or refuse
+/// `entry` with the warning it calls for. Reads nothing but `home`'s answer,
+/// and spells the entry as its events will.
+pub(super) fn plan_entry<'e, H: HomeDir + ?Sized>(
+    home: &H,
     base_dir: &Path,
     source_base: Option<&SourceBase>,
     scoped: ScopedEntry<'e>,
     collisions: &PackageCollisions<'_>,
     purpose: Purpose,
-) -> Result<Classified<'e>, Refusal> {
+) -> Result<Planned<'e>, Refusal> {
     let entry = scoped.entry;
 
     // First, so every entry sharing the target is refused with the same reason
@@ -191,10 +221,10 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
     // The one target rule. A relative target would write relative to CWD, which is
     // surprising and potentially dangerous; a `~user/…` one names a home directory
     // selfie does not resolve.
-    let target = deploy_target(filesystem, entry.target())
+    let target = deploy_target(home, entry.target())
         .map_err(|rejection| target_refusal(entry.target(), rejection))?;
 
-    match content {
+    let (event_source, content) = match content {
         ContentSource::RepoFile(source) => {
             let Some(source_path) = within_package(base_dir, source) else {
                 return Err(Refusal::found(
@@ -202,7 +232,76 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
                     format!("Skipping '{source}': source path escapes YAML base directory"),
                 ));
             };
+            (
+                file_source(source_base, &source_path),
+                PlannedContent::RepoFile {
+                    source,
+                    path: source_path,
+                },
+            )
+        }
+        // Refused, under either purpose: nothing has run, so nothing failed to
+        // resolve.
+        ContentSource::Template { source, vars } => {
+            let Some(path) = within_package(base_dir, source) else {
+                return Err(Refusal::found(
+                    (Condition::Escapes, Location::Template),
+                    format!(
+                        "Skipping '{}': dotfile template '{source}' escapes the package \
+                         directory",
+                        entry.target()
+                    ),
+                ));
+            };
+            let event_source = template_source(source_base, &path, vars.keys().cloned().collect());
+            (event_source, PlannedContent::Template { source, path })
+        }
+        ContentSource::Provider(command) => (
+            DotfileSource::Command(command.to_string()),
+            PlannedContent::Provider,
+        ),
+    };
 
+    Ok(Planned {
+        content,
+        target,
+        event_source,
+    })
+}
+
+/// Classify `entry` for `purpose`, or refuse it with the warning it calls for.
+///
+/// Reads what is at the target and, for a template entry, the template; runs no
+/// command. `base_dir` is the directory of the package file the entry came from,
+/// and an entry among `collisions` is refused.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn classify_entry<'e, F: FileSystem>(
+    filesystem: &F,
+    base_dir: &Path,
+    source_base: Option<&SourceBase>,
+    scoped: ScopedEntry<'e>,
+    collisions: &PackageCollisions<'_>,
+    purpose: Purpose,
+) -> Result<Classified<'e>, Refusal> {
+    let entry = scoped.entry;
+    let Planned {
+        content,
+        target,
+        event_source,
+    } = plan_entry(
+        filesystem,
+        base_dir,
+        source_base,
+        scoped,
+        collisions,
+        purpose,
+    )?;
+
+    match content {
+        PlannedContent::RepoFile {
+            source,
+            path: source_path,
+        } => {
             // Ahead of every read of the target, not merely ahead of the write.
             // Reading a fifo blocks until a writer opens it, and a character device
             // would be read from, then written to. A symlink is refused whatever it
@@ -216,40 +315,20 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
 
             Ok(Classified::RepoFile(RepoFile {
                 source,
-                event_source: file_source(source_base, &source_path),
+                event_source,
                 source_path,
                 target,
             }))
         }
-        secret @ (ContentSource::Template { .. } | ContentSource::Provider(_)) => {
-            // Decided from the entry alone, so it is asked after the target rule and
-            // ahead of anything that looks at the file system.
-            //
-            // The template is read here too, which runs nothing, so a template
-            // that is missing, unreadable or a fifo is refused by a check and a
-            // dry run exactly where the deploy would refuse it.
-            let event_source = match secret {
-                ContentSource::Template { source, vars } => {
-                    // Refused, under either purpose: nothing has run, so nothing
-                    // failed to resolve.
-                    let Some(path) = within_package(base_dir, source) else {
-                        return Err(Refusal::found(
-                            (Condition::Escapes, Location::Template),
-                            format!(
-                                "Skipping '{}': dotfile template '{source}' escapes the package \
-                                 directory",
-                                entry.target()
-                            ),
-                        ));
-                    };
-                    if let Err(e) = read_template(filesystem, source, &path) {
-                        return Err(e.refusal(entry.target()));
-                    }
-                    template_source(source_base, &path, vars.keys().cloned().collect())
-                }
-                ContentSource::Provider(command) => DotfileSource::Command(command.to_string()),
-                ContentSource::RepoFile(_) => unreachable!("a repository file takes the arm above"),
-            };
+        secret @ (PlannedContent::Template { .. } | PlannedContent::Provider) => {
+            // The template is read here, which runs nothing, so a template that
+            // is missing, unreadable or a fifo is refused by a check and a dry run
+            // exactly where the deploy would refuse it.
+            if let PlannedContent::Template { source, path } = &secret
+                && let Err(e) = read_template(filesystem, source, path)
+            {
+                return Err(e.refusal(entry.target()));
+            }
 
             let link = match purpose {
                 Purpose::Deploy => deployable_secret_target(filesystem, entry.target(), &target)?,
