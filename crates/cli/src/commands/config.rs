@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use selfie::{
     config::{YamlLoader, loader::ConfigLoader},
     fs::FileSystem,
@@ -90,10 +91,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         report_with_style(
             display,
             "package_directory:",
-            raw_config
-                .package_directory(fs)
-                .unwrap_or_default()
-                .display(),
+            DisplayPath::of(&raw_config.package_directory(fs).unwrap_or_default()),
         );
         // The directories in effect: the configured value, or the default the
         // file leaves selfie to derive. Whether either exists is reported in the
@@ -102,16 +100,13 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         report_with_style(
             display,
             "dotfiles_directory:",
-            raw_config
-                .dotfiles_directory(fs)
-                .unwrap_or_default()
-                .display(),
+            DisplayPath::of(&raw_config.dotfiles_directory(fs).unwrap_or_default()),
         );
         report_with_style(
             display,
             "state_directory:",
             match selfie::fs::state_directory(fs, raw_config.state_directory(fs).as_deref()) {
-                Ok(directory) => directory.display().to_string(),
+                Ok(directory) => DisplayPath::of(&directory).to_string(),
                 Err(error) => format!("(unresolved: {error})"),
             },
         );

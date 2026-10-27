@@ -5,6 +5,7 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
+use crate::terminal_text::DisplayPath;
 use selfie::dotfile_service::track::Tracker;
 use std::collections::HashSet;
 
@@ -209,7 +210,7 @@ fn report_existing_tracker(
             } else {
                 display.print_suggestion(format!(
                     "Edit {} to correct the target.",
-                    spec_path.display()
+                    DisplayPath::of(spec_path)
                 ));
             }
             return Exit::Failed;
@@ -345,7 +346,7 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
         // one gets.
         DirectoryState::Directory => format!(
             "The dotfiles directory at {} could not be listed, so selfie cannot tell whether a spec in it already tracks this file: {error}",
-            path.display()
+            DisplayPath::of(path)
         ),
         // An empty path is silent unless the user named it, which is the rule
         // `dotfiles_directory_is_expected` states: an empty default is the
@@ -366,7 +367,7 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
             // path followed by another.
             let mut sentence = format!(
                 "The dotfiles directory at {} {}. A standalone dotfile cannot be tracked until that is fixed.",
-                path.display(),
+                DisplayPath::of(path),
                 reason.clause()
             );
             if let Some(command) = reason.remedy(path) {
@@ -377,11 +378,11 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
         }
         DirectoryState::Unlistable(_) => format!(
             "The dotfiles directory could not be listed, so selfie cannot tell whether a spec in it already tracks this file: {} — {error}",
-            path.display()
+            DisplayPath::of(path)
         ),
         DirectoryState::Unknown(_) => format!(
             "The dotfiles directory could not be checked: {} — {error}",
-            path.display()
+            DisplayPath::of(path)
         ),
     })
 }

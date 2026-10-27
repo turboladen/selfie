@@ -15,7 +15,9 @@ mod snippet;
 mod source_paths;
 mod status_style;
 mod tables;
+mod terminal_text;
 
+use crate::terminal_text::DisplayPath;
 use std::process;
 
 use clap::{CommandFactory, Parser};
@@ -180,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
             Err(ConfigLoadError::NotFound { searched }) => {
                 config_debug = Some(format!(
                     "No configuration file in {}; building from flags",
-                    searched.display()
+                    DisplayPath::of(&searched)
                 ));
                 // No file, so no `cli:` section to read and nothing to report.
                 (

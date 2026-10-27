@@ -5,6 +5,7 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
+use crate::terminal_text::DisplayPath;
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -347,7 +348,7 @@ impl EventProcessor {
                             // the answer, so this renders it rather than looking again.
                             self.display.print_error(format!(
                                 "Package directory at {} {}",
-                                listing.path().display(),
+                                DisplayPath::of(listing.path()),
                                 listing.clause()
                             ));
                             // `selfie config` requires a subcommand and has only
@@ -411,7 +412,7 @@ impl EventProcessor {
                                     if let Some(at) = failure.location() {
                                         self.display.print_error_context(&format!(
                                             "{}:{}:{}",
-                                            failed_file.display(),
+                                            DisplayPath::of(&failed_file),
                                             at.line(),
                                             at.column()
                                         ));
@@ -617,7 +618,10 @@ impl EventProcessor {
                     package_name
                 ));
                 for target in &dotfile_targets {
-                    self.display.print_info(format!("  - {}", target));
+                    self.display.print_info(format!(
+                        "  - {}",
+                        crate::display_manager::shorten_path(target)
+                    ));
                 }
                 self.display.print_info(
                     "  These files were NOT removed. Delete them manually if no longer needed.",

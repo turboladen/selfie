@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
 use selfie::{
     namespace::{self, NamespaceValidationError},
@@ -65,9 +66,10 @@ pub(crate) async fn handle_create(
         Ok(PackageNameResult::EditExisting(path)) => {
             display.print_run_note(format!(
                 "Opening existing package for editing at {}",
-                path.display()
+                DisplayPath::of(&path)
             ));
-            let success_message = format!("Package editing completed at {}", path.display());
+            let success_message =
+                format!("Package editing completed at {}", DisplayPath::of(&path));
             return common::open_editor(&path, display, Some(success_message));
         }
         // A create that wrote nothing did not do what it was asked, so a script
@@ -118,7 +120,7 @@ pub(crate) async fn handle_create(
         Ok(true) => {
             let success_message = format!(
                 "Package '{created_name}' created and saved at {}",
-                file_path.display()
+                DisplayPath::of(&file_path)
             );
             created_exit.max(common::open_editor(
                 &file_path,

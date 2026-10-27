@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 use selfie::package::{
@@ -86,7 +87,10 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
     // Show invalid packages
     for invalid in &data.invalid_packages {
         // One sentence, styled or not, so the two branches cannot drift apart.
-        let text = format!("Invalid: {} — {invalid}", invalid.package_path().display());
+        let text = format!(
+            "Invalid: {} — {invalid}",
+            DisplayPath::of(invalid.package_path())
+        );
         let msg = if use_colors {
             format!("  {} {}", style("⚠").yellow(), style(text).dim())
         } else {
@@ -99,7 +103,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
         let text = format!(
             "Refused: {} ({}) — {}",
             refused.package_name,
-            refused.path.display(),
+            DisplayPath::of(&refused.path),
             refused.reason
         );
         let msg = if use_colors {

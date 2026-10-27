@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use console::style;
 use selfie::package::{event, service::PackageService};
 
@@ -187,7 +188,11 @@ fn handle_list_event(
                 add(
                     &RowResult::Failure,
                     &refused.package_name,
-                    failed(format!("refused ({}): {}", shown.display(), refused.reason)),
+                    failed(format!(
+                        "refused ({}): {}",
+                        DisplayPath::of(shown),
+                        refused.reason
+                    )),
                     None,
                 );
             }

@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use selfie::package::{
     event::{
         CollectionRefusal, OperationResult, OperationSuccess, Outcome, PackageEvent,
@@ -237,7 +238,7 @@ impl Unvalidated {
                 spec: error.display_name(),
                 status: refusal.status(),
                 issues: error.location().map(|at| at.to_string()),
-                label: error.package_path().display().to_string(),
+                label: DisplayPath::of(error.package_path()).to_string(),
                 field: Some(error.kind().label()),
                 message: error.reason(),
                 location: error.location(),
@@ -255,10 +256,10 @@ impl Unvalidated {
             // which.
             CollectionRefusal::UnlistableDotfilesDirectory(error)
             | CollectionRefusal::UncheckableDotfilesDirectory(error) => Self {
-                spec: error.path().display().to_string(),
+                spec: DisplayPath::of(error.path()).to_string(),
                 status: refusal.status(),
                 issues: None,
-                label: error.path().display().to_string(),
+                label: DisplayPath::of(error.path()).to_string(),
                 field: None,
                 message: refusal.sentence(),
                 location: None,

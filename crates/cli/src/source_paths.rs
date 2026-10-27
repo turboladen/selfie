@@ -4,7 +4,7 @@ use std::path::Path;
 
 use selfie::package::event::{BaseKind, DotfileSource, RepoPath};
 
-use crate::display_manager::{Channel, DisplayManager, shorten_path};
+use crate::display_manager::{Channel, DisplayManager, DisplayPath, shorten_path};
 
 /// The line naming a base directory, for relative source paths printed below
 /// it: "Packages: ~/…" or "Dotfiles: ~/…".
@@ -13,16 +13,13 @@ pub(crate) fn base_directory_line(kind: BaseKind, directory: &Path) -> String {
         BaseKind::PackageDirectory => "Packages",
         BaseKind::DotfilesDirectory => "Dotfiles",
     };
-    format!(
-        "{label}: {}",
-        shorten_path(&directory.display().to_string())
-    )
+    format!("{label}: {}", shorten_path(&directory.to_string_lossy()))
 }
 
 /// A source as one line shows it once its base directory is known: the path
 /// relative to the base with any var names, or the command. A file under no
 /// known base is shown in full, and a recorded spelling is marked as one.
-pub(crate) fn relative_text(source: &DotfileSource) -> String {
+pub(crate) fn relative_text(source: &DotfileSource) -> DisplayPath {
     match source {
         DotfileSource::File(RepoPath { base: None, .. })
         | DotfileSource::Template {
@@ -30,11 +27,13 @@ pub(crate) fn relative_text(source: &DotfileSource) -> String {
             ..
         } => shorten_path(&source.relative().to_string()),
         DotfileSource::File(_) | DotfileSource::Template { .. } | DotfileSource::Command(_) => {
-            source.relative().to_string()
+            DisplayPath::new(&source.relative().to_string())
         }
         // No base is known, so the line says so: under a heading printed for an
         // earlier line, a bare spelling would read as relative to it.
-        DotfileSource::Recorded(spelling) => format!("{spelling} (as recorded, directory unknown)"),
+        DotfileSource::Recorded(spelling) => {
+            DisplayPath::new(&format!("{spelling} (as recorded, directory unknown)"))
+        }
     }
 }
 
@@ -45,7 +44,11 @@ pub(crate) fn relative_text(source: &DotfileSource) -> String {
 // never guesses. Apply and drift walk every package-directory spec before any
 // standalone one, so each heading prints once; were that order to change, a
 // heading would print again instead of a path showing under the wrong one.
-pub(crate) fn label(display: &DisplayManager, channel: Channel, source: &DotfileSource) -> String {
+pub(crate) fn label(
+    display: &DisplayManager,
+    channel: Channel,
+    source: &DotfileSource,
+) -> DisplayPath {
     if let Some(base) = source.base()
         && display.swap_heading(channel, base.kind)
     {
@@ -102,7 +105,7 @@ mod tests {
     }
 
     fn out(display: &DisplayManager, source: &DotfileSource) -> String {
-        label(display, Channel::Stdout, source)
+        label(display, Channel::Stdout, source).to_string()
     }
 
     #[test]
@@ -225,7 +228,42 @@ mod tests {
             },
             vars: vec!["email".to_string()],
         };
-        assert_eq!(relative_text(&source), "git/config.tmpl (vars: email)");
+        assert_eq!(
+            relative_text(&source).to_string(),
+            "git/config.tmpl (vars: email)"
+        );
+    }
+
+    // Every kind of source shows a control character as its escape, so a file
+    // name or command cannot act on the terminal through a row.
+    #[test]
+    fn a_source_shows_control_characters_as_escapes() {
+        let name = "a\u{1b}]0;pwned\u{7}b\u{1b}[2Jc.conf";
+        let sources = [
+            file(BaseKind::PackageDirectory, "/r/p", name),
+            DotfileSource::File(RepoPath {
+                base: None,
+                path: PathBuf::from(format!("/elsewhere/{name}")),
+            }),
+            DotfileSource::Template {
+                file: RepoPath {
+                    base: None,
+                    path: PathBuf::from(name),
+                },
+                vars: vec!["email".to_string()],
+            },
+            DotfileSource::Command(format!("cat {name}")),
+            DotfileSource::Recorded(name.to_string()),
+        ];
+
+        for source in &sources {
+            let shown = relative_text(source).to_string();
+            assert!(!shown.chars().any(char::is_control), "{shown:?}");
+            assert!(
+                shown.contains("a\\u{1b}]0;pwned\\u{7}b\\u{1b}[2Jc.conf"),
+                "{shown:?}"
+            );
+        }
     }
 
     #[test]
@@ -234,6 +272,6 @@ mod tests {
             base: None,
             path: PathBuf::from("/elsewhere/x"),
         });
-        assert_eq!(relative_text(&source), "/elsewhere/x");
+        assert_eq!(relative_text(&source).to_string(), "/elsewhere/x");
     }
 }

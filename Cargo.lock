@@ -2667,6 +2667,7 @@ dependencies = [
  "etcetera",
  "futures",
  "human-panic",
+ "icu_properties",
  "indicatif",
  "mockall",
  "nix",

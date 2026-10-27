@@ -143,7 +143,7 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
                 (None, _) => "(shared)".to_string(),
             },
             crate::commands::dotfiles::list::source_cell(&dotfile.entry),
-            shorten_path(dotfile.entry.target()),
+            shorten_path(dotfile.entry.target()).to_string(),
         ]);
     }
     display.println(format!("\n{table}"));

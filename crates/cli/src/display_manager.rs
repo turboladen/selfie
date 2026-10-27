@@ -15,15 +15,16 @@ use selfie::package::event::{BaseKind, StepEnding, StepId};
 use tokio_util::sync::CancellationToken;
 
 use crate::event_processor::Exit;
+pub(crate) use crate::terminal_text::DisplayPath;
 
-/// Shorten a path for display by replacing the home directory with `~`.
+/// A path as the terminal shows it: the home directory replaced with `~`, and
+/// its text escaped as [`DisplayPath`] escapes it.
 ///
-/// Only a path inside the home directory is shortened; anything else comes back
-/// unchanged.
-pub(crate) fn shorten_path(path: &str) -> String {
+/// Only a path inside the home directory is shortened.
+pub(crate) fn shorten_path(path: &str) -> DisplayPath {
     match std::env::var("HOME") {
-        Ok(home) => shorten_path_under(path, &home),
-        Err(_) => path.to_string(),
+        Ok(home) => DisplayPath::new(&shorten_path_under(path, &home)),
+        Err(_) => DisplayPath::new(path),
     }
 }
 
@@ -38,7 +39,7 @@ fn shorten_path_under(path: &str, home: &str) -> String {
     }
     match std::path::Path::new(path).strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", rest.to_string_lossy()),
         Err(_) => path.to_string(),
     }
 }

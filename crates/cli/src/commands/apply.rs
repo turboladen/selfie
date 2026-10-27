@@ -19,7 +19,7 @@ use crate::{
     cli::ApplyArgs,
     commands::common::create_dotfile_service,
     config::CliConfig,
-    display_manager::{Channel, DisplayManager, PromptFailure, shorten_path},
+    display_manager::{Channel, DisplayManager, DisplayPath, PromptFailure, shorten_path},
     event_processor::{EventProcessor, Exit},
     source_paths::{force_heading, relative_text},
 };
@@ -235,7 +235,7 @@ impl InteractiveConflictResolver {
     // Inside the block, not through the event processor's headings: this runs on
     // the service's thread while the processor may still be printing lines queued
     // before it, each under its own heading.
-    fn print_source(&self, source: &DotfileSource, short_target: &str) {
+    fn print_source(&self, source: &DotfileSource, short_target: &DisplayPath) {
         let _block = self.display.hold_block();
         if let Some(base) = source.base() {
             force_heading(&self.display, Channel::Stdout, base.kind, &base.directory);
@@ -443,7 +443,7 @@ mod tests {
             path: "bat/config".into(),
         });
 
-        resolver.print_source(&source, "~/.config/bat/config");
+        resolver.print_source(&source, &DisplayPath::new("~/.config/bat/config"));
 
         let lines: Vec<String> = display
             .printed()
@@ -479,7 +479,9 @@ mod tests {
         });
 
         let held = display.hold_block();
-        let printer = std::thread::spawn(move || resolver.print_source(&source, "~/.zshrc"));
+        let printer = std::thread::spawn(move || {
+            resolver.print_source(&source, &DisplayPath::new("~/.zshrc"))
+        });
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(display.printed().is_empty(), "{:?}", display.printed());
         drop(held);

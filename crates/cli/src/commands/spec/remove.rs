@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::package::{
     event::{OperationResult, PackageEvent},
@@ -59,7 +60,7 @@ pub(crate) async fn handle_remove(
     };
 
     display.print_run_note(format!("Package '{package_name}' found at:"));
-    display.print_run_note(format!("  {}", package_blob.file_path().display()));
+    display.print_run_note(format!("  {}", DisplayPath::of(package_blob.file_path())));
 
     // `checked` is what separates "nothing depends on this" from "selfie does not
     // know". Both used to arrive here as an empty list, and the line below then
@@ -157,7 +158,7 @@ pub(crate) async fn handle_remove(
                     display.print_success(format!(
                         "Package '{}' removed successfully from {}",
                         package_name,
-                        package_blob.file_path().display()
+                        DisplayPath::of(package_blob.file_path())
                     ));
 
                     if !dependent_packages.is_empty() {

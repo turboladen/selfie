@@ -15,7 +15,7 @@ use tracing::info;
 use crate::{
     commands::{common::create_dotfile_service, presentation::create_formatted_table},
     config::CliConfig,
-    display_manager::{DisplayManager, shorten_path},
+    display_manager::{DisplayManager, DisplayPath, shorten_path},
     event_processor::{EventProcessor, Exit},
     source_paths::base_directory_line,
 };
@@ -70,7 +70,7 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
         display.print_warning(format!(
             "Cannot read the dotfiles in '{}' ({}): {}",
             refused.package_name,
-            refused.path.display(),
+            DisplayPath::of(&refused.path),
             refused.reason
         ));
     }
@@ -94,7 +94,7 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
                 pkg.name().to_string(),
                 scope.unwrap_or("(shared)").to_string(),
                 source_cell(entry),
-                shorten_path(entry.target()),
+                shorten_path(entry.target()).to_string(),
             ]);
             total += 1;
         }
@@ -117,9 +117,10 @@ pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> String {
     // listing that hid it would leave the user looking for a dotfile the table
     // says does not exist. The brief form, since a cell cannot hold the anchor
     // advice.
-    entry
+    let text = entry
         .content_source()
-        .map_or_else(|invalid| invalid.brief(), |source| source.to_string())
+        .map_or_else(|invalid| invalid.brief(), |source| source.to_string());
+    DisplayPath::new(&text).to_string()
 }
 
 /// Print the base directories above the table so relative source paths have context.

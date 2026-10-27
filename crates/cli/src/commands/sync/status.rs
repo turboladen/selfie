@@ -49,7 +49,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             behind,
             ..
         } => {
-            let short_root = shorten_path(&repo_root.display().to_string());
+            let short_root = shorten_path(&repo_root.to_string_lossy());
             let branch_str = branch.as_deref().unwrap_or("(detached)");
 
             let total_changes = modified_count + staged_count + untracked_count + deleted_count;
