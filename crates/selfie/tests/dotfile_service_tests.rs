@@ -362,6 +362,17 @@ impl TestDirs {
         self
     }
 
+    // The configuration every service built from these dirs shares.
+    fn config(&self) -> selfie::config::SelfieConfig {
+        SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(&self.package_dir)
+            .dotfiles_directory(self.dotfiles_dir.clone())
+            .state_directory(self.state_dir.clone())
+            .stop_on_error(self.stop_on_error)
+            .build()
+    }
+
     // Create a service over both directories, answering provider commands with
     // a runner that knows none.
     fn service(
@@ -403,33 +414,7 @@ impl TestDirs {
     where
         CR: selfie::commands::CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
     {
-        let fs = RealFileSystem;
-        let config = SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory(&self.package_dir)
-            .dotfiles_directory(self.dotfiles_dir.clone())
-            .state_directory(self.state_dir.clone())
-            .stop_on_error(self.stop_on_error)
-            .build();
-        let repo = YamlPackageRepository::new(
-            fs,
-            config.package_directory().clone(),
-            SpecOrigin::PackageDirectory,
-        );
-        let dotfiles_repo = YamlPackageRepository::new(
-            fs,
-            self.dotfiles_dir.clone(),
-            SpecOrigin::DotfilesDirectory,
-        );
-        DotfileServiceImpl::new(
-            repo,
-            dotfiles_repo,
-            fs,
-            runner,
-            config,
-            token,
-            self.sudo_policy,
-        )
+        self.service_over(RealFileSystem, RealFileSystem, runner, token)
     }
 
     // As [`service_with_runner`](Self::service_with_runner), but with a caller-supplied
@@ -457,20 +442,48 @@ impl TestDirs {
         F: selfie::fs::FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
         CR: selfie::commands::CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
     {
-        let config = SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory(&self.package_dir)
-            .dotfiles_directory(self.dotfiles_dir.clone())
-            .state_directory(self.state_dir.clone())
-            .stop_on_error(self.stop_on_error)
-            .build();
-        let repo = YamlPackageRepository::new(
+        self.service_over(RealFileSystem, fs, runner, token)
+    }
+
+    // A service whose two repositories read and write through `fs`, for a test
+    // that has to act on a spec write. Provider commands answer from a runner that
+    // knows none.
+    fn service_with_repository_fs<F>(
+        &self,
+        fs: F,
+    ) -> DotfileServiceImpl<YamlPackageRepository<F>, RealFileSystem, FakeCommandRunner, RunningAs>
+    where
+        F: selfie::fs::FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
+    {
+        self.service_over(
+            fs,
             RealFileSystem,
+            FakeCommandRunner::new(),
+            CancellationToken::new(),
+        )
+    }
+
+    // Both repositories over `repository_fs`, the service itself over `fs`.
+    fn service_over<RF, F, CR>(
+        &self,
+        repository_fs: RF,
+        fs: F,
+        runner: CR,
+        token: CancellationToken,
+    ) -> DotfileServiceImpl<YamlPackageRepository<RF>, F, CR, RunningAs>
+    where
+        RF: selfie::fs::FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
+        F: selfie::fs::FileSystem + Clone + std::fmt::Debug + Send + Sync + 'static,
+        CR: selfie::commands::CommandRunner + Clone + std::fmt::Debug + Send + Sync + 'static,
+    {
+        let config = self.config();
+        let repo = YamlPackageRepository::new(
+            repository_fs.clone(),
             config.package_directory().clone(),
             SpecOrigin::PackageDirectory,
         );
         let dotfiles_repo = YamlPackageRepository::new(
-            RealFileSystem,
+            repository_fs,
             self.dotfiles_dir.clone(),
             SpecOrigin::DotfilesDirectory,
         );
@@ -494,33 +507,7 @@ impl TestDirs {
         FakeCommandRunner,
         RunningAs,
     > {
-        let fs = RealFileSystem;
-        let config = SelfieConfigBuilder::default()
-            .environment("test")
-            .package_directory(&self.package_dir)
-            .dotfiles_directory(self.dotfiles_dir.clone())
-            .state_directory(self.state_dir.clone())
-            .stop_on_error(self.stop_on_error)
-            .build();
-        let package_repo = YamlPackageRepository::new(
-            fs,
-            config.package_directory().clone(),
-            SpecOrigin::PackageDirectory,
-        );
-        let dotfiles_repo = YamlPackageRepository::new(
-            fs,
-            self.dotfiles_dir.clone(),
-            SpecOrigin::DotfilesDirectory,
-        );
-        DotfileServiceImpl::new(
-            package_repo,
-            dotfiles_repo,
-            fs,
-            FakeCommandRunner::new(),
-            config,
-            CancellationToken::new(),
-            self.sudo_policy,
-        )
+        self.service()
     }
 
     // Both directories, with `dotfiles_directory` left unset. `dotfiles_dir` is
@@ -14224,6 +14211,50 @@ mod track_entry_points_agree {
             )),
             "{failure}"
         );
+        // Refused before the copy: nothing was written, so there is nothing to
+        // have removed.
+        assert!(
+            !dirs.dotfiles_dir.join("fresh").exists(),
+            "the copy was written"
+        );
+        assert!(!failure.contains("was removed"), "{failure}");
+    }
+
+    // A dangling link at the new spec's path takes it as surely as a file does,
+    // and is refused before the copy is written.
+    #[tokio::test]
+    async fn a_dangling_link_at_the_spec_path_is_refused_before_any_write() {
+        let dirs = TestDirs::new();
+        let spec = dirs.dotfiles_dir.join("fresh.yml");
+        std::os::unix::fs::symlink(dirs.dotfiles_dir.join("nowhere.yml"), &spec).unwrap();
+        let target = dirs.target_dir.join("config");
+        std::fs::write(&target, "--theme=ansi").unwrap();
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("fresh", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let failure = failure_message(&events);
+        assert!(
+            failure.starts_with(&format!(
+                "Something is already at {}, where the spec for 'fresh' would be written",
+                spec.display()
+            )),
+            "{failure}"
+        );
+        assert!(
+            !dirs.dotfiles_dir.join("fresh").exists(),
+            "the copy was written"
+        );
+        assert!(
+            std::fs::symlink_metadata(&spec)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     // The control: with a target both entry points accept, both succeed. Without
@@ -20323,6 +20354,71 @@ mod an_appearing_target_is_kept {
             !dirs.dotfiles_dir.join("gemrc.yml").exists(),
             "a refused copy still wrote the spec"
         );
+    }
+
+    // The spec a new standalone track writes is checked absent too. One that
+    // appears before the spec lands is kept byte for byte, the track fails
+    // saying something appeared there, and the copy track made is removed. The
+    // copy's directory stays, empty, as on every failed save.
+    #[tokio::test]
+    async fn track_keeps_a_spec_that_appears_where_its_spec_goes() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("gemrc");
+        std::fs::write(&target, "gem: --no-document").unwrap();
+        let spec = dirs.dotfiles_dir.join("gemrc.yml");
+        let fs = PlantsBeforeWrite::new(&spec, Plant::File("name: someone-elses\n", 0o644));
+
+        let events = collect_events(
+            dirs.service_with_repository_fs(fs.clone())
+                .track_standalone("gemrc", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            fs.planted(),
+            "control: the spec write was reached and the plant made"
+        );
+        let failure = failure_message(&events);
+        let named = format!(
+            "Cannot save the spec: something appeared at {} while selfie was writing the spec \
+             there; nothing was written over it. Run the command again to see what is there. ",
+            spec.display()
+        );
+        assert!(failure.starts_with(&named), "{failure}");
+        assert_eq!(
+            failure.matches(spec.to_str().unwrap()).count(),
+            1,
+            "the spec must be named exactly once: {failure}"
+        );
+        // The occupant may be another track's spec for the same name, so the
+        // refusal must not advise removing it.
+        assert!(!failure.contains("Remove it first"), "{failure}");
+        let copy = dirs.dotfiles_dir.join("gemrc").join("gemrc");
+        assert!(
+            failure.contains(&format!("The copy at '{}' was removed.", copy.display())),
+            "{failure}"
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&spec).unwrap(),
+            "name: someone-elses\n"
+        );
+        assert_eq!(
+            fs.planted_inode(),
+            Some(std::fs::symlink_metadata(&spec).unwrap().ino()),
+            "the planted spec was replaced by a file with the same bytes"
+        );
+        assert_eq!(
+            std::fs::read_dir(dirs.dotfiles_dir.join("gemrc"))
+                .unwrap()
+                .count(),
+            0,
+            "the copy's directory must be left empty"
+        );
+        assert!(!recorded(&dirs, &target), "a refused track was recorded");
     }
 
     #[tokio::test]

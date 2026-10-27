@@ -1493,9 +1493,10 @@ the track names each one it could not check and goes on.
 Those three steps are ordered so a failure leaves nothing half-finished. A spec that cannot be saved
 takes the copy with it: selfie removes the file it had just written, so a retry after fixing the
 cause does not trip over a file you never knowingly created. If that removal fails too, selfie says
-so and names the file to delete. The causes are ordinary ones, a permission problem or a spec
-carrying a key selfie will not rewrite. If the copy itself is refused, no spec is written, so no
-entry ever names a file that is not there.
+so and names the file to delete. The causes are ordinary ones: a permission problem, a spec carrying
+a key selfie will not rewrite, or, for a new spec, something that appeared at the spec's path while
+selfie was writing it, which is left as it is. If the copy itself is refused, no spec is written, so
+no entry ever names a file that is not there.
 
 The deploy state is recorded last, and a failure there is the one case that leaves work in place:
 the copy and the spec entry are both correct and only the record is missing. Selfie says so and
