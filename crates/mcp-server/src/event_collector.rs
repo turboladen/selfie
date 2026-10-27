@@ -370,24 +370,11 @@ fn skip_reason_fields(mut row: Value, reason: &SkipReason) -> Value {
 /// `column` are null for the kinds that carry no location — absent because there
 /// is none, not because nothing was wired.
 fn parse_failure_json(error: &selfie::package::port::PackageParseError) -> Value {
-    use selfie::package::port::PackageParseKind;
-
-    // One match, and no catch-all: a new kind has to state here whether it
-    // reports a location, rather than inheriting `None` from an arm that never
-    // considered it.
-    let (at, reason) = match error.kind() {
-        PackageParseKind::Yaml { cause } => (cause.location(), cause.reason()),
-        other @ (PackageParseKind::Io { .. }
-        | PackageParseKind::Unreadable { .. }
-        | PackageParseKind::IrregularFile { .. }
-        | PackageParseKind::Refused { .. }
-        | PackageParseKind::InvalidName { .. }) => (None, other.to_string()),
-    };
-
+    let at = error.location();
     serde_json::json!({
         "path": error.package_path().display().to_string(),
         "kind": error.kind().label(),
-        "reason": reason,
+        "reason": error.reason(),
         "line": at.map(|at| at.line()),
         "column": at.map(|at| at.column()),
     })

@@ -1143,6 +1143,35 @@ impl PackageParseError {
     pub fn kind(&self) -> &PackageParseKind {
         &self.kind
     }
+
+    /// Where in the file the failure is, for the kinds that know.
+    #[must_use]
+    pub fn location(&self) -> Option<crate::yaml::SourceLocation> {
+        self.reason_and_location().1
+    }
+
+    /// What went wrong, without the file or the [`location`](Self::location).
+    ///
+    /// Use this where the location has a place of its own; render the error
+    /// itself where it does not.
+    #[must_use]
+    pub fn reason(&self) -> String {
+        self.reason_and_location().0
+    }
+
+    fn reason_and_location(&self) -> (String, Option<crate::yaml::SourceLocation>) {
+        // One match, and no catch-all: a new kind has to state here whether it
+        // reports a location, rather than inheriting `None` from an arm that never
+        // considered it.
+        match &self.kind {
+            PackageParseKind::Yaml { cause } => (cause.reason(), cause.location()),
+            other @ (PackageParseKind::Io { .. }
+            | PackageParseKind::Unreadable { .. }
+            | PackageParseKind::IrregularFile { .. }
+            | PackageParseKind::Refused { .. }
+            | PackageParseKind::InvalidName { .. }) => (other.to_string(), None),
+        }
+    }
 }
 
 /// Why a package file could not be turned into a package.
