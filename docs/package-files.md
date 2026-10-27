@@ -322,8 +322,8 @@ symlink to nothing, is refused, because the directory cannot be created through 
 
 Creating a package refuses too when a file is already at that path and selfie cannot read it. Only a
 name with no file behind it is a create; anything else — a file that will not parse, one selfie
-refused to open, two files claiming the same name — would be overwritten, and the guards above
-cannot see it because the package being written was built in memory rather than read from disk.
+refused to open, two files claiming the same name — is left as it is, and no second file is created
+beside it to claim the same name.
 
 `selfie spec create` and `selfie spec edit` also refuse when the path is already taken, which is not
 the same question as whether the name is. Names are compared ignoring case and extension, so an
@@ -332,7 +332,9 @@ check cannot see is a path the file system matches and selfie's names do not: on
 directory whose name spells the same letters in a different Unicode normalization, such as a
 decomposed `é`, or something created after the name check. So selfie asks the file system about the
 path as well, and declines: the path is already taken by something selfie did not find under that
-name, and selfie will not write over it.
+name, and selfie will not write over it. A symlink at the path counts as taken whether or not it
+points anywhere. Something that appears at the path after that check, while selfie is writing the
+spec, is left as it is, and the command fails saying so; run it again to see what is there.
 
 The rewriting commands also refuse a file selfie could not read back, even though no key is known to
 be wrong with it, and so does apply — a rewrite would delete whatever the file carries that selfie
