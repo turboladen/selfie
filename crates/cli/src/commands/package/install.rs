@@ -105,9 +105,10 @@ fn display_environment_error(
 /// or a recommend.
 fn display_required_by(display: &DisplayManager, required_by: Option<&str>) {
     if let Some(required_by) = required_by {
-        display.print_note(format!(
-            "{}'{required_by}' requires it.",
-            crate::display_manager::INDENT
+        display.print_note(crate::terminal_text::shown!(
+            "{}'{}' requires it.",
+            crate::display_manager::INDENT,
+            crate::terminal_text::Shown::name(required_by)
         ));
     }
 }

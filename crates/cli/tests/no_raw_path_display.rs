@@ -45,6 +45,70 @@ fn no_path_is_displayed_except_through_display_path() {
     );
 }
 
+// A table reaches the terminal only through `SafeTable`, which escapes every
+// cell not marked as selfie's own styling, so only tables.rs may build a
+// comfy-table `Table` directly.
+#[test]
+fn no_table_is_built_except_through_safe_table() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rust_files(&src, &mut files);
+
+    let found: Vec<String> = files
+        .iter()
+        .filter(|file| file.file_name().is_some_and(|name| name != "tables.rs"))
+        .flat_map(|file| {
+            let text = std::fs::read_to_string(file).unwrap();
+            outside_test_modules(&text)
+                .filter(|(_, line)| line.contains("comfy_table"))
+                .map(|(number, line)| {
+                    format!("{}:{number}: {}", file.to_string_lossy(), line.trim())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    assert!(
+        found.is_empty(),
+        "build these tables with tables::SafeTable:\n{}",
+        found.join("\n")
+    );
+}
+
+// Text reaches a styled printer only as a `Shown`, and only terminal_text.rs
+// builds one from a bare string: `shown!` expands to `Shown::assembled` after
+// checking each argument, so a direct call elsewhere skips that check.
+#[test]
+fn no_shown_is_assembled_outside_terminal_text() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rust_files(&src, &mut files);
+
+    let found: Vec<String> = files
+        .iter()
+        .filter(|file| {
+            file.file_name()
+                .is_some_and(|name| name != "terminal_text.rs")
+        })
+        .flat_map(|file| {
+            let text = std::fs::read_to_string(file).unwrap();
+            text.lines()
+                .enumerate()
+                .filter(|(_, line)| line.contains("Shown::assembled"))
+                .map(|(index, line)| {
+                    format!("{}:{}: {}", file.to_string_lossy(), index + 1, line.trim())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    assert!(
+        found.is_empty(),
+        "build these with shown!, Shown::name or Shown::prose:\n{}",
+        found.join("\n")
+    );
+}
+
 // The gate must see what it is meant to forbid: a `.display()` outside a test
 // module is reported, and one inside it is not.
 #[test]

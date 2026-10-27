@@ -1,5 +1,5 @@
-use comfy_table::Table;
-use console::style;
+use crate::tables::{Cell, SafeTable};
+use crate::terminal_text::{Shown, shown};
 use selfie::package::{
     event::{
         DependencyStatus, EnvironmentStatus, EnvironmentStatusData, OperationResult, PackageEvent,
@@ -39,7 +39,7 @@ pub(crate) async fn handle_info(
             match event {
                 PackageEvent::PackageInfoLoaded { package_info, .. } => {
                     let table = create_package_info_table(package_info, config);
-                    display.println(format!("{table}"));
+                    display.println(shown!("{}", table));
                     print_dotfiles(package_info, display);
                     if let Some(reason) = &package_info.refusal_elsewhere {
                         display.print_info(format!(
@@ -52,7 +52,7 @@ pub(crate) async fn handle_info(
                     environment_status, ..
                 } => {
                     let table = create_environment_table(environment_status, config);
-                    display.println(format!("\n{table}"));
+                    display.println(shown!("\n{}", table));
                     true // Handled
                 }
                 PackageEvent::Completed {
@@ -67,59 +67,44 @@ pub(crate) async fn handle_info(
     result.exit
 }
 
-fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig) -> Table {
-    let mut table = presentation::create_formatted_table();
+fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig) -> SafeTable {
+    let mut table = SafeTable::new();
+    let use_colors = config.use_colors();
+    let key = |name: &'static str| Cell::from(format_key(name, use_colors));
 
-    // Helper functions for formatting
-    let format_key_fn = |name: &str| -> String { format_key(name, config.use_colors()) };
-
-    let format_value =
-        |value: &str| -> String { presentation::format_field_value(value, config.use_colors()) };
-
-    // Add the basic package info rows
-    table.add_row(vec![
-        format_key_fn("Name"),
-        format_value(&package_info.name),
-    ]);
+    table.add_row([key("Name"), package_info.name.as_str().into()]);
     if let Some(desc) = &package_info.description {
-        table.add_row(vec![format_key_fn("Description"), format_value(desc)]);
+        table.add_row([key("Description"), Cell::prose(desc)]);
     }
 
     if let Some(homepage) = &package_info.homepage {
-        let homepage_value = if config.use_colors() {
-            style(homepage).underlined().blue().to_string()
-        } else {
-            homepage.to_string()
-        };
-        table.add_row(vec![format_key_fn("Homepage"), homepage_value]);
+        table.add_row([
+            key("Homepage"),
+            Cell::painted(homepage, use_colors, |s| s.underlined().blue()),
+        ]);
     }
 
     // A refused spec's environments cannot be trusted, so the reason stands in
     // for them rather than an empty list that reads as "declares none".
     if let Some(refusal) = &package_info.refusal {
         let text = format!("selfie apply would refuse this spec here: {refusal}");
-        let value = if config.use_colors() {
-            style(text).red().to_string()
-        } else {
-            text
-        };
-        table.add_row(vec![format_key_fn("Refused"), value]);
+        table.add_row([
+            key("Refused"),
+            Shown::prose(&text).paint(use_colors, |s| s.red()).into(),
+        ]);
     } else {
         let env_names = presentation::format_environment_names(
             &package_info.environments,
             &package_info.current_environment,
             config,
         );
-        table.add_row(vec![
-            format_key_fn("Environments"),
-            format_value(&env_names),
-        ]);
+        table.add_row([key("Environments"), env_names.into()]);
     }
 
     if let Some(git_status) = &package_info.git_status {
-        table.add_row(vec![
-            format_key_fn("Git Status"),
-            git_style::format_git_status_long(git_status, config.use_colors()),
+        table.add_row([
+            key("Git Status"),
+            git_style::format_git_status_long(git_status, use_colors).into(),
         ]);
     }
 
@@ -133,10 +118,10 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
         return;
     }
 
-    let mut table = presentation::create_formatted_table();
-    table.set_header(vec!["Environment", "Content", "Target"]);
+    let mut table = SafeTable::new();
+    table.set_header(["Environment", "Content", "Target"]);
     for dotfile in &package_info.dotfiles {
-        table.add_row(vec![
+        table.add_row([
             match (&dotfile.environment, dotfile.refused) {
                 (Some(environment), true) => format!("{environment} (refused)"),
                 (Some(environment), false) => environment.clone(),
@@ -146,7 +131,7 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
             shorten_path(dotfile.entry.target()).to_string(),
         ]);
     }
-    display.println(format!("\n{table}"));
+    display.println(shown!("\n{}", table));
 
     // A reader may take a package file for data, and applying this one runs
     // commands.
@@ -163,40 +148,29 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
 pub(crate) fn create_environment_table(
     env_status: &EnvironmentStatusData,
     config: &CliConfig,
-) -> Table {
-    let mut env_table = presentation::create_formatted_table();
+) -> SafeTable {
+    let mut env_table = SafeTable::new();
 
     // Create a header for the environment table
+    let use_colors = config.use_colors();
+    let name = &env_status.environment_name;
     let env_header = if env_status.is_current {
-        let msg = format!("Environment: *{}", env_status.environment_name);
-        if config.use_colors() {
-            style(msg).bold().green().to_string()
-        } else {
-            msg
-        }
+        Shown::name(&format!("Environment: *{name}")).paint(use_colors, |s| s.bold().green())
     } else {
-        let msg = format!("Environment: {}", env_status.environment_name);
-        if config.use_colors() {
-            style(msg).bold().to_string()
-        } else {
-            msg
-        }
+        Shown::name(&format!("Environment: {name}")).paint(use_colors, |s| s.bold())
     };
+    env_table.set_header([Cell::from(env_header), "".into()]);
 
-    // Add a header row
-    env_table.set_header(vec![env_header, String::new()]);
-
-    // Format environment detail keys
     let format_env_key =
-        |key: &str| -> String { presentation::format_field_key(key, config.use_colors()) };
-
-    let format_env_value =
-        |value: &str| -> String { presentation::format_field_value(value, config.use_colors()) };
+        |key: &'static str| Cell::from(presentation::format_field_key(key, use_colors));
+    // Commands and package names, as prose: a block-scalar command keeps its
+    // line breaks inside the cell.
+    let format_env_value = Cell::prose;
 
     // Add installation status if this is the current environment and we have status
     if env_status.is_current {
         let status_text = format_status(&env_status.status, config.use_colors());
-        env_table.add_row(vec![format_env_key("Status"), status_text]);
+        env_table.add_row([format_env_key("Status"), status_text.into()]);
     }
 
     // Add environment detail rows
@@ -204,35 +178,39 @@ pub(crate) fn create_environment_table(
     let install = env_status.install_command.as_deref().unwrap_or(
         "none (blank: `package install` refuses it unless the check says it is installed)",
     );
-    env_table.add_row(vec![format_env_key("Install"), format_env_value(install)]);
+    env_table.add_row([format_env_key("Install"), format_env_value(install)]);
 
     if let Some(check) = &env_status.check_command {
-        env_table.add_row(vec![format_env_key("Check"), format_env_value(check)]);
+        env_table.add_row([format_env_key("Check"), format_env_value(check)]);
     }
 
     if !env_status.dependency_statuses.is_empty() {
-        let dep_display: Vec<String> = env_status
+        let dep_display = env_status
             .dependency_statuses
             .iter()
-            .map(|dep| format_dependency_with_status(dep, config.use_colors()))
-            .collect();
-        env_table.add_row(vec![format_env_key("Dependencies"), dep_display.join(", ")]);
+            .map(|dep| format_dependency_with_status(dep, use_colors));
+        env_table.add_row([
+            format_env_key("Dependencies"),
+            Shown::join(dep_display, ", ").into(),
+        ]);
     } else if !env_status.dependencies.is_empty() {
-        env_table.add_row(vec![
+        env_table.add_row([
             format_env_key("Dependencies"),
             format_env_value(&env_status.dependencies.join(", ")),
         ]);
     }
 
     if !env_status.recommend_statuses.is_empty() {
-        let rec_display: Vec<String> = env_status
+        let rec_display = env_status
             .recommend_statuses
             .iter()
-            .map(|dep| format_dependency_with_status(dep, config.use_colors()))
-            .collect();
-        env_table.add_row(vec![format_env_key("Recommends"), rec_display.join(", ")]);
+            .map(|dep| format_dependency_with_status(dep, use_colors));
+        env_table.add_row([
+            format_env_key("Recommends"),
+            Shown::join(rec_display, ", ").into(),
+        ]);
     } else if !env_status.recommends.is_empty() {
-        env_table.add_row(vec![
+        env_table.add_row([
             format_env_key("Recommends"),
             format_env_value(&env_status.recommends.join(", ")),
         ]);
@@ -241,23 +219,22 @@ pub(crate) fn create_environment_table(
     env_table
 }
 
-pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> String {
+pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Shown {
     match status {
         EnvironmentStatus::Installed => status_style::format_installed(use_colors),
         EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
         EnvironmentStatus::Unknown(reason) => {
-            let msg = format!("Unknown ({reason})");
-            if use_colors {
-                style(msg).yellow().italic().to_string()
-            } else {
-                msg
-            }
+            Shown::prose(&format!("Unknown ({reason})")).paint(use_colors, |s| s.yellow().italic())
         }
     }
 }
 
-fn format_dependency_with_status(dep: &DependencyStatus, use_colors: bool) -> String {
-    format!("{}: {}", dep.name, format_status(&dep.status, use_colors))
+fn format_dependency_with_status(dep: &DependencyStatus, use_colors: bool) -> Shown {
+    shown!(
+        "{}: {}",
+        Shown::name(&dep.name),
+        format_status(&dep.status, use_colors)
+    )
 }
 
 #[cfg(test)]

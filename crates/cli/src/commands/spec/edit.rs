@@ -187,7 +187,10 @@ fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> String {
 fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(), Exit> {
     let confirm = display.prompt(
         Confirm::with_theme(&SimpleTheme)
-            .with_prompt(format!("Create new package '{package_name}'?"))
+            .with_prompt(format!(
+                "Create new package '{}'?",
+                crate::terminal_text::escape(package_name)
+            ))
             .default(false),
     );
 

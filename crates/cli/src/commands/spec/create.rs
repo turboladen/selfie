@@ -614,7 +614,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         .prompt(
             MultiSelect::with_theme(&SimpleTheme)
                 .with_prompt("Dependencies (select with space, confirm with enter)")
-                .items(&available_packages),
+                .items(dependency_items(&available_packages)),
         )
         .map_err(|failure| refuse_interactive(display, &failure))?;
 
@@ -622,6 +622,15 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         .into_iter()
         .map(|i| available_packages[i].clone())
         .collect())
+}
+
+/// The dependency picker's items as it shows them: each name escaped. The
+/// choice is read back from the raw list by index.
+fn dependency_items(available: &[String]) -> Vec<String> {
+    available
+        .iter()
+        .map(|name| crate::terminal_text::escape(name).into_owned())
+        .collect()
 }
 
 fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, Exit> {
@@ -639,6 +648,15 @@ mod tests {
     use selfie::package::port::PackageListError;
 
     use super::*;
+
+    // The picker shows a name escaped, so a name holding a filler character
+    // reads differently from the plain one it imitates.
+    #[test]
+    fn the_dependency_picker_shows_names_escaped() {
+        let available = vec!["git".to_string(), "git\u{3164}".to_string()];
+
+        assert_eq!(dependency_items(&available), ["git", "git\\u{3164}"]);
+    }
     use futures::StreamExt;
     use selfie::package::SpecService;
     use selfie::package::event::{OperationResult, OperationSuccess, PackageEvent};

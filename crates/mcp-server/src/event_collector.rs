@@ -1142,6 +1142,25 @@ mod tests {
         assert_eq!(row["relative_path"], "bat/config");
     }
 
+    // A path holding an escape sequence reaches the assistant as JSON, which
+    // writes ESC as `\u001b`, so the serialized row carries no raw ESC for a
+    // client to echo to a terminal.
+    #[tokio::test]
+    async fn a_row_naming_an_escape_sequence_serializes_without_a_raw_esc() {
+        let events = vec![PackageEvent::DotfileSkipped {
+            operation_info: test_op_info(),
+            source: package_file("a\u{1b}[2Jb"),
+            target: "/home/u/.a\u{1b}]0;t\u{7}".to_string(),
+            reason: SkipReason::DryRun,
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+        let json = serde_json::to_string(&result.data).unwrap();
+
+        assert!(!json.contains('\u{1b}'), "{json}");
+        assert!(json.contains("a\\u001b[2Jb"), "{json}");
+    }
+
     // A record that names no base gives its spelling, never a path it cannot know
     // is full.
     #[tokio::test]

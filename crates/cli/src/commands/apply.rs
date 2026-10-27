@@ -4,6 +4,7 @@
 //! dotfiles defined in package YAML files to their target
 //! locations on the system.
 
+use crate::terminal_text::{Shown, shown};
 use std::sync::{Arc, Mutex};
 
 use selfie::package::event::DotfileSource;
@@ -221,9 +222,11 @@ impl InteractiveConflictResolver {
 
         match reveal_body(incoming, current, target) {
             RevealBody::Diff(diff) => self.display.print_diff(&diff),
-            RevealBody::Binary { incoming, current } => self.display.println(format!(
+            RevealBody::Binary { incoming, current } => self.display.println(shown!(
                 "Content is not valid UTF-8, so it cannot be shown as a diff or printed \
-                 safely.\n  resolved output : {incoming} bytes\n  current target  : {current} bytes"
+                 safely.\n  resolved output : {} bytes\n  current target  : {} bytes",
+                incoming,
+                current
             )),
         }
     }
@@ -241,7 +244,7 @@ impl InteractiveConflictResolver {
             force_heading(&self.display, Channel::Stdout, base.kind, &base.directory);
         }
         self.display
-            .println(format!("  {} → {short_target}", relative_text(source)));
+            .println(shown!("  {} → {}", relative_text(source), short_target));
     }
 }
 
@@ -272,7 +275,7 @@ impl ConflictResolver for InteractiveConflictResolver {
                 current,
             } => {
                 self.print_source(source, &short_target);
-                self.display.println(summary);
+                self.display.println(Shown::block(summary));
 
                 // Reveal is offered only when stdout is a terminal as well as
                 // stderr: the values print on stdout, and a redirected stdout

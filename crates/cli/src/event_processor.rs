@@ -556,8 +556,11 @@ impl EventProcessor {
                 self.display.println("");
                 self.display
                     .print_warning(format!("  Conflict: {short_target}"));
-                self.display
-                    .println(format!("  {short_source} → {short_target}"));
+                self.display.println(crate::terminal_text::shown!(
+                    "  {} → {}",
+                    short_source,
+                    short_target
+                ));
                 self.display.print_diff(&detail.to_string());
             }
 
@@ -604,8 +607,11 @@ impl EventProcessor {
                 }
             }
 
+            // One message: the printer keeps the note's line breaks and indents
+            // the lines after the first under it.
             PackageEvent::PostInstallNote { note, .. } => {
-                self.display.print_info(format!("\n📋 {note}"));
+                self.display.println("");
+                self.display.print_info(format!("📋 {note}"));
             }
 
             PackageEvent::DotfileCleanupInfo {
@@ -613,10 +619,9 @@ impl EventProcessor {
                 dotfile_targets,
                 ..
             } => {
-                self.display.print_info(format!(
-                    "\nPackage '{}' has deployed dotfiles:",
-                    package_name
-                ));
+                self.display.println("");
+                self.display
+                    .print_info(format!("Package '{package_name}' has deployed dotfiles:"));
                 for target in &dotfile_targets {
                     self.display.print_info(format!(
                         "  - {}",

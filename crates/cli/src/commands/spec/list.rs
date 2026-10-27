@@ -1,6 +1,6 @@
+use crate::tables::{Cell, SafeTable};
 use crate::terminal_text::DisplayPath;
-use comfy_table::{ContentArrangement, Table, presets};
-use console::style;
+use crate::terminal_text::{Shown, shown};
 use selfie::package::{
     event::{PackageEvent, SpecListData},
     service::SpecService,
@@ -61,11 +61,8 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
     }
 
     if !data.specs.is_empty() {
-        let mut table = Table::new();
-        table
-            .load_style(presets::UTF8_FULL_CONDENSED.with_rounded_corners())
-            .set_content_arrangement(ContentArrangement::Dynamic);
-        table.set_header(vec!["Name", "Description", "Environments", "Git"]);
+        let mut table = SafeTable::new();
+        table.set_header(["Name", "Description", "Environments", "Git"]);
 
         for spec in &data.specs {
             let git_col = spec
@@ -73,71 +70,75 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
                 .as_ref()
                 .map(|s| git_style::format_git_status_short(s, use_colors))
                 .unwrap_or_default();
-            table.add_row(vec![
-                format_name(&spec.name, use_colors),
-                spec.description.clone().unwrap_or_default(),
-                format_environment_names(&spec.environments, &data.current_environment, config),
-                git_col,
+            table.add_row([
+                Cell::painted(&spec.name, use_colors, |s| s.bold()),
+                Cell::prose(spec.description.as_deref().unwrap_or_default()),
+                format_environment_names(&spec.environments, &data.current_environment, config)
+                    .into(),
+                git_col.into(),
             ]);
         }
 
-        display.println(format!("{table}"));
+        display.println(shown!("{}", table));
     }
 
     // Show invalid packages
     for invalid in &data.invalid_packages {
-        // One sentence, styled or not, so the two branches cannot drift apart.
-        let text = format!(
-            "Invalid: {} — {invalid}",
-            DisplayPath::of(invalid.package_path())
+        let text = shown!(
+            "Invalid: {} — {}",
+            DisplayPath::of(invalid.package_path()),
+            Shown::block(&invalid.to_string())
         );
-        let msg = if use_colors {
-            format!("  {} {}", style("⚠").yellow(), style(text).dim())
-        } else {
-            format!("  {text}")
-        };
-        display.println(msg);
+        display.println(issue_line(text, use_colors));
     }
 
     for refused in &data.refused {
-        let text = format!(
+        let text = shown!(
             "Refused: {} ({}) — {}",
-            refused.package_name,
+            Shown::name(&refused.package_name),
             DisplayPath::of(&refused.path),
-            refused.reason
+            Shown::block(&refused.reason.to_string())
         );
-        let msg = if use_colors {
-            format!("  {} {}", style("⚠").yellow(), style(text).dim())
-        } else {
-            format!("  {text}")
-        };
-        display.println(msg);
+        display.println(issue_line(text, use_colors));
     }
 
     // Summary
     let summary = if data.show_all {
-        format!("{} spec(s) across all environments", data.specs.len())
+        shown!("{} spec(s) across all environments", data.specs.len())
     } else {
-        format!(
+        shown!(
             "{} spec(s) in environment '{}'",
             data.specs.len(),
-            data.current_environment,
+            Shown::name(&data.current_environment),
         )
     };
-    display.println(format!("\n{summary}"));
+    display.println(shown!("\n{}", summary));
 }
 
-fn format_name(name: &str, use_colors: bool) -> String {
-    if use_colors {
-        style(name).bold().to_string()
-    } else {
-        name.to_string()
-    }
+// An invalid or refused spec's line under the table. One sentence, styled or
+// not, so the two cases cannot drift apart. The lines after its first start
+// under its text, past the mark.
+fn issue_line(text: Shown, use_colors: bool) -> Shown {
+    let text = Shown::indented(text, "    ");
+    shown!(
+        "  {} {}",
+        Shown::from("⚠").paint(use_colors, |s| s.yellow()),
+        text.paint(use_colors, |s| s.dim())
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A refusal's continuation lines start under its text, past the mark, and
+    // are indented once.
+    #[test]
+    fn an_issue_line_indents_its_continuation_once() {
+        let line = issue_line(shown!("Refused: {}", Shown::block("a\nb")), false);
+
+        assert_eq!(line, "  ⚠ Refused: a\n    b");
+    }
     use crate::config::CliConfig;
     use selfie::{
         config::SelfieConfigBuilder,

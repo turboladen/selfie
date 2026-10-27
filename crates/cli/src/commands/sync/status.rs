@@ -1,6 +1,6 @@
 //! Handler for `selfie sync status`.
 
-use console::style;
+use crate::terminal_text::{Shown, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -57,8 +57,9 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
 
             if is_clean && *ahead == 0 && *behind == 0 {
                 display.print_success(format!("Repository: {short_root} ({branch_str})"));
-                display.println(format!(
-                    "{INDENT}No uncommitted changes, up to date with remote"
+                display.println(shown!(
+                    "{}No uncommitted changes, up to date with remote",
+                    INDENT
                 ));
             } else {
                 if is_clean {
@@ -69,33 +70,34 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
 
                 // File changes summary
                 if total_changes > 0 {
-                    let mut parts = Vec::new();
-                    if *modified_count > 0 {
-                        parts.push(format!("{modified_count} modified"));
-                    }
-                    if *staged_count > 0 {
-                        parts.push(format!("{staged_count} staged"));
-                    }
-                    if *untracked_count > 0 {
-                        parts.push(format!("{untracked_count} untracked"));
-                    }
-                    if *deleted_count > 0 {
-                        parts.push(format!("{deleted_count} deleted"));
-                    }
-                    display.println(format!("{INDENT}{}", parts.join(", ")));
+                    let parts = [
+                        (*modified_count, "modified"),
+                        (*staged_count, "staged"),
+                        (*untracked_count, "untracked"),
+                        (*deleted_count, "deleted"),
+                    ]
+                    .into_iter()
+                    .filter(|(count, _)| *count > 0)
+                    .map(|(count, word)| shown!("{} {}", count, word));
+                    display.println(shown!("{}{}", INDENT, Shown::join(parts, ", ")));
                 }
 
                 // Remote tracking
                 if *ahead > 0 && *behind > 0 {
-                    display.println(format!("{INDENT}{ahead} ahead, {behind} behind remote"));
+                    display.println(shown!(
+                        "{}{} ahead, {} behind remote",
+                        INDENT,
+                        *ahead,
+                        *behind
+                    ));
                 } else if *ahead > 0 {
                     let label = selfie::pluralize(*ahead, "commit", "commits");
-                    display.println(format!("{INDENT}{ahead} {label} ahead of remote"));
+                    display.println(shown!("{}{} {} ahead of remote", INDENT, *ahead, label));
                 } else if *behind > 0 {
                     let label = selfie::pluralize(*behind, "commit", "commits");
-                    display.println(format!("{INDENT}{behind} {label} behind remote"));
+                    display.println(shown!("{}{} {} behind remote", INDENT, *behind, label));
                 } else {
-                    display.println(format!("{INDENT}Up to date with remote"));
+                    display.println(shown!("{}Up to date with remote", INDENT));
                 }
             }
             true
@@ -152,13 +154,8 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                 );
                 // Show drifted file paths (shortened)
                 for target in drifted_targets {
-                    let short = shorten_path(target);
-                    let formatted = if use_colors {
-                        format!("{INDENT}{}", style(&short).yellow())
-                    } else {
-                        format!("{INDENT}{short}")
-                    };
-                    display.println(formatted);
+                    let short = Shown::from(shorten_path(target)).paint(use_colors, |s| s.yellow());
+                    display.println(shown!("{}{}", INDENT, short));
                 }
                 display.print_suggestion(
                     "Run 'selfie apply' to redeploy or 'selfie dotfiles drift' for details",

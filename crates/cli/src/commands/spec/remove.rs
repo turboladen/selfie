@@ -86,17 +86,18 @@ pub(crate) async fn handle_remove(
     // unreadable spec nor a failed listing can support a clearance.
     let complete = checked && unreadable.is_empty();
 
+    let shown_name = crate::terminal_text::escape(package_name);
     let (prompt, default_answer) = if dependent_packages.is_empty() && complete {
         display.print_run_note(format!(
             "Package '{package_name}' is not a dependency of any other packages."
         ));
-        (format!("Remove package '{package_name}'?"), false)
+        (format!("Remove package '{shown_name}'?"), false)
     } else if dependent_packages.is_empty() {
         display.print_warning(format!(
             "Nothing selfie could read depends on '{package_name}', but it could not read \
              everything, so this is not a clearance."
         ));
-        (format!("Remove package '{package_name}' anyway?"), false)
+        (format!("Remove package '{shown_name}' anyway?"), false)
     } else {
         display.print_warning(format!(
             "Package '{package_name}' is a dependency of the following packages:"

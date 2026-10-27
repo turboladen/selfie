@@ -242,15 +242,12 @@ fn prompt_track_choice(
     file: &str,
     display: &DisplayManager,
 ) -> Result<TrackChoice, PromptFailure> {
-    // Build the selection list: existing packages + sentinel options
-    let mut items: Vec<String> = package_names.to_vec();
-    items.push(NEW_STANDALONE.to_string());
-    items.push(TYPE_A_NAME.to_string());
+    let (shown, items) = select_items(package_names);
 
     let selection = display.prompt(
         FuzzySelect::with_theme(&ColorfulTheme::default())
             .with_prompt("Where should this file be tracked?")
-            .items(&items)
+            .items(&shown)
             .default(0),
     );
 
@@ -259,6 +256,22 @@ fn prompt_track_choice(
     };
 
     resolve_choice(&items, choice, file, display)
+}
+
+/// The selection list, existing packages then the two sentinel options: as the
+/// prompt shows it, escaped, and as the choice is read back, raw.
+// Escaped only where it is shown: the choice is looked up in the raw list, so
+// picking a spec whose name holds an escaped character tracks into that spec,
+// not into one named by its escaped spelling.
+fn select_items(package_names: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut items: Vec<String> = package_names.to_vec();
+    items.push(NEW_STANDALONE.to_string());
+    items.push(TYPE_A_NAME.to_string());
+    let shown = items
+        .iter()
+        .map(|item| crate::terminal_text::escape(item).into_owned())
+        .collect();
+    (shown, items)
 }
 
 /// Given the selection list and the chosen index, determine the action, asking
@@ -278,7 +291,7 @@ fn resolve_choice(
     let default = if selected == TYPE_A_NAME {
         None
     } else if selected == NEW_STANDALONE {
-        Some(suggest_name(file))
+        offered_name(file)
     } else {
         return Ok(TrackChoice::ExistingPackage(selected.clone()));
     };
@@ -306,6 +319,14 @@ fn prompt_for_name(
     }
     let name: String = display.prompt(crate::display_manager::TextLine(input))?;
     Ok(Some(name).filter(|name| !name.trim().is_empty()))
+}
+
+/// The name the prompt offers for `file`, or `None` when the prompt could only
+/// show it escaped.
+// Accepted, an escaped default would become the spec's name, backslashes and
+// all, so a name holding such a character is typed instead.
+fn offered_name(file: &str) -> Option<String> {
+    Some(suggest_name(file)).filter(|name| crate::terminal_text::escape(name) == *name)
 }
 
 /// Derive a suggested spec name from the file path.
@@ -573,6 +594,27 @@ mod tests {
         );
         assert_eq!(count("in spec 'second'"), 1, "{printed:?}");
         assert_eq!(count("2 specs track this file"), 1, "{printed:?}");
+    }
+
+    // The prompt shows each name escaped, and the choice is read back from the
+    // raw list, so the spec picked is the one whose name holds the character.
+    #[test]
+    fn a_name_the_prompt_could_only_show_escaped_is_not_offered() {
+        assert_eq!(offered_name("~/.batrc").as_deref(), Some("batrc"));
+        assert_eq!(offered_name("~/.bat\u{1b}[2Jrc"), None);
+        assert_eq!(offered_name("~/.bat\u{202E}rc"), None);
+    }
+
+    #[test]
+    fn select_items_shows_names_escaped_and_keeps_them_raw() {
+        let names = vec!["plain".to_string(), "evil\u{1b}[2J".to_string()];
+
+        let (shown, raw) = select_items(&names);
+
+        assert_eq!(shown[1], "evil\\u{1b}[2J");
+        assert_eq!(raw[1], "evil\u{1b}[2J");
+        assert_eq!(shown[0], raw[0]);
+        assert_eq!(shown.len(), raw.len());
     }
 
     #[test]

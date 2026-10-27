@@ -1,20 +1,11 @@
 //! How commands lay out what they print: tables, field styling, and the
 //! report for a package that does not support the current environment.
 
-use comfy_table::{ContentArrangement, Table, presets};
-use console::style;
+use crate::terminal_text::{Paint, Shown, shown};
 
 use crate::config::CliConfig;
 use crate::display_manager::{DisplayManager, INDENT};
-
-/// Create a formatted table with consistent styling
-pub(crate) fn create_formatted_table() -> Table {
-    let mut table = Table::new();
-    table
-        .load_style(presets::UTF8_FULL_CONDENSED.with_rounded_corners())
-        .set_content_arrangement(ContentArrangement::Dynamic);
-    table
-}
+use crate::tables::SafeTable;
 
 /// How a table row turned out, which decides its marker.
 pub(crate) enum RowResult {
@@ -36,9 +27,7 @@ impl From<selfie::package::event::Outcome> for RowResult {
 }
 
 /// The color of a row that turned out as `result`.
-fn row_color(
-    result: &RowResult,
-) -> fn(console::StyledObject<String>) -> console::StyledObject<String> {
+fn row_color(result: &RowResult) -> Paint {
     match result {
         RowResult::Success => |s| s.green(),
         RowResult::Warning => |s| s.yellow(),
@@ -48,24 +37,21 @@ fn row_color(
 
 /// `text` in the color of a row that turned out as `result`, or plain when
 /// `use_colors` is off.
-pub(crate) fn paint_row_text(text: &str, result: &RowResult, use_colors: bool) -> String {
+pub(crate) fn paint_row_text(text: &str, result: &RowResult, use_colors: bool) -> Shown {
     crate::status_style::styled_text(text, use_colors, row_color(result))
 }
 
 /// The marker cell for a row.
-pub(crate) fn row_marker(result: &RowResult, use_colors: bool) -> String {
+pub(crate) fn row_marker(result: &RowResult, use_colors: bool) -> Shown {
     let marker = match result {
         RowResult::Success => "✓",
         RowResult::Warning => "⚠",
         RowResult::Failure => "✗",
     };
-    if use_colors {
-        row_color(result)(style(marker.to_string()))
-            .bold()
-            .to_string()
-    } else {
-        marker.to_string()
-    }
+    let color = row_color(result);
+    Shown::from(marker)
+        .paint(use_colors, color)
+        .paint(use_colors, |s| s.bold())
 }
 
 /// Environment names in the order given, which is the order the spec file gives
@@ -74,43 +60,20 @@ pub(crate) fn format_environment_names(
     environments: &[String],
     current_environment: &str,
     config: &CliConfig,
-) -> String {
-    environments
-        .iter()
-        .map(|env_name| {
-            if env_name == current_environment {
-                let env = format!("*{env_name}");
-                if config.use_colors() {
-                    style(env).bold().green().to_string()
-                } else {
-                    env
-                }
-            } else if config.use_colors() {
-                style(env_name).dim().green().to_string()
-            } else {
-                env_name.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+) -> Shown {
+    let names = environments.iter().map(|env_name| {
+        if env_name == current_environment {
+            Shown::name(&format!("*{env_name}")).paint(config.use_colors(), |s| s.bold().green())
+        } else {
+            Shown::name(env_name).paint(config.use_colors(), |s| s.dim().green())
+        }
+    });
+    Shown::join(names, ", ")
 }
 
 /// Format a key with consistent styling
-pub(crate) fn format_field_key(key: &str, use_colors: bool) -> String {
-    if use_colors {
-        style(key).cyan().bold().to_string()
-    } else {
-        key.to_string()
-    }
-}
-
-/// Format a value with consistent styling
-pub(crate) fn format_field_value(value: &str, use_colors: bool) -> String {
-    if use_colors {
-        style(value).white().to_string()
-    } else {
-        value.to_string()
-    }
+pub(crate) fn format_field_key(key: &'static str, use_colors: bool) -> Shown {
+    Shown::from(key).paint(use_colors, |s| s.cyan().bold())
 }
 
 /// Display environment error with available environments for a specific package
@@ -120,7 +83,7 @@ pub(crate) fn display_environment_summary(
     available_environments: &[String],
     config: &CliConfig,
     display: &DisplayManager,
-    context: &str, // "check" or "install"
+    context: &'static str, // "check" or "install"
 ) {
     if available_environments.is_empty() {
         display_generic_environment_suggestion(
@@ -134,9 +97,9 @@ pub(crate) fn display_environment_summary(
         display.print_error(format!(
             "Package '{package_name}' doesn't support environment '{current_environment}'."
         ));
-        display.print_note(format!("{INDENT}Available environments for this package:"));
+        display.print_note(shown!("{}Available environments for this package:", INDENT));
 
-        let mut table = create_formatted_table();
+        let mut table = SafeTable::new();
         // Printed on stderr, so sized to the terminal stderr is on.
         table.use_stderr();
         table.set_header(vec!["Environment"]);
@@ -144,24 +107,16 @@ pub(crate) fn display_environment_summary(
         // The spec file's order, which every other surface lists them in. The
         // current environment is never among them: its absence is the error.
         for env in available_environments {
-            table.add_row(vec![env.as_str()]);
+            table.add_row([env]);
         }
 
-        display.print_note(format!("{table}"));
+        display.print_note(shown!("{}", table));
 
-        if config.use_colors() {
-            display.print_suggestion(format!(
-                "{} with one of the environments above",
-                console::style(format!(
-                    "selfie package {context} --environment <env> <package>"
-                ))
-                .yellow()
-            ));
-        } else {
-            display.print_suggestion(format!(
-                "selfie package {context} --environment <env> <package> with one of the environments above"
-            ));
-        }
+        display.print_styled_suggestion(shown!(
+            "{} with one of the environments above",
+            shown!("selfie package {} --environment <env> <package>", context)
+                .paint(config.use_colors(), |s| s.yellow())
+        ));
     }
 }
 
@@ -169,7 +124,7 @@ pub(crate) fn display_environment_summary(
 /// `environment`, naming the environments that have one (stderr).
 pub(crate) fn display_missing_command(
     display: &DisplayManager,
-    kind: &str,
+    kind: &'static str,
     package_name: &str,
     environment: &str,
     others: &[String],
@@ -181,9 +136,10 @@ pub(crate) fn display_missing_command(
         // Sorted, so the line reads the same on every run.
         let mut others = others.to_vec();
         others.sort();
-        display.print_note(format!(
-            "Environments with {kind} commands: {}",
-            others.join(", ")
+        display.print_note(shown!(
+            "Environments with {} commands: {}",
+            kind,
+            Shown::joined(&others, ", ")
         ));
     }
 }
@@ -194,33 +150,25 @@ pub(crate) fn display_generic_environment_suggestion(
     current_environment: &str,
     config: &CliConfig,
     display: &DisplayManager,
-    context: &str, // "check" or "install"
+    context: &'static str, // "check" or "install"
 ) {
     display.print_error(format!(
         "Package '{package_name}' doesn't support environment '{current_environment}'."
     ));
-    display.print_note(format!("{INDENT}Try one of these options:"));
-    if config.use_colors() {
-        display.print_note(format!(
-            "{INDENT}• {} to {} with a different environment",
-            console::style(format!(
-                "selfie package {context} --environment <env> <package>"
-            ))
-            .yellow(),
-            context
-        ));
-        display.print_note(format!(
-            "{INDENT}• {} to see which environments this package supports",
-            console::style("selfie spec info <package>").yellow()
-        ));
-    } else {
-        display.print_note(format!(
-            "{INDENT}• selfie package {context} --environment <env> <package> to {context} with a different environment"
-        ));
-        display.print_note(format!(
-            "{INDENT}• selfie spec info <package> to see which environments this package supports"
-        ));
-    }
+    display.print_note(shown!("{}Try one of these options:", INDENT));
+    let use_colors = config.use_colors();
+    display.print_note(shown!(
+        "{}• {} to {} with a different environment",
+        INDENT,
+        shown!("selfie package {} --environment <env> <package>", context)
+            .paint(use_colors, |s| s.yellow()),
+        context
+    ));
+    display.print_note(shown!(
+        "{}• {} to see which environments this package supports",
+        INDENT,
+        Shown::from("selfie spec info <package>").paint(use_colors, |s| s.yellow())
+    ));
 }
 
 #[cfg(test)]
@@ -379,15 +327,11 @@ mod tests {
     }
 
     #[test]
-    fn test_format_field_key_and_value() {
+    fn test_format_field_key() {
         let key = format_field_key("Test Key", false);
         assert_eq!(key, "Test Key");
 
-        let value = format_field_value("Test Value", false);
-        assert_eq!(value, "Test Value");
-
         // Test with colors (just ensure no panic)
         let _colored_key = format_field_key("Test Key", true);
-        let _colored_value = format_field_value("Test Value", true);
     }
 }

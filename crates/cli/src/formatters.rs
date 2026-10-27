@@ -1,7 +1,6 @@
 //! Shared text formatting utilities for consistent styling
 
-use console::style;
-use std::fmt::Display;
+use crate::terminal_text::Shown;
 
 /// A spec name as the last argument of a command shown to the user: quoted
 /// where the shell would split it, and after `--` when it starts with a dash.
@@ -15,16 +14,9 @@ pub(crate) fn name_argument(name: &str) -> String {
     }
 }
 
-/// Format text with key field styling (bold and cyan when colors enabled)
-pub(crate) fn format_key<T: Display>(text: T, use_colors: bool) -> String {
-    let text = text.to_string();
-    let styled = style(text).bold();
-
-    if use_colors {
-        styled.cyan().to_string()
-    } else {
-        styled.to_string()
-    }
+/// `text`, a field's name, in key styling: bold and cyan when `use_colors`.
+pub(crate) fn format_key(text: &'static str, use_colors: bool) -> Shown {
+    Shown::from(text).paint(use_colors, |s| s.bold().cyan())
 }
 
 #[cfg(test)]

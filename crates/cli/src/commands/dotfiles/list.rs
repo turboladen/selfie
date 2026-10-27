@@ -13,11 +13,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::{
-    commands::{common::create_dotfile_service, presentation::create_formatted_table},
+    commands::common::create_dotfile_service,
     config::CliConfig,
     display_manager::{DisplayManager, DisplayPath, shorten_path},
     event_processor::{EventProcessor, Exit},
     source_paths::base_directory_line,
+    tables::SafeTable,
 };
 
 /// Handle the `selfie dotfiles list` command
@@ -84,13 +85,13 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
 
     print_base_directories(config, display, &data.packages);
 
-    let mut table = create_formatted_table();
-    table.set_header(vec!["Package", "Environment", "Content", "Target"]);
+    let mut table = SafeTable::new();
+    table.set_header(["Package", "Environment", "Content", "Target"]);
 
     let mut total = 0;
     for pkg in &data.packages {
         for (scope, entry) in pkg.dotfiles_with_scope() {
-            table.add_row(vec![
+            table.add_row([
                 pkg.name().to_string(),
                 scope.unwrap_or("(shared)").to_string(),
                 source_cell(entry),
@@ -100,7 +101,7 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
         }
     }
 
-    display.println(table.to_string());
+    display.println(crate::terminal_text::shown!("{}", table));
     display.print_info(format!(
         "{total} {} across {} {}",
         selfie::pluralize(total, "dotfile", "dotfiles"),

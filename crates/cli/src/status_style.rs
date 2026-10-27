@@ -3,55 +3,50 @@
 //! Pure formatting functions that produce styled text strings for use in
 //! table cells and status displays. No spinner or progress bar dependency.
 
-use console::style;
+use crate::terminal_text::{Paint, Shown, shown};
 
 /// Format a status indicator with a marker prefix and optional color styling
 fn format_status_indicator(
-    marker: &str,
-    label: &str,
+    marker: &'static str,
+    label: &'static str,
     use_colors: bool,
-    style_fn: fn(console::StyledObject<String>) -> console::StyledObject<String>,
-) -> String {
-    let text = if use_colors {
-        style_fn(style(label.to_string())).to_string()
-    } else {
-        label.to_string()
-    };
-    format!("{marker} {text}")
+    paint: Paint,
+) -> Shown {
+    shown!("{} {}", marker, Shown::from(label).paint(use_colors, paint))
 }
 
 /// Format an "installed" status indicator
-pub(crate) fn format_installed(use_colors: bool) -> String {
+pub(crate) fn format_installed(use_colors: bool) -> Shown {
     format_status_indicator("✓", "Installed", use_colors, |s| s.green())
 }
 
 /// Format a "valid" status indicator (for validation results)
-pub(crate) fn format_valid(use_colors: bool) -> String {
+pub(crate) fn format_valid(use_colors: bool) -> Shown {
     format_status_indicator("✓", "Valid", use_colors, |s| s.green())
 }
 
 /// Format a "not installed" status indicator
-pub(crate) fn format_not_installed(use_colors: bool) -> String {
+pub(crate) fn format_not_installed(use_colors: bool) -> Shown {
     format_status_indicator("✗", "Not installed", use_colors, |s| s.cyan())
 }
 
 /// Format a status check error indicator
-pub(crate) fn format_status_error(use_colors: bool) -> String {
+pub(crate) fn format_status_error(use_colors: bool) -> Shown {
     format_status_indicator("✗", "Error", use_colors, |s| s.red())
 }
 
 /// Format a "clean" audit status indicator
-pub(crate) fn format_audit_clean(use_colors: bool) -> String {
+pub(crate) fn format_audit_clean(use_colors: bool) -> Shown {
     format_status_indicator("✓", "Clean", use_colors, |s| s.green())
 }
 
 /// Format a "conflicts detected" audit status indicator
-pub(crate) fn format_audit_conflicts(use_colors: bool) -> String {
+pub(crate) fn format_audit_conflicts(use_colors: bool) -> Shown {
     format_status_indicator("⚠", "Conflicts Detected", use_colors, |s| s.yellow())
 }
 
 /// Format a "no audit command" status indicator
-pub(crate) fn format_no_audit(use_colors: bool) -> String {
+pub(crate) fn format_no_audit(use_colors: bool) -> Shown {
     format_status_indicator("⚠", "No audit command", use_colors, |s| s.yellow())
 }
 
@@ -60,7 +55,7 @@ pub(crate) fn format_no_audit(use_colors: bool) -> String {
 pub(crate) fn format_list_status(
     status: &selfie::package::event::EnvironmentStatus,
     use_colors: bool,
-) -> String {
+) -> Shown {
     use selfie::package::event::{CheckFailure, EnvironmentStatus, UnknownStatus};
     match status {
         EnvironmentStatus::Installed => styled_text("Installed", use_colors, |s| s.green()),
@@ -84,17 +79,9 @@ pub(crate) fn format_list_status(
     }
 }
 
-/// Apply color styling to text, or return plain text if colors disabled
-pub(crate) fn styled_text(
-    text: &str,
-    use_colors: bool,
-    style_fn: fn(console::StyledObject<String>) -> console::StyledObject<String>,
-) -> String {
-    if use_colors {
-        style_fn(style(text.to_string())).to_string()
-    } else {
-        text.to_string()
-    }
+/// `text`, prose, escaped and then styled by `paint` when `use_colors`.
+pub(crate) fn styled_text(text: &str, use_colors: bool, paint: Paint) -> Shown {
+    Shown::prose(text).paint(use_colors, paint)
 }
 
 #[cfg(test)]

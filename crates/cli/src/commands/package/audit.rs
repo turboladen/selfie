@@ -4,6 +4,7 @@ use selfie::package::{
     service::PackageService,
 };
 
+use crate::terminal_text::{Paint, Shown, shown, tool_output};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -141,7 +142,11 @@ fn display_audit_output_only(audit_result: &AuditResultData, display: &DisplayMa
             ));
         }
         AuditResult::Error(err) => {
-            display.print_error(format!("{} — error: {}", audit_result.package_name, err));
+            display.print_error(format!(
+                "{} — error: {}",
+                audit_result.package_name,
+                tool_output(err)
+            ));
         }
         AuditResult::CouldNotRun(failure) => {
             display.print_error(format!("{} — error: {failure}", audit_result.package_name));
@@ -155,65 +160,49 @@ fn display_audit_summary_line(
     display: &DisplayManager,
 ) {
     let use_colors = config.use_colors();
-    let name = &audit_result.package_name;
+    let label = |text: &'static str, paint: Paint| Shown::from(text).paint(use_colors, paint);
     let error = |err: &str| {
-        let label = if use_colors {
-            console::style("error").red().to_string()
-        } else {
-            "error".to_string()
-        };
-        format!("{label}: {err}")
+        shown!(
+            "{}: {}",
+            label("error", |s| s.red()),
+            Shown::tool_output(err, "    ")
+        )
     };
 
     let status = match &audit_result.result {
         AuditResult::Clean { sources } => {
-            let label = if use_colors {
-                console::style("clean").green().to_string()
-            } else {
-                "clean".to_string()
-            };
-            format!("{label} ({})", sources.join(", "))
+            shown!(
+                "{} ({})",
+                label("clean", |s| s.green()),
+                Shown::joined(sources, ", ")
+            )
         }
         AuditResult::Conflicts {
             sources, expected, ..
-        } => {
-            let unexpected: Vec<&String> = sources
-                .iter()
-                .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
-                .collect();
-            let label = if use_colors {
-                console::style("CONFLICTS").red().bold().to_string()
-            } else {
-                "CONFLICTS".to_string()
-            };
-            format!(
-                "{label} — unexpected: {}",
-                unexpected
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }
-        AuditResult::NotInstalled => {
-            if use_colors {
-                console::style("not installed").dim().to_string()
-            } else {
-                "not installed".to_string()
-            }
-        }
-        AuditResult::NoAuditCommand => {
-            if use_colors {
-                console::style("no audit command").dim().to_string()
-            } else {
-                "no audit command".to_string()
-            }
-        }
+        } => shown!(
+            "{} — unexpected: {}",
+            label("CONFLICTS", |s| s.red().bold()),
+            Shown::joined(unexpected(sources, expected), ", ")
+        ),
+        AuditResult::NotInstalled => label("not installed", |s| s.dim()),
+        AuditResult::NoAuditCommand => label("no audit command", |s| s.dim()),
         AuditResult::Error(err) => error(err),
         AuditResult::CouldNotRun(failure) => error(&failure.to_string()),
     };
 
-    display.println(format!("  {name}: {status}"));
+    display.println(shown!(
+        "  {}: {}",
+        Shown::name(&audit_result.package_name),
+        status
+    ));
+}
+
+// The sources an audit found that the spec does not expect.
+fn unexpected<'a>(sources: &'a [String], expected: &[String]) -> Vec<&'a String> {
+    sources
+        .iter()
+        .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
+        .collect()
 }
 
 fn display_audit_result_card(
@@ -232,62 +221,46 @@ fn display_audit_result_card(
         .print();
 
     // Status line stays inline — variant-dependent sub-fields
-    let format_key_fn =
-        |field: &str| -> String { format!("{}{}: ", INDENT, format_key(field, use_colors)) };
-
+    let key = |field: &'static str| shown!("{}{}: ", INDENT, format_key(field, use_colors));
     let error = |err: &str| {
-        format!(
+        shown!(
             "{}{}\n{}{}",
-            format_key_fn("Status"),
+            key("Status"),
             status_style::format_status_error(use_colors),
-            format_key_fn("Details"),
-            err
+            key("Details"),
+            Shown::tool_output(err, "    ")
         )
     };
     let status_line = match &audit_result.result {
-        AuditResult::Clean { sources } => {
-            format!(
-                "{}{}\n{}{}",
-                format_key_fn("Status"),
-                status_style::format_audit_clean(use_colors),
-                format_key_fn("Sources"),
-                sources.join(", ")
-            )
-        }
+        AuditResult::Clean { sources } => shown!(
+            "{}{}\n{}{}",
+            key("Status"),
+            status_style::format_audit_clean(use_colors),
+            key("Sources"),
+            Shown::joined(sources, ", ")
+        ),
         AuditResult::Conflicts {
             sources, expected, ..
-        } => {
-            let unexpected: Vec<&String> = sources
-                .iter()
-                .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
-                .collect();
-            format!(
-                "{}{}\n{}{}\n{}{}\n{}{}",
-                format_key_fn("Status"),
-                status_style::format_audit_conflicts(use_colors),
-                format_key_fn("All sources"),
-                sources.join(", "),
-                format_key_fn("Expected"),
-                expected.join(", "),
-                format_key_fn("Unexpected"),
-                unexpected
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }
-        AuditResult::NotInstalled => {
-            format!(
-                "{}{}",
-                format_key_fn("Status"),
-                status_style::format_not_installed(use_colors)
-            )
-        }
+        } => shown!(
+            "{}{}\n{}{}\n{}{}\n{}{}",
+            key("Status"),
+            status_style::format_audit_conflicts(use_colors),
+            key("All sources"),
+            Shown::joined(sources, ", "),
+            key("Expected"),
+            Shown::joined(expected, ", "),
+            key("Unexpected"),
+            Shown::joined(unexpected(sources, expected), ", ")
+        ),
+        AuditResult::NotInstalled => shown!(
+            "{}{}",
+            key("Status"),
+            status_style::format_not_installed(use_colors)
+        ),
         AuditResult::NoAuditCommand => {
-            format!(
+            shown!(
                 "{}{}",
-                format_key_fn("Status"),
+                key("Status"),
                 status_style::format_no_audit(use_colors)
             )
         }
