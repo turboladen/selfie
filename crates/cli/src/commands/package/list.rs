@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use console::style;
 use selfie::package::{event, service::PackageService};
 
@@ -9,19 +7,12 @@ use crate::{
 };
 use selfie::package::event::BaseKind;
 
-use crate::commands::presentation;
-
-/// Result variant for a formatted list item, determining which finish method to call.
-enum ListItemResult {
-    Success,
-    Failure,
-    Warning,
-}
+use crate::commands::presentation::{self, RowResult, row_marker};
 
 /// One package's row, buffered until the list loads.
 struct ListRow {
     name: String,
-    result: ListItemResult,
+    result: RowResult,
     status: String,
     /// The environments cell, filled under `--all`.
     environments: Option<String>,
@@ -86,15 +77,15 @@ fn format_list_item(
     let status = status_style::format_list_status(&package_item.status, use_colors);
 
     let result = match &package_item.status {
-        EnvironmentStatus::Installed => ListItemResult::Success,
+        EnvironmentStatus::Installed => RowResult::Success,
         // A canceled check says nothing about the package, so like a row with
         // nothing to check it is a warning, not a failure.
         EnvironmentStatus::Unknown(
             UnknownStatus::CheckFailed(CheckFailure::Canceled { .. })
             | UnknownStatus::NoCheckCommand
             | UnknownStatus::NotInEnvironment,
-        ) => ListItemResult::Warning,
-        EnvironmentStatus::NotInstalled | EnvironmentStatus::Unknown(_) => ListItemResult::Failure,
+        ) => RowResult::Warning,
+        EnvironmentStatus::NotInstalled | EnvironmentStatus::Unknown(_) => RowResult::Failure,
     };
 
     let environments = show_all.then(|| {
@@ -110,33 +101,6 @@ fn format_list_item(
         result,
         status,
         environments,
-    }
-}
-
-/// The marker cell for a row.
-fn plain_prefix(result: &ListItemResult, use_colors: bool) -> Cow<'static, str> {
-    match result {
-        ListItemResult::Success => {
-            if use_colors {
-                style("✓").green().bold().to_string().into()
-            } else {
-                "✓".into()
-            }
-        }
-        ListItemResult::Failure => {
-            if use_colors {
-                style("✗").red().bold().to_string().into()
-            } else {
-                "✗".into()
-            }
-        }
-        ListItemResult::Warning => {
-            if use_colors {
-                style("⚠").yellow().bold().to_string().into()
-            } else {
-                "⚠".into()
-            }
-        }
     }
 }
 
@@ -185,18 +149,13 @@ fn handle_list_event(
                     text
                 }
             };
-            let mut add =
-                |result: &ListItemResult, name: &str, status: String, envs: Option<String>| {
-                    let mut row = vec![
-                        plain_prefix(result, use_colors).into_owned(),
-                        name.to_string(),
-                        status,
-                    ];
-                    if show_all {
-                        row.push(envs.unwrap_or_else(|| "-".to_string()));
-                    }
-                    table.add_row(row);
-                };
+            let mut add = |result: &RowResult, name: &str, status: String, envs: Option<String>| {
+                let mut row = vec![row_marker(result, use_colors), name.to_string(), status];
+                if show_all {
+                    row.push(envs.unwrap_or_else(|| "-".to_string()));
+                }
+                table.add_row(row);
+            };
             for row in &state.buffered_rows {
                 add(
                     &row.result,
@@ -212,7 +171,7 @@ fn handle_list_event(
             for invalid in &package_list.invalid_packages {
                 let filename = invalid.display_name();
                 add(
-                    &ListItemResult::Failure,
+                    &RowResult::Failure,
                     &filename,
                     failed(format!("unparsable: {invalid}")),
                     None,
@@ -226,7 +185,7 @@ fn handle_list_event(
                 let path = refused.path.as_path();
                 let shown = path.strip_prefix(package_dir).unwrap_or(path);
                 add(
-                    &ListItemResult::Failure,
+                    &RowResult::Failure,
                     &refused.package_name,
                     failed(format!("refused ({}): {}", shown.display(), refused.reason)),
                     None,
@@ -704,7 +663,7 @@ mod tests {
         };
         let row = format_list_item(&success_item, &config, false, false);
         let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
-        assert!(matches!(result, ListItemResult::Success));
+        assert!(matches!(result, RowResult::Success));
         assert!(content.contains("ripgrep"));
         assert!(content.contains("Installed"));
 
@@ -718,7 +677,7 @@ mod tests {
         };
         let row = format_list_item(&failure_item, &config, false, false);
         let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
-        assert!(matches!(result, ListItemResult::Failure));
+        assert!(matches!(result, RowResult::Failure));
         assert!(content.contains("missing-pkg"));
         assert!(content.contains("Not installed"));
 
@@ -732,7 +691,7 @@ mod tests {
         };
         let row = format_list_item(&warning_item, &config, false, false);
         let (result, content) = (&row.result, format!("{} {}", row.name, row.status));
-        assert!(matches!(result, ListItemResult::Warning));
+        assert!(matches!(result, RowResult::Warning));
         assert!(content.contains("no-check"));
         assert!(content.contains("No check"));
 
@@ -746,7 +705,7 @@ mod tests {
         };
         let row = format_list_item(&na_item, &config, false, false);
         let result = &row.result;
-        assert!(matches!(result, ListItemResult::Warning));
+        assert!(matches!(result, RowResult::Warning));
     }
 
     // A canceled check is a warning row, not a failed one: it says nothing
@@ -767,7 +726,7 @@ mod tests {
 
         let row = format_list_item(&item, &config, false, false);
 
-        assert!(matches!(row.result, ListItemResult::Warning));
+        assert!(matches!(row.result, RowResult::Warning));
         assert_eq!(row.status, "Canceled");
     }
 

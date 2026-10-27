@@ -83,11 +83,13 @@ impl ApplyWarning {
     }
 }
 
-/// A refusal counted before any package is looked at, because collecting the
-/// packages found it. Each carries the facts its message needs and sends that
-/// message itself.
-#[derive(Clone)]
-pub(crate) enum CollectionRefusal {
+/// A file or directory an operation over every package could not use, found
+/// while collecting the packages, before any of them is looked at.
+///
+/// Each variant names what was refused and carries what a renderer needs to
+/// say why; [`sentence`](Self::sentence) says it as prose.
+#[derive(Debug, Clone)]
+pub enum CollectionRefusal {
     /// A dotfiles directory that exists and could not be listed, so it may hold
     /// standalone dotfiles.
     UnlistableDotfilesDirectory(crate::package::port::PackageListError),
@@ -97,13 +99,31 @@ pub(crate) enum CollectionRefusal {
     UncheckableDotfilesDirectory(crate::package::port::PackageListError),
     /// A name several spec files in one directory claim, so none of them is used.
     /// Carries the files, sorted.
-    AmbiguousName { name: String, paths: Vec<PathBuf> },
+    AmbiguousName {
+        /// The name the files claim, lowercased, as names are compared.
+        name: String,
+        /// Every file claiming it.
+        paths: Vec<PathBuf>,
+    },
     /// A spec file that could not be loaded, where it could have been used, so
     /// nothing it declares is looked at.
     UnloadableSpec(crate::package::port::PackageParseError),
 }
 
 impl CollectionRefusal {
+    /// The status a validation of every spec gives what was refused.
+    #[must_use]
+    pub fn status(&self) -> crate::package::event::SpecStatus {
+        use crate::package::event::SpecStatus;
+        match self {
+            Self::UnloadableSpec(_) => SpecStatus::Unparsable,
+            Self::AmbiguousName { .. } => SpecStatus::Ambiguous,
+            Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
+                SpecStatus::Unlistable
+            }
+        }
+    }
+
     /// Whether this refusal is a dotfiles directory selfie could not read
     /// through, so a collection holding it is missing whatever the directory has.
     pub(crate) fn is_unreadable_directory(&self) -> bool {
@@ -113,26 +133,38 @@ impl CollectionRefusal {
         )
     }
 
-    /// Send the message naming this refusal.
-    async fn send(&self, sender: &crate::package::event::EventSender) {
+    /// This refusal as a sentence for a person. A spec that could not be loaded
+    /// is its parse error's own [`Display`](std::fmt::Display), which leaves out
+    /// the file's path.
+    #[must_use]
+    pub fn sentence(&self) -> String {
         match self {
             Self::UnlistableDotfilesDirectory(error) => {
-                sender
-                    .send_warning(format!("Failed to load standalone dotfiles: {error}"))
-                    .await;
+                format!("Failed to load standalone dotfiles: {error}")
             }
             Self::UncheckableDotfilesDirectory(error) => {
-                sender
-                    .send_warning(format!(
-                        "Could not check the standalone dotfiles directory: {error}"
-                    ))
-                    .await;
+                format!("Could not check the standalone dotfiles directory: {error}")
+            }
+            Self::AmbiguousName { name, paths } => {
+                crate::package::port::ambiguous_files_sentence(name, paths)
+            }
+            Self::UnloadableSpec(error) => error.to_string(),
+        }
+    }
+
+    // Each refusal leaves as the event its kind calls for: a directory as a
+    // warning, a name as a refused package, an unloadable spec typed, so each
+    // adapter renders it. All but the last carry `sentence`.
+    async fn send(&self, sender: &crate::package::event::EventSender) {
+        match self {
+            Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
+                sender.send_warning(self.sentence()).await;
             }
             Self::AmbiguousName { name, paths } => {
                 sender
                     .send_packages_refused([crate::package::event::PackageRefusal {
                         kind: crate::package::event::RefusalKind::AmbiguousName,
-                        reason: crate::package::port::ambiguous_files_sentence(name, paths),
+                        reason: self.sentence(),
                         package: crate::package::event::RefusedPackage {
                             name: name.clone(),
                             paths: paths.clone(),
