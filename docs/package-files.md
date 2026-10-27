@@ -1312,6 +1312,14 @@ Consequences worth knowing before you adopt this:
   [every other overwrite](#what-an-overwrite-keeps). The content a secret target already held is
   itself a credential, and a plaintext copy of it on disk is worse than the checksum this section
   refuses. The prompt says so before you accept, and accepting is the only way past the conflict.
+- Accepting answers for the content the prompt described. selfie reads the target again after you
+  answer and overwrites it only if that read still finds those bytes. This narrows the window rather
+  than closing it: something written between that read and selfie's own write is still replaced. A
+  target that now holds the resolved content is in sync, and is tightened to owner-only as any
+  in-sync target is. Other changed content is left in place and reported as a conflict, which the
+  next apply asks about. A target that was removed is created, and anything that appears there first
+  is kept. One that became a symlink is replaced, as below. Anything listed below as refused before
+  a command runs is refused here too, such as a directory, a fifo, or a target selfie cannot read.
 
 #### Deploy behavior and permissions
 
@@ -1341,11 +1349,11 @@ the destination already holds the same content, and whatever its permissions are
 is a fifo, socket or device node behind it, which is refused before any command runs. The
 replacement lands on the link itself, so what it pointed at is left alone. selfie does not read
 through a link it has seen: doing so would show you a file the link's author chose rather than one
-you deployed. It looks twice, once before running the commands and again immediately before the
-read, and the read itself refuses to follow a link, so a link is never read through whenever it
-appeared; one that appears after the second look is replaced the same way. After the replacement
-succeeds selfie warns, naming the link and where it pointed, so a link you created deliberately is
-not removed silently.
+you deployed. It looks once before running the commands, again immediately before the read, and once
+more after you accept a conflict, and the read itself refuses to follow a link, so a link is never
+read through whenever it appeared; one that appears after the last look is replaced the same way.
+After the replacement succeeds selfie warns, naming the link and where it pointed, so a link you
+created deliberately is not removed silently.
 
 These refuse before any command runs, because a provider command can raise a biometric prompt for a
 deploy that would only be refused:

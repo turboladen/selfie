@@ -1,6 +1,8 @@
-//! Settling a target that something appeared at while it was being written, which
-//! the write left in place. One policy for both content classes: this run writes
-//! nothing over what appeared, and leaves any prompt or copy to the next run.
+//! Settling a target that holds bytes nobody has seen: something that appeared
+//! while the target was being written, which the write left in place, or a secret
+//! target that changed while its conflict prompt was open. One policy for both
+//! content classes: this run writes nothing over it, and leaves any prompt or copy
+//! to the next run.
 
 use std::future::Future;
 
@@ -8,6 +10,17 @@ use crate::{
     fs::target::TargetPath,
     package::event::{EntryOperation, EventSender, Failure},
 };
+
+/// The window in which something appeared at a target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum During {
+    /// It appeared after the last read found the target absent, and the write
+    /// kept it.
+    Write,
+    /// It was put there while a conflict prompt about the target's earlier bytes
+    /// was open.
+    Prompt,
+}
 
 /// One entry's side of settling a target that appeared: how it reads the target
 /// again, and what each settlement does on its path.
@@ -55,25 +68,38 @@ pub(super) async fn settle<A: Appeared + Send>(entry: &mut A) -> A::Outcome {
             let failure = gone_again(entry.target());
             entry.failed(failure).await
         }
-        Some(current) if current == entry.content() => entry.in_sync().await,
-        Some(current) => {
-            let outcome = entry.conflict(&current).await;
-            // After the conflict, so it reads as a note on it.
-            let warning = warning(entry.target());
-            entry.sender().send_warning(warning).await;
-            outcome
-        }
+        Some(current) => settle_present(entry, &current, During::Write).await,
     }
 }
 
-/// The warning that what appeared at `target` was left for the next run. Names
-/// the path only, so it is safe for a secret target.
-pub(super) fn warning(target: &TargetPath) -> String {
-    format!(
-        "Something appeared at '{}' while selfie was writing it, and was left in place. Run \
-         apply again to settle it.",
-        target.display()
-    )
+/// Settle `entry`, whose target holds `current`, which nobody has seen and which
+/// got there `during` that window: in sync when it is the content, else a conflict
+/// that is reported, not resolved. Writes nothing over it, and never puts the
+/// conflict to a resolver or to `--yes`.
+pub(super) async fn settle_present<A: Appeared + Send>(
+    entry: &mut A,
+    current: &[u8],
+    during: During,
+) -> A::Outcome {
+    if current == entry.content() {
+        return entry.in_sync().await;
+    }
+    let outcome = entry.conflict(current).await;
+    // After the conflict, so it reads as a note on it.
+    let warning = warning(entry.target(), during);
+    entry.sender().send_warning(warning).await;
+    outcome
+}
+
+/// The warning that what appeared at `target` during `during` was left for the
+/// next run. Names the path only, so it is safe for a secret target.
+pub(super) fn warning(target: &TargetPath, during: During) -> String {
+    let target = target.display();
+    let what = match during {
+        During::Write => format!("Something appeared at '{target}' while selfie was writing it"),
+        During::Prompt => format!("'{target}' changed while selfie was asking about it"),
+    };
+    format!("{what}, and was left in place. Run apply again to settle it.")
 }
 
 /// The failure of an entry whose target something appeared at during the write

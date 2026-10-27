@@ -216,33 +216,26 @@ where
 
         // Both questions again, immediately before the read, because the answers
         // taken when the entry was classified are older than the resolve that ran in between. A
-        // link that appeared meanwhile is replaced like any other; a fifo, socket or
-        // device node that appeared, at the target or behind a new link, refuses,
-        // since the read would meet it and the writer refuse it.
-        let found = self.find(target).await?;
-
-        // A link is replaced whatever is behind it, so there is nothing to compare and
-        // nothing to put to a resolver, and both are skipped.
+        // fifo, socket or device node that appeared, at the target or behind a new
+        // link, refuses, since the read would meet it and the writer refuse it.
         //
-        // Skipping `settle_in_sync` matters as much as skipping the read: the mode of a
-        // link's destination says nothing about the file that replaces the link, and
-        // the outcome must not depend on it (ADR-0005 decision 3).
-        let current = match found {
-            Found::Link(link) => {
-                before_write().map_err(SecretOutcome::StateNotWritable)?;
-                return Ok(self.replace_link(target, &resolved, &link).await);
-            }
-            Found::Current(current) => current,
-        };
+        // A link is replaced whatever is behind it, with nothing compared and nothing
+        // put to a resolver. Skipping `settle_in_sync` matters as much as skipping the
+        // read: the mode of a link's destination says nothing about the file that
+        // replaces the link, and the outcome must not depend on it (ADR-0005 decision 3).
+        let current = self
+            .find_replacing_link(target, &resolved, before_write)
+            .await?;
         self.settle_in_sync(target, &resolved, current.as_deref(), before_write)
             .await?;
         // Ahead of the conflict's question as well as the write, so no answer is
         // asked for a write that cannot happen.
         before_write().map_err(SecretOutcome::StateNotWritable)?;
-        self.settle_conflict(target, &resolved, current.as_deref())
+        let if_present = self
+            .settle_conflict(target, &resolved, current, before_write)
             .await?;
 
-        if current.is_some() {
+        if if_present == IfPresent::Replace {
             return Ok(self.write(target, &resolved).await);
         }
         // Nothing was there, so the write replaces nothing: a file that appeared
@@ -259,11 +252,25 @@ where
         }
     }
 
-    /// Look at the target and read it, immediately before a write.
-    async fn find(&self, target: &SecretEntry<'_>) -> Phase<Found> {
-        match self.look(target.entry.target(), &target.path).await? {
-            Some(link) => Ok(Found::Link(link)),
-            None => self.read_before_write(target).await,
+    /// Look at the target and read it, immediately before a write: its bytes, or
+    /// `None` for nothing there. A link found there is replaced with the resolved
+    /// content, which ends the entry, as does a refusal; both are already reported.
+    async fn find_replacing_link(
+        &self,
+        target: &SecretEntry<'_>,
+        resolved: &ResolvedContent,
+        before_write: &mut BeforeWrite<'_>,
+    ) -> Phase<Option<Vec<u8>>> {
+        let found = match self.look(target.entry.target(), &target.path).await? {
+            Some(link) => Found::Link(link),
+            None => self.read_before_write(target).await?,
+        };
+        match found {
+            Found::Link(link) => {
+                before_write().map_err(SecretOutcome::StateNotWritable)?;
+                Err(self.replace_link(target, resolved, &link).await)
+            }
+            Found::Current(current) => Ok(current),
         }
     }
 
@@ -307,8 +314,9 @@ where
         };
 
         // The repository-file path's classifier and refusal, so the two paths cannot
-        // answer differently about one file. Everything refused here appeared while
-        // the command ran, since the check before it refuses what was already there.
+        // answer differently about one file. Everything refused here appeared since
+        // the check before the command, which refuses what was already there: while
+        // the command ran, while a conflict prompt was open, or during a write.
         // A link here is one again where the look just found none, and a target that
         // changes under every look is refused rather than chased.
         match readable_or_refusal(source, &target.path, state) {
@@ -577,21 +585,28 @@ where
     /// non-interactive contexts; they are reported and skipped. The only way
     /// past this point is an interactive resolver actively returning Accept.
     ///
-    /// Returning `Ok` means the caller may write: either the resolver accepted,
-    /// or there was nothing at the target to begin with.
+    /// Returning `Ok` means the caller may write, and says how the write treats
+    /// what is at the target: `Keep` when nothing was there to begin with, and
+    /// after an accepted conflict whatever [`after_prompt`](Self::after_prompt)
+    /// returns, having read the target again.
     async fn settle_conflict(
         &self,
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
-        current: Option<&[u8]>,
-    ) -> Phase {
+        current: Option<Vec<u8>>,
+        before_write: &mut BeforeWrite<'_>,
+    ) -> Phase<IfPresent> {
         let Some(current) = current else {
-            return Ok(());
+            return Ok(IfPresent::Keep);
         };
-        let report = secret_conflict_report(&resolved.bytes, current);
+        let report = secret_conflict_report(&resolved.bytes, &current);
 
-        let declined = match self.ask_resolver(target, resolved, current, &report).await {
-            Some(ConflictResolution::Accept) => return Ok(()),
+        let declined = match self.ask_resolver(target, resolved, &current, &report).await {
+            Some(ConflictResolution::Accept) => {
+                return self
+                    .after_prompt(target, resolved, &current, before_write)
+                    .await;
+            }
             Some(ConflictResolution::Skip) => true,
             None => false,
         };
@@ -602,6 +617,43 @@ where
             .send_dotfile_conflict(&target.source, target.path.display(), report, declined)
             .await;
         Err(SecretOutcome::Conflicted)
+    }
+
+    /// Read the target again once a resolver has accepted a conflict about
+    /// `shown`, and say how the write treats what is there: `Replace` when it still
+    /// holds `shown`, and `Keep` when nothing is there, so the write creates and
+    /// keeps whatever appears. Anything else ends the entry here, already reported:
+    /// a link is replaced, a target the looks or the read refuse is refused, the
+    /// resolved content is settled as in sync, and other bytes are left in place as
+    /// an unasked conflict.
+    // A secret target keeps no copy, so different bytes written while the prompt
+    // was open would be lost to a credential nobody was asked about.
+    async fn after_prompt(
+        &self,
+        target: &SecretEntry<'_>,
+        resolved: &ResolvedContent,
+        shown: &[u8],
+        before_write: &mut BeforeWrite<'_>,
+    ) -> Phase<IfPresent> {
+        let now = match self
+            .find_replacing_link(target, resolved, before_write)
+            .await?
+        {
+            None => return Ok(IfPresent::Keep),
+            Some(now) if now == shown => return Ok(IfPresent::Replace),
+            Some(now) => now,
+        };
+        // The same settlement as a target found in sync before the prompt, so a laxer
+        // mode is tightened and a link put there since is replaced.
+        self.settle_in_sync(target, resolved, Some(&now), before_write)
+            .await?;
+        let mut entry = SecretAppeared {
+            apply: self,
+            target,
+            resolved,
+            before_write,
+        };
+        Err(appeared::settle_present(&mut entry, &now, appeared::During::Prompt).await)
     }
 
     /// Put the conflict to the injected resolver, if there is one, and return
@@ -706,7 +758,8 @@ where
     }
 }
 
-/// A secret-bearing entry whose write left in place what appeared at its target.
+/// A secret-bearing entry whose target holds bytes nobody has seen: left in place
+/// by its write, or changed while its conflict prompt was open.
 struct SecretAppeared<'a, 'b, 'g, F, CR> {
     apply: &'a SecretApply<'b, F, CR>,
     target: &'a SecretEntry<'a>,
@@ -736,16 +789,9 @@ where
     // A link is replaced whenever it is found, as for any secret target, so one
     // that appeared settles here.
     async fn reread(&mut self) -> Result<Option<Vec<u8>>, SecretOutcome> {
-        match self.apply.find(self.target).await? {
-            Found::Link(link) => {
-                (self.before_write)().map_err(SecretOutcome::StateNotWritable)?;
-                Err(self
-                    .apply
-                    .replace_link(self.target, self.resolved, &link)
-                    .await)
-            }
-            Found::Current(current) => Ok(current),
-        }
+        self.apply
+            .find_replacing_link(self.target, self.resolved, self.before_write)
+            .await
     }
 
     async fn failed(&mut self, failure: Failure) -> SecretOutcome {
@@ -772,7 +818,10 @@ where
         } else {
             self.apply
                 .sender
-                .send_warning(appeared::warning(&self.target.path))
+                .send_warning(appeared::warning(
+                    &self.target.path,
+                    appeared::During::Write,
+                ))
                 .await;
         }
         SecretOutcome::Skipped
