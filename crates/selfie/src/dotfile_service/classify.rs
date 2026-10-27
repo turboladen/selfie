@@ -18,7 +18,10 @@ use crate::{
     },
     package::{
         ContentSource, DotfileEntry, Package, ScopedEntry, SpecOrigin, TargetCollision,
-        event::{BaseKind, Condition, DotfileSource, Location, Refusal, RepoPath, SourceBase},
+        event::{
+            BaseKind, Condition, DotfileSource, Location, PlannedEntry, Refusal, RepoPath,
+            SourceBase,
+        },
     },
     paths::is_within,
 };
@@ -343,6 +346,52 @@ pub(super) fn classify_entry<'e, F: FileSystem>(
             }))
         }
     }
+}
+
+/// The directory `package`'s entries resolve their sources against: the
+/// directory of its spec file.
+pub(super) fn base_dir(package: &Package) -> PathBuf {
+    package
+        .path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+/// The entries a run over `packages` will walk, in walk order, each spelled as
+/// its events will spell it. An entry [`plan_entry`] refuses is left out: it is
+/// refused before anything is read, so it gets no event of its own beyond the
+/// refusal.
+pub(super) fn planned_entries<'p>(
+    packages: impl IntoIterator<Item = &'p Package>,
+    home: &ResolvedHome,
+    across: &CrossSpecCollisions<'_>,
+    config: &SelfieConfig,
+) -> Vec<PlannedEntry> {
+    let mut planned = Vec::new();
+    for package in packages {
+        let base_dir = base_dir(package);
+        let source_base = source_base(config, package);
+        let collisions = PackageCollisions::of(package, home, config.environment(), across);
+        for scoped in package.effective_dotfiles(home, Some(config.environment())) {
+            if let Ok(entry) = plan_entry(
+                home,
+                &base_dir,
+                source_base.as_ref(),
+                scoped,
+                &collisions,
+                // Only the wording of a refusal depends on the purpose, and a
+                // refusal here is dropped.
+                Purpose::Deploy,
+            ) {
+                planned.push(PlannedEntry {
+                    source: entry.event_source,
+                    target: entry.target.display().to_string(),
+                });
+            }
+        }
+    }
+    planned
 }
 
 /// The directory `package`'s specs are read from, as events name it: `None` for

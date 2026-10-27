@@ -647,7 +647,8 @@ impl EventProcessor {
             | PackageEvent::DotfileListLoaded { .. }
             | PackageEvent::SyncRepoStatus { .. }
             | PackageEvent::SyncDriftSummary { .. }
-            | PackageEvent::SyncCommitCreated { .. } => {
+            | PackageEvent::SyncCommitCreated { .. }
+            | PackageEvent::DotfileEntriesPlanned { .. } => {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }

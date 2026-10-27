@@ -838,14 +838,16 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         // rather than emitted as a data event, and the lifecycle and log variants
         // carry nothing a tool caller acts on.
         // A step's end is lifecycle too: a failed step's cause arrives as its own
-        // warning or failure.
+        // warning or failure. So is the list of entries a run is about to walk,
+        // which only lays out what a terminal shows next.
         PackageEvent::Started { .. }
         | PackageEvent::Progress { .. }
         | PackageEvent::StepEnded { .. }
         | PackageEvent::Completed { .. }
         | PackageEvent::Canceled { .. }
         | PackageEvent::Trace { .. }
-        | PackageEvent::Debug { .. } => None,
+        | PackageEvent::Debug { .. }
+        | PackageEvent::DotfileEntriesPlanned { .. } => None,
     };
     row.into_iter().collect()
 }
@@ -1423,6 +1425,30 @@ mod tests {
         assert!(!result.success);
         assert_eq!(result.data["result"]["status"], "refused");
         assert_eq!(result.data["result"]["refused"], 1);
+    }
+
+    // The entries a run announces lay out a terminal's table and nothing else,
+    // so a stream carrying them reads exactly as one without them.
+    #[tokio::test]
+    async fn the_entry_announcement_adds_nothing() {
+        use selfie::package::event::{DotfileSource, PlannedEntry};
+
+        let completed = || PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+        };
+        let announced = PackageEvent::DotfileEntriesPlanned {
+            operation_info: test_op_info(),
+            entries: vec![PlannedEntry {
+                source: DotfileSource::Command("echo x".to_string()),
+                target: "/home/u/.x".to_string(),
+            }],
+        };
+
+        let with = collect_events(Box::pin(stream::iter(vec![announced, completed()]))).await;
+        let without = collect_events(Box::pin(stream::iter(vec![completed()]))).await;
+
+        assert_eq!(with.data, without.data);
     }
 
     // A drift row is the target and its bare classification, and nothing else an

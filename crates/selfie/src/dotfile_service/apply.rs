@@ -7,7 +7,7 @@
 
 use crate::package::collect::CrossSpecCollisions;
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tokio_util::sync::CancellationToken;
 
@@ -32,7 +32,7 @@ use crate::{
 
 use super::classify::{
     Classified, PackageCollisions, Purpose, RepoFile, RepoRead, ResolvedHome, classify_entry,
-    read_repo_file,
+    planned_entries, read_repo_file,
 };
 use super::deploy_entry::{
     Decided, DeployUnit, Ledger, Recorded, conflict_diff, deploy_and_record, record_and_save,
@@ -410,6 +410,17 @@ where
         config.environment(),
     );
 
+    // Announced only once the run is known to walk, so a stopped or canceled run
+    // announces nothing. The resolver hears it first, on this task, so a
+    // conflict put to it on the first entry can already lay itself out.
+    if stopped.is_none() && !token.is_cancelled() {
+        let entries = planned_entries(packages.iter().copied(), &home, &across, config);
+        if let Some(resolver) = &options.conflict_resolver {
+            resolver.planned(&entries);
+        }
+        sender.send_dotfile_entries_planned(entries).await;
+    }
+
     'packages: for package in packages {
         let dotfiles = package.effective_dotfiles(&home, Some(config.environment()));
         let package_name = package.spec_name();
@@ -435,11 +446,7 @@ where
 
         // Source paths resolve relative to the YAML file's parent directory,
         // so packages/fnm.yaml with source "fnm/init.fish" → packages/fnm/init.fish
-        let base_dir = package
-            .path()
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+        let base_dir = super::classify::base_dir(package);
         let source_base = super::classify::source_base(config, package);
 
         let secret_apply = SecretApply {

@@ -79,6 +79,13 @@ pub trait ConflictResolver: Send + Sync {
     /// conflict a resolver gave no answer for, as when it panicked, is reported
     /// undeclined and skipped.
     fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution;
+
+    /// Hear the entries an apply is about to walk, before any of them can be
+    /// put to [`resolve`](ConflictResolver::resolve). Called once per run, on
+    /// the library's task, just before the run announces the same entries as a
+    /// [`PackageEvent::DotfileEntriesPlanned`](crate::package::event::PackageEvent::DotfileEntriesPlanned)
+    /// event. Must return promptly. Does nothing unless implemented.
+    fn planned(&self, _entries: &[crate::package::event::PlannedEntry]) {}
 }
 
 /// Put a conflict to `resolver` off the async runtime, since a resolver

@@ -2488,6 +2488,58 @@ mod tests {
         assert!(summary.error.is_none());
     }
 
+    // The entries a drift check announces change nothing it counts.
+    #[tokio::test]
+    async fn collect_drift_summary_ignores_the_entry_announcement() {
+        use crate::package::event::{DotfileSource, DriftType, PlannedEntry, StepCount};
+
+        let events = || {
+            vec![
+                PackageEvent::DotfileDriftDetected {
+                    operation_info: test_operation_info(),
+                    source: DotfileSource::Recorded("bash/bashrc".to_string()),
+                    target: "/home/user/.bashrc".to_string(),
+                    drift_type: DriftType::TargetChanged,
+                },
+                PackageEvent::Completed {
+                    operation_info: test_operation_info(),
+                    result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
+                        drift_count: 1,
+                        total_count: 3,
+                        refused_count: 0,
+                        unverified_count: 0,
+                        orphan_count: 0,
+                        unjudged_count: 0,
+                        environment: "test".to_string(),
+                        steps_completed: StepCount::new(3, 3),
+                    }),
+                },
+            ]
+        };
+        let mut announced = vec![PackageEvent::DotfileEntriesPlanned {
+            operation_info: test_operation_info(),
+            entries: vec![PlannedEntry {
+                source: DotfileSource::Recorded("bash/bashrc".to_string()),
+                target: "/home/user/.bashrc".to_string(),
+            }],
+        }];
+        announced.extend(events());
+
+        let with = collect_drift_summary(events_to_stream(announced)).await;
+        let without = collect_drift_summary(events_to_stream(events())).await;
+
+        assert_eq!(with.drifted_targets, without.drifted_targets);
+        assert_eq!(
+            (with.total_deployed, with.refused_count, with.warned),
+            (
+                without.total_deployed,
+                without.refused_count,
+                without.warned
+            )
+        );
+        assert_eq!(with.relayed.len(), without.relayed.len());
+    }
+
     // ─── status() tests ──────────────────────────────────────────────────────
 
     // A GitSyncProvider whose `discover_repo` and `repo_status` succeed, so

@@ -21415,3 +21415,274 @@ mod collisions_with_unreadable_specs {
         );
     }
 }
+
+// The entries a run announces before walking them: what is listed, in which
+// order, spelled how, and when nothing is announced at all.
+mod entries_planned {
+    use super::*;
+    use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+    use selfie::package::event::PlannedEntry;
+    use std::sync::{Arc, Mutex};
+
+    fn planned(events: &[PackageEvent]) -> Vec<Vec<PlannedEntry>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileEntriesPlanned { entries, .. } => Some(entries.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Each row event's source and target, in order.
+    fn rows(events: &[PackageEvent]) -> Vec<PlannedEntry> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDeployed { source, target, .. }
+                | PackageEvent::DotfileSkipped { source, target, .. }
+                | PackageEvent::DotfileDriftDetected { source, target, .. } => Some(PlannedEntry {
+                    source: source.clone(),
+                    target: target.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn position(events: &[PackageEvent], what: impl Fn(&PackageEvent) -> bool) -> usize {
+        events
+            .iter()
+            .position(what)
+            .unwrap_or_else(|| panic!("no such event in {events:?}"))
+    }
+
+    fn is_row(event: &PackageEvent) -> bool {
+        matches!(
+            event,
+            PackageEvent::DotfileDeploying { .. }
+                | PackageEvent::DotfileDeployed { .. }
+                | PackageEvent::DotfileSkipped { .. }
+                | PackageEvent::DotfileConflict { .. }
+                | PackageEvent::DotfileDriftDetected { .. }
+        )
+    }
+
+    fn is_planned(event: &PackageEvent) -> bool {
+        matches!(event, PackageEvent::DotfileEntriesPlanned { .. })
+    }
+
+    // Two packages of two entries, so a list in the wrong order or missing a
+    // package fails.
+    fn two_packages(dirs: &TestDirs) {
+        for name in ["aaa", "bbb"] {
+            std::fs::create_dir_all(dirs.package_dir.join(name)).unwrap();
+            let mut entries = Vec::new();
+            for file in ["one.conf", "two.conf"] {
+                std::fs::write(dirs.package_dir.join(name).join(file), file).unwrap();
+                entries.push((
+                    format!("{name}/{file}"),
+                    dirs.target_dir
+                        .join(format!("{name}-{file}"))
+                        .display()
+                        .to_string(),
+                ));
+            }
+            let pairs: Vec<(&str, &str)> = entries
+                .iter()
+                .map(|(s, t)| (s.as_str(), t.as_str()))
+                .collect();
+            create_package_with_dotfiles(&dirs.package_dir, name, &pairs);
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_announces_the_entries_it_walks_before_the_first() {
+        let dirs = TestDirs::new();
+        two_packages(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let announced = planned(&events);
+        assert_eq!(announced.len(), 1, "announced once: {events:?}");
+        assert!(position(&events, is_planned) < position(&events, is_row));
+        assert_eq!(announced[0], rows(&events));
+        assert_eq!(announced[0].len(), 4);
+    }
+
+    #[tokio::test]
+    async fn drift_announces_the_entries_it_walks_before_the_first() {
+        let dirs = TestDirs::new();
+        two_packages(&dirs);
+        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        std::fs::write(dirs.target_dir.join("aaa-one.conf"), "edited").unwrap();
+        std::fs::write(dirs.target_dir.join("bbb-two.conf"), "edited").unwrap();
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let announced = planned(&events);
+        assert_eq!(announced.len(), 1, "announced once: {events:?}");
+        assert!(position(&events, is_planned) < position(&events, is_row));
+        let drifted = rows(&events);
+        assert_eq!(drifted.len(), 2, "{events:?}");
+        // Every entry is announced, the in-sync ones included, in walk order.
+        assert_eq!(announced[0].len(), 4);
+        assert_eq!(announced[0][0], drifted[0]);
+        assert_eq!(announced[0][3], drifted[1]);
+    }
+
+    // Refused before anything is read, so each gets no row: a source escaping
+    // the package, two entries sharing a target, and a relative target.
+    #[tokio::test]
+    async fn an_entry_refused_lexically_is_not_announced() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/good.conf"), "g").unwrap();
+        std::fs::write(dirs.package_dir.join("app/dup.conf"), "d").unwrap();
+        let good = dirs.target_dir.join("good.conf").display().to_string();
+        let shared = dirs.target_dir.join("shared.conf").display().to_string();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[
+                ("app/good.conf", good.as_str()),
+                (
+                    "../../outside.conf",
+                    dirs.target_dir.join("x").to_str().unwrap(),
+                ),
+                ("app/dup.conf", shared.as_str()),
+                ("app/good.conf", shared.as_str()),
+                ("app/good.conf", "relative/target"),
+            ],
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let announced = planned(&events);
+        assert_eq!(announced.len(), 1, "{events:?}");
+        let targets: Vec<&str> = announced[0].iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(targets, vec![good.as_str()], "{events:?}");
+    }
+
+    // The target as its row will carry it, expanded against the home the run
+    // resolves: a spec's `~//x` and `~/a/../b` are not what a row prints.
+    #[tokio::test]
+    async fn the_announced_target_is_the_expanded_one() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.join("home");
+        std::fs::create_dir_all(home.join("a")).unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/x.conf"), "x").unwrap();
+        std::fs::write(dirs.package_dir.join("app/b.conf"), "b").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[("app/x.conf", "~//x.conf"), ("app/b.conf", "~/a/../b.conf")],
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let announced = planned(&events);
+        assert_eq!(announced.len(), 1, "{events:?}");
+        let rows = rows(&events);
+        assert_eq!(rows.len(), 2, "{events:?}");
+        assert_eq!(announced[0], rows);
+        assert!(
+            announced[0].iter().all(|e| !e.target.starts_with('~')),
+            "{announced:?}"
+        );
+    }
+
+    // A run that stops or is canceled before its first entry announces nothing:
+    // collection refused a spec, or a package was refused whole, under
+    // `stop_on_error`, or the run was canceled first.
+    #[tokio::test]
+    async fn a_stopped_run_announces_nothing() {
+        // A spec that does not load.
+        let dirs = TestDirs::new().stopping_on_error(true);
+        two_packages(&dirs);
+        std::fs::write(dirs.package_dir.join("aab.yml"), "environments: {oops\n").unwrap();
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert!(
+            failure_message(&events).starts_with("Stopped before applying anything"),
+            "control: {events:?}"
+        );
+        assert!(
+            planned(&events).is_empty(),
+            "collection refused: {events:?}"
+        );
+
+        // A package refused whole.
+        let dirs = TestDirs::new().stopping_on_error(true);
+        two_packages(&dirs);
+        write_package_yaml(
+            &dirs.package_dir,
+            "zzz",
+            "name: zzz\nenvironments:\n  test:\n    install: \"echo i\"\nconfigs: []\n",
+        );
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert!(
+            failure_message(&events).starts_with("Stopped before applying anything"),
+            "control: {events:?}"
+        );
+        assert!(planned(&events).is_empty(), "package refused: {events:?}");
+
+        // Canceled before the run.
+        let dirs = TestDirs::new();
+        two_packages(&dirs);
+        let token = CancellationToken::new();
+        token.cancel();
+        let events = collect_events(
+            dirs.service_with_runner_and_token(FakeCommandRunner::new(), token)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+        assert!(rows(&events).is_empty(), "control: {events:?}");
+        assert!(planned(&events).is_empty(), "canceled: {events:?}");
+    }
+
+    // Records what it hears, in order.
+    struct Recording(Mutex<Vec<String>>);
+
+    impl ConflictResolver for Recording {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            self.0.lock().unwrap().push("resolve".to_string());
+            ConflictResolution::Skip
+        }
+
+        fn planned(&self, entries: &[PlannedEntry]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("planned {}", entries.len()));
+        }
+    }
+
+    // The resolver is told the plan on the run's own task, before the first
+    // conflict is put to it, whatever a consumer of the events has seen.
+    #[tokio::test]
+    async fn the_resolver_hears_the_plan_before_the_first_conflict() {
+        let dirs = TestDirs::new();
+        two_packages(&dirs);
+        // Content selfie did not write, so the first entry is a conflict.
+        std::fs::write(dirs.target_dir.join("aaa-one.conf"), "mine").unwrap();
+        let recording = Arc::new(Recording(Mutex::new(Vec::new())));
+        let options = ApplyOptions {
+            conflict_resolver: Some(recording.clone()),
+            ..ApplyOptions::default()
+        };
+
+        let _ = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(
+            *recording.0.lock().unwrap(),
+            vec!["planned 4".to_string(), "resolve".to_string()]
+        );
+    }
+}

@@ -950,6 +950,16 @@ impl EventSender {
         .await;
     }
 
+    /// Announce the dotfile entries a run is about to walk.
+    pub(crate) async fn send_dotfile_entries_planned(&self, entries: Vec<PlannedEntry>) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::DotfileEntriesPlanned {
+            operation_info,
+            entries,
+        })
+        .await;
+    }
+
     /// Send a dotfile-drift-detected event
     pub(crate) async fn send_dotfile_drift_detected(
         &self,
@@ -3433,6 +3443,20 @@ pub enum PackageEvent {
         package: Option<String>,
     },
 
+    /// The dotfile entries an apply or drift run is about to walk, in the order
+    /// it walks them, sent once before the first entry's event.
+    ///
+    /// Each is spelled as that entry's events will spell it, so a consumer can
+    /// lay out what follows. It is a forecast and nothing more: an entry refused
+    /// by what is found at its target, or one a drift check finds in sync, gets
+    /// no deployed, skipped, conflict or drift event, and a later event may spell
+    /// an entry differently. An entry refused before anything is read is not
+    /// listed.
+    DotfileEntriesPlanned {
+        operation_info: OperationInfo,
+        entries: Vec<PlannedEntry>,
+    },
+
     /// Drift detected between deployed file and repo source
     DotfileDriftDetected {
         operation_info: OperationInfo,
@@ -3981,6 +4005,15 @@ impl std::fmt::Display for DriftType {
             DriftType::NotTracked => write!(f, "not tracked"),
         }
     }
+}
+
+/// A dotfile entry a run is about to walk, as its events will name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedEntry {
+    /// The source, as the entry's events will carry it.
+    pub source: DotfileSource,
+    /// The expanded target, as the entry's events will carry it.
+    pub target: String,
 }
 
 /// How a dotfile's target differs from what selfie would write.
