@@ -433,14 +433,14 @@ impl From<&crate::package::collect::warning::CollectionRefusal> for Unchecked {
         use crate::package::collect::warning::CollectionRefusal;
 
         match refusal {
-            CollectionRefusal::UnloadableSpec(error) => {
+            CollectionRefusal::UnloadableSpec { error, .. } => {
                 Self::Unloadable(error.package_path().to_path_buf())
             }
             CollectionRefusal::UnlistableDotfilesDirectory(error)
             | CollectionRefusal::UncheckableDotfilesDirectory(error) => {
                 Self::DotfilesDirectory(error.clone())
             }
-            CollectionRefusal::AmbiguousName { name, paths } => Self::Ambiguous {
+            CollectionRefusal::AmbiguousName { name, paths, .. } => Self::Ambiguous {
                 name: name.clone(),
                 paths: paths.clone(),
             },

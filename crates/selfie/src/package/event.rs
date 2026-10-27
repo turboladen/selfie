@@ -5383,18 +5383,22 @@ mod tests {
     }
 
     fn unparsable_spec() -> CollectionRefusal {
-        CollectionRefusal::UnloadableSpec(crate::package::port::PackageParseError::new(
-            "/p/broken.yml",
-            crate::package::port::PackageParseKind::Unreadable {
-                reason: "a fifo".to_string(),
-            },
-        ))
+        CollectionRefusal::UnloadableSpec {
+            error: crate::package::port::PackageParseError::new(
+                "/p/broken.yml",
+                crate::package::port::PackageParseKind::Unreadable {
+                    reason: "a fifo".to_string(),
+                },
+            ),
+            base: BaseKind::PackageDirectory,
+        }
     }
 
     fn ambiguous_name() -> CollectionRefusal {
         CollectionRefusal::AmbiguousName {
             name: "nv".to_string(),
             paths: vec!["/p/nv.yaml".into(), "/p/nv.yml".into()],
+            base: BaseKind::PackageDirectory,
         }
     }
 

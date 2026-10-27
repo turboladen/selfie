@@ -60,9 +60,10 @@ fn other_specs<R: PackageRepository>(
             let unrefused = collected
                 .unrefused_ambiguities
                 .iter()
-                .map(|(name, paths)| CollectionRefusal::AmbiguousName {
+                .map(|(name, paths, base)| CollectionRefusal::AmbiguousName {
                     name: name.clone(),
                     paths: paths.clone(),
+                    base: *base,
                 })
                 .collect::<Vec<_>>();
             let unchecked: Vec<Unchecked> = collected
@@ -461,9 +462,9 @@ where
                     let unloadable: Vec<&std::path::Path> = findings
                         .iter()
                         .filter_map(|finding| match finding {
-                            Finding::Refusal(CollectionRefusal::UnloadableSpec(error)) => {
-                                Some(error.package_path())
-                            }
+                            Finding::Refusal(CollectionRefusal::UnloadableSpec {
+                                error, ..
+                            }) => Some(error.package_path()),
                             _ => None,
                         })
                         .collect();
@@ -482,7 +483,11 @@ where
                     };
                     for finding in &findings {
                         match finding {
-                            Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths }) => {
+                            Finding::Refusal(CollectionRefusal::AmbiguousName {
+                                name,
+                                paths,
+                                ..
+                            }) => {
                                 refuse_name(name, paths);
                             }
                             _ => finding.send(&sender).await,
@@ -491,7 +496,7 @@ where
                     // The listing spans every environment, so a name apply leaves
                     // unmentioned here, its files declaring no dotfiles in this
                     // one, is refused rows too.
-                    for (name, paths) in &unrefused_ambiguities {
+                    for (name, paths, _) in &unrefused_ambiguities {
                         refuse_name(name, paths);
                     }
 

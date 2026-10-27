@@ -61,7 +61,9 @@ where
     let mut unvalidated = Vec::new();
     let unrefused = unrefused_ambiguities
         .into_iter()
-        .map(|(name, paths)| Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths }));
+        .map(|(name, paths, base)| {
+            Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths, base })
+        });
     // Every unparsable file is reported, but only the ones apply could have used
     // are errors: a dotfiles copy a package spec shadows is not one, as it is not
     // one for apply. Collection refuses exactly those, one refusal per file.
@@ -325,7 +327,7 @@ mod tests {
 
         assert_eq!(validated, 1, "the readable spec is still validated");
         assert_eq!(other_warnings, 0, "{unvalidated:?}");
-        let [CollectionRefusal::UnloadableSpec(error)] = unvalidated.as_slice() else {
+        let [CollectionRefusal::UnloadableSpec { error, .. }] = unvalidated.as_slice() else {
             panic!("the unparsable spec must be the one refusal, got: {unvalidated:?}");
         };
         assert_eq!(error.package_path(), packages.join("creds.yml"));
@@ -369,7 +371,7 @@ mod tests {
         } = validated(&packages, &dotfiles).await;
 
         assert_eq!(other_warnings, 0);
-        let [CollectionRefusal::AmbiguousName { name, paths }] = unvalidated.as_slice() else {
+        let [CollectionRefusal::AmbiguousName { name, paths, .. }] = unvalidated.as_slice() else {
             panic!("the ambiguous name must be the one refusal, got: {unvalidated:?}");
         };
         assert_eq!(name, "nv");

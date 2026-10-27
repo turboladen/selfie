@@ -111,8 +111,8 @@ Collection belongs to the package module, named for what it does rather than for
 the collected packages and one list of findings in the order it found them. A finding is a warning
 or a refusal, and each refusal carries the facts its sentence and its event need: the listing error
 for a dotfiles directory selfie could not read, the parse error for a spec that could not be loaded,
-the files for an ambiguous name. Each one sends its own event, so a refusal cannot exist without its
-message.
+the files for an ambiguous name, and for those last two the directory the files were found in. Each
+one sends its own event, so a refusal cannot exist without its message.
 
 A spec in the dotfiles directory that does not parse, under a name the package directory claims,
 stays a warning: nothing would have used it. The findings leave in the order they were found, so a
