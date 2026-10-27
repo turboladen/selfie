@@ -64,6 +64,10 @@ fn resolve_package_directory() -> Option<PathBuf> {
 }
 
 /// List package names (file stems of `.yml`/`.yaml` files) in a directory.
+///
+/// A name holding a character the terminal would act on, or one that renders
+/// as nothing, is left out: the shell inserts a candidate as written, so it
+/// cannot be shown escaped, and a newline would split it into two candidates.
 fn list_package_names(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
@@ -75,7 +79,10 @@ fn list_package_names(dir: &Path) -> Vec<String> {
             let path = entry.path();
             let ext = path.extension()?.to_str()?;
             if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") {
-                path.file_stem()?.to_str().map(String::from)
+                path.file_stem()?
+                    .to_str()
+                    .filter(|name| !name.chars().any(crate::terminal_text::is_escaped))
+                    .map(String::from)
             } else {
                 None
             }
@@ -90,6 +97,24 @@ mod tests {
     use std::ffi::OsString;
 
     use tempfile::TempDir;
+
+    // A name the shell would insert as an escape sequence, or split on a
+    // newline, is not offered; an ordinary name beside it is.
+    #[test]
+    fn a_name_holding_a_control_or_hidden_character_is_not_offered() {
+        let dir = TempDir::new().unwrap();
+        for name in [
+            "plain",
+            "esc\u{1b}[2J",
+            "rlo\u{202E}txt",
+            "split\nname",
+            "vs\u{FE0F}",
+        ] {
+            std::fs::write(dir.path().join(format!("{name}.yml")), "").unwrap();
+        }
+
+        assert_eq!(list_package_names(dir.path()), ["plain"]);
+    }
 
     #[test]
     fn list_package_names_finds_yaml_files() {

@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::package::{
     event::{OperationResult, PackageEvent},
@@ -59,7 +60,7 @@ pub(crate) async fn handle_remove(
     };
 
     display.print_run_note(format!("Package '{package_name}' found at:"));
-    display.print_run_note(format!("  {}", package_blob.file_path().display()));
+    display.print_run_note(format!("  {}", DisplayPath::of(package_blob.file_path())));
 
     // `checked` is what separates "nothing depends on this" from "selfie does not
     // know". Both used to arrive here as an empty list, and the line below then
@@ -85,17 +86,18 @@ pub(crate) async fn handle_remove(
     // unreadable spec nor a failed listing can support a clearance.
     let complete = checked && unreadable.is_empty();
 
+    let shown_name = crate::terminal_text::escape(package_name);
     let (prompt, default_answer) = if dependent_packages.is_empty() && complete {
         display.print_run_note(format!(
             "Package '{package_name}' is not a dependency of any other packages."
         ));
-        (format!("Remove package '{package_name}'?"), false)
+        (format!("Remove package '{shown_name}'?"), false)
     } else if dependent_packages.is_empty() {
         display.print_warning(format!(
             "Nothing selfie could read depends on '{package_name}', but it could not read \
              everything, so this is not a clearance."
         ));
-        (format!("Remove package '{package_name}' anyway?"), false)
+        (format!("Remove package '{shown_name}' anyway?"), false)
     } else {
         display.print_warning(format!(
             "Package '{package_name}' is a dependency of the following packages:"
@@ -157,7 +159,7 @@ pub(crate) async fn handle_remove(
                     display.print_success(format!(
                         "Package '{}' removed successfully from {}",
                         package_name,
-                        package_blob.file_path().display()
+                        DisplayPath::of(package_blob.file_path())
                     ));
 
                     if !dependent_packages.is_empty() {

@@ -16,6 +16,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+use crate::terminal_text::escape_keeping_tabs;
+
 /// Lines either side of the failing one.
 const CONTEXT: u64 = 2;
 
@@ -108,13 +110,36 @@ pub(crate) fn window(path: &Path, line: u64, column: u64) -> Option<String> {
     Some(out)
 }
 
-/// `text`, cut short if it is longer than a terminal wants.
+// Each character of `line` as the row shows it: itself, or the escape it is
+// written as. The row and the caret below it are both measured from these, so
+// a cut never falls inside an escape and the caret counts the cells an escape
+// takes.
+fn shown_chars(line: &str) -> Vec<(char, String)> {
+    line.chars()
+        .map(|c| {
+            (
+                c,
+                escape_keeping_tabs(c.encode_utf8(&mut [0; 4])).into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// `text` escaped, and cut short if it is longer than a terminal wants. The
+/// cut falls between characters, so an escape is shown whole or not at all.
 fn clamp(text: &str) -> String {
-    if text.chars().count() <= MAX_LINE {
-        return text.to_string();
+    let mut shown = String::new();
+    let mut width = 0;
+    for (_, piece) in shown_chars(text) {
+        let cells = piece.chars().count();
+        if width + cells > MAX_LINE {
+            shown.push('…');
+            return shown;
+        }
+        width += cells;
+        shown.push_str(&piece);
     }
-    let head: String = text.chars().take(MAX_LINE).collect();
-    format!("{head}…")
+    shown
 }
 
 /// Spaces to place a caret under `column`, replaying the prefix's own tabs.
@@ -130,14 +155,23 @@ fn clamp(text: &str) -> String {
 fn pad(text: &str, column: u64) -> String {
     let take = usize::try_from(column.saturating_sub(1)).unwrap_or(usize::MAX);
     // Bounded by what `clamp` leaves on screen as well as by the line's own
-    // length. A column past `MAX_LINE` names a character the printed row ends in
-    // an ellipsis instead of, so padding to it puts the caret in empty space and
-    // wraps the terminal.
-    let available = text.chars().count().min(MAX_LINE);
-    text.chars()
-        .take(take.min(available))
-        .map(|c| if c == '\t' { '\t' } else { ' ' })
-        .collect()
+    // length, measured as `clamp` measures it: a character shown as an escape
+    // takes as many cells as its escape does.
+    let mut caret = String::new();
+    let mut printed = 0;
+    for (c, piece) in shown_chars(text).into_iter().take(take) {
+        let cells = piece.chars().count();
+        if printed + cells > MAX_LINE {
+            break;
+        }
+        printed += cells;
+        if c == '\t' {
+            caret.push('\t');
+        } else {
+            caret.extend(std::iter::repeat_n(' ', cells));
+        }
+    }
+    caret
 }
 
 #[cfg(test)]
@@ -166,6 +200,30 @@ mod tests {
         // Emitting a space here would land the caret wherever the tab width is not
         // one, which is every terminal.
         assert_eq!(pad("\t\tkey: value", 3), "\t\t");
+    }
+
+    // A character the row shows as an escape takes the escape's cells, so the
+    // caret stays under the character it points at.
+    #[test]
+    fn a_caret_pad_spans_a_character_shown_as_an_escape() {
+        // `x`, not a letter that ends the escape `\u{1b}`, so a pad that counts
+        // the raw character as one cell lands on a different letter.
+        let line = "a\u{1b}[2Jx: {oops";
+        let shown = escape_keeping_tabs(line);
+        let caret = pad(line, 6);
+
+        assert_eq!(&shown[caret.len()..caret.len() + 1], "x", "{shown}");
+    }
+
+    // A line cut at the screen's width never ends inside an escape: the
+    // character the escape stands for is left out whole.
+    #[test]
+    fn a_long_line_is_cut_between_escapes() {
+        let line = format!("{}\u{200B}tail", "a".repeat(MAX_LINE - 5));
+
+        let shown = clamp(&line);
+
+        assert_eq!(shown, format!("{}…", "a".repeat(MAX_LINE - 5)));
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! Provides short (for list tables) and long (for info displays) formatted
 //! representations of git file status, following the pattern in `status_style.rs`.
 
-use console::style;
+use crate::status_style::styled_text;
+use crate::terminal_text::Shown;
 use selfie::package::git::GitFileStatus;
 
 /// Format git status as a short indicator for list table columns.
@@ -15,7 +16,7 @@ use selfie::package::git::GitFileStatus;
 /// - StagedAndModified → `SM`
 /// - Untracked → `?`
 /// - NotInRepo → `--`
-pub(crate) fn format_git_status_short(status: &GitFileStatus, use_colors: bool) -> String {
+pub(crate) fn format_git_status_short(status: &GitFileStatus, use_colors: bool) -> Shown {
     match status {
         GitFileStatus::Clean => styled_text("✓", use_colors, |s| s.dim().green()),
         GitFileStatus::Modified => styled_text("M", use_colors, |s| s.yellow()),
@@ -29,7 +30,7 @@ pub(crate) fn format_git_status_short(status: &GitFileStatus, use_colors: bool) 
 /// Format git status as a descriptive label for info table rows.
 ///
 /// Returns full descriptions like "Modified (unstaged)", "Staged", etc.
-pub(crate) fn format_git_status_long(status: &GitFileStatus, use_colors: bool) -> String {
+pub(crate) fn format_git_status_long(status: &GitFileStatus, use_colors: bool) -> Shown {
     match status {
         GitFileStatus::Clean => styled_text("Clean", use_colors, |s| s.dim().green()),
         GitFileStatus::Modified => styled_text("Modified (unstaged)", use_colors, |s| s.yellow()),
@@ -39,18 +40,6 @@ pub(crate) fn format_git_status_long(status: &GitFileStatus, use_colors: bool) -
         }
         GitFileStatus::Untracked => styled_text("Untracked", use_colors, |s| s.red()),
         GitFileStatus::NotInRepo => styled_text("Not in repo", use_colors, |s| s.dim()),
-    }
-}
-
-fn styled_text(
-    text: &str,
-    use_colors: bool,
-    style_fn: fn(console::StyledObject<String>) -> console::StyledObject<String>,
-) -> String {
-    if use_colors {
-        style_fn(style(text.to_string())).to_string()
-    } else {
-        text.to_string()
     }
 }
 

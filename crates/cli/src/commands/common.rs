@@ -3,6 +3,7 @@
 //! helpers, and opening the user's editor. How a command lays out its output is
 //! in [`presentation`](super::presentation).
 
+use crate::terminal_text::DisplayPath;
 use selfie::{
     commands::ShellCommandRunner,
     dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
@@ -386,7 +387,7 @@ pub(crate) fn check_editor_available(
                 display.print_suggestion(format!(
                     "Package '{}' exists at {}. Go ahead and open it in your editor of choice!",
                     package_name,
-                    path.display()
+                    DisplayPath::of(path)
                 ));
             } else {
                 display.print_suggestion(format!(

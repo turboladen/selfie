@@ -15,7 +15,9 @@ mod snippet;
 mod source_paths;
 mod status_style;
 mod tables;
+mod terminal_text;
 
+use crate::terminal_text::DisplayPath;
 use std::process;
 
 use clap::{CommandFactory, Parser};
@@ -106,15 +108,27 @@ async fn until_force_quit(signals: &mut impl NextSignal, token: &CancellationTok
     signals.next().await;
 }
 
+/// Print `error`, with its causes, as the error a run that could not start
+/// ends with: its first line marked, the rest beneath it.
+fn report_startup_error(display: &DisplayManager, error: &anyhow::Error) {
+    let text = format!("{error:#}");
+    let mut lines = text.lines();
+    display.print_error(lines.next().unwrap_or_default());
+    let rest: Vec<&str> = lines.collect();
+    if !rest.is_empty() {
+        display.print_error_context(&rest.join("\n"));
+    }
+}
+
 /// Parse arguments, load configuration, dispatch, and exit with the handler's
 /// status code.
 ///
 /// # Errors
 ///
-/// [`anyhow::Error`] if configuration cannot be found, read or parsed, or if
-/// initialization fails before dispatch. A command's own failures become exit
-/// codes rather than errors, and clap handles a bad command line by printing
-/// usage and exiting.
+/// None in practice. A configuration that cannot be found, read or parsed is
+/// reported on stderr and exits with the failure code, a command's own failures
+/// become exit codes, and clap handles a bad command line by printing usage and
+/// exiting.
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     human_panic::setup_panic!();
@@ -180,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
             Err(ConfigLoadError::NotFound { searched }) => {
                 config_debug = Some(format!(
                     "No configuration file in {}; building from flags",
-                    searched.display()
+                    DisplayPath::of(&searched)
                 ));
                 // No file, so no `cli:` section to read and nothing to report.
                 (
@@ -219,7 +233,16 @@ async fn main() -> anyhow::Result<()> {
     if let Some(line) = config_debug {
         debug!("{line}");
     }
-    let (config, notices) = loaded?;
+    let (config, notices) = match loaded {
+        Ok(loaded) => loaded,
+        // Printed through the display, as every other error is, so a path or a
+        // value from the file is escaped. A config that did not load cannot say
+        // whether to use colors, so the flag alone decides.
+        Err(error) => {
+            report_startup_error(&DisplayManager::new(!args.no_color), &error);
+            process::exit(event_processor::Exit::Failed.code());
+        }
+    };
     debug!("Final config: {:#?}", &config);
 
     let cancellation_token = CancellationToken::new();

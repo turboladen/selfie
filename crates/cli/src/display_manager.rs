@@ -15,15 +15,19 @@ use selfie::package::event::{BaseKind, StepEnding, StepId};
 use tokio_util::sync::CancellationToken;
 
 use crate::event_processor::Exit;
+pub(crate) use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{
+    Paint, Shown, escape, escape_prose, escape_prose_keeping_tabs, guard, printable, shown,
+};
 
-/// Shorten a path for display by replacing the home directory with `~`.
+/// A path as the terminal shows it: the home directory replaced with `~`, and
+/// its text escaped as [`DisplayPath`] escapes it.
 ///
-/// Only a path inside the home directory is shortened; anything else comes back
-/// unchanged.
-pub(crate) fn shorten_path(path: &str) -> String {
+/// Only a path inside the home directory is shortened.
+pub(crate) fn shorten_path(path: &str) -> DisplayPath {
     match std::env::var("HOME") {
-        Ok(home) => shorten_path_under(path, &home),
-        Err(_) => path.to_string(),
+        Ok(home) => DisplayPath::new(&shorten_path_under(path, &home)),
+        Err(_) => DisplayPath::new(path),
     }
 }
 
@@ -38,7 +42,7 @@ fn shorten_path_under(path: &str, home: &str) -> String {
     }
     match std::path::Path::new(path).strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", rest.to_string_lossy()),
         Err(_) => path.to_string(),
     }
 }
@@ -214,12 +218,16 @@ impl ErrorCollector {
         lines.push("── Errors ─────────────────────────────────────".to_string());
 
         for error in &self.errors {
-            lines.push(format!("✗ {} ({})", error.package_name, error.operation));
+            lines.push(format!(
+                "✗ {} ({})",
+                escape(&error.package_name),
+                error.operation
+            ));
             if !error.message.is_empty() {
-                lines.push(format!("  {}", error.message));
+                lines.push(format!("  {}", untrusted(&error.message, 2)));
             }
             if let Some(cmd) = &error.command {
-                lines.push(format!("  Command: {cmd}"));
+                lines.push(format!("  Command: {}", escape(cmd)));
             }
             if let Some(code) = error.exit_code {
                 lines.push(format!("  Exit code: {code}"));
@@ -228,8 +236,10 @@ impl ErrorCollector {
                 let stderr = stderr.trim();
                 if !stderr.is_empty() {
                     lines.push("  stderr:".to_string());
+                    // A tool's own stderr, cleaned as command output is: its
+                    // colors stripped, not shown as escapes.
                     for line in stderr.lines() {
-                        lines.push(format!("    {line}"));
+                        lines.push(format!("    {}", printable(line)));
                     }
                 }
             }
@@ -316,6 +326,9 @@ pub struct DisplayManager {
     // which a test in this process cannot read back.
     #[cfg(test)]
     printed: Arc<Mutex<Vec<(Channel, String)>>>,
+    // How many times `draw` wrote, so a test can see a block written as one.
+    #[cfg(test)]
+    draws: Arc<std::sync::atomic::AtomicUsize>,
     // stderr is a terminal, so a prompt can be drawn and answered.
     #[cfg_attr(test, expect(dead_code, reason = "a test answers from `script`"))]
     can_prompt: bool,
@@ -355,6 +368,13 @@ impl DisplayManager {
             let stderr = console::Term::stderr().is_term();
             (stderr, stderr && console::Term::stdout().is_term())
         };
+        // Nothing styled may reach a stream once colors are off, whatever
+        // `console` would decide from the environment. Process-wide, so a test,
+        // which builds many displays, leaves it alone.
+        if !use_colors && !cfg!(test) {
+            console::set_colors_enabled(false);
+            console::set_colors_enabled_stderr(false);
+        }
         let mp = if draws_spinner {
             MultiProgress::new()
         } else {
@@ -376,6 +396,8 @@ impl DisplayManager {
             block: Arc::new(Mutex::new(())),
             #[cfg(test)]
             printed: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            draws: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             can_prompt: draws_spinner,
             cancellation: None,
             #[cfg(test)]
@@ -476,7 +498,7 @@ impl DisplayManager {
     /// spinner on a terminal, otherwise one status line (stderr). Steps may
     /// overlap; each lasts until [`end_waiting`](Self::end_waiting) with its id.
     pub(crate) fn start_waiting(&self, step: StepId, subject: impl Display) {
-        let subject = subject.to_string();
+        let subject = escape(&subject.to_string()).into_owned();
         let bar = if self.draws_spinner {
             Some(self.spinner(&subject))
         } else {
@@ -581,9 +603,10 @@ impl DisplayManager {
             .lock()
             .map(|mut failed| std::mem::take(&mut *failed))
             .unwrap_or_default();
-        let rest: Vec<&str> = stderr
+        let rest: Vec<String> = stderr
             .lines()
-            .filter(|line| !shown.contains(&printable(line)))
+            .map(printable)
+            .filter(|line| !shown.contains(line))
             .collect();
         if rest.iter().any(|line| !line.trim().is_empty()) {
             self.print_error_context(&rest.join("\n"));
@@ -689,7 +712,7 @@ impl DisplayManager {
 
     /// Print an informational message (stdout)
     pub(crate) fn print_info(&self, message: impl Display) {
-        let message = message.to_string();
+        let message = untrusted(message, 2);
         self.record_stdout(&message);
         if self.use_colors {
             self.mp
@@ -701,7 +724,7 @@ impl DisplayManager {
 
     /// Print an error message (stderr)
     pub(crate) fn print_error(&self, message: impl Display) {
-        let message = message.to_string();
+        let message = untrusted(message, 2);
         self.record_stderr(&message);
         if self.use_colors {
             self.mp.suspend(|| {
@@ -723,11 +746,15 @@ impl DisplayManager {
     /// newline costs nothing. Each line is indented and dimmed and carries no `✗`;
     /// the marker belongs to the sentence above, not to every line of its evidence.
     pub(crate) fn print_error_context(&self, block: &str) {
-        for line in block.lines() {
+        let lines: Vec<String> = block
+            .lines()
+            .map(|line| escape_prose_keeping_tabs(line).into_owned())
+            .collect();
+        for line in &lines {
             self.record_stderr(line);
         }
         self.mp.suspend(|| {
-            for line in block.lines() {
+            for line in &lines {
                 if self.use_colors {
                     eprintln!("  {}", style(line).dim());
                 } else {
@@ -748,7 +775,7 @@ impl DisplayManager {
     ) {
         use selfie::package::event::Outcome;
 
-        let message = message.to_string();
+        let message = untrusted(message, 2);
         self.record_stdout(&message);
         let (mark, line) = match outcome {
             Outcome::Clean => ("✓", style(message.as_str()).green()),
@@ -769,7 +796,7 @@ impl DisplayManager {
 
     /// Print a success message (stdout)
     pub(crate) fn print_success(&self, message: impl Display) {
-        let message = message.to_string();
+        let message = untrusted(message, 2);
         self.record_stdout(&message);
         if self.use_colors {
             self.mp
@@ -781,7 +808,7 @@ impl DisplayManager {
 
     /// Print a warning message (stderr)
     pub(crate) fn print_warning(&self, message: impl Display) {
-        let message = message.to_string();
+        let message = untrusted(message, 2);
         self.record_stderr(&message);
         if self.use_colors {
             self.mp.suspend(|| {
@@ -798,7 +825,7 @@ impl DisplayManager {
 
     /// Print a line about the run's progress (stderr).
     pub(crate) fn print_progress(&self, message: impl Display) {
-        let message = message.to_string();
+        let message = untrusted(message, 2);
         self.record_stderr(&message);
         if self.use_colors {
             self.mp.suspend(|| eprintln!("  {}", style(message).dim()));
@@ -821,7 +848,7 @@ impl DisplayManager {
 
     /// Print a note about the run (stderr), such as the operation header.
     pub(crate) fn print_run_note(&self, message: impl Display) {
-        let message = message.to_string();
+        let message = untrusted(message, 2);
         self.record_stderr(&message);
         if self.use_colors {
             self.mp
@@ -833,19 +860,33 @@ impl DisplayManager {
 
     /// Print a suggestion (stderr): advice about the run, never the answer.
     pub(crate) fn print_suggestion(&self, message: impl Display) {
-        let message = message.to_string();
-        self.record_stderr(&message);
+        let message = untrusted(message, 2);
+        self.suggest(&message, &message);
+    }
+
+    /// Print a suggestion selfie styled itself, such as one naming a command
+    /// to run in a highlight (stderr).
+    pub(crate) fn print_styled_suggestion(&self, suggestion: Shown) {
+        let plain = guard(suggestion.as_str(), false).into_owned();
+        self.suggest(&plain, suggestion.as_str());
+    }
+
+    // `plain` is what a test reads back, `shown` what the terminal gets; both
+    // are already escaped.
+    fn suggest(&self, plain: &str, shown: &str) {
+        self.record_stderr(plain);
+        let shown = guard(shown, self.stderr_colors());
         if self.use_colors {
             self.mp.suspend(|| {
                 eprintln!(
                     "{} {}: {}",
                     style("✨").bold(),
                     style("Suggestion").yellow().bold(),
-                    message
+                    shown
                 )
             });
         } else {
-            self.mp.suspend(|| eprintln!("✨ Suggestion: {message}"));
+            self.mp.suspend(|| eprintln!("✨ Suggestion: {shown}"));
         }
     }
 
@@ -856,7 +897,7 @@ impl DisplayManager {
 
     /// Print a section header on `channel`.
     pub(crate) fn print_section_header_to(&self, channel: Channel, title: impl Display) {
-        let title = title.to_string();
+        let title = escape(&title.to_string()).into_owned();
         let rendered = if self.use_colors {
             format!("── {} ──", style(&title).bold())
         } else {
@@ -890,51 +931,60 @@ impl DisplayManager {
     /// Colors: `---` red, `+++` green, `@@` cyan, `-` red, `+` green,
     /// context dim, separator dim. Paths shortened with `~`.
     pub(crate) fn print_diff(&self, diff: &str) {
-        for line in diff.lines() {
-            self.record_stdout(line);
-        }
         const SEPARATOR: &str =
             "──────────────────────────────────────────────────────────────────────";
 
-        self.mp.suspend(|| {
-            let mut printed_separator = false;
-
-            for line in diff.lines() {
-                if self.use_colors {
-                    if let Some(rest) = line.strip_prefix("--- ") {
-                        println!("  {}", style(format!("--- {}", shorten_path(rest))).red());
-                    } else if let Some(rest) = line.strip_prefix("+++ ") {
-                        println!("  {}", style(format!("+++ {}", shorten_path(rest))).green());
-                        println!("  {}", style(SEPARATOR).dim());
-                        printed_separator = true;
-                    } else if line.starts_with("@@") {
-                        println!("  {}", style(line).cyan());
-                    } else if line.starts_with('-') {
-                        println!("  {}", style(line).red());
-                    } else if line.starts_with('+') {
-                        println!("  {}", style(line).green());
-                    } else {
-                        println!("  {}", style(line).dim());
-                    }
-                } else if let Some(rest) = line.strip_prefix("--- ") {
-                    println!("  --- {}", shorten_path(rest));
-                } else if let Some(rest) = line.strip_prefix("+++ ") {
-                    println!("  +++ {}", shorten_path(rest));
-                    println!("  {SEPARATOR}");
+        // Each line is file content, so a tab stays a tab and everything else
+        // that could act on the terminal shows as an escape.
+        let mut rows: Vec<(Shown, Paint)> = Vec::new();
+        let mut printed_separator = false;
+        for line in diff_lines(diff) {
+            match line {
+                DiffLine::OldFile(rest) => {
+                    rows.push((shown!("--- {}", shorten_path(rest)), |s| s.red()));
+                }
+                DiffLine::NewFile(rest) => {
+                    rows.push((shown!("+++ {}", shorten_path(rest)), |s| s.green()));
+                    rows.push((Shown::from(SEPARATOR), |s| s.dim()));
                     printed_separator = true;
-                } else {
-                    println!("  {line}");
                 }
+                DiffLine::Hunk(line) => rows.push((Shown::content(line), |s| s.cyan())),
+                DiffLine::Removed(line) => rows.push((Shown::content(line), |s| s.red())),
+                DiffLine::Added(line) => rows.push((Shown::content(line), |s| s.green())),
+                DiffLine::Context(line) => rows.push((Shown::content(line), |s| s.dim())),
             }
+        }
+        if printed_separator {
+            rows.push((Shown::from(SEPARATOR), |s| s.dim()));
+        }
 
-            if printed_separator {
-                if self.use_colors {
-                    println!("  {}", style(SEPARATOR).dim());
-                } else {
-                    println!("  {SEPARATOR}");
-                }
+        // Written in one suspend, so no other line lands between two rows of
+        // the diff and a spinner does not redraw between them.
+        let colors = self.stdout_colors();
+        let rendered: Vec<String> = rows
+            .into_iter()
+            .map(|(text, paint)| {
+                let row = shown!("  {}", text.paint(self.use_colors, paint));
+                guard(row.as_str(), colors).into_owned()
+            })
+            .collect();
+        for row in &rendered {
+            self.record_stdout(row);
+        }
+        self.draw(|| {
+            for row in &rendered {
+                println!("{row}");
             }
         });
+    }
+
+    // Write with nothing else drawing on the terminal, counting the writes
+    // under test so that a test can see a block written as one.
+    fn draw<R>(&self, write: impl FnOnce() -> R) -> R {
+        #[cfg(test)]
+        self.draws
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.mp.suspend(write)
     }
 
     /// Ask `prompt` on the terminal, with nothing else drawing on it until the
@@ -1073,31 +1123,46 @@ impl DisplayManager {
         self
     }
 
-    /// Print a plain line to stdout
-    pub(crate) fn println(&self, message: impl Display) {
-        let message = message.to_string();
+    /// Print a block of lines to stdout, its line breaks kept. selfie's own
+    /// styling is kept when the run and stdout have colors on, and removed
+    /// otherwise.
+    pub(crate) fn println(&self, message: impl Into<Shown>) {
+        let message = guard(message.into().as_str(), self.stdout_colors()).into_owned();
         self.record_stdout(&message);
         self.mp.suspend(|| println!("{message}"));
     }
 
-    /// Print a plain line to stderr, as written: the stderr twin of
-    /// [`println`](Self::println), for the lines a diagnostic lists.
-    pub(crate) fn print_note(&self, message: impl Display) {
-        let message = message.to_string();
+    /// Print a block of plain lines to stderr, as [`println`](Self::println)
+    /// prints them: its stderr twin, for the lines a diagnostic lists.
+    pub(crate) fn print_note(&self, message: impl Into<Shown>) {
+        let message = guard(message.into().as_str(), self.stderr_colors()).into_owned();
         self.record_stderr(&message);
         self.mp.suspend(|| eprintln!("{message}"));
     }
 
     /// Print a plain line on `channel`.
-    pub(crate) fn line_to(&self, channel: Channel, message: impl Display) {
+    pub(crate) fn line_to(&self, channel: Channel, message: impl Into<Shown>) {
         match channel {
             Channel::Stdout => self.println(message),
             Channel::Stderr => self.print_note(message),
         }
     }
 
+    // Whether selfie's own styling is written to stdout: colors are on for the
+    // run and for the stream itself.
+    fn stdout_colors(&self) -> bool {
+        self.use_colors && console::colors_enabled()
+    }
+
+    // As `stdout_colors`, for stderr.
+    fn stderr_colors(&self) -> bool {
+        self.use_colors && console::colors_enabled_stderr()
+    }
+
     /// Print a styled key-value pair (stdout, for config display, etc.)
     pub(crate) fn print_field(&self, key: impl Display, value: impl Display) {
+        let key = escape(&key.to_string()).into_owned();
+        let value = escape(&value.to_string()).into_owned();
         self.record_stdout(&format!("{key} {value}"));
         if self.use_colors {
             self.mp
@@ -1182,7 +1247,7 @@ impl DisplayManager {
 pub(crate) struct ResultCard<'a> {
     display: &'a DisplayManager,
     title: String,
-    fields: Vec<(String, String)>,
+    fields: Vec<(&'static str, Shown)>,
 }
 
 impl<'a> ResultCard<'a> {
@@ -1194,17 +1259,25 @@ impl<'a> ResultCard<'a> {
         }
     }
 
-    /// Add a key-value field to the card
-    pub(crate) fn field(mut self, key: &str, value: impl Display) -> Self {
-        self.fields.push((key.to_string(), value.to_string()));
+    /// Add a key-value field to the card. The value is shown escaped, a
+    /// newline included, so it may come from outside selfie.
+    pub(crate) fn field(mut self, key: &'static str, value: impl Display) -> Self {
+        self.fields.push((key, Shown::name(&value.to_string())));
         self
     }
 
-    /// Add a field only if the value is `Some`
-    pub(crate) fn field_if(mut self, key: &str, value: Option<impl Display>) -> Self {
-        if let Some(v) = value {
-            self.fields.push((key.to_string(), v.to_string()));
+    /// Add a field only if the value is `Some`, shown as [`field`](Self::field)
+    /// shows it.
+    pub(crate) fn field_if(self, key: &'static str, value: Option<impl Display>) -> Self {
+        match value {
+            Some(value) => self.field(key, value),
+            None => self,
         }
+    }
+
+    /// Add a field whose value selfie styled itself.
+    pub(crate) fn styled_field(mut self, key: &'static str, value: Shown) -> Self {
+        self.fields.push((key, value));
         self
     }
 
@@ -1216,8 +1289,8 @@ impl<'a> ResultCard<'a> {
         self.display.print_section_header(&self.title);
 
         let use_colors = self.display.use_colors();
-        for (key, value) in &self.fields {
-            self.display.println(format!(
+        for (key, value) in self.fields {
+            self.display.println(shown!(
                 "{}{}: {}",
                 INDENT,
                 format_key(key, use_colors),
@@ -1227,21 +1300,54 @@ impl<'a> ResultCard<'a> {
     }
 }
 
-// `line` as a terminal would leave it, with no control characters left, so a
-// command's colors or carriage returns cannot redraw the spinner line.
-fn printable(line: &str) -> String {
-    let line = console::strip_ansi_codes(line);
-    // A carriage return redraws the line in place, so only the text after the
-    // last one is still on screen: a progress meter shows its final state.
-    let shown = line
-        .rsplit('\r')
-        .find(|part| !part.trim().is_empty())
-        .unwrap_or_default();
-    shown
-        .chars()
-        .map(|c| if c == '\t' { ' ' } else { c })
-        .filter(|c| !c.is_control())
-        .collect()
+// `text` from outside selfie, as a message printer shows it: escaped as prose,
+// its line breaks kept, and every line after the first indented by `indent`
+// columns so that no line of it starts at the left margin.
+fn untrusted(text: impl Display, indent: usize) -> String {
+    let text = text.to_string();
+    let shown = escape_prose(text.trim_end_matches(['\r', '\n']));
+    shown.replace('\n', &format!("\n{}", " ".repeat(indent)))
+}
+
+// Each line of a unified diff is classified by where it stands as well as by
+// how it starts.
+#[derive(Debug, PartialEq, Eq)]
+enum DiffLine<'a> {
+    // These two carry the file names, with their `--- ` and `+++ ` stripped.
+    OldFile(&'a str),
+    NewFile(&'a str),
+    Hunk(&'a str),
+    Removed(&'a str),
+    Added(&'a str),
+    Context(&'a str),
+}
+
+// The lines of `diff`, classified. Only lines before the first hunk can name a
+// file: after it, a removed line whose content starts `-- ` reads `--- `, and
+// an added one starting `++ ` reads `+++ `, and both are content.
+fn diff_lines(diff: &str) -> impl Iterator<Item = DiffLine<'_>> {
+    let mut in_hunks = false;
+    diff.lines().map(move |line| {
+        if line.starts_with("@@") {
+            in_hunks = true;
+            return DiffLine::Hunk(line);
+        }
+        if !in_hunks {
+            if let Some(rest) = line.strip_prefix("--- ") {
+                return DiffLine::OldFile(rest);
+            }
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                return DiffLine::NewFile(rest);
+            }
+        }
+        if line.starts_with('-') {
+            DiffLine::Removed(line)
+        } else if line.starts_with('+') {
+            DiffLine::Added(line)
+        } else {
+            DiffLine::Context(line)
+        }
+    })
 }
 
 // `line` cut to fit beside the spinner on the terminal, measured in columns.
@@ -1438,6 +1544,142 @@ mod wakeup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Each message printer shows what it is handed escaped as prose: a joiner
+    // renders, and a line break is kept with the line after it indented under
+    // the message, so no line of it starts at the left margin.
+    #[test]
+    fn every_message_printer_escapes_what_it_prints() {
+        use selfie::package::event::Outcome;
+
+        let text = "a\u{1b}[2J\u{202E}b\u{200D}\n✓ c\n";
+        let shown = "a\\u{1b}[2J\\u{202e}b\u{200D}\n  ✓ c";
+        let display = DisplayManager::new(false);
+        display.print_info(text);
+        display.print_error(text);
+        display.print_result(Outcome::Clean, text);
+        display.print_success(text);
+        display.print_warning(text);
+        display.print_progress(text);
+        display.print_run_note(text);
+        display.print_suggestion(text);
+
+        let printed = display.printed();
+        assert_eq!(printed.len(), 8, "{printed:?}");
+        assert!(printed.iter().all(|(_, line)| line == shown), "{printed:?}");
+    }
+
+    // A message written with Windows line endings ends at its text, with no
+    // carriage return shown after it.
+    #[test]
+    fn a_message_ending_in_a_carriage_return_shows_none() {
+        let display = DisplayManager::new(false);
+        display.print_info("one\r\n");
+
+        assert_eq!(display.printed(), [(Channel::Stdout, "one".to_string())]);
+    }
+
+    // A section header is one line: a line break in its title is escaped.
+    #[test]
+    fn a_section_header_stays_on_one_line() {
+        let display = DisplayManager::new(false);
+        display.print_section_header("a\n✓ b");
+
+        assert_eq!(
+            display.printed(),
+            [(Channel::Stdout, "a\\n✓ b".to_string())]
+        );
+    }
+
+    // The plain-line printers keep line breaks and tabs, remove selfie's own
+    // styling when colors are off, and escape every other sequence.
+    #[test]
+    fn the_plain_line_printers_escape_all_but_line_breaks() {
+        let display = DisplayManager::new(false);
+        display.println("one\u{1b}[31m\ntwo\u{202E}\t");
+        display.print_note("three\u{1b}]0;t\u{7}");
+
+        assert_eq!(
+            display.printed(),
+            [
+                (Channel::Stdout, "one\ntwo\\u{202e}\t".to_string()),
+                (Channel::Stderr, "three\\u{1b}]0;t\\u{7}".to_string()),
+            ]
+        );
+    }
+
+    // A run without colors prints no styling, whatever console decides about
+    // the stream: the printers do not read the environment's color settings
+    // alone.
+    #[test]
+    fn a_run_without_colors_prints_no_styling() {
+        let display = DisplayManager::new(false);
+        display.println(Shown::from("x").paint(true, |s| s.red()));
+
+        assert_eq!(display.printed(), [(Channel::Stdout, "x".to_string())]);
+    }
+
+    // A waiting step's subject can name a command from a spec. It shows escaped
+    // while the step runs and on the line it collapses to when it ends.
+    #[test]
+    fn a_waiting_subject_is_escaped() {
+        let shown = "Running `printf \\u{1b}[2J`";
+        let plain = DisplayManager::new(false);
+        plain.start_waiting(ONE, "Running `printf \u{1b}[2J`");
+        assert_eq!(plain.printed(), [(Channel::Stderr, format!("{shown}..."))]);
+
+        let drawn = DisplayManager::new(false).drawing_as_a_terminal();
+        drawn.start_waiting(ONE, "Running `printf \u{1b}[2J`");
+        assert_eq!(drawn.waiting_messages(), [shown]);
+        drawn.end_waiting(ONE, StepEnding::Succeeded);
+        let ended = drawn.printed();
+        assert!(
+            ended
+                .iter()
+                .any(|(_, line)| line.starts_with(&format!("✓ {shown} ("))),
+            "{ended:?}"
+        );
+    }
+
+    // A diff is written in one draw, so no other line lands between its rows.
+    #[test]
+    fn a_diff_is_written_in_one_draw() {
+        let display = DisplayManager::new(false);
+
+        display.print_diff("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n");
+
+        assert_eq!(display.draws.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(display.printed().len(), 7, "{:?}", display.printed());
+    }
+
+    // A content line that starts like a file header is content once the first
+    // hunk has begun.
+    #[test]
+    fn a_diff_names_files_only_before_its_first_hunk() {
+        let diff = "--- a\n+++ b\n@@ -1 +1 @@\n--- gone\n+++ added\n x\n";
+
+        let lines: Vec<DiffLine<'_>> = diff_lines(diff).collect();
+
+        assert_eq!(
+            lines,
+            [
+                DiffLine::OldFile("a"),
+                DiffLine::NewFile("b"),
+                DiffLine::Hunk("@@ -1 +1 @@"),
+                DiffLine::Removed("--- gone"),
+                DiffLine::Added("+++ added"),
+                DiffLine::Context(" x"),
+            ]
+        );
+    }
+
+    // Command output loses its colors, shows a bidi override as an escape, and
+    // keeps a variation selector, which renders.
+    #[test]
+    fn command_output_shows_format_characters_as_escapes() {
+        assert_eq!(printable("\u{1b}[31mred\u{1b}[0m"), "red");
+        assert_eq!(printable("a\u{202E}b\u{FE0F}c"), "a\\u{202e}b\u{FE0F}c");
+    }
 
     const ONE: StepId = StepId::from_raw(1);
 

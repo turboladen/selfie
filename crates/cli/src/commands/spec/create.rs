@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
 use selfie::{
     namespace::{self, NamespaceValidationError},
@@ -65,9 +66,10 @@ pub(crate) async fn handle_create(
         Ok(PackageNameResult::EditExisting(path)) => {
             display.print_run_note(format!(
                 "Opening existing package for editing at {}",
-                path.display()
+                DisplayPath::of(&path)
             ));
-            let success_message = format!("Package editing completed at {}", path.display());
+            let success_message =
+                format!("Package editing completed at {}", DisplayPath::of(&path));
             return common::open_editor(&path, display, Some(success_message));
         }
         // A create that wrote nothing did not do what it was asked, so a script
@@ -118,7 +120,7 @@ pub(crate) async fn handle_create(
         Ok(true) => {
             let success_message = format!(
                 "Package '{created_name}' created and saved at {}",
-                file_path.display()
+                DisplayPath::of(&file_path)
             );
             created_exit.max(common::open_editor(
                 &file_path,
@@ -612,7 +614,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         .prompt(
             MultiSelect::with_theme(&SimpleTheme)
                 .with_prompt("Dependencies (select with space, confirm with enter)")
-                .items(&available_packages),
+                .items(dependency_items(&available_packages)),
         )
         .map_err(|failure| refuse_interactive(display, &failure))?;
 
@@ -620,6 +622,15 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         .into_iter()
         .map(|i| available_packages[i].clone())
         .collect())
+}
+
+/// The dependency picker's items as it shows them: each name escaped. The
+/// choice is read back from the raw list by index.
+fn dependency_items(available: &[String]) -> Vec<String> {
+    available
+        .iter()
+        .map(|name| crate::terminal_text::escape(name).into_owned())
+        .collect()
 }
 
 fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, Exit> {
@@ -637,6 +648,15 @@ mod tests {
     use selfie::package::port::PackageListError;
 
     use super::*;
+
+    // The picker shows a name escaped, so a name holding a filler character
+    // reads differently from the plain one it imitates.
+    #[test]
+    fn the_dependency_picker_shows_names_escaped() {
+        let available = vec!["git".to_string(), "git\u{3164}".to_string()];
+
+        assert_eq!(dependency_items(&available), ["git", "git\\u{3164}"]);
+    }
     use futures::StreamExt;
     use selfie::package::SpecService;
     use selfie::package::event::{OperationResult, OperationSuccess, PackageEvent};

@@ -24,6 +24,9 @@ futures.workspace = true
 # the run.
 nix = { workspace = true, features = ["pthread", "signal"] }
 human-panic = "2"
+# The general category and Default_Ignorable_Code_Point of a character, for
+# escaping what reaches the terminal.
+icu_properties = "2.2"
 selfie = { path = "../selfie/" }
 serde.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }

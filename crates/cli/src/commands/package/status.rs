@@ -27,7 +27,7 @@ pub(crate) async fn handle_status(
                 environment_status, ..
             } => {
                 let table = create_environment_table(environment_status, config);
-                display.println(format!("\n{table}"));
+                display.println(crate::terminal_text::shown!("\n{}", table));
                 true
             }
             // The table is the answer for a clean status. A status with gaps also

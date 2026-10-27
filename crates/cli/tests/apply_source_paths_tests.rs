@@ -155,3 +155,47 @@ fn a_declined_conflict_is_shown_once() {
     let root = temp_dir.path().display().to_string();
     assert!(!labels.iter().any(|l| l.contains(&root)), "{stdout}");
 }
+
+// A file name in a packages repository can carry escape sequences, here one
+// that clears the screen and one that retitles the terminal. The row shows each
+// control character as its escape, and no escape byte reaches either stream.
+#[test]
+fn a_source_whose_name_carries_escape_sequences_cannot_reach_the_terminal() {
+    let temp_dir = sandbox(false);
+    let packages = temp_dir.path().join("packages");
+    fs::create_dir_all(packages.join("esc")).unwrap();
+    fs::write(
+        packages.join("esc").join("a\u{1b}[2Jb\u{1b}]0;x\u{7}c"),
+        "e\n",
+    )
+    .unwrap();
+    // YAML's double-quoted `\e` is ESC and `\a` is BEL.
+    fs::write(
+        packages.join("esc.yaml"),
+        format!(
+            "name: esc\ndotfiles:\n  - source: \"esc/a\\e[2Jb\\e]0;x\\ac\"\n    target: \
+             \"~/.esc\\e[2J\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run(&temp_dir, &["apply", "--dry-run"]);
+
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
+    assert!(
+        !stdout.contains('\u{1b}') && !stdout.contains('\u{7}'),
+        "{stdout:?}"
+    );
+    assert!(
+        !stderr.contains('\u{1b}') && !stderr.contains('\u{7}'),
+        "{stderr:?}"
+    );
+    let row = stdout
+        .lines()
+        .find(|line| line.contains("esc/a"))
+        .unwrap_or_else(|| panic!("no row names the source:\n{stdout}"));
+    assert!(
+        row.contains(r"esc/a\u{1b}[2Jb\u{1b}]0;x\u{7}c") && row.contains(r"/.esc\u{1b}[2J"),
+        "{row}"
+    );
+}

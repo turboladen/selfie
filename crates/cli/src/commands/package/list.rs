@@ -1,4 +1,6 @@
-use console::style;
+use crate::tables::{Cell, SafeTable};
+use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{Shown, shown};
 use selfie::package::{event, service::PackageService};
 
 use crate::source_paths::base_directory_line;
@@ -13,9 +15,9 @@ use crate::commands::presentation::{self, RowResult, row_marker};
 struct ListRow {
     name: String,
     result: RowResult,
-    status: String,
+    status: Shown,
     /// The environments cell, filled under `--all`.
-    environments: Option<String>,
+    environments: Option<Shown>,
 }
 
 /// Mutable state accumulated while processing list events.
@@ -135,24 +137,19 @@ fn handle_list_event(
             // One table, the answer: each package's status, and its environments
             // under `--all`, in their own columns.
             state.buffered_rows.sort_by(|a, b| a.name.cmp(&b.name));
-            let mut table = presentation::create_formatted_table();
+            let mut table = SafeTable::new();
             let mut header = vec!["", "Package", "Status"];
             if show_all {
                 header.push("Environments");
             }
             table.set_header(header);
             let package_dir = std::path::Path::new(&package_list.package_directory);
-            let failed = |text: String| {
-                if use_colors {
-                    style(text).red().to_string()
-                } else {
-                    text
-                }
-            };
-            let mut add = |result: &RowResult, name: &str, status: String, envs: Option<String>| {
-                let mut row = vec![row_marker(result, use_colors), name.to_string(), status];
+            let failed =
+                |text: String| Cell::from(Shown::prose(&text).paint(use_colors, |s| s.red()));
+            let mut add = |result: &RowResult, name: &str, status: Cell, envs: Option<Shown>| {
+                let mut row = vec![row_marker(result, use_colors).into(), name.into(), status];
                 if show_all {
-                    row.push(envs.unwrap_or_else(|| "-".to_string()));
+                    row.push(envs.map_or_else(|| "-".into(), Cell::from));
                 }
                 table.add_row(row);
             };
@@ -160,7 +157,7 @@ fn handle_list_event(
                 add(
                     &row.result,
                     &row.name,
-                    row.status.clone(),
+                    row.status.clone().into(),
                     row.environments.clone(),
                 );
             }
@@ -187,7 +184,11 @@ fn handle_list_event(
                 add(
                     &RowResult::Failure,
                     &refused.package_name,
-                    failed(format!("refused ({}): {}", shown.display(), refused.reason)),
+                    failed(format!(
+                        "refused ({}): {}",
+                        DisplayPath::of(shown),
+                        refused.reason
+                    )),
                     None,
                 );
             }
@@ -200,7 +201,7 @@ fn handle_list_event(
             // `dotfiles list` and apply name the same directory.
             display.println(base_directory_line(BaseKind::PackageDirectory, package_dir));
             if rows > 0 {
-                display.println(format!("{table}"));
+                display.println(shown!("{}", table));
             }
 
             let valid = package_list.valid_packages.len();
@@ -212,9 +213,9 @@ fn handle_list_event(
             if valid + invalid + refused == 0 && package_list.environment_stats.is_empty() {
                 display.println("No packages found.");
             } else if valid + invalid + refused == 0 {
-                display.println(format!(
+                display.println(shown!(
                     "No packages found for environment '{}'.",
-                    config.environment()
+                    Shown::name(config.environment())
                 ));
                 display_environment_stats(&package_list.environment_stats, config, display);
             }
@@ -246,45 +247,31 @@ fn display_environment_stats(
         .collect();
     env_counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    let mut table = presentation::create_formatted_table();
-    table.set_header(vec!["Environment", "Package Count"]);
+    let mut table = SafeTable::new();
+    table.set_header(["Environment", "Package Count"]);
 
+    let use_colors = config.use_colors();
     for (env_name, count) in env_counts {
-        let env_styled = if config.use_colors() {
-            if env_name == config.environment() {
-                console::style(&env_name).green().bold().to_string()
-            } else {
-                env_name.clone()
-            }
+        let env_cell = if env_name == config.environment() {
+            Cell::painted(&env_name, use_colors, |s| s.green().bold())
         } else {
-            env_name.clone()
+            env_name.into()
         };
-
-        let count_str = count.to_string();
-        let count_styled = if config.use_colors() {
-            console::style(count_str).cyan().to_string()
-        } else {
-            count_str
-        };
-
-        table.add_row(vec![env_styled, count_styled]);
+        table.add_row([
+            env_cell,
+            Cell::painted(&count.to_string(), use_colors, |s| s.cyan()),
+        ]);
     }
 
-    display.println(format!("{table}"));
+    display.println(shown!("{}", table));
 
     // Advice about the run, so on stderr, as one suggestion: a second line on
     // its own would read as an unrelated note.
-    let (environment, all) = if config.use_colors() {
-        (
-            console::style("--environment <env>").yellow().to_string(),
-            console::style("--all").yellow().to_string(),
-        )
-    } else {
-        ("--environment <env>".to_string(), "--all".to_string())
-    };
-    display.print_suggestion(format!(
-        "{environment} to see packages for a different environment, or {all} to see all \
-         packages regardless of environment"
+    display.print_styled_suggestion(shown!(
+        "{} to see packages for a different environment, or {} to see all packages regardless \
+         of environment",
+        Shown::from("--environment <env>").paint(use_colors, |s| s.yellow()),
+        Shown::from("--all").paint(use_colors, |s| s.yellow())
     ));
 }
 

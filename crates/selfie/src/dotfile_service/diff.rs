@@ -8,6 +8,9 @@
 use similar::TextDiff;
 
 /// Produce a unified diff between two strings, labeled with source/target paths.
+///
+/// Each label is kept to its header line: a line break in it is written as
+/// `\n` or `\r`.
 pub fn unified_diff(old: &str, new: &str, old_label: &str, new_label: &str) -> String {
     let diff = TextDiff::from_lines(old, new);
     let mut output = String::new();
@@ -16,8 +19,12 @@ pub fn unified_diff(old: &str, new: &str, old_label: &str, new_label: &str) -> S
         return output; // Identical
     }
 
-    output.push_str(&format!("--- {old_label}\n"));
-    output.push_str(&format!("+++ {new_label}\n"));
+    // A path may hold a line break. Written raw, the rest of the label would
+    // become a line of its own, which a reader of the diff takes for a hunk or
+    // content line.
+    let one_line = |label: &str| label.replace('\r', "\\r").replace('\n', "\\n");
+    output.push_str(&format!("--- {}\n", one_line(old_label)));
+    output.push_str(&format!("+++ {}\n", one_line(new_label)));
 
     for hunk in diff.unified_diff().context_radius(3).iter_hunks() {
         output.push_str(&hunk.to_string());
@@ -41,6 +48,17 @@ mod tests {
         let diff = unified_diff("hello\nworld\n", "hello\nearth\n", "source", "target");
         assert!(diff.contains("-world"));
         assert!(diff.contains("+earth"));
+    }
+
+    // A label holding a line break stays on its header line.
+    #[test]
+    fn a_label_holding_a_line_break_stays_on_its_line() {
+        let diff = unified_diff("a\n", "b\n", "~/.a\n@@ -9 +9 @@", "src\r\nx");
+
+        let lines: Vec<&str> = diff.lines().collect();
+        assert_eq!(lines[0], "--- ~/.a\\n@@ -9 +9 @@");
+        assert_eq!(lines[1], "+++ src\\r\\nx");
+        assert_eq!(lines[2], "@@ -1 +1 @@");
     }
 
     #[test]

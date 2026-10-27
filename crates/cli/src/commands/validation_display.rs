@@ -3,13 +3,12 @@
 //! Used by both `spec validate` and `sync push` to display validation issues
 //! in a consistent table format.
 
-use comfy_table::{ContentArrangement, Table, presets};
-use console::style;
-
 use selfie::package::event::ValidationIssueData;
 use selfie::validation::ValidationLevel;
 
 use crate::display_manager::{Channel, DisplayManager};
+use crate::tables::{Cell, SafeTable};
+use crate::terminal_text::{Shown, shown};
 
 /// A single validation issue row, used as a common representation for both
 /// event-driven validation results and sync push validation failures.
@@ -81,21 +80,15 @@ pub(crate) fn display_validation_groups(
         // File/package header. A group holding only informational notices is not
         // a failure, so it must not be marked with a red cross.
         let blocking = group.rows.iter().any(|r| r.level != ValidationLevel::Info);
-        let (marker, marked) = if blocking {
-            ("✗", style("✗").red())
+        let marker = if blocking {
+            Shown::from("✗").paint(use_colors, |s| s.red())
         } else {
-            ("ℹ", style("ℹ").blue())
+            Shown::from("ℹ").paint(use_colors, |s| s.blue())
         };
-        if use_colors {
-            display.line_to(
-                channel,
-                format!("  {} {}", marked, style(group.label).bold()),
-            );
-        } else {
-            display.line_to(channel, format!("  {marker} {}", group.label));
-        }
+        let label = Shown::name(group.label).paint(use_colors, |s| s.bold());
+        display.line_to(channel, shown!("  {} {}", marker, label));
 
-        let mut table = create_validation_table();
+        let mut table = SafeTable::new();
         // Sized to the terminal of the stream it prints on.
         if channel == Channel::Stderr {
             table.use_stderr();
@@ -110,41 +103,32 @@ pub(crate) fn display_validation_groups(
         table.set_header(header);
 
         for row in &group.rows {
-            let label = level_label(&row.level);
-            let level = if use_colors {
+            let level = Cell::painted(
+                level_label(&row.level),
+                use_colors,
                 match row.level {
-                    ValidationLevel::Error => style(label).red().bold().to_string(),
-                    ValidationLevel::Warning => style(label).yellow().bold().to_string(),
-                    ValidationLevel::Info => label.to_string(),
-                }
-            } else {
-                label.to_string()
-            };
-
-            let category = if use_colors {
-                style(&row.category).magenta().to_string()
-            } else {
-                row.category.clone()
-            };
-
-            let field = if use_colors {
-                style(row.field).cyan().to_string()
-            } else {
-                row.field.to_string()
-            };
-
+                    ValidationLevel::Error => |s| s.red().bold(),
+                    ValidationLevel::Warning => |s| s.yellow().bold(),
+                    ValidationLevel::Info => |s| s,
+                },
+            );
             let location = row
                 .location
                 .map_or_else(|| "-".to_string(), |at| at.to_string());
-
-            let mut cells = vec![level, category, field, row.message.to_string(), location];
+            let mut cells = vec![
+                level,
+                Cell::painted(&row.category, use_colors, |s| s.magenta()),
+                Cell::painted(row.field, use_colors, |s| s.cyan()),
+                Cell::prose(row.message),
+                location.into(),
+            ];
             if suggested {
-                cells.push(row.suggestion.unwrap_or("-").to_string());
+                cells.push(Cell::prose(row.suggestion.unwrap_or("-")));
             }
             table.add_row(cells);
         }
 
-        display.line_to(channel, format!("{table}"));
+        display.line_to(channel, shown!("{}", table));
     }
 }
 
@@ -160,14 +144,6 @@ pub(crate) fn level_counts(errors: usize, warnings: usize, notices: usize) -> Ve
     .filter(|(n, _)| *n > 0)
     .map(|(n, noun)| format!("{n} {noun}"))
     .collect()
-}
-
-fn create_validation_table() -> Table {
-    let mut table = Table::new();
-    table
-        .load_style(presets::UTF8_FULL_CONDENSED.with_rounded_corners())
-        .set_content_arrangement(ContentArrangement::Dynamic);
-    table
 }
 
 /// The word a validation table and an issue line both use for `level`.

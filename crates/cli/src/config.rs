@@ -10,6 +10,7 @@
 //! 2. Configuration file settings
 //! 3. Default values (lowest priority)
 
+use crate::terminal_text::DisplayPath;
 use std::path::PathBuf;
 
 use selfie::{
@@ -254,18 +255,18 @@ impl std::fmt::Display for MissingRequiredSettings {
             SettingsSource::NoFile { searched } => write!(
                 f,
                 "No configuration file found in {}, and not every required setting was supplied on the command line.\nMissing: {}\nSupply the missing flags, or create {}/config.yaml with `environment:` and `package_directory:`.",
-                searched.display(),
+                DisplayPath::of(searched),
                 self.missing
                     .iter()
                     .map(|setting| flag(*setting))
                     .collect::<Vec<_>>()
                     .join(", "),
-                searched.display(),
+                DisplayPath::of(searched),
             ),
             SettingsSource::File { path } => write!(
                 f,
                 "The configuration file {} does not set every required setting, and the command line did not supply the rest.\nMissing: {}\nAdd them to the file, or pass the flags.",
-                path.display(),
+                DisplayPath::of(path),
                 self.missing
                     .iter()
                     .map(|setting| format!("`{}:` ({})", setting.key(), flag(*setting)))

@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use selfie::package::{
     event::{
         CollectionRefusal, OperationResult, OperationSuccess, Outcome, PackageEvent,
@@ -10,7 +11,7 @@ use selfie::validation::ValidationLevel;
 
 use crate::display_manager::Channel;
 use crate::{
-    commands::presentation::{self, RowResult, paint_row_text, row_marker},
+    commands::presentation::{RowResult, paint_row_text, row_marker},
     commands::validation_display::{
         ValidationGroup, ValidationRow, display_validation_groups, level_counts,
     },
@@ -18,6 +19,7 @@ use crate::{
     display_manager::DisplayManager,
     event_processor::{EventProcessor, Exit, refused_packages_lines},
     status_style,
+    tables::{Cell, SafeTable},
 };
 
 pub(crate) async fn handle_validate(
@@ -237,7 +239,7 @@ impl Unvalidated {
                 spec: error.display_name(),
                 status: refusal.status(),
                 issues: error.location().map(|at| at.to_string()),
-                label: error.package_path().display().to_string(),
+                label: DisplayPath::of(error.package_path()).to_string(),
                 field: Some(error.kind().label()),
                 message: error.reason(),
                 location: error.location(),
@@ -255,10 +257,10 @@ impl Unvalidated {
             // which.
             CollectionRefusal::UnlistableDotfilesDirectory(error)
             | CollectionRefusal::UncheckableDotfilesDirectory(error) => Self {
-                spec: error.path().display().to_string(),
+                spec: DisplayPath::of(error.path()).to_string(),
                 status: refusal.status(),
                 issues: None,
-                label: error.path().display().to_string(),
+                label: DisplayPath::of(error.path()).to_string(),
                 field: None,
                 message: refusal.sentence(),
                 location: None,
@@ -282,14 +284,14 @@ fn display_results(
         return;
     }
 
-    let mut table = presentation::create_formatted_table();
-    table.set_header(vec!["", "Spec", "Status", "Issues"]);
+    let mut table = SafeTable::new();
+    table.set_header(["", "Spec", "Status", "Issues"]);
     let mut add = |result: RowResult, spec: &str, status: SpecStatus, issues: Option<&str>| {
-        table.add_row(vec![
-            row_marker(&result, use_colors),
-            spec.to_string(),
-            paint_row_text(&status.to_string(), &result, use_colors),
-            issues.unwrap_or(NO_VALUE).to_string(),
+        table.add_row([
+            Cell::from(row_marker(&result, use_colors)),
+            spec.into(),
+            paint_row_text(&status.to_string(), &result, use_colors).into(),
+            issues.unwrap_or(NO_VALUE).into(),
         ]);
     };
     for result in &results {
@@ -308,7 +310,7 @@ fn display_results(
             entry.issues.as_deref(),
         );
     }
-    display.println(format!("{table}"));
+    display.println(crate::terminal_text::shown!("{}", table));
 
     let mut groups: Vec<ValidationGroup<'_>> = results
         .iter()
@@ -380,7 +382,7 @@ fn display_validation_success_card(
         .result_card("Validation Results")
         .field("Package", &validation_result.package_name)
         .field("Environment", &validation_result.environment)
-        .field("Status", status_style::format_valid(config.use_colors()))
+        .styled_field("Status", status_style::format_valid(config.use_colors()))
         .print();
 }
 

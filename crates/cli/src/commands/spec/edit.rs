@@ -1,3 +1,4 @@
+use crate::terminal_text::DisplayPath;
 use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::{
     namespace,
@@ -90,7 +91,7 @@ fn editor_success_message(
     (!created).then(|| {
         format!(
             "Package '{package_name}' updated successfully at {}",
-            path.display()
+            DisplayPath::of(path)
         )
     })
 }
@@ -174,7 +175,7 @@ fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> String {
     format!(
         "Cannot create '{package_name}': {} is already taken by something selfie did not find \
          under that name; selfie will not write over it.",
-        path.display()
+        DisplayPath::of(path)
     )
 }
 
@@ -186,7 +187,10 @@ fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> String {
 fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(), Exit> {
     let confirm = display.prompt(
         Confirm::with_theme(&SimpleTheme)
-            .with_prompt(format!("Create new package '{package_name}'?"))
+            .with_prompt(format!(
+                "Create new package '{}'?",
+                crate::terminal_text::escape(package_name)
+            ))
             .default(false),
     );
 

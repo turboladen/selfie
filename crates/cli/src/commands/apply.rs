@@ -4,6 +4,7 @@
 //! dotfiles defined in package YAML files to their target
 //! locations on the system.
 
+use crate::terminal_text::{Shown, shown};
 use std::sync::{Arc, Mutex};
 
 use selfie::package::event::DotfileSource;
@@ -19,7 +20,7 @@ use crate::{
     cli::ApplyArgs,
     commands::common::create_dotfile_service,
     config::CliConfig,
-    display_manager::{Channel, DisplayManager, PromptFailure, shorten_path},
+    display_manager::{Channel, DisplayManager, DisplayPath, PromptFailure, shorten_path},
     event_processor::{EventProcessor, Exit},
     source_paths::{force_heading, relative_text},
 };
@@ -221,9 +222,11 @@ impl InteractiveConflictResolver {
 
         match reveal_body(incoming, current, target) {
             RevealBody::Diff(diff) => self.display.print_diff(&diff),
-            RevealBody::Binary { incoming, current } => self.display.println(format!(
+            RevealBody::Binary { incoming, current } => self.display.println(shown!(
                 "Content is not valid UTF-8, so it cannot be shown as a diff or printed \
-                 safely.\n  resolved output : {incoming} bytes\n  current target  : {current} bytes"
+                 safely.\n  resolved output : {} bytes\n  current target  : {} bytes",
+                incoming,
+                current
             )),
         }
     }
@@ -235,13 +238,13 @@ impl InteractiveConflictResolver {
     // Inside the block, not through the event processor's headings: this runs on
     // the service's thread while the processor may still be printing lines queued
     // before it, each under its own heading.
-    fn print_source(&self, source: &DotfileSource, short_target: &str) {
+    fn print_source(&self, source: &DotfileSource, short_target: &DisplayPath) {
         let _block = self.display.hold_block();
         if let Some(base) = source.base() {
             force_heading(&self.display, Channel::Stdout, base.kind, &base.directory);
         }
         self.display
-            .println(format!("  {} → {short_target}", relative_text(source)));
+            .println(shown!("  {} → {}", relative_text(source), short_target));
     }
 }
 
@@ -272,7 +275,7 @@ impl ConflictResolver for InteractiveConflictResolver {
                 current,
             } => {
                 self.print_source(source, &short_target);
-                self.display.println(summary);
+                self.display.println(Shown::block(summary));
 
                 // Reveal is offered only when stdout is a terminal as well as
                 // stderr: the values print on stdout, and a redirected stdout
@@ -443,7 +446,7 @@ mod tests {
             path: "bat/config".into(),
         });
 
-        resolver.print_source(&source, "~/.config/bat/config");
+        resolver.print_source(&source, &DisplayPath::new("~/.config/bat/config"));
 
         let lines: Vec<String> = display
             .printed()
@@ -479,7 +482,9 @@ mod tests {
         });
 
         let held = display.hold_block();
-        let printer = std::thread::spawn(move || resolver.print_source(&source, "~/.zshrc"));
+        let printer = std::thread::spawn(move || {
+            resolver.print_source(&source, &DisplayPath::new("~/.zshrc"))
+        });
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(display.printed().is_empty(), "{:?}", display.printed());
         drop(held);

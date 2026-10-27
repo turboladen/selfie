@@ -1,6 +1,6 @@
 //! Handler for `selfie sync push`.
 
-use console::style;
+use crate::terminal_text::{Shown, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -107,7 +107,7 @@ pub(crate) async fn handle_push(
         display.print_info(format!(
             "{ahead} existing {label} not yet pushed — pushing now"
         ));
-        return execute_push(&service, vec![], display, use_colors).await;
+        return execute_push(&service, vec![], display).await;
     }
 
     // Refused before the preview, which is printed only to be confirmed: a run
@@ -135,7 +135,7 @@ pub(crate) async fn handle_push(
     };
 
     // Phase 2: Execute commits and push
-    execute_push(&service, confirmed_commits, display, use_colors).await
+    execute_push(&service, confirmed_commits, display).await
 }
 
 /// Display the list of pending commits as a preview before confirmation.
@@ -153,19 +153,26 @@ fn show_pending_commits(
         let num = i + 1;
         let file_count = commit.files.len();
         let file_label = selfie::pluralize(file_count, "file", "files");
-        if use_colors {
-            display.println(format!(
-                "  {num}. {} ({file_count} {file_label})",
-                style(&commit.message).bold()
-            ));
-        } else {
-            display.println(format!(
-                "  {num}. {} ({file_count} {file_label})",
-                commit.message
-            ));
-        }
+        let message = Shown::prose(&commit.message).paint(use_colors, |s| s.bold());
+        display.println(shown!(
+            "  {}. {} ({} {})",
+            num,
+            message,
+            file_count,
+            file_label
+        ));
     }
     display.println("");
+}
+
+/// The message a commit gets from its prompt's `answer`: the answer, or the
+/// suggested message when the answer is blank.
+fn chosen_message(answer: String, suggested: String) -> String {
+    if answer.trim().is_empty() {
+        suggested
+    } else {
+        answer
+    }
 }
 
 /// Prompt the user to confirm or edit each commit message.
@@ -192,15 +199,27 @@ fn confirm_commits(
     let mut confirmed = Vec::new();
     for (i, commit) in pending.into_iter().enumerate() {
         let num = i + 1;
-        let edited_message: String = display.prompt(crate::display_manager::TextLine(
-            dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                .with_prompt(format!("Commit message ({num}/{total})"))
-                .with_initial_text(&commit.message),
-        ))?;
+        let theme = dialoguer::theme::ColorfulTheme::default();
+        let mut input = dialoguer::Input::with_theme(&theme)
+            .with_prompt(format!("Commit message ({num}/{total})"))
+            .allow_empty(true);
+        // The prompt draws a pre-filled message on the terminal as it is, and
+        // what the user accepts is committed. So a message that would need an
+        // escape is shown escaped above an empty prompt instead, and a blank
+        // answer keeps its own bytes, as `--yes` does.
+        if crate::terminal_text::escape(&commit.message) == commit.message {
+            input = input.with_initial_text(&commit.message);
+        } else {
+            display.print_note(shown!(
+                "  Suggested: {} (Enter keeps it)",
+                Shown::name(&commit.message)
+            ));
+        }
+        let answer: String = display.prompt(crate::display_manager::TextLine(input))?;
 
         confirmed.push(ConfirmedCommit {
             files: commit.files,
-            message: edited_message,
+            message: chosen_message(answer, commit.message),
         });
     }
     Ok(confirmed)
@@ -211,31 +230,26 @@ async fn execute_push(
     service: &impl SyncService,
     commits: Vec<ConfirmedCommit>,
     display: &DisplayManager,
-    use_colors: bool,
 ) -> Exit {
     let event_stream = service.execute_push(commits).await;
     let display_for_handler = display.clone();
     let processor = EventProcessor::new(display.clone());
     processor
         .process_events(event_stream, move |event| {
-            handle_push_event(event, &display_for_handler, use_colors)
+            handle_push_event(event, &display_for_handler)
         })
         .await
         .exit
 }
 
-fn handle_push_event(event: &PackageEvent, display: &DisplayManager, use_colors: bool) -> bool {
+fn handle_push_event(event: &PackageEvent, display: &DisplayManager) -> bool {
     match event {
         PackageEvent::SyncCommitCreated {
             package_name,
             message,
             ..
         } => {
-            if use_colors {
-                display.print_success(format!("{}: {}", style(package_name).bold(), message));
-            } else {
-                display.print_success(format!("{package_name}: {message}"));
-            }
+            display.print_success(format!("{package_name}: {message}"));
             true
         }
 
@@ -269,6 +283,41 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager, use_colors:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A message the prompt could only draw escaped is shown escaped above an
+    // empty prompt, and pressing Enter commits its own bytes, as --yes does.
+    #[test]
+    fn accepting_a_message_that_needs_escaping_commits_its_own_bytes() {
+        use crate::display_manager::answer;
+        let message = "feat(x\u{FE0F}\u{1b}]0;pwn\u{7}): add".to_string();
+        let pending = vec![selfie::sync_service::PendingCommit {
+            name: "x".to_string(),
+            message: message.clone(),
+            files: Vec::new(),
+        }];
+        let display = DisplayManager::new(false).answering(vec![answer(String::new())]);
+
+        let confirmed = confirm_commits(pending, false, &display).unwrap();
+
+        assert_eq!(confirmed[0].message, message);
+        let printed = display.printed();
+        assert!(
+            printed
+                .iter()
+                .any(|(_, line)| line.contains("x\\u{fe0f}\\u{1b}]0;pwn\\u{7}")),
+            "{printed:?}"
+        );
+    }
+
+    // An answer the user typed is committed as typed.
+    #[test]
+    fn a_typed_message_is_committed_as_typed() {
+        assert_eq!(
+            chosen_message("fix: mine".into(), "chore: x".into()),
+            "fix: mine"
+        );
+        assert_eq!(chosen_message("  ".into(), "chore: x".into()), "chore: x");
+    }
     use selfie::package::event::{OperationContext, OperationInfo, OperationType, StepCount};
     use selfie::sync_service::PendingCommit;
     use std::path::PathBuf;
@@ -303,7 +352,7 @@ mod tests {
             message: "abc1234 feat(starship): add package spec".to_string(),
         };
 
-        assert!(handle_push_event(&event, &display, false));
+        assert!(handle_push_event(&event, &display));
     }
 
     #[test]
@@ -317,7 +366,7 @@ mod tests {
             }),
         };
 
-        assert!(handle_push_event(&event, &display, false));
+        assert!(handle_push_event(&event, &display));
     }
 
     #[test]
@@ -330,7 +379,7 @@ mod tests {
             }),
         };
 
-        assert!(handle_push_event(&event, &display, false));
+        assert!(handle_push_event(&event, &display));
     }
 
     // The header is the shared handler's, shown only under `--verbose`.
@@ -340,7 +389,7 @@ mod tests {
         let started = PackageEvent::Started {
             operation_info: make_operation_info(),
         };
-        assert!(!handle_push_event(&started, &display, false));
+        assert!(!handle_push_event(&started, &display));
     }
 
     // --- show_pending_commits tests ---
@@ -469,7 +518,7 @@ mod tests {
         });
 
         let display = DisplayManager::new(false);
-        let exit = execute_push(&mock_service, vec![], &display, false).await;
+        let exit = execute_push(&mock_service, vec![], &display).await;
         assert_eq!(exit, Exit::Clean);
     }
 }

@@ -1,6 +1,6 @@
 //! Handler for `selfie sync pull`.
 
-use console::style;
+use crate::terminal_text::{Shown, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -54,15 +54,15 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
 
             if !packages_updated.is_empty() {
                 let names = format_package_list(packages_updated, use_colors);
-                display.println(format!("{INDENT}updated: {names}"));
+                display.println(shown!("{}updated: {}", INDENT, names));
             }
             if !packages_added.is_empty() {
                 let names = format_package_list(packages_added, use_colors);
-                display.println(format!("{INDENT}added: {names}"));
+                display.println(shown!("{}added: {}", INDENT, names));
             }
             if !packages_removed.is_empty() {
                 let names = format_package_list(packages_removed, use_colors);
-                display.println(format!("{INDENT}removed: {names}"));
+                display.println(shown!("{}removed: {}", INDENT, names));
             }
             true
         }
@@ -79,16 +79,13 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
     }
 }
 
-fn format_package_list(names: &[String], use_colors: bool) -> String {
-    if use_colors {
+fn format_package_list(names: &[String], use_colors: bool) -> Shown {
+    Shown::join(
         names
             .iter()
-            .map(|n| style(n).bold().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    } else {
-        names.join(", ")
-    }
+            .map(|name| Shown::name(name).paint(use_colors, |s| s.bold())),
+        ", ",
+    )
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ use selfie::package::{
     service::PackageService,
 };
 
+use crate::terminal_text::{Shown, shown, tool_output};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -112,18 +113,18 @@ fn display_check_output_only(check_result: &CheckResultData, display: &DisplayMa
         CheckResult::Success { stdout, stderr } => {
             // Show stdout output if present
             if !stdout.trim().is_empty() {
-                display.print_info(format!("Check output: {}", stdout.trim()));
+                display.print_info(format!("Check output: {}", tool_output(stdout)));
             } else if !stderr.trim().is_empty() {
-                display.print_info(format!("Check output: {}", stderr.trim()));
+                display.print_info(format!("Check output: {}", tool_output(stderr)));
             }
         }
         CheckResult::Failed { stdout, stderr, .. } => {
             // Not installed: the check's own output explains the answer, so it
             // is a warning, on stderr, beside the result line on stdout.
             if !stderr.is_empty() {
-                display.print_warning(format!("Check failed: {}", stderr.trim()));
+                display.print_warning(format!("Check failed: {}", tool_output(stderr)));
             } else if !stdout.is_empty() {
-                display.print_warning(format!("Check failed: {}", stdout.trim()));
+                display.print_warning(format!("Check failed: {}", tool_output(stdout)));
             } else {
                 display.print_warning("Check failed with no output");
             }
@@ -142,20 +143,22 @@ fn display_check_result_card(
     let use_colors = config.use_colors();
 
     // Status line stays inline — complex branching with conditional sub-fields
-    let format_key_fn =
-        |field: &str| -> String { format!("{}{}: ", INDENT, format_key(field, use_colors)) };
+    let key = |field: &'static str| shown!("{}{}: ", INDENT, format_key(field, use_colors));
+    let output = |field: &'static str, text: &str| {
+        shown!("\n{}{}", key(field), Shown::tool_output(text, "    "))
+    };
 
     let status_line = match &check_result.result {
         CheckResult::Success { stdout, stderr } => {
-            let status = format!(
+            let status = shown!(
                 "{}{}",
-                format_key_fn("Status"),
+                key("Status"),
                 status_style::format_installed(use_colors)
             );
             if !stdout.trim().is_empty() {
-                format!("{}\n{}{}", status, format_key_fn("Output"), stdout.trim())
+                shown!("{}{}", status, output("Output", stdout))
             } else if !stderr.trim().is_empty() {
-                format!("{}\n{}{}", status, format_key_fn("Output"), stderr.trim())
+                shown!("{}{}", status, output("Output", stderr))
             } else {
                 status
             }
@@ -166,17 +169,17 @@ fn display_check_result_card(
             exit_code,
             ..
         } => {
-            let status = format!(
+            let status = shown!(
                 "{}{}",
-                format_key_fn("Status"),
+                key("Status"),
                 status_style::format_not_installed(use_colors)
             );
             if !stderr.is_empty() {
-                format!("{}\n{}{}", status, format_key_fn("Details"), stderr.trim())
+                shown!("{}{}", status, output("Details", stderr))
             } else if !stdout.is_empty() {
-                format!("{}\n{}{}", status, format_key_fn("Details"), stdout.trim())
+                shown!("{}{}", status, output("Details", stdout))
             } else if let Some(code) = exit_code {
-                format!("{}\n{}Exit code {}", status, format_key_fn("Details"), code)
+                shown!("{}\n{}Exit code {}", status, key("Details"), *code)
             } else {
                 status
             }
