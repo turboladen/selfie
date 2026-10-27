@@ -5,6 +5,7 @@
 //! count is never read as a clean result.
 
 use crate::package::collect::CrossSpecCollisions;
+use crate::package::collect::warning::CollectionRefusal;
 use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
@@ -33,16 +34,17 @@ use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
 /// after it, and a collection failure is not a cancellation whatever the token
 /// says.
 ///
-/// `collection_refusals` counts what collecting the catalog's packages refused,
-/// such as a dotfiles directory it could not list or a name several spec files
-/// claim.
+/// `collection_refusals` is what collecting the catalog's packages refused, such
+/// as a dotfiles directory it could not list or a name several spec files claim.
+/// Each counts as one refusal, and each is named as something no target was
+/// compared with.
 pub(super) async fn handle_check_drift<F>(
     catalog: Catalog<'_>,
     filesystem: &F,
     config: &SelfieConfig,
     sender: &EventSender,
     token: &CancellationToken,
-    collection_refusals: usize,
+    collection_refusals: &[CollectionRefusal],
 ) -> Option<OperationResult>
 where
     F: FileSystem,
@@ -70,7 +72,7 @@ where
     // report missing every standalone dotfile, or a package it never examined,
     // must not read as all clear.
     let mut tally = DriftTally {
-        refused: collection_refusals,
+        refused: collection_refusals.len(),
         ..DriftTally::default()
     };
 
@@ -81,6 +83,9 @@ where
     if token.is_cancelled() {
         return None;
     }
+    // Sent where apply sends it, once the run is known to carry on.
+    super::unchecked::send_unchecked_line(sender, collection_refusals, catalog.packages, config)
+        .await;
 
     // Asked once, so every package compares targets against the same home.
     let home = ResolvedHome::of(filesystem);

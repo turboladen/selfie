@@ -111,6 +111,14 @@ directory, and a user moving a file from one to the other would get different re
 which copy they deleted first. Rejected: refuse the whole run. It blocks an apply of every unrelated
 package over one shared file.
 
+Amended 2026-10-26: what collection refused takes no part either, because its entries are unknown,
+so apply and drift carry on and say what they could not compare. A run over everything names every
+spec file, or the dotfiles directory, it could not use in one warning, after each one's own: as
+`packages/<file>` or `dotfiles/<file>`, every file of an ambiguous name included. A run asked for
+one package names each with why it could not be used. A run with no entry in this environment says
+nothing, and nor does one `stop_on_error` stopped before it deployed. Rejected: refuse every entry
+while any spec is unreadable. As §4 says of track, an unrelated broken spec would block every apply.
+
 ### 4. Track asks the same question of every spec
 
 Within the spec it writes to, track counts an entry as already tracking the file when the entry

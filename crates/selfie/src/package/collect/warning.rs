@@ -19,6 +19,14 @@ pub(crate) enum Finding {
 }
 
 impl Finding {
+    /// The refusal this finding is, if it is one.
+    pub(crate) fn refusal(&self) -> Option<&CollectionRefusal> {
+        match self {
+            Self::Refusal(refusal) => Some(refusal),
+            Self::Warning(_) => None,
+        }
+    }
+
     /// Whether this finding is about a package name other than `name`, which a
     /// run asked for `name` alone has no reason to report.
     pub(crate) fn is_about_another_name(&self, name: &str) -> bool {
@@ -118,6 +126,25 @@ pub enum CollectionRefusal {
 }
 
 impl CollectionRefusal {
+    /// What a run could not compare its targets with because of this refusal:
+    /// the file, every file of an ambiguous name, or the dotfiles directory.
+    #[must_use]
+    pub fn unchecked_sources(&self) -> Vec<crate::package::event::UncheckedSource> {
+        use crate::package::event::UncheckedSource;
+        match self {
+            Self::UnloadableSpec { error, base } => {
+                vec![UncheckedSource::spec_file(error.package_path(), *base)]
+            }
+            Self::AmbiguousName { paths, base, .. } => paths
+                .iter()
+                .map(|path| UncheckedSource::spec_file(path, *base))
+                .collect(),
+            Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
+                vec![UncheckedSource::DotfilesDirectory]
+            }
+        }
+    }
+
     /// The status a validation of every spec gives what was refused.
     #[must_use]
     pub fn status(&self) -> crate::package::event::SpecStatus {

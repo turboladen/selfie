@@ -1,9 +1,9 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, BaseKind, ConflictReport, Coverage, DotfileSource, EnvironmentStatus, EventStream,
-    Gap, LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome,
-    PackageEvent, SkipReason,
+    AuditResult, ConflictReport, Coverage, DotfileSource, EnvironmentStatus, EventStream, Gap,
+    LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
+    SkipReason,
 };
 use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
@@ -79,10 +79,7 @@ fn with_source(mut row: Value, source: &DotfileSource) -> Value {
     let relative_path = base
         .and(source.repo_path())
         .map(|file| file.path.display().to_string());
-    let base = base.map(|base| match base.kind {
-        BaseKind::PackageDirectory => "packages",
-        BaseKind::DotfilesDirectory => "dotfiles",
-    });
+    let base = base.map(|base| base.kind.directory_name());
     let kind = label(source);
     let full = match source {
         DotfileSource::Recorded(_) => Value::Null,
@@ -634,6 +631,11 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "type": "warning",
             "message": message,
         })),
+        // A warning row like any other, so a caller reading warnings reads it.
+        PackageEvent::CollisionsUnchecked { sources, .. } => Some(serde_json::json!({
+            "type": "warning",
+            "message": selfie::package::service::collisions_unchecked_warning(sources),
+        })),
         // `spec_target` and `condition` rather than `target` and `kind`, which mean
         // the expanded path and the source kind on every other dotfile row.
         PackageEvent::DotfileRefused {
@@ -1113,7 +1115,7 @@ mod tests {
     fn package_file(path: &str) -> DotfileSource {
         DotfileSource::File(RepoPath {
             base: Some(selfie::package::event::SourceBase {
-                kind: BaseKind::PackageDirectory,
+                kind: selfie::package::event::BaseKind::PackageDirectory,
                 directory: "/home/u/packages".into(),
             }),
             path: path.into(),
@@ -1596,7 +1598,7 @@ mod tests {
         }
         let base = || {
             Some(selfie::package::event::SourceBase {
-                kind: BaseKind::PackageDirectory,
+                kind: selfie::package::event::BaseKind::PackageDirectory,
                 directory: "/home/u/packages".into(),
             })
         };

@@ -120,6 +120,11 @@ skipped spec's warning still precedes the failure it explains. A run asked for o
 findings about that name and about no name, and counts none of them; a run over everything sends and
 counts them all.
 
+Amended 2026-10-26: after its findings, a run asked for one name names each refusal, as something it
+could not check for a target it deploys, as
+[0013](0013-two-entries-are-one-target-when-their-expanded-targets-are-equal.md) §3 says. That
+warning is not a finding, and it counts nothing.
+
 Rejected: a warning list beside a refusal list, paired by convention. A count or a message is lost
 whenever one side is added without the other, and nothing fails to compile.
 

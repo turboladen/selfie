@@ -30,10 +30,7 @@ pub(crate) struct Collected {
 impl Collected {
     /// What collection refused, in the order it found them.
     pub(crate) fn refusals(&self) -> impl Iterator<Item = &CollectionRefusal> {
-        self.findings.iter().filter_map(|finding| match finding {
-            Finding::Refusal(refusal) => Some(refusal),
-            Finding::Warning(_) => None,
-        })
+        self.findings.iter().filter_map(Finding::refusal)
     }
 
     /// What collection found worth saying and refused nothing, in order.
@@ -413,13 +410,7 @@ pub(crate) fn ambiguity_matters(paths: &[PathBuf], loaded: &[&Package], environm
         loaded
             .iter()
             .find(|pkg| pkg.path() == path)
-            .is_none_or(|pkg| {
-                !pkg.dotfiles().is_empty()
-                    || pkg
-                        .environments()
-                        .get(environment)
-                        .is_some_and(|env| !env.dotfiles().is_empty())
-            })
+            .is_none_or(|pkg| pkg.has_dotfiles_in(environment))
     })
 }
 
