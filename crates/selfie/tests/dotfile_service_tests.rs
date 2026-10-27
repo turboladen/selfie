@@ -2284,6 +2284,55 @@ async fn test_apply_conflict_resolver_skip() {
     assert_eq!(content, "key = \"user-modified\"");
 }
 
+// A drift event names the repository file the target was compared against,
+// relative to the package directory, so a reader can see which entry drifted.
+// Two entries, one drifted, so a source taken from the wrong entry fails too.
+#[tokio::test]
+async fn a_drift_event_names_the_source_it_compared() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+    std::fs::write(source_dir.join("theme.toml"), "dark = true").unwrap();
+
+    let config = dirs.target_dir.join("config.toml");
+    let theme = dirs.target_dir.join("theme.toml");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[
+            ("myapp/config.toml", config.to_str().unwrap()),
+            ("myapp/theme.toml", theme.to_str().unwrap()),
+        ],
+    );
+
+    let service = dirs.service();
+    let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+    std::fs::write(&theme, "dark = false").unwrap();
+
+    let events = collect_events(service.check_drift().await).await;
+
+    let sources: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            PackageEvent::DotfileDriftDetected { source, .. } => {
+                Some(source.relative().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sources, vec!["myapp/theme.toml".to_string()], "{events:?}");
+    let based_on_the_package_directory = events.iter().any(|e| {
+        matches!(
+            e,
+            PackageEvent::DotfileDriftDetected { source, .. }
+                if source.base().is_some_and(|base| base.directory == dirs.package_dir)
+        )
+    });
+    assert!(based_on_the_package_directory, "{events:?}");
+}
+
 #[tokio::test]
 async fn test_check_drift_detects_target_change() {
     let dirs = TestDirs::new();

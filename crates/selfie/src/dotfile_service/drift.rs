@@ -199,7 +199,7 @@ where
             );
             if let Some(drift) = drift {
                 sender
-                    .send_dotfile_drift_detected(repo.target.display(), drift)
+                    .send_dotfile_drift_detected(&repo.event_source, repo.target.display(), drift)
                     .await;
                 tally.drifted += 1;
             }

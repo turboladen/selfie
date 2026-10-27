@@ -2462,6 +2462,7 @@ mod tests {
         let events = vec![
             PackageEvent::DotfileDriftDetected {
                 operation_info: test_operation_info(),
+                source: crate::package::event::DotfileSource::Recorded("bash/bashrc".to_string()),
                 target: "/home/user/.bashrc".to_string(),
                 drift_type: crate::package::event::DriftType::TargetChanged,
             },

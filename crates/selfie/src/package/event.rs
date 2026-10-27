@@ -953,12 +953,14 @@ impl EventSender {
     /// Send a dotfile-drift-detected event
     pub(crate) async fn send_dotfile_drift_detected(
         &self,
+        source: &DotfileSource,
         target: impl fmt::Display,
         drift_type: DriftType,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDriftDetected {
             operation_info,
+            source: source.clone(),
             target: target.to_string(),
             drift_type,
         })
@@ -3434,6 +3436,8 @@ pub enum PackageEvent {
     /// Drift detected between deployed file and repo source
     DotfileDriftDetected {
         operation_info: OperationInfo,
+        /// The repository file the target was compared against.
+        source: DotfileSource,
         target: String,
         /// How the target and its source have moved since selfie last deployed
         /// it.

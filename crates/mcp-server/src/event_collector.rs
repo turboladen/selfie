@@ -1432,6 +1432,15 @@ mod tests {
         let events = vec![
             PackageEvent::DotfileDriftDetected {
                 operation_info: test_op_info(),
+                source: selfie::package::event::DotfileSource::File(
+                    selfie::package::event::RepoPath {
+                        base: Some(selfie::package::event::SourceBase {
+                            kind: selfie::package::event::BaseKind::PackageDirectory,
+                            directory: "/r/packages".into(),
+                        }),
+                        path: "git/gitconfig".into(),
+                    },
+                ),
                 target: "/home/u/.gitconfig".to_string(),
                 drift_type: DriftType::RepoChanged,
             },
@@ -1572,6 +1581,15 @@ mod tests {
             let label = pinned(&drift);
             let events = vec![PackageEvent::DotfileDriftDetected {
                 operation_info: test_op_info(),
+                source: selfie::package::event::DotfileSource::File(
+                    selfie::package::event::RepoPath {
+                        base: Some(selfie::package::event::SourceBase {
+                            kind: selfie::package::event::BaseKind::PackageDirectory,
+                            directory: "/r/packages".into(),
+                        }),
+                        path: "git/gitconfig".into(),
+                    },
+                ),
                 target: "/home/u/.batrc".to_string(),
                 drift_type: drift.clone(),
             }];
