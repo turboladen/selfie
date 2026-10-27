@@ -64,6 +64,17 @@ pub(super) enum Decided<'a> {
     BeforePrompt,
 }
 
+/// Whether a write overwrites a conflict the run's resolver accepted, which its
+/// deployed event reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Overwrite {
+    /// The resolver accepted a conflict at the target.
+    Accepted,
+    /// Nobody was asked: there was no conflict, or `--yes` answered for the
+    /// user.
+    Unasked,
+}
+
 /// The deploy state an apply reads, and whether the run writes and records.
 ///
 /// Only a real run holds [`Record`](Self::Record), so only a real run writes a
@@ -93,14 +104,17 @@ impl Ledger {
 /// made the decision: the entry's own drift, or an accepted conflict. Under a
 /// [`Ledger::Preview`] it reports what it would do and writes nothing.
 ///
-/// `backed_up` carries what this run has already copied aside, keyed by target,
-/// so a target two entries deploy to is copied once.
+/// `overwrite` says whether a resolver accepted a conflict to reach this write,
+/// which the deployed event reports. `backed_up` carries what this run
+/// has already copied aside, keyed by target, so a target two entries deploy
+/// to is copied once.
 pub(super) async fn deploy_and_record<F: FileSystem>(
     filesystem: &F,
     sender: &EventSender,
     ledger: &mut Ledger,
     unit: &DeployUnit<'_>,
     decided: Decided<'_>,
+    overwrite: Overwrite,
     backed_up: &mut HashMap<String, Option<PathBuf>>,
 ) -> EntryOutcome {
     let Ledger::Record(recorder) = ledger else {
@@ -119,7 +133,7 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
         Ok(loaded) => loaded,
         Err(failure) => return EntryOutcome::Unrecorded(stopped_before_writing(&failure)),
     };
-    match perform_deploy(filesystem, sender, unit, decided, backed_up).await {
+    match perform_deploy(filesystem, sender, unit, decided, overwrite, backed_up).await {
         Wrote::Written => {
             match record_and_save(filesystem, &mut loaded, sender, Recorded::Deployed, unit).await {
                 Some(reason) => EntryOutcome::Unrecorded(reason),
@@ -238,6 +252,7 @@ async fn perform_deploy<F: FileSystem>(
     sender: &EventSender,
     unit: &DeployUnit<'_>,
     decided: Decided<'_>,
+    overwrite: Overwrite,
     backed_up: &mut HashMap<String, Option<PathBuf>>,
 ) -> Wrote {
     sender
@@ -355,6 +370,7 @@ async fn perform_deploy<F: FileSystem>(
             unit.event_source,
             unit.target_path.display(),
             backup.as_deref(),
+            overwrite == Overwrite::Accepted,
         )
         .await;
     Wrote::Written
@@ -574,7 +590,15 @@ mod tests {
             entry_target: "~/.config/app.toml",
             backups: Some(Path::new("/state/backups")),
         };
-        perform_deploy(fs, &sender(), &unit, Decided::Now(None), backed_up).await
+        perform_deploy(
+            fs,
+            &sender(),
+            &unit,
+            Decided::Now(None),
+            Overwrite::Unasked,
+            backed_up,
+        )
+        .await
     }
 
     // A target an earlier entry already settled is written without reading it

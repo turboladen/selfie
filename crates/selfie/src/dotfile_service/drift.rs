@@ -6,7 +6,6 @@
 
 use crate::package::collect::CrossSpecCollisions;
 use crate::package::collect::warning::CollectionRefusal;
-use std::path::Path;
 
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +20,8 @@ use crate::{
 };
 
 use super::classify::{
-    Classified, PackageCollisions, Purpose, RepoRead, ResolvedHome, classify_entry, read_repo_file,
+    Classified, PackageCollisions, Purpose, RepoRead, ResolvedHome, classify_entry,
+    planned_entries, read_repo_file,
 };
 use super::orphan::{self, Catalog};
 use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
@@ -106,6 +106,18 @@ where
     // at all, so its reason is reported against the package.
     let (packages, refused) = refuse_up_front(catalog.packages, config.environment(), sender).await;
     tally.refused += refused.len();
+    // As apply announces: only for a run still going.
+    if token.is_cancelled() {
+        return None;
+    }
+    sender
+        .send_dotfile_entries_planned(planned_entries(
+            packages.iter().copied(),
+            &home,
+            &across,
+            config,
+        ))
+        .await;
 
     for package in packages {
         // Between packages, for a run whose entries are few or absent.
@@ -114,11 +126,7 @@ where
         }
 
         // Source paths resolve relative to the YAML file's parent directory
-        let base_dir = package
-            .path()
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
+        let base_dir = super::classify::base_dir(package);
         let source_base = super::classify::source_base(config, package);
 
         // The same collisions apply refuses, so drift refuses the same entries.
@@ -199,7 +207,7 @@ where
             );
             if let Some(drift) = drift {
                 sender
-                    .send_dotfile_drift_detected(repo.target.display(), drift)
+                    .send_dotfile_drift_detected(&repo.event_source, repo.target.display(), drift)
                     .await;
                 tally.drifted += 1;
             }

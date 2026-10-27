@@ -838,14 +838,16 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         // rather than emitted as a data event, and the lifecycle and log variants
         // carry nothing a tool caller acts on.
         // A step's end is lifecycle too: a failed step's cause arrives as its own
-        // warning or failure.
+        // warning or failure. So is the list of entries a run is about to walk,
+        // which only lays out what a terminal shows next.
         PackageEvent::Started { .. }
         | PackageEvent::Progress { .. }
         | PackageEvent::StepEnded { .. }
         | PackageEvent::Completed { .. }
         | PackageEvent::Canceled { .. }
         | PackageEvent::Trace { .. }
-        | PackageEvent::Debug { .. } => None,
+        | PackageEvent::Debug { .. }
+        | PackageEvent::DotfileEntriesPlanned { .. } => None,
     };
     row.into_iter().collect()
 }
@@ -1250,6 +1252,7 @@ mod tests {
             source: package_file("myapp/config.toml"),
             target: "/home/u/.config/app.toml".to_string(),
             backup: backup.map(str::to_string),
+            accepted_conflict: false,
         };
 
         let result = collect_events(Box::pin(stream::iter(vec![
@@ -1270,6 +1273,44 @@ mod tests {
             rows[1]["backup"].is_null(),
             "a deploy that kept nothing says so rather than omitting the key: {:?}",
             rows[1]
+        );
+    }
+
+    // A deployment row has exactly these keys. Whether the write settled an
+    // accepted conflict lays out a terminal's table and is not one of them.
+    #[tokio::test]
+    async fn a_deployment_row_keeps_its_published_keys() {
+        let result = collect_events(Box::pin(stream::iter(vec![
+            PackageEvent::DotfileDeployed {
+                operation_info: test_op_info(),
+                source: package_file("myapp/config.toml"),
+                target: "/home/u/.config/app.toml".to_string(),
+                backup: None,
+                accepted_conflict: true,
+            },
+        ])))
+        .await;
+
+        let row = &result.data["data"][0];
+        let keys: std::collections::BTreeSet<&str> = row
+            .as_object()
+            .expect("a row is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "backup",
+                "base",
+                "kind",
+                "relative_path",
+                "source",
+                "target",
+                "type",
+                "vars",
+            ]),
+            "row: {row}"
         );
     }
 
@@ -1425,6 +1466,30 @@ mod tests {
         assert_eq!(result.data["result"]["refused"], 1);
     }
 
+    // The entries a run announces lay out a terminal's table and nothing else,
+    // so a stream carrying them reads exactly as one without them.
+    #[tokio::test]
+    async fn the_entry_announcement_adds_nothing() {
+        use selfie::package::event::{DotfileSource, PlannedEntry};
+
+        let completed = || PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+        };
+        let announced = PackageEvent::DotfileEntriesPlanned {
+            operation_info: test_op_info(),
+            entries: vec![PlannedEntry {
+                source: DotfileSource::Command("echo x".to_string()),
+                target: "/home/u/.x".to_string(),
+            }],
+        };
+
+        let with = collect_events(Box::pin(stream::iter(vec![announced, completed()]))).await;
+        let without = collect_events(Box::pin(stream::iter(vec![completed()]))).await;
+
+        assert_eq!(with.data, without.data);
+    }
+
     // A drift row is the target and its bare classification, and nothing else an
     // assistant might read as an explanation.
     #[tokio::test]
@@ -1432,6 +1497,15 @@ mod tests {
         let events = vec![
             PackageEvent::DotfileDriftDetected {
                 operation_info: test_op_info(),
+                source: selfie::package::event::DotfileSource::File(
+                    selfie::package::event::RepoPath {
+                        base: Some(selfie::package::event::SourceBase {
+                            kind: selfie::package::event::BaseKind::PackageDirectory,
+                            directory: "/r/packages".into(),
+                        }),
+                        path: "git/gitconfig".into(),
+                    },
+                ),
                 target: "/home/u/.gitconfig".to_string(),
                 drift_type: DriftType::RepoChanged,
             },
@@ -1572,6 +1646,15 @@ mod tests {
             let label = pinned(&drift);
             let events = vec![PackageEvent::DotfileDriftDetected {
                 operation_info: test_op_info(),
+                source: selfie::package::event::DotfileSource::File(
+                    selfie::package::event::RepoPath {
+                        base: Some(selfie::package::event::SourceBase {
+                            kind: selfie::package::event::BaseKind::PackageDirectory,
+                            directory: "/r/packages".into(),
+                        }),
+                        path: "git/gitconfig".into(),
+                    },
+                ),
                 target: "/home/u/.batrc".to_string(),
                 drift_type: drift.clone(),
             }];

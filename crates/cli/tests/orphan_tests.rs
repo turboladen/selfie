@@ -147,7 +147,22 @@ fn an_orphan_whose_record_names_no_base_shows_its_spelling() {
             .contains("deployed from myapp/rc (as recorded, directory unknown) by package 'myapp'"),
         "{stdout}"
     );
-    assert!(!stdout.contains("Packages: "), "{stdout}");
+    // The drift row for the entry's new target is headed by its directory; the
+    // orphan gets no heading of its own.
+    let lines: Vec<&str> = stdout.lines().collect();
+    let headings: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains("Packages: "))
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(headings.len(), 1, "{stdout}");
+    assert!(
+        lines
+            .get(headings[0] + 1)
+            .is_some_and(|next| next.starts_with("drifted ")),
+        "{stdout}"
+    );
 }
 
 // Apply warns about an orphan on stderr, so its heading is on stderr too: a

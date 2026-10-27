@@ -2284,6 +2284,55 @@ async fn test_apply_conflict_resolver_skip() {
     assert_eq!(content, "key = \"user-modified\"");
 }
 
+// A drift event names the repository file the target was compared against,
+// relative to the package directory, so a reader can see which entry drifted.
+// Two entries, one drifted, so a source taken from the wrong entry fails too.
+#[tokio::test]
+async fn a_drift_event_names_the_source_it_compared() {
+    let dirs = TestDirs::new();
+
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("config.toml"), "key = \"value\"").unwrap();
+    std::fs::write(source_dir.join("theme.toml"), "dark = true").unwrap();
+
+    let config = dirs.target_dir.join("config.toml");
+    let theme = dirs.target_dir.join("theme.toml");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[
+            ("myapp/config.toml", config.to_str().unwrap()),
+            ("myapp/theme.toml", theme.to_str().unwrap()),
+        ],
+    );
+
+    let service = dirs.service();
+    let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+    std::fs::write(&theme, "dark = false").unwrap();
+
+    let events = collect_events(service.check_drift().await).await;
+
+    let sources: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            PackageEvent::DotfileDriftDetected { source, .. } => {
+                Some(source.relative().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sources, vec!["myapp/theme.toml".to_string()], "{events:?}");
+    let based_on_the_package_directory = events.iter().any(|e| {
+        matches!(
+            e,
+            PackageEvent::DotfileDriftDetected { source, .. }
+                if source.base().is_some_and(|base| base.directory == dirs.package_dir)
+        )
+    });
+    assert!(based_on_the_package_directory, "{events:?}");
+}
+
 #[tokio::test]
 async fn test_check_drift_detects_target_change() {
     let dirs = TestDirs::new();
@@ -21364,5 +21413,431 @@ mod collisions_with_unreadable_specs {
             ],
             "{events:?}"
         );
+    }
+}
+
+// The entries a run announces before walking them: what is listed, in which
+// order, spelled how, and when nothing is announced at all.
+mod entries_planned {
+    use super::*;
+    use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+    use selfie::package::event::PlannedEntry;
+    use std::sync::{Arc, Mutex};
+
+    fn planned(events: &[PackageEvent]) -> Vec<Vec<PlannedEntry>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileEntriesPlanned { entries, .. } => Some(entries.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Each row event's source and target, in order.
+    fn rows(events: &[PackageEvent]) -> Vec<PlannedEntry> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDeployed { source, target, .. }
+                | PackageEvent::DotfileSkipped { source, target, .. }
+                | PackageEvent::DotfileDriftDetected { source, target, .. } => Some(PlannedEntry {
+                    source: source.clone(),
+                    target: target.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn position(events: &[PackageEvent], what: impl Fn(&PackageEvent) -> bool) -> usize {
+        events
+            .iter()
+            .position(what)
+            .unwrap_or_else(|| panic!("no such event in {events:?}"))
+    }
+
+    fn is_row(event: &PackageEvent) -> bool {
+        matches!(
+            event,
+            PackageEvent::DotfileDeploying { .. }
+                | PackageEvent::DotfileDeployed { .. }
+                | PackageEvent::DotfileSkipped { .. }
+                | PackageEvent::DotfileConflict { .. }
+                | PackageEvent::DotfileDriftDetected { .. }
+        )
+    }
+
+    fn is_planned(event: &PackageEvent) -> bool {
+        matches!(event, PackageEvent::DotfileEntriesPlanned { .. })
+    }
+
+    // Two packages of two entries, so a list in the wrong order or missing a
+    // package fails.
+    fn two_packages(dirs: &TestDirs) {
+        for name in ["aaa", "bbb"] {
+            std::fs::create_dir_all(dirs.package_dir.join(name)).unwrap();
+            let mut entries = Vec::new();
+            for file in ["one.conf", "two.conf"] {
+                std::fs::write(dirs.package_dir.join(name).join(file), file).unwrap();
+                entries.push((
+                    format!("{name}/{file}"),
+                    dirs.target_dir
+                        .join(format!("{name}-{file}"))
+                        .display()
+                        .to_string(),
+                ));
+            }
+            let pairs: Vec<(&str, &str)> = entries
+                .iter()
+                .map(|(s, t)| (s.as_str(), t.as_str()))
+                .collect();
+            create_package_with_dotfiles(&dirs.package_dir, name, &pairs);
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_announces_the_entries_it_walks_before_the_first() {
+        let dirs = TestDirs::new();
+        two_packages(&dirs);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let announced = planned(&events);
+        assert_eq!(announced.len(), 1, "announced once: {events:?}");
+        assert!(position(&events, is_planned) < position(&events, is_row));
+        assert_eq!(announced[0], rows(&events));
+        assert_eq!(announced[0].len(), 4);
+    }
+
+    #[tokio::test]
+    async fn drift_announces_the_entries_it_walks_before_the_first() {
+        let dirs = TestDirs::new();
+        two_packages(&dirs);
+        let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        std::fs::write(dirs.target_dir.join("aaa-one.conf"), "edited").unwrap();
+        std::fs::write(dirs.target_dir.join("bbb-two.conf"), "edited").unwrap();
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        let announced = planned(&events);
+        assert_eq!(announced.len(), 1, "announced once: {events:?}");
+        assert!(position(&events, is_planned) < position(&events, is_row));
+        let drifted = rows(&events);
+        assert_eq!(drifted.len(), 2, "{events:?}");
+        // Every entry is announced, the in-sync ones included, in walk order.
+        assert_eq!(announced[0].len(), 4);
+        assert_eq!(announced[0][0], drifted[0]);
+        assert_eq!(announced[0][3], drifted[1]);
+    }
+
+    // Refused before anything is read, so each gets no row: a source escaping
+    // the package, two entries sharing a target, and a relative target.
+    #[tokio::test]
+    async fn an_entry_refused_lexically_is_not_announced() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/good.conf"), "g").unwrap();
+        std::fs::write(dirs.package_dir.join("app/dup.conf"), "d").unwrap();
+        let good = dirs.target_dir.join("good.conf").display().to_string();
+        let shared = dirs.target_dir.join("shared.conf").display().to_string();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[
+                ("app/good.conf", good.as_str()),
+                (
+                    "../../outside.conf",
+                    dirs.target_dir.join("x").to_str().unwrap(),
+                ),
+                ("app/dup.conf", shared.as_str()),
+                ("app/good.conf", shared.as_str()),
+                ("app/good.conf", "relative/target"),
+            ],
+        );
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        let announced = planned(&events);
+        assert_eq!(announced.len(), 1, "{events:?}");
+        let targets: Vec<&str> = announced[0].iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(targets, vec![good.as_str()], "{events:?}");
+    }
+
+    // The target as its row will carry it, expanded against the home the run
+    // resolves: a spec's `~//x` and `~/a/../b` are not what a row prints.
+    #[tokio::test]
+    async fn the_announced_target_is_the_expanded_one() {
+        let dirs = TestDirs::new();
+        let home = dirs.target_dir.join("home");
+        std::fs::create_dir_all(home.join("a")).unwrap();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/x.conf"), "x").unwrap();
+        std::fs::write(dirs.package_dir.join("app/b.conf"), "b").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[("app/x.conf", "~//x.conf"), ("app/b.conf", "~/a/../b.conf")],
+        );
+
+        let events = collect_events(
+            dirs.service_with_home(&home)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        let announced = planned(&events);
+        assert_eq!(announced.len(), 1, "{events:?}");
+        let rows = rows(&events);
+        assert_eq!(rows.len(), 2, "{events:?}");
+        assert_eq!(announced[0], rows);
+        assert!(
+            announced[0].iter().all(|e| !e.target.starts_with('~')),
+            "{announced:?}"
+        );
+    }
+
+    // A run that stops or is canceled before its first entry announces nothing:
+    // collection refused a spec, or a package was refused whole, under
+    // `stop_on_error`, or the run was canceled first.
+    #[tokio::test]
+    async fn a_stopped_run_announces_nothing() {
+        // A spec that does not load.
+        let dirs = TestDirs::new().stopping_on_error(true);
+        two_packages(&dirs);
+        std::fs::write(dirs.package_dir.join("aab.yml"), "environments: {oops\n").unwrap();
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert!(
+            failure_message(&events).starts_with("Stopped before applying anything"),
+            "control: {events:?}"
+        );
+        assert!(
+            planned(&events).is_empty(),
+            "collection refused: {events:?}"
+        );
+
+        // A package refused whole.
+        let dirs = TestDirs::new().stopping_on_error(true);
+        two_packages(&dirs);
+        write_package_yaml(
+            &dirs.package_dir,
+            "zzz",
+            "name: zzz\nenvironments:\n  test:\n    install: \"echo i\"\nconfigs: []\n",
+        );
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        assert!(
+            failure_message(&events).starts_with("Stopped before applying anything"),
+            "control: {events:?}"
+        );
+        assert!(planned(&events).is_empty(), "package refused: {events:?}");
+
+        // Canceled before the run.
+        let dirs = TestDirs::new();
+        two_packages(&dirs);
+        let token = CancellationToken::new();
+        token.cancel();
+        let events = collect_events(
+            dirs.service_with_runner_and_token(FakeCommandRunner::new(), token)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await;
+        assert!(rows(&events).is_empty(), "control: {events:?}");
+        assert!(planned(&events).is_empty(), "canceled: {events:?}");
+    }
+
+    // Records what it hears, in order.
+    struct Recording(Mutex<Vec<String>>);
+
+    impl ConflictResolver for Recording {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            self.0.lock().unwrap().push("resolve".to_string());
+            ConflictResolution::Skip
+        }
+
+        fn planned(&self, entries: &[PlannedEntry]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("planned {}", entries.len()));
+        }
+    }
+
+    // The resolver is told the plan on the run's own task, before the first
+    // conflict is put to it, whatever a consumer of the events has seen.
+    #[tokio::test]
+    async fn the_resolver_hears_the_plan_before_the_first_conflict() {
+        let dirs = TestDirs::new();
+        two_packages(&dirs);
+        // Content selfie did not write, so the first entry is a conflict.
+        std::fs::write(dirs.target_dir.join("aaa-one.conf"), "mine").unwrap();
+        let recording = Arc::new(Recording(Mutex::new(Vec::new())));
+        let options = ApplyOptions {
+            conflict_resolver: Some(recording.clone()),
+            ..ApplyOptions::default()
+        };
+
+        let _ = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(
+            *recording.0.lock().unwrap(),
+            vec!["planned 4".to_string(), "resolve".to_string()]
+        );
+    }
+}
+
+// A deploy says whether it settled a conflict its resolver accepted: a consumer
+// that hides routine deploys shows that one, which the prompt was about.
+mod accepted_conflicts {
+    use super::*;
+    use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+    use std::sync::Arc;
+
+    struct Accept;
+
+    impl ConflictResolver for Accept {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            ConflictResolution::Accept
+        }
+    }
+
+    fn accepting() -> ApplyOptions {
+        ApplyOptions {
+            conflict_resolver: Some(Arc::new(Accept)),
+            ..ApplyOptions::default()
+        }
+    }
+
+    fn accepted_flags(events: &[PackageEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDeployed {
+                    accepted_conflict, ..
+                } => Some(*accepted_conflict),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Two repository files: one over content selfie did not write, which is a
+    // conflict, and one to an empty target, which is not.
+    #[tokio::test]
+    async fn a_repository_file_deploy_says_it_settled_an_accepted_conflict() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/a.conf"), "ours").unwrap();
+        std::fs::write(dirs.package_dir.join("app/b.conf"), "ours").unwrap();
+        let conflicted = dirs.target_dir.join("a.conf");
+        std::fs::write(&conflicted, "theirs").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[
+                ("app/a.conf", conflicted.to_str().unwrap()),
+                (
+                    "app/b.conf",
+                    dirs.target_dir.join("b.conf").to_str().unwrap(),
+                ),
+            ],
+        );
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        assert_eq!(accepted_flags(&events), vec![true, false], "{events:?}");
+    }
+
+    // A secret-bearing deploy keeps no copy, so the flag is all that marks an
+    // accepted one. The command is answered by the fake runner, never run.
+    #[tokio::test]
+    async fn a_secret_deploy_says_it_settled_an_accepted_conflict() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "old").unwrap();
+        super::secret_bearing::provider_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "op read x",
+        );
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"new");
+
+        let events = collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(accepting())
+                .await,
+        )
+        .await;
+
+        assert_eq!(accepted_flags(&events), vec![true], "{events:?}");
+    }
+
+    // Accepts, and while "the user decides" puts a symlink where the target
+    // was, as something else on the machine could.
+    struct AcceptAfterPlantingLink(std::path::PathBuf, std::path::PathBuf);
+
+    impl ConflictResolver for AcceptAfterPlantingLink {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            std::fs::remove_file(&self.0).unwrap();
+            std::os::unix::fs::symlink(&self.1, &self.0).unwrap();
+            ConflictResolution::Accept
+        }
+    }
+
+    // The link is replaced after the accept, and that write is still the one
+    // the user accepted.
+    #[tokio::test]
+    async fn a_link_planted_during_an_accepted_secret_prompt_is_still_accepted() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "old").unwrap();
+        let elsewhere = dirs.target_dir.join("elsewhere");
+        std::fs::write(&elsewhere, "other").unwrap();
+        super::secret_bearing::provider_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "op read x",
+        );
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"new");
+        let options = ApplyOptions {
+            conflict_resolver: Some(Arc::new(AcceptAfterPlantingLink(
+                target.clone(),
+                elsewhere.clone(),
+            ))),
+            ..ApplyOptions::default()
+        };
+
+        let events =
+            collect_events(dirs.service_with_runner(runner).apply_all(options).await).await;
+
+        assert!(
+            !std::fs::symlink_metadata(&target).unwrap().is_symlink(),
+            "control: the link was replaced"
+        );
+        assert_eq!(accepted_flags(&events), vec![true], "{events:?}");
+    }
+
+    // `--yes` overwrites a conflict without asking, so its deploy is not one a
+    // resolver accepted, even with a resolver supplied.
+    #[tokio::test]
+    async fn an_overwrite_nobody_was_asked_about_is_not_marked_accepted() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/a.conf"), "ours").unwrap();
+        let conflicted = dirs.target_dir.join("a.conf");
+        std::fs::write(&conflicted, "theirs").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[("app/a.conf", conflicted.to_str().unwrap())],
+        );
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..accepting()
+        };
+
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(accepted_flags(&events), vec![false], "{events:?}");
     }
 }

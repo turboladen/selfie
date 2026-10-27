@@ -827,12 +827,14 @@ impl EventSender {
     /// Send a dotfile-deployed event
     ///
     /// `backup` is where the target's former content was copied, or `None` when
-    /// nothing was kept.
+    /// nothing was kept. `accepted_conflict` says the write settled a conflict
+    /// the resolver accepted.
     pub(crate) async fn send_dotfile_deployed(
         &self,
         source: &DotfileSource,
         target: impl fmt::Display,
         backup: Option<&std::path::Path>,
+        accepted_conflict: bool,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDeployed {
@@ -840,6 +842,7 @@ impl EventSender {
             source: source.clone(),
             target: target.to_string(),
             backup: backup.map(|path| path.display().to_string()),
+            accepted_conflict,
         })
         .await;
     }
@@ -950,15 +953,27 @@ impl EventSender {
         .await;
     }
 
+    /// Announce the dotfile entries a run is about to walk.
+    pub(crate) async fn send_dotfile_entries_planned(&self, entries: Vec<PlannedEntry>) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::DotfileEntriesPlanned {
+            operation_info,
+            entries,
+        })
+        .await;
+    }
+
     /// Send a dotfile-drift-detected event
     pub(crate) async fn send_dotfile_drift_detected(
         &self,
+        source: &DotfileSource,
         target: impl fmt::Display,
         drift_type: DriftType,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDriftDetected {
             operation_info,
+            source: source.clone(),
             target: target.to_string(),
             drift_type,
         })
@@ -3367,6 +3382,8 @@ pub enum PackageEvent {
         /// copied. A target two entries deploy to in one run is copied once, and
         /// both events name that one copy.
         backup: Option<String>,
+        /// Whether this write settled a conflict the run's resolver accepted.
+        accepted_conflict: bool,
     },
 
     /// A config file was left as it is, with nothing wrong: already current, a
@@ -3431,9 +3448,25 @@ pub enum PackageEvent {
         package: Option<String>,
     },
 
+    /// The dotfile entries an apply or drift run is about to walk, in the order
+    /// it walks them, sent once before the first entry's event.
+    ///
+    /// Each is spelled as that entry's events will spell it, so a consumer can
+    /// lay out what follows. It is a forecast and nothing more: an entry refused
+    /// by what is found at its target, or one a drift check finds in sync, gets
+    /// no deployed, skipped, conflict or drift event, and a later event may spell
+    /// an entry differently. An entry refused before anything is read is not
+    /// listed.
+    DotfileEntriesPlanned {
+        operation_info: OperationInfo,
+        entries: Vec<PlannedEntry>,
+    },
+
     /// Drift detected between deployed file and repo source
     DotfileDriftDetected {
         operation_info: OperationInfo,
+        /// The repository file the target was compared against.
+        source: DotfileSource,
         target: String,
         /// How the target and its source have moved since selfie last deployed
         /// it.
@@ -3977,6 +4010,15 @@ impl std::fmt::Display for DriftType {
             DriftType::NotTracked => write!(f, "not tracked"),
         }
     }
+}
+
+/// A dotfile entry a run is about to walk, as its events will name it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedEntry {
+    /// The source, as the entry's events will carry it.
+    pub source: DotfileSource,
+    /// The expanded target, as the entry's events will carry it.
+    pub target: String,
 }
 
 /// How a dotfile's target differs from what selfie would write.

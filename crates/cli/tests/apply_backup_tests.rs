@@ -132,10 +132,13 @@ fn a_skipped_dotfile_names_its_target() {
         .code(CLEAN);
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
 
-    let skipped: Vec<&str> = stdout.lines().filter(|line| line.contains('⊘')).collect();
+    let skipped: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("skipped "))
+        .collect();
     assert_eq!(skipped.len(), 1, "one entry, one skip line:\n{stdout}");
     assert!(
-        skipped[0].contains("→ ~/target/config.toml skipped:"),
+        skipped[0].contains("→ ~/target/config.toml "),
         "the skip line must name the target:\n{stdout}"
     );
 }

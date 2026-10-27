@@ -383,6 +383,11 @@ impl DisplayPath {
         // gate in tests/no_raw_path_display.rs holds every other one to it.
         Self::new(&path.display().to_string())
     }
+
+    /// Returns the escaped text.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Display for DisplayPath {

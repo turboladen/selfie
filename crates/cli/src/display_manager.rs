@@ -11,10 +11,12 @@ use std::time::{Duration, Instant};
 
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
-use selfie::package::event::{BaseKind, StepEnding, StepId};
+use selfie::package::event::{BaseKind, PlannedEntry, StepEnding, StepId};
 use tokio_util::sync::CancellationToken;
 
+use crate::entry_rows::{EntryColumns, EntryRow, entry_line};
 use crate::event_processor::Exit;
+use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
     Paint, Shown, escape, escape_prose, escape_prose_keeping_tabs, guard, printable, shown,
@@ -321,6 +323,9 @@ pub struct DisplayManager {
     last_heading: Arc<Mutex<[Option<BaseKind>; 2]>>,
     // Held while a heading and the line under it print, by every clone.
     block: Arc<Mutex<()>>,
+    // The entry table's columns, shared by every clone, so the conflict prompt
+    // lays out its row as the event processor lays out the rest.
+    entry_columns: Arc<Mutex<EntryColumns>>,
     // What the printing methods rendered, and to which stream, so a test can
     // assert what a run would have shown. Output goes straight to the terminal,
     // which a test in this process cannot read back.
@@ -394,6 +399,7 @@ impl DisplayManager {
             failed_tail: Arc::new(Mutex::new(Vec::new())),
             last_heading: Arc::new(Mutex::new([None, None])),
             block: Arc::new(Mutex::new(())),
+            entry_columns: Arc::new(Mutex::new(EntryColumns::default())),
             #[cfg(test)]
             printed: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
@@ -584,6 +590,34 @@ impl DisplayManager {
             .lock()
             .map(|mut last| last[index].replace(kind) != Some(kind))
             .unwrap_or(true)
+    }
+
+    /// Fix the entry table's columns for `entries`, the entries a run is about
+    /// to walk, as their rows will show them. Prints nothing.
+    pub(crate) fn plan_entry_columns(&self, entries: &[PlannedEntry]) {
+        let shown: Vec<(DisplayPath, DisplayPath)> = entries
+            .iter()
+            .map(|entry| (relative_text(&entry.source), shorten_path(&entry.target)))
+            .collect();
+        let columns = EntryColumns::of(
+            shown
+                .iter()
+                .map(|(source, target)| (source.as_str(), target.as_str())),
+        );
+        if let Ok(mut current) = self.entry_columns.lock() {
+            *current = columns;
+        }
+    }
+
+    /// Print `row` in the entry table's columns (stdout), with its outcome's
+    /// label colored.
+    pub(crate) fn print_entry_row(&self, row: &EntryRow) {
+        let columns = self
+            .entry_columns
+            .lock()
+            .map(|columns| *columns)
+            .unwrap_or_default();
+        self.println(entry_line(row, columns, self.use_colors));
     }
 
     /// Hold every clone's printing of source lines until the guard drops, so

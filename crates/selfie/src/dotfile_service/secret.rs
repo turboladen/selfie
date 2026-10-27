@@ -30,7 +30,7 @@ use crate::{
 
 use super::appeared;
 use super::classify::{SecretEntry, secret_target_link};
-use super::deploy_entry::write_failure;
+use super::deploy_entry::{Overwrite, write_failure};
 use super::port::ApplyOptions;
 use super::refusal::{
     Link, TargetState, classify_link, classify_write, read_target_state, readable_or_refusal,
@@ -224,29 +224,36 @@ where
         // read: the mode of a link's destination says nothing about the file that
         // replaces the link, and the outcome must not depend on it (ADR-0005 decision 3).
         let current = self
-            .find_replacing_link(target, &resolved, before_write)
+            .find_replacing_link(target, &resolved, before_write, Overwrite::Unasked)
             .await?;
-        self.settle_in_sync(target, &resolved, current.as_deref(), before_write)
-            .await?;
+        self.settle_in_sync(
+            target,
+            &resolved,
+            current.as_deref(),
+            before_write,
+            Overwrite::Unasked,
+        )
+        .await?;
         // Ahead of the conflict's question as well as the write, so no answer is
         // asked for a write that cannot happen.
         before_write().map_err(SecretOutcome::StateNotWritable)?;
-        let if_present = self
+        let (if_present, overwrite) = self
             .settle_conflict(target, &resolved, current, before_write)
             .await?;
 
         if if_present == IfPresent::Replace {
-            return Ok(self.write(target, &resolved).await);
+            return Ok(self.write(target, &resolved, overwrite).await);
         }
         // Nothing was there, so the write replaces nothing: a file that appeared
         // since is kept rather than overwritten unseen.
-        match self.create(target, &resolved).await {
+        match self.create(target, &resolved, overwrite).await {
             Some(outcome) => Ok(outcome),
             None => Ok(appeared::settle(&mut SecretAppeared {
                 apply: self,
                 target,
                 resolved: &resolved,
                 before_write,
+                overwrite,
             })
             .await),
         }
@@ -260,6 +267,7 @@ where
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
         before_write: &mut BeforeWrite<'_>,
+        overwrite: Overwrite,
     ) -> Phase<Option<Vec<u8>>> {
         let found = match self.look(target.entry.target(), &target.path).await? {
             Some(link) => Found::Link(link),
@@ -268,7 +276,7 @@ where
         match found {
             Found::Link(link) => {
                 before_write().map_err(SecretOutcome::StateNotWritable)?;
-                Err(self.replace_link(target, resolved, &link).await)
+                Err(self.replace_link(target, resolved, &link, overwrite).await)
             }
             Found::Current(current) => Ok(current),
         }
@@ -281,8 +289,9 @@ where
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
         link: &Link,
+        overwrite: Overwrite,
     ) -> SecretOutcome {
-        let outcome = self.write(target, resolved).await;
+        let outcome = self.write(target, resolved, overwrite).await;
         if matches!(outcome, SecretOutcome::Deployed) {
             self.sender
                 .send_warning(replaced_link_warning(target, link))
@@ -503,6 +512,7 @@ where
         resolved: &ResolvedContent,
         current: Option<&[u8]>,
         before_write: &mut BeforeWrite<'_>,
+        overwrite: Overwrite,
     ) -> Phase {
         let Some(bytes) = current else {
             return Ok(());
@@ -517,7 +527,7 @@ where
             Err(refusal @ FileSystemError::SymlinkedTarget { .. }) => {
                 if let Ok(Some(link)) = classify_link(Some(refusal)) {
                     before_write().map_err(SecretOutcome::StateNotWritable)?;
-                    return Err(self.replace_link(target, resolved, &link).await);
+                    return Err(self.replace_link(target, resolved, &link, overwrite).await);
                 }
             }
             // The content read above succeeded, so a mode that cannot be read is
@@ -595,9 +605,9 @@ where
         resolved: &ResolvedContent,
         current: Option<Vec<u8>>,
         before_write: &mut BeforeWrite<'_>,
-    ) -> Phase<IfPresent> {
+    ) -> Phase<(IfPresent, Overwrite)> {
         let Some(current) = current else {
-            return Ok(IfPresent::Keep);
+            return Ok((IfPresent::Keep, Overwrite::Unasked));
         };
         let report = secret_conflict_report(&resolved.bytes, &current);
 
@@ -605,7 +615,8 @@ where
             Some(ConflictResolution::Accept) => {
                 return self
                     .after_prompt(target, resolved, &current, before_write)
-                    .await;
+                    .await
+                    .map(|if_present| (if_present, Overwrite::Accepted));
             }
             Some(ConflictResolution::Skip) => true,
             None => false,
@@ -636,7 +647,7 @@ where
         before_write: &mut BeforeWrite<'_>,
     ) -> Phase<IfPresent> {
         let now = match self
-            .find_replacing_link(target, resolved, before_write)
+            .find_replacing_link(target, resolved, before_write, Overwrite::Accepted)
             .await?
         {
             None => return Ok(IfPresent::Keep),
@@ -645,13 +656,20 @@ where
         };
         // The same settlement as a target found in sync before the prompt, so a laxer
         // mode is tightened and a link put there since is replaced.
-        self.settle_in_sync(target, resolved, Some(&now), before_write)
-            .await?;
+        self.settle_in_sync(
+            target,
+            resolved,
+            Some(&now),
+            before_write,
+            Overwrite::Accepted,
+        )
+        .await?;
         let mut entry = SecretAppeared {
             apply: self,
             target,
             resolved,
             before_write,
+            overwrite: Overwrite::Accepted,
         };
         Err(appeared::settle_present(&mut entry, &now, appeared::During::Prompt).await)
     }
@@ -706,11 +724,16 @@ where
     ///
     /// Owner-only and atomic: no window in which the credential is
     /// world-readable, and no interrupted write leaving a truncated one behind.
-    async fn write(&self, target: &SecretEntry<'_>, resolved: &ResolvedContent) -> SecretOutcome {
+    async fn write(
+        &self,
+        target: &SecretEntry<'_>,
+        resolved: &ResolvedContent,
+        overwrite: Overwrite,
+    ) -> SecretOutcome {
         let written =
             self.filesystem
                 .write_file_private(&target.path, &resolved.bytes, IfPresent::Replace);
-        self.report_write(target, written).await
+        self.report_write(target, written, overwrite).await
     }
 
     /// Write the resolved content to a target last read as absent, and report it:
@@ -720,13 +743,14 @@ where
         &self,
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
+        overwrite: Overwrite,
     ) -> Option<SecretOutcome> {
         match self
             .filesystem
             .write_file_private(&target.path, &resolved.bytes, IfPresent::Keep)
         {
             Ok(Placed::Kept) => None,
-            written => Some(self.report_write(target, written).await),
+            written => Some(self.report_write(target, written, overwrite).await),
         }
     }
 
@@ -735,6 +759,7 @@ where
         &self,
         target: &SecretEntry<'_>,
         written: Result<Placed, FileSystemError>,
+        overwrite: Overwrite,
     ) -> SecretOutcome {
         match written {
             Ok(Placed::Written) => {}
@@ -749,7 +774,12 @@ where
             // disk, and the former content of a secret target is the credential
             // itself -- worse to persist than the checksum that ADR already
             // refuses. Owner-only permissions do not change that.
-            .send_dotfile_deployed(&target.source, target.path.display(), None)
+            .send_dotfile_deployed(
+                &target.source,
+                target.path.display(),
+                None,
+                overwrite == Overwrite::Accepted,
+            )
             .await;
 
         // No deploy state is recorded: a stored checksum of a credential is a
@@ -765,6 +795,9 @@ struct SecretAppeared<'a, 'b, 'g, F, CR> {
     target: &'a SecretEntry<'a>,
     resolved: &'a ResolvedContent,
     before_write: &'a mut BeforeWrite<'g>,
+    // Whether the resolver accepted a conflict on this entry, which a link
+    // replaced from here reports.
+    overwrite: Overwrite,
 }
 
 impl<F, CR> appeared::Appeared for SecretAppeared<'_, '_, '_, F, CR>
@@ -790,7 +823,12 @@ where
     // that appeared settles here.
     async fn reread(&mut self) -> Result<Option<Vec<u8>>, SecretOutcome> {
         self.apply
-            .find_replacing_link(self.target, self.resolved, self.before_write)
+            .find_replacing_link(
+                self.target,
+                self.resolved,
+                self.before_write,
+                self.overwrite,
+            )
             .await
     }
 
