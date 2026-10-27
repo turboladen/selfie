@@ -1114,6 +1114,8 @@ Commands that enumerate specs continue with the rest and name the file they skip
 - `selfie package audit --all`
 - `selfie dotfiles list`
 - `selfie apply`
+- `selfie dotfiles drift`
+- `selfie sync status`
 - `selfie track`
 - `selfie spec create --interactive`, when it offers the dependency picker
 
