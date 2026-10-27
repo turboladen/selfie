@@ -935,31 +935,35 @@ impl DisplayManager {
         self.mp.suspend(|| {
             let mut printed_separator = false;
 
-            for line in diff.lines() {
+            for line in diff_lines(diff) {
                 if self.use_colors {
-                    if let Some(rest) = line.strip_prefix("--- ") {
-                        println!("  {}", style(format!("--- {}", shorten_path(rest))).red());
-                    } else if let Some(rest) = line.strip_prefix("+++ ") {
-                        println!("  {}", style(format!("+++ {}", shorten_path(rest))).green());
-                        println!("  {}", style(SEPARATOR).dim());
-                        printed_separator = true;
-                    } else if line.starts_with("@@") {
-                        println!("  {}", style(line).cyan());
-                    } else if line.starts_with('-') {
-                        println!("  {}", style(line).red());
-                    } else if line.starts_with('+') {
-                        println!("  {}", style(line).green());
-                    } else {
-                        println!("  {}", style(line).dim());
+                    match line {
+                        DiffLine::OldFile(rest) => {
+                            println!("  {}", style(format!("--- {}", shorten_path(rest))).red());
+                        }
+                        DiffLine::NewFile(rest) => {
+                            println!("  {}", style(format!("+++ {}", shorten_path(rest))).green());
+                            println!("  {}", style(SEPARATOR).dim());
+                            printed_separator = true;
+                        }
+                        DiffLine::Hunk(line) => println!("  {}", style(line).cyan()),
+                        DiffLine::Removed(line) => println!("  {}", style(line).red()),
+                        DiffLine::Added(line) => println!("  {}", style(line).green()),
+                        DiffLine::Context(line) => println!("  {}", style(line).dim()),
                     }
-                } else if let Some(rest) = line.strip_prefix("--- ") {
-                    println!("  --- {}", shorten_path(rest));
-                } else if let Some(rest) = line.strip_prefix("+++ ") {
-                    println!("  +++ {}", shorten_path(rest));
-                    println!("  {SEPARATOR}");
-                    printed_separator = true;
                 } else {
-                    println!("  {line}");
+                    match line {
+                        DiffLine::OldFile(rest) => println!("  --- {}", shorten_path(rest)),
+                        DiffLine::NewFile(rest) => {
+                            println!("  +++ {}", shorten_path(rest));
+                            println!("  {SEPARATOR}");
+                            printed_separator = true;
+                        }
+                        DiffLine::Hunk(line)
+                        | DiffLine::Removed(line)
+                        | DiffLine::Added(line)
+                        | DiffLine::Context(line) => println!("  {line}"),
+                    }
                 }
             }
 
@@ -1295,6 +1299,47 @@ fn untrusted(text: impl Display, indent: usize) -> String {
     shown.replace('\n', &format!("\n{}", " ".repeat(indent)))
 }
 
+// Each line of a unified diff is classified by where it stands as well as by
+// how it starts.
+#[derive(Debug, PartialEq, Eq)]
+enum DiffLine<'a> {
+    // These two carry the file names, with their `--- ` and `+++ ` stripped.
+    OldFile(&'a str),
+    NewFile(&'a str),
+    Hunk(&'a str),
+    Removed(&'a str),
+    Added(&'a str),
+    Context(&'a str),
+}
+
+// The lines of `diff`, classified. Only lines before the first hunk can name a
+// file: after it, a removed line whose content starts `-- ` reads `--- `, and
+// an added one starting `++ ` reads `+++ `, and both are content.
+fn diff_lines(diff: &str) -> impl Iterator<Item = DiffLine<'_>> {
+    let mut in_hunks = false;
+    diff.lines().map(move |line| {
+        if line.starts_with("@@") {
+            in_hunks = true;
+            return DiffLine::Hunk(line);
+        }
+        if !in_hunks {
+            if let Some(rest) = line.strip_prefix("--- ") {
+                return DiffLine::OldFile(rest);
+            }
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                return DiffLine::NewFile(rest);
+            }
+        }
+        if line.starts_with('-') {
+            DiffLine::Removed(line)
+        } else if line.starts_with('+') {
+            DiffLine::Added(line)
+        } else {
+            DiffLine::Context(line)
+        }
+    })
+}
+
 // `line` cut to fit beside the spinner on the terminal, measured in columns.
 fn fit_to_terminal(line: &str) -> String {
     let (_, columns) = console::Term::stderr().size();
@@ -1583,6 +1628,27 @@ mod tests {
                 .iter()
                 .any(|(_, line)| line.starts_with(&format!("✓ {shown} ("))),
             "{ended:?}"
+        );
+    }
+
+    // A content line that starts like a file header is content once the first
+    // hunk has begun.
+    #[test]
+    fn a_diff_names_files_only_before_its_first_hunk() {
+        let diff = "--- a\n+++ b\n@@ -1 +1 @@\n--- gone\n+++ added\n x\n";
+
+        let lines: Vec<DiffLine<'_>> = diff_lines(diff).collect();
+
+        assert_eq!(
+            lines,
+            [
+                DiffLine::OldFile("a"),
+                DiffLine::NewFile("b"),
+                DiffLine::Hunk("@@ -1 +1 @@"),
+                DiffLine::Removed("--- gone"),
+                DiffLine::Added("+++ added"),
+                DiffLine::Context(" x"),
+            ]
         );
     }
 
