@@ -333,8 +333,12 @@ fn copy_fate(copy: &Path, removal: &CopyRemoval) -> String {
 // counting rather than by checking presence, so a variant that stops naming the
 // spec fails a test instead of going quiet.
 fn spec_save_failure(error: &PackageRepoError, copy: &Path, removal: &CopyRemoval) -> String {
+    // Several errors end their own sentence, so the frame does not add a second
+    // period. Only one is stripped: an error ending in an ellipsis keeps it.
+    let error = error.to_string();
     format!(
-        "Cannot save the spec: {error}. {}",
+        "Cannot save the spec: {}. {}",
+        error.strip_suffix('.').unwrap_or(&error),
         copy_fate(copy, removal)
     )
 }
@@ -1185,6 +1189,28 @@ mod tests {
         assert!(
             survived.contains("Remove it before retrying"),
             "the remedy is missing: {survived}"
+        );
+        // The error's own sentence ends in a period, and the frame adds none.
+        assert!(!removed.contains(".."), "a doubled period: {removed}");
+    }
+
+    // Only the one period the frame would double is dropped: an error ending in an
+    // ellipsis keeps it whole.
+    #[test]
+    fn a_failed_spec_save_keeps_an_ellipsis_the_error_ends_with() {
+        let error = PackageRepoError::FileSystemError(FileSystemError::IoError(
+            std::sync::Arc::new(std::io::Error::other("the disk filled up...")),
+        ));
+
+        let message = spec_save_failure(
+            &error,
+            Path::new("/dotfiles/gemrc/gemrc"),
+            &CopyRemoval::Removed,
+        );
+
+        assert!(
+            message.contains("the disk filled up... The copy"),
+            "the ellipsis was cut: {message}"
         );
     }
 
