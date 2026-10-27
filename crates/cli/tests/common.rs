@@ -180,6 +180,9 @@ pub fn sandboxed_std_command(temp_dir: &TempDir) -> std::process::Command {
     );
     cmd.env("SHELL", "/bin/sh");
     cmd.env_remove("EDITOR");
+    // The git selfie runs reads no configuration of the developer's either.
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
 
     cmd
 }
@@ -245,14 +248,16 @@ pub fn run_sandboxed(temp_dir: &TempDir, args: &[&str]) -> RunOutput {
     }
 }
 
-/// Run `git` with `args` in `dir`, as a fixed identity with commit signing off,
-/// so a commit does not depend on the developer's git configuration.
+/// Run `git` with `args` in `dir`, as a fixed identity with commit signing off
+/// and no global or system configuration read, so neither the result nor the
+/// run depends on the developer's git configuration: no signer, credential
+/// helper or hook path of theirs is reached.
 ///
 /// # Panics
 ///
 /// Panics if git cannot be run or exits non-zero.
 pub fn git(dir: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
+    let status = isolated_git()
         .arg("-C")
         .arg(dir)
         .args([
@@ -267,6 +272,15 @@ pub fn git(dir: &std::path::Path, args: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "git {args:?} failed in {dir:?}");
+}
+
+/// A `git` command that reads no global or system configuration.
+#[must_use]
+pub fn isolated_git() -> std::process::Command {
+    let mut git = std::process::Command::new("git");
+    git.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    git
 }
 
 /// Make `temp_dir`'s package directory a git repository holding what is there

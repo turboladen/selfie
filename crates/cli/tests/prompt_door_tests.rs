@@ -99,7 +99,7 @@ fn sync_push_without_a_terminal_is_a_usage_error_and_commits_nothing() {
     package_repo_with_remote(&temp);
     write_spec(&temp, "fd");
     let head = || {
-        std::process::Command::new("git")
+        common::isolated_git()
             .arg("-C")
             .arg(temp.path().join("packages"))
             .args(["rev-parse", "HEAD"])
