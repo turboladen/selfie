@@ -26,8 +26,84 @@ use super::sync_provider::{
 };
 
 /// Git adapter backed by the `gix` crate (local ops) and `git` CLI (network ops).
-#[derive(Debug, Clone)]
-pub struct GixGitAdapter;
+///
+/// [`GixGitAdapter::default`] reads git configuration as `git` itself does:
+/// the repository's, the user's global file and the system file.
+#[derive(Debug, Clone, Default)]
+pub struct GixGitAdapter {
+    scope: ConfigScope,
+}
+
+impl GixGitAdapter {
+    /// An adapter whose git reads only each repository's own configuration and
+    /// none of its caller's environment. No developer's hooks, includes,
+    /// excludes, attributes, identity, templates or signing key reach a test
+    /// repository, and nothing an outer git exports points it elsewhere.
+    ///
+    /// For tests only. A user's run must read their configuration, so code
+    /// outside tests uses [`GixGitAdapter::default`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn isolated() -> Self {
+        Self {
+            scope: ConfigScope::Isolated,
+        }
+    }
+}
+
+// A scope names which git configuration the adapter's git and gix read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ConfigScope {
+    // Git reads the repository's, the global and the system configuration.
+    #[default]
+    User,
+    // Git reads the repository's configuration and nothing else.
+    Isolated,
+}
+
+impl ConfigScope {
+    // Have `git` read the configuration this scope names.
+    fn apply(self, git: &mut Command) {
+        if self == Self::Isolated {
+            isolated_environment(git);
+        }
+    }
+}
+
+// The one recipe for an isolated git: start from an empty environment, so
+// nothing the caller exports reaches git (an outer git's `GIT_DIR` or `-c`
+// settings, `GIT_AUTHOR_*`, `GIT_TEMPLATE_DIR`, `EMAIL`), then add back only
+// what git needs. A `HOME` and `XDG_CONFIG_HOME` of /dev/null hold no config,
+// ignore or attributes file, and git 2.50 reads them as absent without a
+// warning. An empty `GIT_TEMPLATE_DIR` copies no templates, also silently;
+// /dev/null would warn. The identity is fixed, since no config supplies one.
+fn isolated_environment(git: &mut Command) {
+    git.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        git.env("PATH", path);
+    }
+    git.env("HOME", "/dev/null")
+        .env("XDG_CONFIG_HOME", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_TEMPLATE_DIR", "")
+        .env("GIT_AUTHOR_NAME", "selfie-test")
+        .env("GIT_AUTHOR_EMAIL", "selfie-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "selfie-test")
+        .env("GIT_COMMITTER_EMAIL", "selfie-test@example.invalid")
+        .env("GIT_TERMINAL_PROMPT", "0");
+}
+
+/// Give `git` the environment [`GixGitAdapter::isolated`] runs its git in:
+/// empty apart from `PATH`, a fixed identity and settings that turn off every
+/// global, system and template source.
+///
+/// For tests only, as [`GixGitAdapter::isolated`] is.
+#[doc(hidden)]
+pub fn isolate_git_config(git: &mut Command) {
+    ConfigScope::Isolated.apply(git);
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -35,8 +111,8 @@ pub struct GixGitAdapter;
 ///
 /// Distinguishes "not a git repository" from real I/O or corruption errors,
 /// matching the error discrimination in `GitStatusProvider::status_for_directory`.
-fn open_repo(path: &Path) -> Result<gix::Repository, GitSyncError> {
-    gix::discover(path).map_err(|e| match e {
+fn open_repo(scope: ConfigScope, path: &Path) -> Result<gix::Repository, GitSyncError> {
+    discover(scope, path).map_err(|e| match e {
         gix::discover::Error::Discover(_) => GitSyncError::NotARepo {
             path: path.to_path_buf(),
         },
@@ -45,6 +121,26 @@ fn open_repo(path: &Path) -> Result<gix::Repository, GitSyncError> {
             message: GitMessage::new(other),
         },
     })
+}
+
+// `gix::discover`, reading only the repository's own configuration when
+// `scope` is isolated.
+#[expect(
+    clippy::result_large_err,
+    reason = "gix's own discover error, returned as gix::discover returns it"
+)]
+fn discover(scope: ConfigScope, path: &Path) -> Result<gix::Repository, gix::discover::Error> {
+    match scope {
+        ConfigScope::User => gix::discover(path),
+        ConfigScope::Isolated => {
+            let isolated = gix::sec::trust::Mapping {
+                full: gix::open::Options::isolated(),
+                reduced: gix::open::Options::isolated(),
+            };
+            gix::ThreadSafeRepository::discover_opts(path, Default::default(), isolated)
+                .map(Into::into)
+        }
+    }
 }
 
 /// Check if a file has the executable bit set.
@@ -68,17 +164,13 @@ fn git_sync_err(operation: &str, e: impl std::fmt::Display) -> GitSyncError {
 /// Stdin is set to `Stdio::null` and `GIT_TERMINAL_PROMPT=0` to prevent git
 /// from blocking on credential prompts, which is critical for non-interactive
 /// callers like the MCP server.
-fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, GitSyncError> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo_root)
-        .stdin(Stdio::null())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
-        .map_err(|e| GitSyncError::OperationFailed {
+fn run_git(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Result<String, GitSyncError> {
+    let output = git_command(scope, repo_root, args).output().map_err(|e| {
+        GitSyncError::OperationFailed {
             operation: GitMessage::new(format!("git {}", args.join(" "))),
             message: GitMessage::new(e),
-        })?;
+        }
+    })?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -92,6 +184,19 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, GitSyncError> {
             message: GitMessage::from_stderr(output.stderr.trim_ascii()),
         })
     }
+}
+
+// The `git` command `run_git` runs, built in one place so the leak tests can
+// run exactly what it runs.
+fn git_command(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0");
+    scope.apply(&mut command);
+    command
 }
 
 /// Intermediate representation of gix status output, shared between
@@ -183,7 +288,7 @@ fn parse_diff_line(line: &str) -> Option<ChangedFile> {
 
 impl GitStatusProvider for GixGitAdapter {
     fn status_for_directory(&self, directory: &Path) -> Result<GitDirectoryStatus, GitStatusError> {
-        let repo = match gix::discover(directory) {
+        let repo = match discover(self.scope, directory) {
             Ok(repo) => repo,
             Err(gix::discover::Error::Discover(_)) => {
                 return Ok(GitDirectoryStatus {
@@ -236,7 +341,7 @@ impl GitStatusProvider for GixGitAdapter {
 
 impl GitSyncProvider for GixGitAdapter {
     fn discover_repo(&self, path: &Path) -> Result<RepoInfo, GitSyncError> {
-        let repo = open_repo(path)?;
+        let repo = open_repo(self.scope, path)?;
 
         let root = repo
             .workdir()
@@ -248,12 +353,12 @@ impl GitSyncProvider for GixGitAdapter {
         let root = dunce::canonicalize(&root).unwrap_or(root);
 
         // Get branch name via git CLI (more reliable across gix versions)
-        let branch = run_git(&root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        let branch = run_git(self.scope, &root, &["rev-parse", "--abbrev-ref", "HEAD"])
             .ok()
             .filter(|b| b != "HEAD"); // Detached HEAD → None
 
         // Get remote name via git CLI
-        let remote_name = run_git(&root, &["remote"])
+        let remote_name = run_git(self.scope, &root, &["remote"])
             .ok()
             .and_then(|output| output.lines().next().map(String::from));
 
@@ -265,7 +370,7 @@ impl GitSyncProvider for GixGitAdapter {
     }
 
     fn repo_status(&self, repo_root: &Path) -> Result<RepoStatus, GitSyncError> {
-        let repo = open_repo(repo_root)?;
+        let repo = open_repo(self.scope, repo_root)?;
 
         let raw = collect_raw_status(&repo).map_err(|msg| GitSyncError::OperationFailed {
             operation: GitMessage::new("status"),
@@ -278,7 +383,7 @@ impl GitSyncProvider for GixGitAdapter {
 
         // Detect deleted files via git CLI (gix status doesn't surface deletions cleanly)
         let mut deleted = Vec::new();
-        if let Ok(output) = run_git(repo_root, &["ls-files", "--deleted"]) {
+        if let Ok(output) = run_git(self.scope, repo_root, &["ls-files", "--deleted"]) {
             for line in output.lines().filter(|l| !l.is_empty()) {
                 deleted.push(PathBuf::from(line));
             }
@@ -302,7 +407,7 @@ impl GitSyncProvider for GixGitAdapter {
             return Ok(());
         }
 
-        let repo = open_repo(repo_root)?;
+        let repo = open_repo(self.scope, repo_root)?;
         let mut index = repo
             .open_index()
             .map_err(|e| git_sync_err("open index", e))?;
@@ -381,7 +486,7 @@ impl GitSyncProvider for GixGitAdapter {
         // Shells out because gix's transport layer (blocking-network-client)
         // doesn't automatically integrate with the user's SSH agent and
         // credential helpers the way the git CLI does.
-        run_git(repo_root, &["push"]).map_err(|e| {
+        run_git(self.scope, repo_root, &["push"]).map_err(|e| {
             // Detect common push failure: remote has new commits
             let msg = e.to_string();
             if msg.contains("rejected") || msg.contains("non-fast-forward") {
@@ -400,7 +505,7 @@ impl GitSyncProvider for GixGitAdapter {
 
     fn fetch(&self, repo_root: &Path) -> Result<(), GitSyncError> {
         // Shells out for the same reason as push — SSH/credential integration.
-        run_git(repo_root, &["fetch"])?;
+        run_git(self.scope, repo_root, &["fetch"])?;
         Ok(())
     }
 
@@ -409,16 +514,17 @@ impl GitSyncProvider for GixGitAdapter {
         // gix can update refs, but a full working-tree checkout (handling file
         // modes, symlinks, dirty-file guards) requires gix-worktree-state which
         // we don't pull in.
-        let old_head = run_git(repo_root, &["rev-parse", "HEAD"])?;
+        let old_head = run_git(self.scope, repo_root, &["rev-parse", "HEAD"])?;
 
-        match run_git(repo_root, &["merge", "--ff-only", "@{u}"]) {
+        match run_git(self.scope, repo_root, &["merge", "--ff-only", "@{u}"]) {
             Ok(output) => {
                 if output.contains("Already up to date") {
                     return Ok(FastForwardResult::AlreadyUpToDate);
                 }
 
-                let new_head = run_git(repo_root, &["rev-parse", "HEAD"])?;
+                let new_head = run_git(self.scope, repo_root, &["rev-parse", "HEAD"])?;
                 let commit_count = run_git(
+                    self.scope,
                     repo_root,
                     &["rev-list", "--count", &format!("{old_head}..{new_head}")],
                 )?
@@ -448,7 +554,11 @@ impl GitSyncProvider for GixGitAdapter {
         from: &CommitId,
         to: &CommitId,
     ) -> Result<Vec<ChangedFile>, GitSyncError> {
-        let output = run_git(repo_root, &["diff", "--name-status", &from.0, &to.0])?;
+        let output = run_git(
+            self.scope,
+            repo_root,
+            &["diff", "--name-status", &from.0, &to.0],
+        )?;
         Ok(output.lines().filter_map(parse_diff_line).collect())
     }
 }
@@ -458,6 +568,7 @@ impl GixGitAdapter {
     /// Returns (0, 0) if no upstream is configured.
     fn ahead_behind_counts(&self, repo_root: &Path) -> (usize, usize) {
         let output = run_git(
+            self.scope,
             repo_root,
             &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
         );
@@ -481,8 +592,12 @@ impl GixGitAdapter {
     not(test),
     expect(dead_code, reason = "commit is disabled until the tree bug is fixed")
 )]
-fn commit_tree(repo_root: &Path, message: &str) -> Result<CommitId, GitSyncError> {
-    let repo = open_repo(repo_root)?;
+fn commit_tree(
+    scope: ConfigScope,
+    repo_root: &Path,
+    message: &str,
+) -> Result<CommitId, GitSyncError> {
+    let repo = open_repo(scope, repo_root)?;
     let index = repo
         .open_index()
         .map_err(|e| git_sync_err("open index", e))?;
@@ -564,10 +679,33 @@ mod tests {
 
     use test_common::assert_secret_free;
 
+    // This returns this crate's own adapter, isolated.
+    // `test_common::isolated_git_adapter` builds the adapter of the `selfie`
+    // that test-common links, which is a different crate from the one these
+    // tests compile.
+    fn isolated() -> GixGitAdapter {
+        GixGitAdapter {
+            scope: ConfigScope::Isolated,
+        }
+    }
+
+    // Run `git` with `args` in `path` as this crate's isolated adapter runs it.
+    fn git(path: &Path, args: &[&str]) -> Result<String, GitSyncError> {
+        run_git(ConfigScope::Isolated, path, args)
+    }
+
     // Create a temporary git repo, returning the tempdir handle and its path.
+    // `gix::init` would read the developer's `init.defaultBranch`, so the repo
+    // is created with isolated options instead.
     fn init_repo() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::TempDir::new().unwrap();
-        gix::init(temp.path()).unwrap();
+        gix::ThreadSafeRepository::init_opts(
+            temp.path(),
+            gix::create::Kind::WithWorktree,
+            gix::create::Options::default(),
+            gix::open::Options::isolated(),
+        )
+        .unwrap();
         let path = temp.path().to_path_buf();
         (temp, path)
     }
@@ -575,11 +713,16 @@ mod tests {
     // Create a temporary git repo with an initial commit (so the index exists).
     fn init_repo_for_commits() -> (tempfile::TempDir, PathBuf) {
         let (temp, path) = init_repo();
-        run_git(&path, &["config", "user.email", "test@test.com"]).unwrap();
-        run_git(&path, &["config", "user.name", "Test"]).unwrap();
-        run_git(&path, &["config", "commit.gpgsign", "false"]).unwrap();
+        // gix, opened isolated, reads no identity from the environment, so the
+        // repository carries one for `commit_tree`.
+        git(
+            &path,
+            &["config", "user.email", "selfie-test@example.invalid"],
+        )
+        .unwrap();
+        git(&path, &["config", "user.name", "selfie-test"]).unwrap();
         // Create an initial commit so the index file exists on disk.
-        run_git(&path, &["commit", "--allow-empty", "-m", "initial"]).unwrap();
+        git(&path, &["commit", "--allow-empty", "-m", "initial"]).unwrap();
         (temp, path)
     }
 
@@ -634,7 +777,7 @@ mod tests {
     #[test]
     fn non_git_directory_returns_not_in_repo() {
         let temp = tempfile::TempDir::new().unwrap();
-        let result = GixGitAdapter.status_for_directory(temp.path()).unwrap();
+        let result = isolated().status_for_directory(temp.path()).unwrap();
         assert!(!result.in_repo);
         assert!(result.files.is_empty());
     }
@@ -642,7 +785,7 @@ mod tests {
     #[test]
     fn git_repo_detected_as_in_repo() {
         let (_temp, path) = init_repo();
-        let result = GixGitAdapter.status_for_directory(&path).unwrap();
+        let result = isolated().status_for_directory(&path).unwrap();
         assert!(result.in_repo);
     }
 
@@ -652,7 +795,7 @@ mod tests {
         let file_path = path.join("untracked.yml");
         fs::write(&file_path, "name: untracked\n").unwrap();
 
-        let result = GixGitAdapter.status_for_directory(&path).unwrap();
+        let result = isolated().status_for_directory(&path).unwrap();
 
         assert!(result.in_repo);
         assert_eq!(result.status_for_file(&file_path), GitFileStatus::Untracked);
@@ -663,13 +806,13 @@ mod tests {
     #[test]
     fn discover_repo_not_found() {
         let temp = tempfile::TempDir::new().unwrap();
-        assert!(GixGitAdapter.discover_repo(temp.path()).is_err());
+        assert!(isolated().discover_repo(temp.path()).is_err());
     }
 
     #[test]
     fn discover_repo_finds_root() {
         let (_temp, path) = init_repo();
-        let info = GixGitAdapter.discover_repo(&path).unwrap();
+        let info = isolated().discover_repo(&path).unwrap();
 
         let expected = dunce::canonicalize(&path).unwrap();
         assert_eq!(info.root, expected);
@@ -678,7 +821,7 @@ mod tests {
     #[test]
     fn repo_status_clean() {
         let (_temp, path) = init_repo();
-        let status = GixGitAdapter.repo_status(&path).unwrap();
+        let status = isolated().repo_status(&path).unwrap();
         assert!(status.is_clean());
     }
 
@@ -687,7 +830,7 @@ mod tests {
         let (_temp, path) = init_repo();
         fs::write(path.join("new.yml"), "name: new\n").unwrap();
 
-        let status = GixGitAdapter.repo_status(&path).unwrap();
+        let status = isolated().repo_status(&path).unwrap();
 
         assert!(status.is_dirty());
         assert_eq!(status.untracked.len(), 1);
@@ -698,11 +841,11 @@ mod tests {
         let (_temp, path) = init_repo_for_commits();
         fs::write(path.join("test.yml"), "name: test\n").unwrap();
 
-        GixGitAdapter
+        isolated()
             .stage_files(&path, &[PathBuf::from("test.yml")])
             .unwrap();
 
-        let status = GixGitAdapter.repo_status(&path).unwrap();
+        let status = isolated().repo_status(&path).unwrap();
         assert!(!status.staged.is_empty() || status.untracked.is_empty());
     }
 
@@ -711,11 +854,11 @@ mod tests {
         let (_temp, path) = init_repo_for_commits();
         fs::write(path.join("test.yml"), "name: test\n").unwrap();
 
-        GixGitAdapter
+        isolated()
             .stage_files(&path, &[PathBuf::from("test.yml")])
             .unwrap();
 
-        let result = commit_tree(&path, "test commit");
+        let result = commit_tree(ConfigScope::Isolated, &path, "test commit");
         assert!(result.is_ok(), "commit should succeed: {result:?}");
     }
 
@@ -727,21 +870,21 @@ mod tests {
         fs::create_dir_all(path.join("packages/foo")).unwrap();
         fs::write(path.join("packages/foo.yml"), "name: foo\n").unwrap();
         fs::write(path.join("packages/foo/rc"), "a\n").unwrap();
-        run_git(&path, &["add", "-A"]).unwrap();
-        run_git(&path, &["commit", "-m", "init"]).unwrap();
-        let before = run_git(&path, &["rev-parse", "HEAD"]).unwrap();
+        git(&path, &["add", "-A"]).unwrap();
+        git(&path, &["commit", "-m", "init"]).unwrap();
+        let before = git(&path, &["rev-parse", "HEAD"]).unwrap();
         fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
-        GixGitAdapter
+        isolated()
             .stage_files(&path, &[PathBuf::from("packages/foo/rc")])
             .unwrap();
 
-        let result = GixGitAdapter.commit(&path, "chore(foo): update dotfile");
+        let result = isolated().commit(&path, "chore(foo): update dotfile");
 
         assert!(
             matches!(result, Err(GitSyncError::CommitDisabled)),
             "commit must be refused: {result:?}"
         );
-        assert_eq!(run_git(&path, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!(git(&path, &["rev-parse", "HEAD"]).unwrap(), before);
     }
 
     #[test]
@@ -750,17 +893,17 @@ mod tests {
 
         // First commit
         fs::write(path.join("a.yml"), "name: a\n").unwrap();
-        run_git(&path, &["add", "a.yml"]).unwrap();
-        run_git(&path, &["commit", "-m", "first"]).unwrap();
-        let first = run_git(&path, &["rev-parse", "HEAD"]).unwrap();
+        git(&path, &["add", "a.yml"]).unwrap();
+        git(&path, &["commit", "-m", "first"]).unwrap();
+        let first = git(&path, &["rev-parse", "HEAD"]).unwrap();
 
         // Second commit
         fs::write(path.join("b.yml"), "name: b\n").unwrap();
-        run_git(&path, &["add", "b.yml"]).unwrap();
-        run_git(&path, &["commit", "-m", "second"]).unwrap();
-        let second = run_git(&path, &["rev-parse", "HEAD"]).unwrap();
+        git(&path, &["add", "b.yml"]).unwrap();
+        git(&path, &["commit", "-m", "second"]).unwrap();
+        let second = git(&path, &["rev-parse", "HEAD"]).unwrap();
 
-        let changes = GixGitAdapter
+        let changes = isolated()
             .diff_commits(&path, &CommitId(first), &CommitId(second))
             .unwrap();
 
@@ -821,30 +964,30 @@ mod tests {
         let (temp, path) = init_repo_for_commits();
         let url = format!("http://{FIXTURE_TOKEN}@127.0.0.1:{port}/o/r.git");
 
-        run_git(&path, &["remote", "add", "origin", &url]).unwrap();
+        git(&path, &["remote", "add", "origin", &url]).unwrap();
         // Repo-local, so an ambient credential helper cannot answer the prompt
         // and dissolve the premise…
-        run_git(&path, &["config", "credential.helper", ""]).unwrap();
+        git(&path, &["config", "credential.helper", ""]).unwrap();
         // …and so an ambient proxy cannot turn this loopback request into real
         // network egress, which in a security test is the worse failure.
-        run_git(&path, &["config", "http.proxy", ""]).unwrap();
+        git(&path, &["config", "http.proxy", ""]).unwrap();
         // A libcurl that strips credentials from CURLINFO_EFFECTIVE_URL makes
         // git treat every response as a redirect and rebuild its credential
         // from the stripped URL, losing the username. Configured here as well,
         // git applies it to the rebuilt credential and still names the token.
         // On an unpatched libcurl the URL's own userinfo is the token too, so
         // both routes give the same text.
-        run_git(&path, &["config", "credential.username", FIXTURE_TOKEN]).unwrap();
+        git(&path, &["config", "credential.username", FIXTURE_TOKEN]).unwrap();
 
         // `git push` refuses before contacting the remote without an upstream,
         // so set one without needing a fetch to succeed first.
-        let branch = run_git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
-        run_git(
+        let branch = git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
+        git(
             &path,
             &["config", &format!("branch.{branch}.remote"), "origin"],
         )
         .unwrap();
-        run_git(
+        git(
             &path,
             &[
                 "config",
@@ -865,13 +1008,9 @@ mod tests {
     // never names the URL. A leak test that passes because the secret was never
     // produced is worse than no test.
     //
-    // Mirrors `run_git` exactly: same args, cwd, null stdin, `GIT_TERMINAL_PROMPT`.
+    // It runs the command `run_git` runs, built by the same `git_command`.
     fn assert_git_really_leaks_the_token(repo_root: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(repo_root)
-            .stdin(Stdio::null())
-            .env("GIT_TERMINAL_PROMPT", "0")
+        let output = git_command(ConfigScope::Isolated, repo_root, args)
             .output()
             .expect("spawn git");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -898,7 +1037,7 @@ mod tests {
 
         assert_git_really_leaks_the_token(&path, &["fetch"]);
 
-        let error = GixGitAdapter
+        let error = isolated()
             .fetch(&path)
             .expect_err("a 401 with no password must fail");
 
@@ -920,7 +1059,7 @@ mod tests {
 
         assert_git_really_leaks_the_token(&path, &["push"]);
 
-        let error = GixGitAdapter
+        let error = isolated()
             .push(&path)
             .expect_err("a 401 with no password must fail");
 

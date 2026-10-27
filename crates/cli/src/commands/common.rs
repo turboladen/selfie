@@ -161,7 +161,7 @@ pub(crate) fn create_sync_service(
     config: &CliConfig,
     cancellation_token: CancellationToken,
 ) -> impl SyncService {
-    let git = GixGitAdapter;
+    let git = GixGitAdapter::default();
     let dotfile_service = create_dotfile_service(config, cancellation_token);
     // Its own policy rather than one read back out of `dotfile_service`: sync
     // commits and pushes as root even though it deploys nothing, and root-owned
@@ -414,7 +414,7 @@ pub(crate) fn create_package_service(
         repo,
         create_dotfiles_repository(config),
         command_runner,
-        GixGitStatusProvider,
+        GixGitStatusProvider::default(),
         config.selfie_config().clone(),
         cancellation_token,
     )

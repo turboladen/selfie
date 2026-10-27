@@ -16,6 +16,10 @@
 # serialize error can carry what a `Serialize` impl said about a value, so it
 # goes through `selfie::yaml::serialize`, whose failure never quotes one.
 disallowed-methods = [
+  # The isolated git adapter reads none of the user's git configuration, so a
+  # real run must never use it. Tests take it from test_common::isolated_git_adapter.
+  { path = "selfie::git::GixGitAdapter::isolated", reason = "tests only: a user's run reads their git configuration; use GixGitAdapter::default()" },
+  { path = "selfie::git::isolate_git_config", reason = "tests only: a user's git reads their git configuration" },
   { path = "serde_saphyr::from_str", reason = "use selfie::yaml::parse, which does not quote the file" },
   { path = "serde_saphyr::from_str_with_options", reason = "use selfie::yaml::parse, which does not quote the file" },
   { path = "serde_saphyr::from_slice", reason = "use selfie::yaml::parse, which does not quote the file" },

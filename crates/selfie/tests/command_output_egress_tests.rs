@@ -27,7 +27,6 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         event::{CheckVerdict, OperationResult, OperationSuccess, PackageEvent},
-        git_adapter::GixGitStatusProvider,
         repository::YamlPackageRepository,
         service::{PackageService, PackageServiceImpl},
     },
@@ -65,7 +64,7 @@ fn failing_check_service(temp: &TempDir) -> impl PackageService {
             SpecOrigin::DotfilesDirectory,
         ),
         runner,
-        GixGitStatusProvider,
+        test_common::isolated_git_adapter(),
         config,
         CancellationToken::new(),
     )

@@ -134,27 +134,28 @@ pub fn add_package(base_dir: &TempDir, package: &Package) {
 /// - `HOME` additionally decides where a `~` dotfile target is written and
 ///   where deploy state goes when no `state_directory` is configured, so it is
 ///   load-bearing even when the config file is found by the first route.
-/// - `EDITOR` is removed rather than set, so `spec edit` takes its "not set"
-///   branch instead of launching the developer's editor under captured stdio.
-///   The environment is inherited, so leaving it alone is not neutral.
+/// - `EDITOR` is not passed, so `spec edit` takes its "not set" branch instead
+///   of launching the developer's editor under captured stdio.
 ///
 /// It does **not** sandbox execution: `install`, `check`, `audit` and any
 /// `command:` dotfile source run for real on this machine, through a login
-/// shell that still sources `/etc/profile`. Nor does it sandbox the network or
-/// the developer's credentials — the rest of the environment is inherited, so
-/// `sync push` and `sync pull` reach the real remote with the real
-/// `SSH_AUTH_SOCK` and any `GIT_*` variables in scope; only `~/.gitconfig`
-/// moves with `HOME`. Fixtures must use inert commands such as `true` or
-/// `echo`. `SHELL` is pinned for determinism, not safety.
+/// shell that still sources `/etc/profile`, and a remote a fixture names is
+/// reached over the real network. The environment starts empty: only `PATH`,
+/// `TMPDIR`, the sandbox's `HOME`, `XDG_CONFIG_HOME` and `SELFIE_CONFIG_DIR`,
+/// `SHELL`, and settings that turn off git's global and system configuration
+/// are passed, so no `GIT_*` variable, credential socket or editor of the
+/// developer's reaches the run.
+/// Fixtures must use inert commands such as `true` or `echo`. `SHELL` is
+/// pinned for determinism, not safety.
 ///
 /// # Panics
 ///
 /// Panics if the `selfie-cli` binary cannot be found by `cargo_bin`.
 #[must_use]
 pub fn sandboxed_command(temp_dir: &TempDir) -> Command {
-    // Wraps the other builder rather than repeating it. Two copies of the same five
-    // variables can drift, and a fixture that then passes under one and fails under
-    // the other says nothing about the code.
+    // Wraps the other builder rather than repeating it. Two copies of one
+    // environment can drift, and a fixture that then passes under one and fails
+    // under the other says nothing about the code.
     Command::from_std(sandboxed_std_command(temp_dir))
 }
 
@@ -172,6 +173,14 @@ pub fn sandboxed_std_command(temp_dir: &TempDir) -> std::process::Command {
     let binary = Command::cargo_bin(SELFIE_BIN_NAME).unwrap();
     let mut cmd = std::process::Command::new(binary.get_program());
 
+    // Nothing of the caller's environment reaches the run but what is added
+    // back here: no outer git's `GIT_DIR` or `-c` settings, no `EDITOR`.
+    cmd.env_clear();
+    for kept in ["PATH", "TMPDIR"] {
+        if let Some(value) = std::env::var_os(kept) {
+            cmd.env(kept, value);
+        }
+    }
     cmd.env("HOME", temp_dir.path());
     cmd.env("XDG_CONFIG_HOME", temp_dir.path().join(".config"));
     cmd.env(
@@ -179,10 +188,10 @@ pub fn sandboxed_std_command(temp_dir: &TempDir) -> std::process::Command {
         temp_dir.path().join(".config").join("selfie"),
     );
     cmd.env("SHELL", "/bin/sh");
-    cmd.env_remove("EDITOR");
-    // The git selfie runs reads no configuration of the developer's either.
+    // The git selfie runs reads no global or system configuration.
     cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
     cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_ATTR_NOSYSTEM", "1");
 
     cmd
 }
@@ -274,14 +283,7 @@ pub fn git(dir: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
-/// A `git` command that reads no global or system configuration.
-#[must_use]
-pub fn isolated_git() -> std::process::Command {
-    let mut git = std::process::Command::new("git");
-    git.env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1");
-    git
-}
+pub use test_common::isolated_git;
 
 /// Make `temp_dir`'s package directory a git repository holding what is there
 /// now as one commit, with a bare clone beside it as its upstream `origin`. The

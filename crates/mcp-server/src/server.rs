@@ -242,6 +242,7 @@ impl SelfieServer {
         service: ConcreteService,
         config: SelfieConfig,
         ignored_config_keys: Vec<IgnoredKey>,
+        git: GixGitAdapter,
     ) -> Self {
         let repo = YamlPackageRepository::new(
             RealFileSystem,
@@ -274,7 +275,7 @@ impl SelfieServer {
             SudoPolicy::new(RealPrivilege),
         );
         let sync_service = SyncServiceImpl::new(
-            GixGitAdapter,
+            git,
             dotfile_service.clone(),
             config.clone(),
             SudoPolicy::new(RealPrivilege),
@@ -1469,11 +1470,16 @@ mod tests {
             repo,
             dotfiles_repository(&config),
             ShellCommandRunner::login_shell(config.command_timeout()),
-            GixGitStatusProvider,
+            test_common::isolated_git_adapter(),
             config.clone(),
             CancellationToken::new(),
         );
-        SelfieServer::new(service, config, Vec::new())
+        SelfieServer::new(
+            service,
+            config,
+            Vec::new(),
+            test_common::isolated_git_adapter(),
+        )
     }
 
     // `selfie_spec_create` for `name`, with an inert install command.
@@ -1996,7 +2002,7 @@ mod tests {
     async fn sync_status_neither_relays_nor_counts_the_unchecked_line() {
         let (temp, packages, dotfiles) = two_unreadable_specs();
         // Status reads the package directory's repository before it checks drift.
-        let init = std::process::Command::new("git")
+        let init = test_common::isolated_git()
             .args(["init", "--quiet"])
             .current_dir(&packages)
             .status()

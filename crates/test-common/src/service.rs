@@ -113,7 +113,7 @@ where
         repo,
         dotfiles_repo,
         runner,
-        GixGitStatusProvider,
+        crate::isolated_git_adapter(),
         config,
         CancellationToken::new(),
     )
@@ -181,7 +181,7 @@ pub fn create_cli_service(
         repo,
         dotfiles_repo,
         command_runner,
-        GixGitStatusProvider,
+        crate::isolated_git_adapter(),
         config.clone(),
         CancellationToken::new(),
     )

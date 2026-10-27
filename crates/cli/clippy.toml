@@ -16,6 +16,10 @@
 # Keep the two copies in step. A call planted in this crate must make
 # `cargo clippy -p selfie-cli --all-targets -- -D warnings` fail.
 disallowed-methods = [
+  # The isolated git adapter reads none of the user's git configuration, so a
+  # real run must never use it. Tests take it from test_common::isolated_git_adapter.
+  { path = "selfie::git::GixGitAdapter::isolated", reason = "tests only: a user's run reads their git configuration; use GixGitAdapter::default()" },
+  { path = "selfie::git::isolate_git_config", reason = "tests only: a user's git reads their git configuration" },
   { path = "selfie::commands::ShellCommandRunner::new", reason = "use commands::common::create_command_runner — the CLI runs a login shell so provider commands see the user's profile" },
   { path = "selfie::commands::ShellCommandRunner::default_shell", reason = "the CLI runs a login shell so provider commands see the user's profile; use commands::common::create_command_runner" },
 

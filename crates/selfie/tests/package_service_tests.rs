@@ -1127,7 +1127,6 @@ mod recommends_after_the_root_stops_loading {
         fs::{FileSystemError, RealFileSystem},
         package::{
             GetPackage, Package, SpecOrigin,
-            git_adapter::GixGitStatusProvider,
             port::{
                 ListPackagesOutput, PackageListError, PackageParseError, PackageRepoError,
                 PackageRepository,
@@ -1272,7 +1271,7 @@ mod recommends_after_the_root_stops_loading {
             repo,
             dotfiles_repo,
             runner,
-            GixGitStatusProvider,
+            test_common::isolated_git_adapter(),
             config,
             CancellationToken::new(),
         );
@@ -1305,10 +1304,7 @@ mod recommends_after_the_root_stops_loading {
 async fn a_cancel_during_the_recommends_ends_the_stream_canceled() {
     use selfie::{
         fs::RealFileSystem,
-        package::{
-            SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
-            service::PackageServiceImpl,
-        },
+        package::{SpecOrigin, repository::YamlPackageRepository, service::PackageServiceImpl},
     };
     use test_common::{FakeCommandRunner, config::service_test_config_with_dir};
     use tokio_util::sync::CancellationToken;
@@ -1348,7 +1344,7 @@ async fn a_cancel_during_the_recommends_ends_the_stream_canceled() {
             SpecOrigin::DotfilesDirectory,
         ),
         runner.clone(),
-        GixGitStatusProvider,
+        test_common::isolated_git_adapter(),
         config,
         token,
     );
@@ -2064,10 +2060,7 @@ async fn a_cancel_during_the_recommends_names_the_ones_left_untried() {
     use selfie::{
         config::SelfieConfigBuilder,
         fs::RealFileSystem,
-        package::{
-            SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
-            service::PackageServiceImpl,
-        },
+        package::{SpecOrigin, repository::YamlPackageRepository, service::PackageServiceImpl},
     };
     use test_common::FakeCommandRunner;
     use tokio_util::sync::CancellationToken;
@@ -2112,7 +2105,7 @@ async fn a_cancel_during_the_recommends_names_the_ones_left_untried() {
             SpecOrigin::DotfilesDirectory,
         ),
         runner.clone(),
-        GixGitStatusProvider,
+        test_common::isolated_git_adapter(),
         config,
         token,
     );
@@ -2174,10 +2167,7 @@ async fn a_cancel_during_the_recommends_names_the_ones_left_untried() {
 async fn a_recommend_the_cancel_stops_part_way_is_named_untried() {
     use selfie::{
         fs::RealFileSystem,
-        package::{
-            SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
-            service::PackageServiceImpl,
-        },
+        package::{SpecOrigin, repository::YamlPackageRepository, service::PackageServiceImpl},
     };
     use test_common::{FakeCommandRunner, config::service_test_config_with_dir};
     use tokio_util::sync::CancellationToken;
@@ -2221,7 +2211,7 @@ async fn a_recommend_the_cancel_stops_part_way_is_named_untried() {
             SpecOrigin::DotfilesDirectory,
         ),
         runner.clone(),
-        GixGitStatusProvider,
+        test_common::isolated_git_adapter(),
         config,
         token,
     );
@@ -2259,10 +2249,7 @@ async fn a_recommend_whose_command_failed_under_a_cancel_is_reported_failed() {
     use selfie::{
         commands::CommandError,
         fs::RealFileSystem,
-        package::{
-            SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
-            service::PackageServiceImpl,
-        },
+        package::{SpecOrigin, repository::YamlPackageRepository, service::PackageServiceImpl},
     };
     use test_common::{FakeCommandRunner, config::service_test_config_with_dir};
     use tokio_util::sync::CancellationToken;
@@ -2315,7 +2302,7 @@ async fn a_recommend_whose_command_failed_under_a_cancel_is_reported_failed() {
                 SpecOrigin::DotfilesDirectory,
             ),
             runner,
-            GixGitStatusProvider,
+            test_common::isolated_git_adapter(),
             config,
             token,
         );
