@@ -776,10 +776,10 @@ file changes, selfie detects this as a conflict and shows the difference, with t
 side and the repository file on the `+` side:
 
 ```
-⚠   Conflict: ~/.config/starship.toml
-  ~/.selfie/packages/starship/starship.toml → ~/.config/starship.toml
+ℹ Packages: ~/.selfie/packages
+conflict    starship/starship.toml → ~/.config/starship.toml
   --- ~/.config/starship.toml
-  +++ ~/.selfie/packages/starship/starship.toml
+  +++ starship/starship.toml
   ──────────────────────────────────────────────────────────────────────
   @@ -1 +1 @@
   -format = "$all"
@@ -897,8 +897,8 @@ lands. Before selfie overwrites a target whose content differs from what it is a
 copies that content to `<state_directory>/backups/`, and the apply names the copy:
 
 ```
-✓   starship/starship.toml → ~/.config/starship.toml
-ℹ     previous content copied to ~/.local/state/selfie/backups/starship.toml-3f9a1c…/20260920T143005.117Z-8b2e41
+deployed    starship/starship.toml → ~/.config/starship.toml
+            previous content copied to ~/.local/state/selfie/backups/starship.toml-3f9a1c…/20260920T143005.117Z-8b2e41
 ```
 
 The directory is named after the target's file name and a checksum of its full path, so two targets

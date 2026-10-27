@@ -7,7 +7,7 @@
 use crate::terminal_text::{Shown, shown};
 use std::sync::{Arc, Mutex};
 
-use selfie::package::event::DotfileSource;
+use selfie::package::event::{DotfileSource, PlannedEntry};
 
 use selfie::dotfile_service::diff::unified_diff;
 use selfie::dotfile_service::port::{
@@ -20,7 +20,8 @@ use crate::{
     cli::ApplyArgs,
     commands::common::create_dotfile_service,
     config::CliConfig,
-    display_manager::{Channel, DisplayManager, DisplayPath, PromptFailure, shorten_path},
+    display_manager::{Channel, DisplayManager, PromptFailure, shorten_path},
+    entry_rows::{EntryOutcome, EntryRow},
     event_processor::{EventProcessor, Exit},
     source_paths::{force_heading, relative_text},
 };
@@ -233,33 +234,43 @@ impl InteractiveConflictResolver {
 }
 
 impl InteractiveConflictResolver {
-    /// Print where the conflicting content comes from, with its base directory
+    /// Print the conflict's row in the entry table, with its base directory
     /// named inside the block.
     // Inside the block, not through the event processor's headings: this runs on
     // the service's thread while the processor may still be printing lines queued
     // before it, each under its own heading.
-    fn print_source(&self, source: &DotfileSource, short_target: &DisplayPath) {
+    fn print_conflict_row(&self, source: &DotfileSource, target: &str) {
         let _block = self.display.hold_block();
+        // A blank line first, so the block's diff and prompt do not read as part
+        // of the row above.
+        self.display.println("");
         if let Some(base) = source.base() {
             force_heading(&self.display, Channel::Stdout, base.kind, &base.directory);
         }
-        self.display
-            .println(shown!("  {} → {}", relative_text(source), short_target));
+        self.display.print_entry_row(&EntryRow {
+            outcome: EntryOutcome::Conflict,
+            source: relative_text(source),
+            target: shorten_path(target),
+            detail: None,
+        });
+        // The prompt asks on stderr. With stdout redirected, the row and the
+        // diff land in the file, so the prompt's own stream names the target.
+        if self.display.can_prompt() && !self.display.is_tty() {
+            self.display
+                .print_warning(format!("Conflict: {}", shorten_path(target)));
+        }
     }
 }
 
 impl ConflictResolver for InteractiveConflictResolver {
+    fn planned(&self, entries: &[PlannedEntry]) {
+        self.display.plan_entry_columns(entries);
+    }
+
     fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution {
-        let short_target = shorten_path(target);
-
-        // Blank line for breathing room before the conflict block
-        self.display.println("");
-        self.display
-            .print_warning(format!("  Conflict: {short_target}"));
-
         match detail {
             ConflictDetail::Diff { source, diff } => {
-                self.print_source(source, &short_target);
+                self.print_conflict_row(source, target);
                 self.display.print_diff(diff);
 
                 match self.prompt(Prompt::RepositoryFile) {
@@ -274,7 +285,7 @@ impl ConflictResolver for InteractiveConflictResolver {
                 incoming,
                 current,
             } => {
-                self.print_source(source, &short_target);
+                self.print_conflict_row(source, target);
                 self.display.println(Shown::block(summary));
 
                 // Reveal is offered only when stdout is a terminal as well as
@@ -318,6 +329,13 @@ fn summary_to_render(
         }
         _ => None,
     }
+}
+
+/// Whether apply hides a deploy's row. A deploy's row is hidden unless the
+/// deploy kept a copy of what it overwrote or settled a conflict the user
+/// accepted.
+fn deployed_row_hidden(backup: Option<&str>, accepted_conflict: bool) -> bool {
+    backup.is_none() && !accepted_conflict
 }
 
 /// Handle the apply command
@@ -366,10 +384,14 @@ pub(crate) async fn handle_apply(
             // A deploy that displaced content is let through, because it is not
             // progress: it carries the only path that leads back to what was
             // overwritten, and the summary counts deployments without naming any.
+            // So is one the user accepted at a prompt: its last row would
+            // otherwise say `conflict` for an entry the run deployed.
             selfie::package::event::PackageEvent::DotfileDeploying { .. } => true,
-            selfie::package::event::PackageEvent::DotfileDeployed { backup, .. } => {
-                backup.is_none()
-            }
+            selfie::package::event::PackageEvent::DotfileDeployed {
+                backup,
+                accepted_conflict,
+                ..
+            } => deployed_row_hidden(backup.as_deref(), *accepted_conflict),
 
             selfie::package::event::PackageEvent::Completed { result, .. } => {
                 match summary_to_render(result) {
@@ -446,7 +468,7 @@ mod tests {
             path: "bat/config".into(),
         });
 
-        resolver.print_source(&source, &DisplayPath::new("~/.config/bat/config"));
+        resolver.print_conflict_row(&source, "~/.config/bat/config");
 
         let lines: Vec<String> = display
             .printed()
@@ -456,8 +478,9 @@ mod tests {
         assert_eq!(
             lines,
             vec![
+                String::new(),
                 "Packages: /r/packages".to_string(),
-                "  bat/config → ~/.config/bat/config".to_string()
+                "conflict    bat/config → ~/.config/bat/config".to_string()
             ]
         );
     }
@@ -482,15 +505,13 @@ mod tests {
         });
 
         let held = display.hold_block();
-        let printer = std::thread::spawn(move || {
-            resolver.print_source(&source, &DisplayPath::new("~/.zshrc"))
-        });
+        let printer = std::thread::spawn(move || resolver.print_conflict_row(&source, "~/.zshrc"));
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(display.printed().is_empty(), "{:?}", display.printed());
         drop(held);
         printer.join().unwrap();
 
-        assert_eq!(display.printed().len(), 2, "{:?}", display.printed());
+        assert_eq!(display.printed().len(), 3, "{:?}", display.printed());
     }
 
     fn source() -> DotfileSource {
@@ -518,6 +539,79 @@ mod tests {
                 current: b"old",
             },
         )
+    }
+
+    // The resolver lays out its conflict row from the plan the library hands
+    // it, before any event reaches the processor, so a conflict on the first
+    // entry lines up with the rows after it.
+    #[test]
+    fn planned_sets_the_columns_before_any_event() {
+        use selfie::package::event::PlannedEntry;
+
+        let display = DisplayManager::new(false);
+        let resolver = resolver(&display);
+        resolver.planned(&[
+            PlannedEntry {
+                source: source(),
+                target: "/h/.creds".to_string(),
+            },
+            PlannedEntry {
+                source: DotfileSource::Command("echo a-longer-command".to_string()),
+                target: "/h/.a-much-longer-target".to_string(),
+            },
+        ]);
+
+        resolver.print_conflict_row(&source(), "/h/.creds");
+
+        let lines: Vec<String> = display.printed().into_iter().map(|(_, l)| l).collect();
+        // Padded to the planned command's width, 30 columns.
+        assert_eq!(
+            lines,
+            vec![
+                String::new(),
+                format!("conflict    {:<30} → /h/.creds", "creds.tpl")
+            ]
+        );
+    }
+
+    // A deploy that settled an accepted conflict shows its row even with no
+    // copy kept, as a secret-bearing entry never keeps one; any other deploy
+    // shows only when it kept a copy.
+    #[test]
+    fn an_accepted_conflict_lets_its_deployed_row_through() {
+        assert!(!deployed_row_hidden(None, true));
+        assert!(deployed_row_hidden(None, false));
+        assert!(!deployed_row_hidden(Some("/backups/x"), false));
+    }
+
+    // The prompt asks on stderr, so when stdout is not a terminal the target
+    // is named there too; on a terminal the row already shows it.
+    #[test]
+    fn a_prompt_with_stdout_redirected_names_its_target_on_stderr() {
+        use crate::display_manager::answer;
+
+        let redirected = DisplayManager::new(false).answering(vec![answer(0_usize)]);
+        resolver(&redirected).print_conflict_row(&source(), "/h/.creds");
+        let on_stderr: Vec<String> = redirected
+            .printed()
+            .into_iter()
+            .filter(|(channel, _)| *channel == Channel::Stderr)
+            .map(|(_, line)| line)
+            .collect();
+        assert_eq!(on_stderr, vec!["Conflict: /h/.creds".to_string()]);
+
+        let terminal = DisplayManager::new(false)
+            .drawing_as_a_terminal()
+            .answering(vec![answer(0_usize)]);
+        resolver(&terminal).print_conflict_row(&source(), "/h/.creds");
+        assert!(
+            terminal
+                .printed()
+                .iter()
+                .all(|(channel, _)| *channel == Channel::Stdout),
+            "{:?}",
+            terminal.printed()
+        );
     }
 
     // Ctrl+C at the conflict prompt cancels the run and leaves the target.

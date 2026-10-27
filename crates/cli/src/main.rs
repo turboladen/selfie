@@ -8,6 +8,7 @@ mod commands;
 mod completers;
 mod config;
 mod display_manager;
+mod entry_rows;
 mod event_processor;
 mod formatters;
 mod git_style;

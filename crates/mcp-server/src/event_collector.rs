@@ -1252,6 +1252,7 @@ mod tests {
             source: package_file("myapp/config.toml"),
             target: "/home/u/.config/app.toml".to_string(),
             backup: backup.map(str::to_string),
+            accepted_conflict: false,
         };
 
         let result = collect_events(Box::pin(stream::iter(vec![
@@ -1272,6 +1273,44 @@ mod tests {
             rows[1]["backup"].is_null(),
             "a deploy that kept nothing says so rather than omitting the key: {:?}",
             rows[1]
+        );
+    }
+
+    // A deployment row has exactly these keys. Whether the write settled an
+    // accepted conflict lays out a terminal's table and is not one of them.
+    #[tokio::test]
+    async fn a_deployment_row_keeps_its_published_keys() {
+        let result = collect_events(Box::pin(stream::iter(vec![
+            PackageEvent::DotfileDeployed {
+                operation_info: test_op_info(),
+                source: package_file("myapp/config.toml"),
+                target: "/home/u/.config/app.toml".to_string(),
+                backup: None,
+                accepted_conflict: true,
+            },
+        ])))
+        .await;
+
+        let row = &result.data["data"][0];
+        let keys: std::collections::BTreeSet<&str> = row
+            .as_object()
+            .expect("a row is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "backup",
+                "base",
+                "kind",
+                "relative_path",
+                "source",
+                "target",
+                "type",
+                "vars",
+            ]),
+            "row: {row}"
         );
     }
 

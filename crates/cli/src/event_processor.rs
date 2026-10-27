@@ -5,18 +5,19 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, Shown};
 use futures::StreamExt;
 use selfie::package::{
     event::{
-        ConsoleOutput, EventStream, OperationInfo, OperationResult, OperationType, Outcome,
-        PackageEvent, RefusedPackage, Settled, StepKind,
+        ConsoleOutput, DotfileSource, EventStream, OperationInfo, OperationResult, OperationType,
+        Outcome, PackageEvent, RefusedPackage, Settled, StepKind,
     },
     port::{PackageError, PackageParseKind},
 };
 
 use crate::display_manager::Channel;
 use crate::display_manager::{DisplayManager, ErrorDetail};
+use crate::entry_rows::{EntryOutcome, EntryRow, under_row};
 use crate::source_paths;
 
 /// How a command's run ended, as the process reports it.
@@ -202,6 +203,7 @@ impl EventProcessor {
                 | PackageEvent::DotfileSkipped { .. }
                 | PackageEvent::DotfileConflict { .. }
                 | PackageEvent::DotfileOrphaned { .. }
+                | PackageEvent::DotfileDriftDetected { .. }
         )
         .then(|| self.display.hold_block());
         match event {
@@ -513,22 +515,27 @@ impl EventProcessor {
                     .print_info(format!("  Deploying {short_source} → {short_target}"));
             }
 
+            // Each entry's row prints as its event arrives, in columns fixed by
+            // the announcement before the first.
+            PackageEvent::DotfileEntriesPlanned { entries, .. } => {
+                self.display.plan_entry_columns(&entries);
+            }
+
             PackageEvent::DotfileDeployed {
                 source,
                 target,
                 backup,
                 ..
             } => {
-                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
-                let short_target = crate::display_manager::shorten_path(&target);
-                self.display
-                    .print_success(format!("  {short_source} → {short_target}"));
+                self.print_entry_row(EntryOutcome::Deployed, &source, &target, None);
                 // Only when something was kept. Saying so on every deploy would
                 // train the reader to skip the line that matters.
                 if let Some(backup) = backup {
-                    let short_backup = crate::display_manager::shorten_path(&backup);
-                    self.display
-                        .print_info(format!("    previous content copied to {short_backup}"));
+                    self.display.println(crate::terminal_text::shown!(
+                        "{}previous content copied to {}",
+                        under_row(),
+                        crate::display_manager::shorten_path(&backup)
+                    ));
                 }
             }
 
@@ -538,11 +545,12 @@ impl EventProcessor {
                 reason,
                 ..
             } => {
-                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
-                let short_target = crate::display_manager::shorten_path(&target);
-                self.display.print_info(format!(
-                    "  ⊘ {short_source} → {short_target} skipped: {reason}"
-                ));
+                self.print_entry_row(
+                    EntryOutcome::from(&reason),
+                    &source,
+                    &target,
+                    Some(Shown::prose(&reason.to_string())),
+                );
             }
 
             PackageEvent::DotfileConflict {
@@ -551,27 +559,25 @@ impl EventProcessor {
                 detail,
                 ..
             } => {
-                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
-                let short_target = crate::display_manager::shorten_path(&target);
+                // A blank line first, so the diff under the row does not read as
+                // part of the row above.
                 self.display.println("");
-                self.display
-                    .print_warning(format!("  Conflict: {short_target}"));
-                self.display.println(crate::terminal_text::shown!(
-                    "  {} → {}",
-                    short_source,
-                    short_target
-                ));
+                self.print_entry_row(EntryOutcome::Conflict, &source, &target, None);
                 self.display.print_diff(&detail.to_string());
             }
 
+            // Drift is what `dotfiles drift` was asked to find: its answer.
             PackageEvent::DotfileDriftDetected {
-                target, drift_type, ..
+                source,
+                target,
+                drift_type,
+                ..
             } => {
-                // Drift is what `dotfiles drift` was asked to find: its answer.
-                let short_target = crate::display_manager::shorten_path(&target);
-                self.display.print_result(
-                    Outcome::Found,
-                    format!("  Drift in {short_target}: {drift_type}"),
+                self.print_entry_row(
+                    EntryOutcome::Drifted,
+                    &source,
+                    &target,
+                    Some(Shown::name(&drift_type.to_string())),
                 );
             }
 
@@ -647,12 +653,29 @@ impl EventProcessor {
             | PackageEvent::DotfileListLoaded { .. }
             | PackageEvent::SyncRepoStatus { .. }
             | PackageEvent::SyncDriftSummary { .. }
-            | PackageEvent::SyncCommitCreated { .. }
-            | PackageEvent::DotfileEntriesPlanned { .. } => {
+            | PackageEvent::SyncCommitCreated { .. } => {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }
         }
+    }
+
+    /// Print the row of an entry `outcome` describes, its source's heading
+    /// first when the base directory changed.
+    fn print_entry_row(
+        &self,
+        outcome: EntryOutcome,
+        source: &DotfileSource,
+        target: &str,
+        detail: Option<Shown>,
+    ) {
+        let source = source_paths::label(&self.display, Channel::Stdout, source);
+        self.display.print_entry_row(&EntryRow {
+            outcome,
+            source,
+            target: crate::display_manager::shorten_path(target),
+            detail,
+        });
     }
 }
 
@@ -1820,5 +1843,185 @@ mod tests {
         assert_eq!("package_install".to_title_case(), "Package install");
         assert_eq!("package_validate".to_title_case(), "Package validate");
         assert_eq!("PACKAGE_LIST".to_title_case(), "Package list");
+    }
+
+    fn file_under(
+        kind: selfie::package::event::BaseKind,
+        directory: &str,
+        path: &str,
+    ) -> selfie::package::event::DotfileSource {
+        use selfie::package::event::{DotfileSource, RepoPath, SourceBase};
+
+        DotfileSource::File(RepoPath {
+            base: Some(SourceBase {
+                kind,
+                directory: directory.into(),
+            }),
+            path: path.into(),
+        })
+    }
+
+    fn package_file(path: &str) -> selfie::package::event::DotfileSource {
+        file_under(
+            selfie::package::event::BaseKind::PackageDirectory,
+            "/r/p",
+            path,
+        )
+    }
+
+    fn dotfiles_file(path: &str) -> selfie::package::event::DotfileSource {
+        file_under(
+            selfie::package::event::BaseKind::DotfilesDirectory,
+            "/r/d",
+            path,
+        )
+    }
+
+    fn skipped(source: selfie::package::event::DotfileSource, target: &str) -> PackageEvent {
+        PackageEvent::DotfileSkipped {
+            operation_info: make_operation_info("p"),
+            source,
+            target: target.to_string(),
+            reason: selfie::package::event::SkipReason::UpToDate,
+        }
+    }
+
+    fn announced(entries: &[(selfie::package::event::DotfileSource, &str)]) -> PackageEvent {
+        PackageEvent::DotfileEntriesPlanned {
+            operation_info: make_operation_info("p"),
+            entries: entries
+                .iter()
+                .map(|(source, target)| selfie::package::event::PlannedEntry {
+                    source: source.clone(),
+                    target: target.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn lines(display: &DisplayManager) -> Vec<String> {
+        display.printed().into_iter().map(|(_, l)| l).collect()
+    }
+
+    // The announced entries fix one set of columns for the whole run, so rows
+    // under different headings line up with each other.
+    #[test]
+    fn rows_under_every_heading_share_the_announced_columns() {
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display.clone());
+        let entries = [
+            (package_file("a"), "/h/.a"),
+            (package_file("bat/config"), "/h/.config/bat/config"),
+            (dotfiles_file("zshrc"), "/h/.zshrc"),
+        ];
+
+        processor.handle_event(announced(&entries));
+        for (source, target) in &entries {
+            processor.handle_event(skipped(source.clone(), target));
+        }
+
+        assert_eq!(
+            lines(&display),
+            vec![
+                "Packages: /r/p",
+                "skipped     a          → /h/.a                  already up to date",
+                "skipped     bat/config → /h/.config/bat/config  already up to date",
+                "Dotfiles: /r/d",
+                "skipped     zshrc      → /h/.zshrc              already up to date",
+            ]
+        );
+    }
+
+    // A conflict's block, its row and the diff under it, starts with a blank
+    // line, so the diff does not read as part of the row above.
+    #[test]
+    fn a_conflict_block_is_set_off_from_the_row_above() {
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display.clone());
+        processor.handle_event(skipped(package_file("a"), "/h/.a"));
+
+        processor.handle_event(PackageEvent::DotfileConflict {
+            operation_info: make_operation_info("p"),
+            source: package_file("b"),
+            target: "/h/.b".to_string(),
+            detail: selfie::package::event::ConflictReport::Diff(String::new()),
+            declined: false,
+        });
+
+        let lines = lines(&display);
+        assert_eq!(lines[1], "skipped     a → /h/.a  already up to date");
+        assert_eq!(lines[2], "", "{lines:?}");
+        assert_eq!(lines[3], "conflict    b → /h/.b", "{lines:?}");
+    }
+
+    // With no announcement, columns have no width and a row reads single-spaced.
+    #[test]
+    fn a_row_with_no_announcement_reads_single_spaced() {
+        let display = DisplayManager::new(false);
+        let processor = EventProcessor::new(display.clone());
+
+        processor.handle_event(skipped(package_file("bat/config"), "/h/.b"));
+
+        assert_eq!(
+            lines(&display),
+            vec![
+                "Packages: /r/p",
+                "skipped     bat/config → /h/.b  already up to date"
+            ]
+        );
+    }
+
+    // `process_events`, the path a command takes, prints each row while the
+    // stream is still open and before the next event exists, so nothing is
+    // held until the run ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rows_stream_through_process_events() {
+        use selfie::package::event::{OperationResult, OperationSuccess};
+        use std::time::{Duration, Instant};
+
+        let display = DisplayManager::new(false);
+        let (send, receive) = futures::channel::mpsc::unbounded::<PackageEvent>();
+        let processing = tokio::spawn(
+            EventProcessor::new(display.clone()).process_events(Box::pin(receive), |_| false),
+        );
+        let printed = |row: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if lines(&display).iter().any(|line| line.contains(row)) {
+                    return true;
+                }
+                if Instant::now() > deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        send.unbounded_send(announced(&[
+            (package_file("a"), "/h/.a"),
+            (package_file("b"), "/h/.b"),
+        ]))
+        .unwrap();
+        send.unbounded_send(skipped(package_file("a"), "/h/.a"))
+            .unwrap();
+        assert!(
+            printed("a → /h/.a"),
+            "the first row was held: {:?}",
+            lines(&display)
+        );
+        send.unbounded_send(skipped(package_file("b"), "/h/.b"))
+            .unwrap();
+        assert!(
+            printed("b → /h/.b"),
+            "the second row was held: {:?}",
+            lines(&display)
+        );
+        send.unbounded_send(PackageEvent::Completed {
+            operation_info: make_operation_info("p"),
+            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+        })
+        .unwrap();
+        drop(send);
+        processing.await.unwrap();
     }
 }

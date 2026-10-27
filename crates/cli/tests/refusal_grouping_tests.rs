@@ -70,7 +70,11 @@ fn drift_groups_its_refusals_and_keeps_its_finding() {
 
     assert_eq!(out.code, Some(FAILED), "{}", out.stderr);
     assert_grouped(&out);
-    assert!(out.stdout.contains("Drift in"), "{}", out.stdout);
+    assert!(
+        out.stdout.lines().any(|line| line.starts_with("drifted ")),
+        "{}",
+        out.stdout
+    );
 }
 
 #[test]

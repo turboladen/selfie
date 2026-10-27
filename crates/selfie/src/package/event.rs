@@ -827,12 +827,14 @@ impl EventSender {
     /// Send a dotfile-deployed event
     ///
     /// `backup` is where the target's former content was copied, or `None` when
-    /// nothing was kept.
+    /// nothing was kept. `accepted_conflict` says the write settled a conflict
+    /// the resolver accepted.
     pub(crate) async fn send_dotfile_deployed(
         &self,
         source: &DotfileSource,
         target: impl fmt::Display,
         backup: Option<&std::path::Path>,
+        accepted_conflict: bool,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::DotfileDeployed {
@@ -840,6 +842,7 @@ impl EventSender {
             source: source.clone(),
             target: target.to_string(),
             backup: backup.map(|path| path.display().to_string()),
+            accepted_conflict,
         })
         .await;
     }
@@ -3379,6 +3382,8 @@ pub enum PackageEvent {
         /// copied. A target two entries deploy to in one run is copied once, and
         /// both events name that one copy.
         backup: Option<String>,
+        /// Whether this write settled a conflict the run's resolver accepted.
+        accepted_conflict: bool,
     },
 
     /// A config file was left as it is, with nothing wrong: already current, a

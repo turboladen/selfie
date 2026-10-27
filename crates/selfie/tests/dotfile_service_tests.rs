@@ -21686,3 +21686,158 @@ mod entries_planned {
         );
     }
 }
+
+// A deploy says whether it settled a conflict its resolver accepted: a consumer
+// that hides routine deploys shows that one, which the prompt was about.
+mod accepted_conflicts {
+    use super::*;
+    use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+    use std::sync::Arc;
+
+    struct Accept;
+
+    impl ConflictResolver for Accept {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            ConflictResolution::Accept
+        }
+    }
+
+    fn accepting() -> ApplyOptions {
+        ApplyOptions {
+            conflict_resolver: Some(Arc::new(Accept)),
+            ..ApplyOptions::default()
+        }
+    }
+
+    fn accepted_flags(events: &[PackageEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileDeployed {
+                    accepted_conflict, ..
+                } => Some(*accepted_conflict),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Two repository files: one over content selfie did not write, which is a
+    // conflict, and one to an empty target, which is not.
+    #[tokio::test]
+    async fn a_repository_file_deploy_says_it_settled_an_accepted_conflict() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/a.conf"), "ours").unwrap();
+        std::fs::write(dirs.package_dir.join("app/b.conf"), "ours").unwrap();
+        let conflicted = dirs.target_dir.join("a.conf");
+        std::fs::write(&conflicted, "theirs").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[
+                ("app/a.conf", conflicted.to_str().unwrap()),
+                (
+                    "app/b.conf",
+                    dirs.target_dir.join("b.conf").to_str().unwrap(),
+                ),
+            ],
+        );
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+
+        assert_eq!(accepted_flags(&events), vec![true, false], "{events:?}");
+    }
+
+    // A secret-bearing deploy keeps no copy, so the flag is all that marks an
+    // accepted one. The command is answered by the fake runner, never run.
+    #[tokio::test]
+    async fn a_secret_deploy_says_it_settled_an_accepted_conflict() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "old").unwrap();
+        super::secret_bearing::provider_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "op read x",
+        );
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"new");
+
+        let events = collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(accepting())
+                .await,
+        )
+        .await;
+
+        assert_eq!(accepted_flags(&events), vec![true], "{events:?}");
+    }
+
+    // Accepts, and while "the user decides" puts a symlink where the target
+    // was, as something else on the machine could.
+    struct AcceptAfterPlantingLink(std::path::PathBuf, std::path::PathBuf);
+
+    impl ConflictResolver for AcceptAfterPlantingLink {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            std::fs::remove_file(&self.0).unwrap();
+            std::os::unix::fs::symlink(&self.1, &self.0).unwrap();
+            ConflictResolution::Accept
+        }
+    }
+
+    // The link is replaced after the accept, and that write is still the one
+    // the user accepted.
+    #[tokio::test]
+    async fn a_link_planted_during_an_accepted_secret_prompt_is_still_accepted() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "old").unwrap();
+        let elsewhere = dirs.target_dir.join("elsewhere");
+        std::fs::write(&elsewhere, "other").unwrap();
+        super::secret_bearing::provider_package(
+            &dirs.package_dir,
+            target.to_str().unwrap(),
+            "op read x",
+        );
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"new");
+        let options = ApplyOptions {
+            conflict_resolver: Some(Arc::new(AcceptAfterPlantingLink(
+                target.clone(),
+                elsewhere.clone(),
+            ))),
+            ..ApplyOptions::default()
+        };
+
+        let events =
+            collect_events(dirs.service_with_runner(runner).apply_all(options).await).await;
+
+        assert!(
+            !std::fs::symlink_metadata(&target).unwrap().is_symlink(),
+            "control: the link was replaced"
+        );
+        assert_eq!(accepted_flags(&events), vec![true], "{events:?}");
+    }
+
+    // `--yes` overwrites a conflict without asking, so its deploy is not one a
+    // resolver accepted, even with a resolver supplied.
+    #[tokio::test]
+    async fn an_overwrite_nobody_was_asked_about_is_not_marked_accepted() {
+        let dirs = TestDirs::new();
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/a.conf"), "ours").unwrap();
+        let conflicted = dirs.target_dir.join("a.conf");
+        std::fs::write(&conflicted, "theirs").unwrap();
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "app",
+            &[("app/a.conf", conflicted.to_str().unwrap())],
+        );
+        let options = ApplyOptions {
+            auto_accept: true,
+            ..accepting()
+        };
+
+        let events = collect_events(dirs.service().apply_all(options).await).await;
+
+        assert_eq!(accepted_flags(&events), vec![false], "{events:?}");
+    }
+}

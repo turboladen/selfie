@@ -64,6 +64,27 @@ fn run(temp_dir: &tempfile::TempDir, args: &[&str]) -> (Option<i32>, String, Str
     )
 }
 
+// The line of the row whose source is `source`, whatever padding its column
+// adds after it.
+fn row_position(lines: &[&str], source: &str) -> usize {
+    let found: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.split_once(" → ")
+                .is_some_and(|(left, _)| left.trim_end().ends_with(&format!(" {source}")))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "{source:?} must head exactly one row:\n{}",
+        lines.join("\n")
+    );
+    found[0]
+}
+
 fn position(lines: &[&str], needle: &str) -> usize {
     let found: Vec<usize> = lines
         .iter()
@@ -88,10 +109,10 @@ fn apply_names_each_directory_once_and_sources_relative_to_it() {
     let lines: Vec<&str> = stdout.lines().collect();
 
     let packages = position(&lines, "Packages: ");
-    let bat = position(&lines, "bat/config → ");
-    let git = position(&lines, "git/gitconfig.tmpl (vars: email) → ");
+    let bat = row_position(&lines, "bat/config");
+    let git = row_position(&lines, "git/gitconfig.tmpl (vars: email)");
     let dotfiles = position(&lines, "Dotfiles: ");
-    let zsh = position(&lines, "zshrc → ");
+    let zsh = row_position(&lines, "zshrc");
 
     // Each heading sits above the lines relative to it, and below the ones that
     // are not.
@@ -141,7 +162,7 @@ fn a_declined_conflict_is_shown_once() {
 
     let conflicts = format!("{stdout}{stderr}")
         .lines()
-        .filter(|line| line.contains("Conflict: "))
+        .filter(|line| line.starts_with("conflict "))
         .count();
     assert_eq!(conflicts, 1, "stdout:\n{stdout}\nstderr:\n{stderr}");
 
