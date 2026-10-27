@@ -200,6 +200,11 @@ selfie spec validate ripgrep
 
 This checks your package definition for syntax errors and validates the structure.
 
+`selfie spec validate --all` checks every spec at once. It prints one table row per spec, with its
+status (valid, warnings, errors, unparsable, ambiguous or unlistable) and its issues: a count at
+each level, where an unparsable file failed, or how many files claim an ambiguous name. Then come
+the issues of each spec that has a problem, then a summary line.
+
 ### 4. Install the Package
 
 ```bash

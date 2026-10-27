@@ -150,11 +150,7 @@ fn handle_list_event(
                 }
             };
             let mut add = |result: &RowResult, name: &str, status: String, envs: Option<String>| {
-                let mut row = vec![
-                    row_marker(result, use_colors).into_owned(),
-                    name.to_string(),
-                    status,
-                ];
+                let mut row = vec![row_marker(result, use_colors), name.to_string(), status];
                 if show_all {
                     row.push(envs.unwrap_or_else(|| "-".to_string()));
                 }

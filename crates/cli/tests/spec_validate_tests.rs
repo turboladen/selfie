@@ -205,6 +205,26 @@ fn only_a_clean_spec_shows_the_success_card() {
     assert_eq!(cards("blank"), 0);
 }
 
+// `spec validate --all` in the sandbox: its exit code, stdout and stderr.
+fn validate_all(temp_dir: &tempfile::TempDir) -> (Option<i32>, String, String) {
+    let output = sandboxed_command(temp_dir)
+        .args(["spec", "validate", "--all"])
+        .output()
+        .unwrap();
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+// The last line of `out` that is not blank.
+fn last_line(out: &str) -> &str {
+    out.lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+}
+
 // The table printed under the line naming `label` in an issues section: the lines
 // after it that draw a table, up to the next line that does not.
 fn group_under<'a>(stdout: &'a str, label: &str) -> Vec<&'a str> {
@@ -244,13 +264,16 @@ fn sandbox_with_an_unparsable_spec() -> tempfile::TempDir {
 fn validate_all_says_where_an_unparsable_spec_failed() {
     let temp_dir = sandbox_with_an_unparsable_spec();
 
-    let output = sandboxed_command(&temp_dir)
-        .args(["spec", "validate", "--all"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (code, stdout, _) = validate_all(&temp_dir);
 
-    assert_eq!(output.status.code(), Some(FAILED), "{stdout}");
+    assert_eq!(code, Some(FAILED), "{stdout}");
+    // Asserted on the row and on the entry apart, so neither copy can stand in
+    // for the other.
+    assert_eq!(
+        row(&stdout, "creds"),
+        ["✗", "creds", "unparsable", "line 2, column 15"],
+        "{stdout}"
+    );
     let group = group_under(&stdout, "packages/creds.yml");
     assert_eq!(
         group
@@ -277,13 +300,9 @@ fn validate_all_still_warns_about_a_shadowed_unparsable_spec() {
     fs::write(&config, text).unwrap();
     fs::write(dotfiles.join("good.yaml"), "name: good\nenvironments: [\n").unwrap();
 
-    let output = sandboxed_command(&temp_dir)
-        .args(["spec", "validate", "--all"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (code, stdout, stderr) = validate_all(&temp_dir);
 
+    assert_eq!(code, Some(common::FOUND), "{stdout}{stderr}");
     assert_eq!(
         stderr
             .lines()
@@ -293,4 +312,173 @@ fn validate_all_still_warns_about_a_shadowed_unparsable_spec() {
         "{stderr}"
     );
     assert!(!stdout.contains("good.yaml"), "{stdout}");
+}
+
+// The cells of the results table's row for `spec`. The results table is the one
+// with four columns; no issues table has that few.
+fn row<'a>(stdout: &'a str, spec: &str) -> Vec<&'a str> {
+    let rows = rows(stdout);
+    let found: Vec<Vec<&str>> = rows.into_iter().filter(|cells| cells[1] == spec).collect();
+    assert_eq!(found.len(), 1, "one row for {spec}: {stdout}");
+    found.into_iter().next().unwrap()
+}
+
+// Every row of the results table, header excluded.
+fn rows(stdout: &str) -> Vec<Vec<&str>> {
+    stdout
+        .lines()
+        .map(|line| {
+            line.trim_matches('│')
+                .split('┆')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+        })
+        .filter(|cells| cells.len() == 4 && cells[1] != "Spec")
+        .collect()
+}
+
+// The labels of the issues section's entries, in order.
+fn entry_labels(stdout: &str) -> Vec<&str> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("  ✗ ")
+                .or_else(|| line.strip_prefix("  ℹ "))
+        })
+        .collect()
+}
+
+// One row per spec, whatever became of it, and an issues entry only for the specs
+// with a problem. Each count in the summary is a number of rows on screen, and the
+// summary is the last thing printed.
+#[test]
+fn validate_all_shows_a_row_per_spec_and_details_for_problems_only() {
+    let temp_dir = sandbox_with_an_unparsable_spec();
+    let packages = temp_dir.path().join("packages");
+    let env = common::SELFIE_ENV;
+    for (name, body) in [
+        (
+            "warn",
+            format!("environments:\n  {env}:\n    install: \"echo `true`\"\n"),
+        ),
+        ("noenv", "description: x\n".to_string()),
+        (
+            "note",
+            format!(
+                "dotfiles:\n  - command: \"echo value\"\n    target: \"~/.noterc\"\n\
+                 environments:\n  {env}:\n    install: \"true\"\n"
+            ),
+        ),
+    ] {
+        fs::write(
+            packages.join(format!("{name}.yml")),
+            format!("name: {name}\n{body}"),
+        )
+        .unwrap();
+    }
+    let ambiguous = format!("name: nv\nenvironments:\n  {env}:\n    install: \"true\"\n");
+    fs::write(packages.join("nv.yml"), &ambiguous).unwrap();
+    fs::write(packages.join("nv.yaml"), &ambiguous).unwrap();
+
+    let (code, stdout, stderr) = validate_all(&temp_dir);
+
+    assert_eq!(code, Some(FAILED), "{stdout}{stderr}");
+    let statuses: Vec<(&str, &str)> = rows(&stdout)
+        .into_iter()
+        .map(|cells| (cells[1], cells[2]))
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("good", "valid"),
+            ("noenv", "errors"),
+            ("note", "valid"),
+            ("warn", "warnings"),
+            ("creds", "unparsable"),
+            ("nv", "ambiguous"),
+        ],
+        "{stdout}"
+    );
+    assert_eq!(row(&stdout, "note")[3], "1 notice(s)", "{stdout}");
+
+    // A valid spec has no issues entry, notices or not: `note` is named once, in
+    // its row.
+    assert_eq!(
+        stdout.lines().filter(|line| line.contains("note")).count(),
+        1,
+        "{stdout}"
+    );
+    let labels = entry_labels(&stdout);
+    assert_eq!(labels.len(), 4, "{stdout}");
+    assert_eq!(labels[..2], ["noenv", "warn"], "{stdout}");
+    assert!(labels[2].ends_with("packages/creds.yml"), "{stdout}");
+    assert_eq!(labels[3], "nv", "{stdout}");
+
+    // The ambiguous name is named in its row and its entry, and in no warning.
+    assert!(!stderr.contains("'nv'"), "{stderr}");
+
+    assert_eq!(
+        last_line(&stdout),
+        format!(
+            "✗ Spec validation completed in environment '{env}': 4 package(s) validated, \
+             1 with errors, 1 with warnings, 1 unparsable, 1 ambiguous or unlistable"
+        ),
+        "{stdout}"
+    );
+}
+
+// A clean run is the table and the summary, with no issues section.
+#[test]
+fn validate_all_over_clean_specs_prints_no_issues_section() {
+    let temp_dir = sandbox_with_an_unparsable_spec();
+    fs::remove_file(temp_dir.path().join("packages/creds.yml")).unwrap();
+
+    let (code, stdout, _) = validate_all(&temp_dir);
+
+    assert_eq!(code, Some(CLEAN), "{stdout}");
+    assert_eq!(row(&stdout, "good")[2], "valid", "{stdout}");
+    assert!(entry_labels(&stdout).is_empty(), "{stdout}");
+    assert!(!stdout.contains("Validation"), "{stdout}");
+    assert!(
+        last_line(&stdout).contains("1 package(s) validated successfully"),
+        "{stdout}"
+    );
+}
+
+// A dotfiles directory selfie could not list is named once, as its row and entry
+// in the results, and in no warning above them.
+#[cfg(unix)]
+#[test]
+fn validate_all_names_an_unlistable_directory_only_in_its_results() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = sandbox_with_an_unparsable_spec();
+    fs::remove_file(temp_dir.path().join("packages/creds.yml")).unwrap();
+    // The sibling of `packages`, which is where an unset `dotfiles_directory`
+    // resolves to.
+    let dotfiles = temp_dir.path().join("dotfiles");
+    fs::create_dir_all(&dotfiles).unwrap();
+    fs::set_permissions(&dotfiles, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root ignores the mode bits, so check the precondition actually holds.
+    if fs::read_dir(&dotfiles).is_ok() {
+        fs::set_permissions(&dotfiles, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("SKIP validate_all_names_an_unlistable_directory_only_in_its_results");
+        return;
+    }
+
+    let (code, stdout, stderr) = validate_all(&temp_dir);
+    // Before any assertion, so a failure cannot leave the temp dir unremovable.
+    fs::set_permissions(&dotfiles, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(code, Some(FAILED), "{stdout}{stderr}");
+    let shown = dotfiles.display().to_string();
+    assert_eq!(row(&stdout, &shown)[2], "unlistable", "{stdout}");
+    assert!(
+        stdout.contains("Failed to load standalone dotfiles"),
+        "{stdout}"
+    );
+    assert!(
+        !stderr.contains("Failed to load standalone dotfiles"),
+        "{stderr}"
+    );
 }

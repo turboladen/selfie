@@ -1,8 +1,6 @@
 //! How commands lay out what they print: tables, field styling, and the
 //! report for a package that does not support the current environment.
 
-use std::borrow::Cow;
-
 use comfy_table::{ContentArrangement, Table, presets};
 use console::style;
 
@@ -25,30 +23,48 @@ pub(crate) enum RowResult {
     Warning,
 }
 
-/// The marker cell for a row.
-pub(crate) fn row_marker(result: &RowResult, use_colors: bool) -> Cow<'static, str> {
+impl From<selfie::package::event::Outcome> for RowResult {
+    /// The marker for a row whose operation ended with `outcome`.
+    fn from(outcome: selfie::package::event::Outcome) -> Self {
+        use selfie::package::event::Outcome;
+        match outcome {
+            Outcome::Clean => Self::Success,
+            Outcome::Found => Self::Warning,
+            Outcome::Failed => Self::Failure,
+        }
+    }
+}
+
+/// The color of a row that turned out as `result`.
+fn row_color(
+    result: &RowResult,
+) -> fn(console::StyledObject<String>) -> console::StyledObject<String> {
     match result {
-        RowResult::Success => {
-            if use_colors {
-                style("✓").green().bold().to_string().into()
-            } else {
-                "✓".into()
-            }
-        }
-        RowResult::Failure => {
-            if use_colors {
-                style("✗").red().bold().to_string().into()
-            } else {
-                "✗".into()
-            }
-        }
-        RowResult::Warning => {
-            if use_colors {
-                style("⚠").yellow().bold().to_string().into()
-            } else {
-                "⚠".into()
-            }
-        }
+        RowResult::Success => |s| s.green(),
+        RowResult::Warning => |s| s.yellow(),
+        RowResult::Failure => |s| s.red(),
+    }
+}
+
+/// `text` in the color of a row that turned out as `result`, or plain when
+/// `use_colors` is off.
+pub(crate) fn paint_row_text(text: &str, result: &RowResult, use_colors: bool) -> String {
+    crate::status_style::styled_text(text, use_colors, row_color(result))
+}
+
+/// The marker cell for a row.
+pub(crate) fn row_marker(result: &RowResult, use_colors: bool) -> String {
+    let marker = match result {
+        RowResult::Success => "✓",
+        RowResult::Warning => "⚠",
+        RowResult::Failure => "✗",
+    };
+    if use_colors {
+        row_color(result)(style(marker.to_string()))
+            .bold()
+            .to_string()
+    } else {
+        marker.to_string()
     }
 }
 

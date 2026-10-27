@@ -63,16 +63,7 @@ pub(crate) fn display_validation_groups(
     // Built from whichever levels are actually present. A fixed
     // errors-or-warnings pair would render an informational-only group as
     // "Validation Warnings (0)".
-    let mut counted = Vec::new();
-    if total_errors > 0 {
-        counted.push(format!("{total_errors} error(s)"));
-    }
-    if total_warnings > 0 {
-        counted.push(format!("{total_warnings} warning(s)"));
-    }
-    if total_notices > 0 {
-        counted.push(format!("{total_notices} notice(s)"));
-    }
+    let counted = level_counts(total_errors, total_warnings, total_notices);
     let header = match (total_errors, total_warnings, total_notices) {
         (e, 0, 0) if e > 0 => format!("Validation Errors ({e})"),
         (0, w, 0) if w > 0 => format!("Validation Warnings ({w})"),
@@ -155,6 +146,20 @@ pub(crate) fn display_validation_groups(
 
         display.line_to(channel, format!("{table}"));
     }
+}
+
+/// The count at each level present, as "2 error(s)", "1 warning(s)" and
+/// "3 notice(s)", in that order.
+pub(crate) fn level_counts(errors: usize, warnings: usize, notices: usize) -> Vec<String> {
+    [
+        (errors, "error(s)"),
+        (warnings, "warning(s)"),
+        (notices, "notice(s)"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, noun)| format!("{n} {noun}"))
+    .collect()
 }
 
 fn create_validation_table() -> Table {

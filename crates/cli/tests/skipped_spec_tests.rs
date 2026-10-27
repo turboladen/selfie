@@ -152,8 +152,17 @@ fn validate_all_names_an_unparsable_spec_once_in_its_results() {
         0,
         "{both}"
     );
-    // The file is named once, as the label of its entry in the results.
+    // The file is named once, as the label of its entry in the results. Its row
+    // in the results table names the spec, not the file.
     assert_eq!(both.matches("creds.yml").count(), 1, "{both}");
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|line| line.contains("creds") && line.contains("unparsable"))
+            .count(),
+        1,
+        "{stdout}"
+    );
     assert_eq!(
         stdout
             .lines()

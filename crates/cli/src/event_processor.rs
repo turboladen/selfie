@@ -692,7 +692,11 @@ impl ToTitleCase for str {
 
 /// The warning lines for packages refused for `reason`: one line naming them
 /// all, or under `verbose` one line per package.
-fn refused_packages_lines(reason: &str, packages: &[RefusedPackage], verbose: bool) -> Vec<String> {
+pub(crate) fn refused_packages_lines(
+    reason: &str,
+    packages: &[RefusedPackage],
+    verbose: bool,
+) -> Vec<String> {
     match packages {
         [] => Vec::new(),
         [package] => vec![format!("Skipping package '{}': {reason}", package.name)],

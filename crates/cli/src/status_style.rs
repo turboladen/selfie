@@ -85,7 +85,7 @@ pub(crate) fn format_list_status(
 }
 
 /// Apply color styling to text, or return plain text if colors disabled
-fn styled_text(
+pub(crate) fn styled_text(
     text: &str,
     use_colors: bool,
     style_fn: fn(console::StyledObject<String>) -> console::StyledObject<String>,
