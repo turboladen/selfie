@@ -49,9 +49,16 @@ what matters.
 
 ## Every phase ends with the maintainer running the binary
 
-The last step of a phase is `cargo install --path crates/cli`, a rebuild of `selfie-mcp`, and a
-numbered list of real commands for the maintainer to run against their real config, with the
-expected result beside each. What they find becomes `dogfood` beads.
+The last step of a phase is `cargo install --path crates/cli`, a rebuild of `selfie-mcp` (both
+`cargo install --path crates/mcp-server` and `cargo build -p selfie-mcp`, since the local MCP
+registration runs `target/debug/selfie-mcp`), and a numbered list of real commands for the
+maintainer to run against their real config, with the expected result beside each. What they find
+becomes `dogfood` beads.
+
+Rehearse the list first with `HOME` set to a scratch directory that holds a copy of
+`~/.config/selfie` and the packages repo, so `~` paths in the config resolve inside it. Never ask
+the maintainer to copy a long one-line command: one arrived mangled and made a spec that would not
+parse.
 
 ## Behavior-affecting PRs carry a binary diff
 
