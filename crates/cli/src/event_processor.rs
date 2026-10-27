@@ -251,6 +251,13 @@ impl EventProcessor {
                     .print_warning(selfie::package::service::skipped_spec_warning(&error));
             }
 
+            PackageEvent::CollisionsUnchecked { sources, .. } => {
+                self.display
+                    .print_warning(selfie::package::service::collisions_unchecked_warning(
+                        &sources,
+                    ));
+            }
+
             PackageEvent::PackagesRefused {
                 reason, packages, ..
             } => {

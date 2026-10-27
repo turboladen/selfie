@@ -43,7 +43,7 @@ pub(crate) enum Shortfall {
 impl std::fmt::Display for Shortfall {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Refused(CollectionRefusal::UnloadableSpec(error)) => {
+            Self::Refused(CollectionRefusal::UnloadableSpec { error, .. }) => {
                 write!(
                     f,
                     "spec '{}' could not be loaded",

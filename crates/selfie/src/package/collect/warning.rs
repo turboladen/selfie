@@ -19,12 +19,20 @@ pub(crate) enum Finding {
 }
 
 impl Finding {
+    /// The refusal this finding is, if it is one.
+    pub(crate) fn refusal(&self) -> Option<&CollectionRefusal> {
+        match self {
+            Self::Refusal(refusal) => Some(refusal),
+            Self::Warning(_) => None,
+        }
+    }
+
     /// Whether this finding is about a package name other than `name`, which a
     /// run asked for `name` alone has no reason to report.
     pub(crate) fn is_about_another_name(&self, name: &str) -> bool {
         let about = match self {
             Self::Warning(ApplyWarning::SkippedSpec(error))
-            | Self::Refusal(CollectionRefusal::UnloadableSpec(error)) => {
+            | Self::Refusal(CollectionRefusal::UnloadableSpec { error, .. }) => {
                 crate::package::spec_name_of(error.package_path())
             }
             Self::Warning(ApplyWarning::Named { name, .. })
@@ -104,19 +112,45 @@ pub enum CollectionRefusal {
         name: String,
         /// Every file claiming it.
         paths: Vec<PathBuf>,
+        /// The directory the files are in.
+        base: crate::package::event::BaseKind,
     },
     /// A spec file that could not be loaded, where it could have been used, so
     /// nothing it declares is looked at.
-    UnloadableSpec(crate::package::port::PackageParseError),
+    UnloadableSpec {
+        /// Why it could not be loaded.
+        error: crate::package::port::PackageParseError,
+        /// The directory it is in.
+        base: crate::package::event::BaseKind,
+    },
 }
 
 impl CollectionRefusal {
+    /// What a run could not compare its targets with because of this refusal:
+    /// the file, every file of an ambiguous name, or the dotfiles directory.
+    #[must_use]
+    pub fn unchecked_sources(&self) -> Vec<crate::package::event::UncheckedSource> {
+        use crate::package::event::UncheckedSource;
+        match self {
+            Self::UnloadableSpec { error, base } => {
+                vec![UncheckedSource::spec_file(error.package_path(), *base)]
+            }
+            Self::AmbiguousName { paths, base, .. } => paths
+                .iter()
+                .map(|path| UncheckedSource::spec_file(path, *base))
+                .collect(),
+            Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
+                vec![UncheckedSource::DotfilesDirectory]
+            }
+        }
+    }
+
     /// The status a validation of every spec gives what was refused.
     #[must_use]
     pub fn status(&self) -> crate::package::event::SpecStatus {
         use crate::package::event::SpecStatus;
         match self {
-            Self::UnloadableSpec(_) => SpecStatus::Unparsable,
+            Self::UnloadableSpec { .. } => SpecStatus::Unparsable,
             Self::AmbiguousName { .. } => SpecStatus::Ambiguous,
             Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
                 SpecStatus::Unlistable
@@ -145,10 +179,10 @@ impl CollectionRefusal {
             Self::UncheckableDotfilesDirectory(error) => {
                 format!("Could not check the standalone dotfiles directory: {error}")
             }
-            Self::AmbiguousName { name, paths } => {
+            Self::AmbiguousName { name, paths, .. } => {
                 crate::package::port::ambiguous_files_sentence(name, paths)
             }
-            Self::UnloadableSpec(error) => error.to_string(),
+            Self::UnloadableSpec { error, .. } => error.to_string(),
         }
     }
 
@@ -160,7 +194,7 @@ impl CollectionRefusal {
             Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
                 sender.send_warning(self.sentence()).await;
             }
-            Self::AmbiguousName { name, paths } => {
+            Self::AmbiguousName { name, paths, .. } => {
                 sender
                     .send_packages_refused([crate::package::event::PackageRefusal {
                         kind: crate::package::event::RefusalKind::AmbiguousName,
@@ -172,7 +206,7 @@ impl CollectionRefusal {
                     }])
                     .await;
             }
-            Self::UnloadableSpec(error) => sender.send_spec_skipped(error.clone()).await,
+            Self::UnloadableSpec { error, .. } => sender.send_spec_skipped(error.clone()).await,
         }
     }
 }
@@ -182,7 +216,7 @@ pub(crate) fn no_such_package(
     name: &str,
     packages: &[crate::package::Package],
     findings: &[Finding],
-    unrefused_ambiguities: &[(String, Vec<PathBuf>)],
+    unrefused_ambiguities: &[(String, Vec<PathBuf>, crate::package::event::BaseKind)],
 ) -> OperationFailure {
     use crate::package::event::NoSuchPackageReason;
 
@@ -192,7 +226,7 @@ pub(crate) fn no_such_package(
     let requested = name.to_lowercase();
     let unloadable = findings.iter().any(|finding| match finding {
         Finding::Warning(ApplyWarning::SkippedSpec(error))
-        | Finding::Refusal(CollectionRefusal::UnloadableSpec(error)) => {
+        | Finding::Refusal(CollectionRefusal::UnloadableSpec { error, .. }) => {
             crate::package::spec_name_of(error.package_path())
                 .is_some_and(|spec_name| spec_name == requested)
         }
@@ -206,7 +240,7 @@ pub(crate) fn no_such_package(
     let ambiguous = findings
         .iter()
         .find_map(|finding| match finding {
-            Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths })
+            Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths, .. })
                 if *name == requested =>
             {
                 Some(paths.clone())
@@ -216,8 +250,8 @@ pub(crate) fn no_such_package(
         .or_else(|| {
             unrefused_ambiguities
                 .iter()
-                .find(|(name, _)| *name == requested)
-                .map(|(_, paths)| paths.clone())
+                .find(|(name, _, _)| *name == requested)
+                .map(|(_, paths, _)| paths.clone())
         });
     // Derived from what the directory turned out to be, not from the fact that some
     // repository failed: the two unreadable states take different sentences, and

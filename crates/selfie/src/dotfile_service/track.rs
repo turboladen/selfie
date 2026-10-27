@@ -28,6 +28,7 @@ use super::refusal::{TargetState, directory_at_target, guard_refusal, read_targe
 use super::state_file::{
     Recorder, StateLoad, StateSaveError, load_deploy_state, save_deploy_state,
 };
+use super::unchecked::{Checking, Unchecked};
 
 /// A spec that already has an entry for a target.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -416,68 +417,6 @@ pub(super) struct OtherSpecs {
     pub(super) unchecked: Vec<Unchecked>,
 }
 
-/// A place track could not check for an entry deploying its file.
-pub(super) enum Unchecked {
-    /// A spec file that could not be loaded.
-    Unloadable(PathBuf),
-    /// Files that all claim one name, so none of them is used.
-    Ambiguous { name: String, paths: Vec<PathBuf> },
-    /// The package directory, which could not be listed.
-    PackageDirectory(crate::package::port::PackageListError),
-    /// The dotfiles directory, which could not be listed or checked.
-    DotfilesDirectory(crate::package::port::PackageListError),
-}
-
-impl From<&crate::package::collect::warning::CollectionRefusal> for Unchecked {
-    fn from(refusal: &crate::package::collect::warning::CollectionRefusal) -> Self {
-        use crate::package::collect::warning::CollectionRefusal;
-
-        match refusal {
-            CollectionRefusal::UnloadableSpec(error) => {
-                Self::Unloadable(error.package_path().to_path_buf())
-            }
-            CollectionRefusal::UnlistableDotfilesDirectory(error)
-            | CollectionRefusal::UncheckableDotfilesDirectory(error) => {
-                Self::DotfilesDirectory(error.clone())
-            }
-            CollectionRefusal::AmbiguousName { name, paths } => Self::Ambiguous {
-                name: name.clone(),
-                paths: paths.clone(),
-            },
-        }
-    }
-}
-
-impl std::fmt::Display for Unchecked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Could not check ")?;
-        match self {
-            Self::Unloadable(path) => write!(
-                f,
-                "{} for an entry deploying this file: it could not be loaded",
-                path.display()
-            ),
-            Self::Ambiguous { name, paths } => {
-                let files: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-                write!(
-                    f,
-                    "{} for an entry deploying this file: they all claim the name '{name}', so \
-                     none of them is used",
-                    files.join(" and ")
-                )
-            }
-            Self::PackageDirectory(error) => write!(
-                f,
-                "the package specs for an entry deploying this file: {error}"
-            ),
-            Self::DotfilesDirectory(error) => write!(
-                f,
-                "the standalone dotfiles for an entry deploying this file: {error}"
-            ),
-        }
-    }
-}
-
 /// Handle `track_standalone`: copy the target file into the dotfiles directory,
 /// create a new YAML spec, and record initial deploy state.
 pub(super) async fn handle_track_standalone<R, F>(
@@ -685,7 +624,9 @@ where
     // are named and the track goes on: refusing it for an unrelated broken spec
     // helps nobody, and apply still refuses a collision it would make.
     for unchecked in &others.unchecked {
-        sender.send_warning(unchecked.to_string()).await;
+        sender
+            .send_warning(unchecked.sentence(Checking::Track))
+            .await;
     }
     // The spec this track writes is not another spec: an existing one answered
     // above, and a new one's path is refused below if a file is already there.

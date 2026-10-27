@@ -228,12 +228,15 @@ file in the environment in use, `selfie apply` deploys neither: it refuses every
 every spec and entry deploying there, and exits non-zero, and `selfie dotfiles drift` refuses the
 same entries. Applying one package by name refuses its entry too, since writing it would overwrite
 the other spec's file. Neither spec takes precedence; remove one of the entries. A package selfie
-refuses whole takes no part, since nothing of it deploys. `selfie spec validate --all` reports such
-a pair as an error on each spec, for every environment where they meet, comparing targets without
-your home directory as validation always does, so a shared entry that an environment entry may
-override on some home takes no part. `selfie spec validate <name>` checks one spec alone; only
-`--all` checks across specs. `selfie sync push` refuses a push that changes one of the pair, and
-lets through one that changes neither.
+refuses whole takes no part, since nothing of it deploys. A spec selfie could not read, or one of
+several files claiming one name, takes no part either, because its targets are unknown: `apply` and
+`drift` still deploy and check the rest, and say which specs no target was compared with.
+`selfie spec validate --all` reports such a pair as an error on each spec, for every environment
+where they meet, comparing targets without your home directory as validation always does, so a
+shared entry that an environment entry may override on some home takes no part.
+`selfie spec validate <name>` checks one spec alone; only `--all` checks across specs.
+`selfie sync push` refuses a push that changes one of the pair, and lets through one that changes
+neither.
 
 `selfie spec validate` reports each override as an informational note, which never fails validation
 or `selfie sync push`. A shared and an environment entry that are one file only for a particular
@@ -1114,6 +1117,8 @@ Commands that enumerate specs continue with the rest and name the file they skip
 - `selfie package audit --all`
 - `selfie dotfiles list`
 - `selfie apply`
+- `selfie dotfiles drift`
+- `selfie sync status`
 - `selfie track`
 - `selfie spec create --interactive`, when it offers the dependency picker
 

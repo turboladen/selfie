@@ -174,7 +174,7 @@ fn print_unlisted_warnings(
 
 /// Whether `refusal` is the spec file `error` reports.
 fn names_file(refusal: &CollectionRefusal, error: &PackageParseError) -> bool {
-    matches!(refusal, CollectionRefusal::UnloadableSpec(refused)
+    matches!(refusal, CollectionRefusal::UnloadableSpec { error: refused, .. }
         if refused.package_path() == error.package_path())
 }
 
@@ -233,7 +233,7 @@ struct Unvalidated {
 impl Unvalidated {
     fn of(refusal: &CollectionRefusal) -> Self {
         match refusal {
-            CollectionRefusal::UnloadableSpec(error) => Self {
+            CollectionRefusal::UnloadableSpec { error, .. } => Self {
                 spec: error.display_name(),
                 status: refusal.status(),
                 issues: error.location().map(|at| at.to_string()),
@@ -242,7 +242,7 @@ impl Unvalidated {
                 message: error.reason(),
                 location: error.location(),
             },
-            CollectionRefusal::AmbiguousName { name, paths } => Self {
+            CollectionRefusal::AmbiguousName { name, paths, .. } => Self {
                 spec: name.clone(),
                 status: refusal.status(),
                 issues: Some(format!("{} files", paths.len())),

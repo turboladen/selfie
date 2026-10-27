@@ -51,9 +51,11 @@ pub(super) enum Scope {
     /// Every package. Carries what collecting them refused, each counted as one
     /// refusal before any package is looked at.
     All(Vec<CollectionRefusal>),
-    /// Packages asked for by name, with case folded. Collection's refusals are no
-    /// part of it, and a package with nothing to apply here is worth saying so.
-    Named(String),
+    /// Packages asked for by name, with case folded, and what collecting every
+    /// package refused. Those refusals count for nothing here; each is only named
+    /// as a spec no target was compared with. A package with nothing to apply
+    /// here is worth saying so.
+    Named(String, Vec<CollectionRefusal>),
 }
 
 /// The reason a canceled apply gives.
@@ -105,7 +107,7 @@ impl std::fmt::Display for Stop {
                 "Stopped before applying anything: several spec files claim the name '{name}' \
                  (stop_on_error is enabled)"
             ),
-            Self::Collection(CollectionRefusal::UnloadableSpec(error)) => write!(
+            Self::Collection(CollectionRefusal::UnloadableSpec { error, .. }) => write!(
                 f,
                 "Stopped before applying anything: spec '{}' could not be loaded (stop_on_error \
                  is enabled)",
@@ -327,7 +329,7 @@ where
     // here.
     let refusals = match &scope {
         Scope::All(refusals) => refusals.as_slice(),
-        Scope::Named(_) => &[],
+        Scope::Named(..) => &[],
     };
     for refusal in refusals {
         stopped = tally.unfinished(
@@ -338,6 +340,23 @@ where
         );
         if stopped.is_some() {
             break;
+        }
+    }
+    // A run that carries on deploys targets it could not compare with what
+    // collection refused, so it says so, naming each. A stopped run deploys
+    // nothing, so it has nothing to say. A named run sent no warning of its own
+    // for a spec of another name, so it says why for each; a run over everything
+    // already did, and names them in one line.
+    // A run canceled by now, during the state load, deploys nothing either.
+    if stopped.is_none() && !token.is_cancelled() {
+        match &scope {
+            Scope::All(refusals) => {
+                super::unchecked::send_unchecked_line(sender, refusals, packages, config).await;
+            }
+            Scope::Named(_, refusals) => {
+                super::unchecked::send_unchecked_sentences(sender, refusals, packages, config)
+                    .await;
+            }
         }
     }
 
@@ -402,7 +421,7 @@ where
             // date". The run says so instead, and does not fail: on a machine
             // where the package declares nothing, nothing to apply is the right
             // answer.
-            if matches!(scope, Scope::Named(_)) {
+            if matches!(scope, Scope::Named(..)) {
                 sender
                     .send_warning(format!(
                         "Package '{}' has no dotfiles for environment '{}'; nothing to apply",
@@ -778,7 +797,7 @@ where
     // anything.
     let owner = match &scope {
         Scope::All(_) => None,
-        Scope::Named(name) => Some(name.as_str()),
+        Scope::Named(name, _) => Some(name.as_str()),
     };
     let findings = orphan::check(
         filesystem,

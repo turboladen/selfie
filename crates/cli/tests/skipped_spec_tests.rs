@@ -281,10 +281,10 @@ fn drift_reports_a_clean_check_when_every_spec_loads() {
     assert_eq!(code, Some(CLEAN), "output was: {stdout}{stderr}");
 }
 
-// A named apply says nothing about specs it was not asked for, even one it could
-// not load.
+// A named apply that deploys nothing here says nothing about a spec it could not
+// load: no target of its could share one with it.
 #[test]
-fn a_named_apply_does_not_report_another_spec_it_could_not_load() {
+fn a_named_apply_deploying_nothing_does_not_report_another_spec_it_could_not_load() {
     let temp_dir = sandbox_with_one_unparsable_spec();
 
     let output = sandboxed_command(&temp_dir)
@@ -321,5 +321,81 @@ fn apply_all_exits_1_over_a_spec_it_could_not_load_and_a_named_apply_does_not() 
         Some(CLEAN),
         "{}",
         String::from_utf8_lossy(&named.stderr)
+    );
+}
+
+// A run's stdout, then its stderr.
+fn combined(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+// The sandbox above, with `good` deploying a file, so a named apply and an apply of
+// everything both have a target they could not compare with `creds.yml`'s.
+fn sandbox_deploying_beside_an_unparsable_spec() -> tempfile::TempDir {
+    let temp_dir = sandbox_with_one_unparsable_spec();
+    let packages_dir = temp_dir.path().join("packages");
+    fs::write(packages_dir.join("good.conf"), "GOOD").unwrap();
+    fs::write(
+        packages_dir.join("good.yml"),
+        format!(
+            "name: good\nenvironments:\n  test-env:\n    install: \"true\"\ndotfiles:\n  \
+             - source: good.conf\n    target: {}\n",
+            temp_dir.path().join("good.conf").display()
+        ),
+    )
+    .unwrap();
+    temp_dir
+}
+
+// A named apply names the spec it could not load once, as one it could not check
+// for a shared target, and still succeeds.
+#[test]
+fn a_named_apply_names_another_spec_it_could_not_check() {
+    let temp_dir = sandbox_deploying_beside_an_unparsable_spec();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["apply", "good", "--dry-run"])
+        .output()
+        .unwrap();
+    let both = combined(&output);
+
+    assert_eq!(output.status.code(), Some(CLEAN), "{both}");
+    let naming: Vec<&str> = both
+        .lines()
+        .filter(|line| line.contains("creds.yml"))
+        .collect();
+    assert_eq!(
+        naming,
+        [
+            "⚠ Could not check packages/creds.yml for an entry deploying to a target this apply \
+          deploys: it could not be loaded"
+        ],
+        "{both}"
+    );
+}
+
+// Applying everything names the spec on its skip line and again on the line
+// saying no target was compared with it: twice, and no more.
+#[test]
+fn applying_everything_names_a_spec_it_could_not_check_after_skipping_it() {
+    let temp_dir = sandbox_deploying_beside_an_unparsable_spec();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["apply", "--dry-run"])
+        .output()
+        .unwrap();
+    let both = combined(&output);
+
+    assert_eq!(output.status.code(), Some(FAILED), "{both}");
+    assert_eq!(both.matches("creds.yml").count(), 2, "{both}");
+    assert!(
+        both.lines().any(|line| line
+            == "⚠ Collisions with these were not checked, since selfie could not use them: \
+                packages/creds.yml"),
+        "{both}"
     );
 }

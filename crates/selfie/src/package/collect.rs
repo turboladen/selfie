@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::fs::target::{HomeDir, TargetPath, expand_target_path};
-use crate::package::{Package, ScopedEntry, SpecOrigin, port::PackageRepository};
+use crate::package::{Package, ScopedEntry, SpecOrigin, event::BaseKind, port::PackageRepository};
 
 pub(crate) mod directory;
 pub(crate) mod warning;
@@ -21,7 +21,7 @@ pub(crate) struct Collected {
     /// every package, since none of them declares dotfiles here. Not refusals, but
     /// none of the files is used, so a run asking for one by name still fails as
     /// ambiguous, as install does. Each with its files, sorted.
-    pub(crate) unrefused_ambiguities: Vec<(String, Vec<PathBuf>)>,
+    pub(crate) unrefused_ambiguities: Vec<(String, Vec<PathBuf>, BaseKind)>,
     /// Names of dotfiles/ specs left unused because packages/ claims the same
     /// name.
     pub(crate) set_aside: Vec<String>,
@@ -30,10 +30,7 @@ pub(crate) struct Collected {
 impl Collected {
     /// What collection refused, in the order it found them.
     pub(crate) fn refusals(&self) -> impl Iterator<Item = &CollectionRefusal> {
-        self.findings.iter().filter_map(|finding| match finding {
-            Finding::Refusal(refusal) => Some(refusal),
-            Finding::Warning(_) => None,
-        })
+        self.findings.iter().filter_map(Finding::refusal)
     }
 
     /// What collection found worth saying and refused nothing, in order.
@@ -138,11 +135,12 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
     let mut unrefused_ambiguities = Vec::new();
     for (name, _, claim) in table.package_claims() {
         if let Claim::Ambiguous(paths) = claim {
-            let ambiguity = (name.to_string(), paths.to_vec());
+            let ambiguity = (name.to_string(), paths.to_vec(), BaseKind::PackageDirectory);
             if ambiguity_matters(paths, &packages.iter().collect::<Vec<_>>(), environment) {
                 findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
                     name: ambiguity.0,
                     paths: ambiguity.1,
+                    base: ambiguity.2,
                 }));
             } else {
                 unrefused_ambiguities.push(ambiguity);
@@ -155,11 +153,12 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
     // much later as an authentication failure nobody traces back to a typo. Every
     // packages/ file that failed to parse could have been used, so each is a
     // refusal, one within an ambiguous name too: it needs its own fix.
-    findings.extend(
-        invalid_in_packages
-            .into_iter()
-            .map(|invalid| Finding::Refusal(CollectionRefusal::UnloadableSpec(invalid))),
-    );
+    findings.extend(invalid_in_packages.into_iter().map(|error| {
+        Finding::Refusal(CollectionRefusal::UnloadableSpec {
+            error,
+            base: BaseKind::PackageDirectory,
+        })
+    }));
 
     // A name packages/ claims is settled in packages/: every dotfiles/ file of that
     // name is set aside with a warning and is never a refusal, whether it parsed,
@@ -195,7 +194,11 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
                 message: why,
             }));
         } else if let Claim::Ambiguous(paths) = claim {
-            let ambiguity = (name.to_string(), paths.to_vec());
+            let ambiguity = (
+                name.to_string(),
+                paths.to_vec(),
+                BaseKind::DotfilesDirectory,
+            );
             if ambiguity_matters(
                 paths,
                 &dotfiles_packages.iter().collect::<Vec<_>>(),
@@ -204,6 +207,7 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
                 findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
                     name: ambiguity.0,
                     paths: ambiguity.1,
+                    base: ambiguity.2,
                 }));
             } else {
                 unrefused_ambiguities.push(ambiguity);
@@ -219,7 +223,10 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
         findings.push(if claimed {
             Finding::Warning(ApplyWarning::SkippedSpec(invalid))
         } else {
-            Finding::Refusal(CollectionRefusal::UnloadableSpec(invalid))
+            Finding::Refusal(CollectionRefusal::UnloadableSpec {
+                error: invalid,
+                base: BaseKind::DotfilesDirectory,
+            })
         });
     }
     dotfiles_packages.retain(|pkg| {
@@ -403,13 +410,7 @@ pub(crate) fn ambiguity_matters(paths: &[PathBuf], loaded: &[&Package], environm
         loaded
             .iter()
             .find(|pkg| pkg.path() == path)
-            .is_none_or(|pkg| {
-                !pkg.dotfiles().is_empty()
-                    || pkg
-                        .environments()
-                        .get(environment)
-                        .is_some_and(|env| !env.dotfiles().is_empty())
-            })
+            .is_none_or(|pkg| pkg.has_dotfiles_in(environment))
     })
 }
 

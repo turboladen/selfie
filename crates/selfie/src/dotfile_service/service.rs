@@ -28,6 +28,7 @@ use super::drift::handle_check_drift;
 use super::orphan::Catalog;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
+use super::unchecked::Unchecked;
 use crate::package::collect::warning::{CollectionRefusal, Finding, no_such_package};
 use crate::package::collect::{Collected, collect_all_packages};
 
@@ -48,8 +49,6 @@ fn other_specs<R: PackageRepository>(
     dotfiles_repo: &R,
     config: &SelfieConfig,
 ) -> super::track::OtherSpecs {
-    use super::track::Unchecked;
-
     match collect_all_packages(
         package_repo,
         dotfiles_repo,
@@ -60,9 +59,10 @@ fn other_specs<R: PackageRepository>(
             let unrefused = collected
                 .unrefused_ambiguities
                 .iter()
-                .map(|(name, paths)| CollectionRefusal::AmbiguousName {
+                .map(|(name, paths, base)| CollectionRefusal::AmbiguousName {
                     name: name.clone(),
                     paths: paths.clone(),
+                    base: *base,
                 })
                 .collect::<Vec<_>>();
             let unchecked: Vec<Unchecked> = collected
@@ -87,7 +87,10 @@ fn other_specs<R: PackageRepository>(
             let packages = match dotfiles_repo.list_packages() {
                 Ok(output) => {
                     unchecked.extend(output.invalid_packages().map(|invalid| {
-                        Unchecked::Unloadable(invalid.package_path().to_path_buf())
+                        Unchecked::Unloadable {
+                            path: invalid.package_path().to_path_buf(),
+                            base: crate::package::event::BaseKind::DotfilesDirectory,
+                        }
                     }));
                     output.valid_packages().cloned().collect()
                 }
@@ -244,13 +247,7 @@ where
             let result = match prepared {
                 Ok(collected) => {
                     let shortfall = super::orphan::shortfall(&collected);
-                    // Counted only by a run over everything; a named run's own
-                    // refusal is its failure.
-                    let refusals: Vec<CollectionRefusal> = if filter.is_none() {
-                        collected.refusals().cloned().collect()
-                    } else {
-                        Vec::new()
-                    };
+                    let refusals: Vec<CollectionRefusal> = collected.refusals().cloned().collect();
                     let Collected {
                         packages,
                         findings,
@@ -282,10 +279,12 @@ where
                             no_such_package(name, &packages, &findings, &unrefused_ambiguities)
                         });
                     // Drained first, in the order found, so a skipped spec's own
-                    // reason precedes the failure it explains. A named apply says
-                    // nothing about a name it was not asked for, and counts none of
-                    // the refusals: its own is the failure. It does not send an
+                    // reason precedes the failure it explains. A named apply sends
+                    // no finding about a name it was not asked for, and counts none
+                    // of the refusals: its own is the failure. It does not send an
                     // ambiguity either, since its failure already names the files.
+                    // `handle_apply` names what it could not check for a shared
+                    // target, once it is known to be deploying something.
                     for finding in &findings {
                         let sent = match filter.as_deref() {
                             None => true,
@@ -317,10 +316,10 @@ where
                     // Applying everything carries on with what it could collect
                     // and counts what collection refused as refusals. A named
                     // apply that finds its package lost nothing to those, so it
-                    // counts none.
+                    // counts none, and only names them as unchecked.
                     let scope = match filter.as_deref() {
                         None => Scope::All(refusals),
-                        Some(name) => Scope::Named(name.to_lowercase()),
+                        Some(name) => Scope::Named(name.to_lowercase(), refusals),
                     };
                     let catalog = Catalog {
                         packages: &packages,
@@ -383,7 +382,7 @@ where
             let outcome = match collected {
                 Ok(collected) => {
                     let shortfall = super::orphan::shortfall(&collected);
-                    let refused = collected.refusals().count();
+                    let refused: Vec<CollectionRefusal> = collected.refusals().cloned().collect();
                     let Collected {
                         packages, findings, ..
                     } = collected;
@@ -396,7 +395,7 @@ where
                         packages: &packages,
                         shortfall,
                     };
-                    handle_check_drift(catalog, &fs, &config, &sender, &token, refused).await
+                    handle_check_drift(catalog, &fs, &config, &sender, &token, &refused).await
                 }
                 Err(e) => Some(OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
@@ -461,9 +460,9 @@ where
                     let unloadable: Vec<&std::path::Path> = findings
                         .iter()
                         .filter_map(|finding| match finding {
-                            Finding::Refusal(CollectionRefusal::UnloadableSpec(error)) => {
-                                Some(error.package_path())
-                            }
+                            Finding::Refusal(CollectionRefusal::UnloadableSpec {
+                                error, ..
+                            }) => Some(error.package_path()),
                             _ => None,
                         })
                         .collect();
@@ -482,7 +481,11 @@ where
                     };
                     for finding in &findings {
                         match finding {
-                            Finding::Refusal(CollectionRefusal::AmbiguousName { name, paths }) => {
+                            Finding::Refusal(CollectionRefusal::AmbiguousName {
+                                name,
+                                paths,
+                                ..
+                            }) => {
                                 refuse_name(name, paths);
                             }
                             _ => finding.send(&sender).await,
@@ -491,7 +494,7 @@ where
                     // The listing spans every environment, so a name apply leaves
                     // unmentioned here, its files declaring no dotfiles in this
                     // one, is refused rows too.
-                    for (name, paths) in &unrefused_ambiguities {
+                    for (name, paths, _) in &unrefused_ambiguities {
                         refuse_name(name, paths);
                     }
 

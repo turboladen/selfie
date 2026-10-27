@@ -74,6 +74,46 @@ pub enum StepEnding {
     NotRun,
 }
 
+/// A spec file or directory whose entries a run could not compare with its own.
+///
+/// [`Display`](fmt::Display) words it as the run names it: `packages/<file>`,
+/// `dotfiles/<file>`, or "the dotfiles directory".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UncheckedSource {
+    /// A spec file, by the directory it is in and its file name.
+    SpecFile {
+        /// Which configured directory holds it.
+        base: BaseKind,
+        /// Its file name.
+        file: String,
+    },
+    /// The dotfiles directory, which could not be read, so its specs are unknown.
+    DotfilesDirectory,
+}
+
+impl UncheckedSource {
+    /// The spec file at `path`, in the directory `base`.
+    #[must_use]
+    pub fn spec_file(path: &std::path::Path, base: BaseKind) -> Self {
+        Self::SpecFile {
+            base,
+            file: path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+        }
+    }
+}
+
+impl fmt::Display for UncheckedSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SpecFile { base, file } => write!(f, "{}/{file}", base.directory_name()),
+            Self::DotfilesDirectory => f.write_str("the dotfiles directory"),
+        }
+    }
+}
+
 /// Which configured directory a dotfile's source is read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +122,18 @@ pub enum BaseKind {
     PackageDirectory,
     /// The dotfiles directory, where standalone dotfile specs live.
     DotfilesDirectory,
+}
+
+impl BaseKind {
+    /// The directory's conventional name, the word selfie uses for it in a
+    /// short path: "packages" or "dotfiles".
+    #[must_use]
+    pub fn directory_name(self) -> &'static str {
+        match self {
+            Self::PackageDirectory => "packages",
+            Self::DotfilesDirectory => "dotfiles",
+        }
+    }
 }
 
 /// The directory a source is relative to, and which one it is.
@@ -480,6 +532,17 @@ impl EventSender {
 
     pub(crate) async fn send_warning(&self, message: impl fmt::Display) {
         self.send_log(LogLevel::Warning, message).await;
+    }
+
+    /// Report what the run could not use, and so could not check for a shared
+    /// target.
+    pub(crate) async fn send_collisions_unchecked(&self, sources: Vec<UncheckedSource>) {
+        let operation_info = self.touch_operation_info();
+        self.send(PackageEvent::CollisionsUnchecked {
+            operation_info,
+            sources,
+        })
+        .await;
     }
 
     /// Report a package file that could not be parsed.
@@ -3229,6 +3292,18 @@ pub enum PackageEvent {
         error: crate::package::port::PackageParseError,
     },
 
+    /// Spec files and directories the run could not use, so whether an entry
+    /// it deployed or checked shares a target with one of them was not
+    /// checked. Sent once per run, after the reasons each could not be used,
+    /// by an apply over every package and by a drift check. An apply of one
+    /// package sends a `Warning` for each instead, saying why it could not be
+    /// used.
+    CollisionsUnchecked {
+        operation_info: OperationInfo,
+        /// What could not be used, in the order collection found it.
+        sources: Vec<UncheckedSource>,
+    },
+
     /// Packages selfie refused whole, all for one reason.
     ///
     /// Sent once per distinct reason, before any package is acted on, so a
@@ -5383,18 +5458,22 @@ mod tests {
     }
 
     fn unparsable_spec() -> CollectionRefusal {
-        CollectionRefusal::UnloadableSpec(crate::package::port::PackageParseError::new(
-            "/p/broken.yml",
-            crate::package::port::PackageParseKind::Unreadable {
-                reason: "a fifo".to_string(),
-            },
-        ))
+        CollectionRefusal::UnloadableSpec {
+            error: crate::package::port::PackageParseError::new(
+                "/p/broken.yml",
+                crate::package::port::PackageParseKind::Unreadable {
+                    reason: "a fifo".to_string(),
+                },
+            ),
+            base: BaseKind::PackageDirectory,
+        }
     }
 
     fn ambiguous_name() -> CollectionRefusal {
         CollectionRefusal::AmbiguousName {
             name: "nv".to_string(),
             paths: vec!["/p/nv.yaml".into(), "/p/nv.yml".into()],
+            base: BaseKind::PackageDirectory,
         }
     }
 

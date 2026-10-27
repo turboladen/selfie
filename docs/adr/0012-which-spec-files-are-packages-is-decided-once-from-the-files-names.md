@@ -111,14 +111,19 @@ Collection belongs to the package module, named for what it does rather than for
 the collected packages and one list of findings in the order it found them. A finding is a warning
 or a refusal, and each refusal carries the facts its sentence and its event need: the listing error
 for a dotfiles directory selfie could not read, the parse error for a spec that could not be loaded,
-the files for an ambiguous name. Each one sends its own event, so a refusal cannot exist without its
-message.
+the files for an ambiguous name, and for those last two the directory the files were found in. Each
+one sends its own event, so a refusal cannot exist without its message.
 
 A spec in the dotfiles directory that does not parse, under a name the package directory claims,
 stays a warning: nothing would have used it. The findings leave in the order they were found, so a
 skipped spec's warning still precedes the failure it explains. A run asked for one name sends the
 findings about that name and about no name, and counts none of them; a run over everything sends and
 counts them all.
+
+Amended 2026-10-26: after its findings, a run asked for one name names each refusal, as something it
+could not check for a target it deploys, as
+[0013](0013-two-entries-are-one-target-when-their-expanded-targets-are-equal.md) §3 says. That
+warning is not a finding, and it counts nothing.
 
 Rejected: a warning list beside a refusal list, paired by convention. A count or a message is lost
 whenever one side is added without the other, and nothing fails to compile.

@@ -1525,6 +1525,9 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
             PackageEvent::Canceled { reason, .. } => {
                 summary.canceled = Some(reason);
             }
+            // Names the specs already relayed as skipped and counted as refused,
+            // so it is neither relayed nor counted again.
+            PackageEvent::CollisionsUnchecked { .. } => {}
             // Progress events with nothing to collect. Anything that changes what
             // the summary says needs an arm of its own above.
             _ => {}
@@ -3056,6 +3059,13 @@ mod tests {
                 },
                 skipped("bat"),
                 skipped("cat"),
+                PackageEvent::CollisionsUnchecked {
+                    operation_info: operation_info.clone(),
+                    sources: vec![crate::package::event::UncheckedSource::SpecFile {
+                        base: crate::package::event::BaseKind::PackageDirectory,
+                        file: "bat.yml".to_string(),
+                    }],
+                },
                 PackageEvent::Completed {
                     operation_info,
                     result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
@@ -3085,7 +3095,9 @@ mod tests {
     // A warning raises `warned` and a skipped spec does not: drift counts an
     // unloadable spec as a refusal, and counting it as a warning too would count
     // it twice. Neither test above can catch that, because each drives a stream
-    // carrying only one kind of event.
+    // carrying only one kind of event. The line naming what drift could not check
+    // for a shared target names the same specs, so it is neither counted nor
+    // relayed either.
     #[tokio::test]
     async fn status_counts_a_warning_and_not_the_skipped_specs_as_warned() {
         use futures::StreamExt;
@@ -3112,6 +3124,12 @@ mod tests {
         });
 
         assert_eq!(warned, Some(1), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::CollisionsUnchecked { .. })),
+            "{events:?}"
+        );
     }
 }
 

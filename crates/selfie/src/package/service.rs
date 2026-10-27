@@ -81,6 +81,17 @@ pub fn skipped_spec_warning(invalid: &super::port::PackageParseError) -> String 
     )
 }
 
+/// The warning for a run that could not compare its entries' targets with
+/// `sources`, naming each, so every command words it the same way.
+#[must_use]
+pub fn collisions_unchecked_warning(sources: &[super::event::UncheckedSource]) -> String {
+    let named: Vec<String> = sources.iter().map(ToString::to_string).collect();
+    format!(
+        "Collisions with these were not checked, since selfie could not use them: {}",
+        named.join(", ")
+    )
+}
+
 /// The warning for a spec file a listing leaves out because several files claim
 /// its name, as [`skipped_spec_warning`] words one that did not parse.
 #[must_use]

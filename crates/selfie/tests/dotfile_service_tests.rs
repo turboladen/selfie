@@ -15940,10 +15940,12 @@ mod folded_names_are_refused {
         );
     }
 
-    // A named apply says nothing about names it was not asked for: not another
-    // name's ambiguity, and not another spec that failed to parse.
+    // A named apply sends no finding about a name it was not asked for: not
+    // another name's ambiguity, and not another spec that failed to parse. It
+    // names each instead as a spec it could not check for a target it deploys,
+    // once, and counts none of them.
     #[tokio::test]
-    async fn a_named_apply_reports_nothing_about_other_names() {
+    async fn a_named_apply_names_other_specs_only_as_unchecked() {
         let dirs = TestDirs::new();
         two_bats(&dirs);
         std::fs::write(dirs.package_dir.join("broken.yml"), "environments: {oops\n").unwrap();
@@ -15951,11 +15953,23 @@ mod folded_names_are_refused {
         let events =
             collect_events(dirs.service().apply("other", ApplyOptions::default()).await).await;
 
-        assert!(warning_messages(&events).is_empty(), "{events:?}");
+        let subject = "for an entry deploying to a target this apply deploys";
+        assert_eq!(
+            warning_messages(&events),
+            [
+                format!(
+                    "Could not check packages/bat.yaml and packages/bat.yml {subject}: they all \
+                     claim the name 'bat', so none of them is used"
+                ),
+                format!("Could not check packages/broken.yml {subject}: it could not be loaded"),
+            ],
+            "{events:?}"
+        );
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, PackageEvent::SpecSkipped { .. })),
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::SpecSkipped { .. } | PackageEvent::PackagesRefused { .. }
+            )),
             "{events:?}"
         );
         assert_eq!(refused_count(&events), 0);
@@ -20877,5 +20891,478 @@ mod an_appearing_target_is_kept {
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(std::fs::metadata(&target).unwrap().ino(), inode);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), SEED);
+    }
+}
+
+// Apply and drift carry on past a spec they could not read, and say that no
+// target was compared with it.
+mod collisions_with_unreadable_specs {
+    use super::*;
+    use selfie::package::event::{BaseKind, UncheckedSource};
+
+    const APPLY: &str = "for an entry deploying to a target this apply deploys";
+
+    // A package `bat` deploying `bat.conf`, beside the files to make unreadable.
+    fn bat(dirs: &TestDirs) -> PathBuf {
+        std::fs::write(dirs.package_dir.join("bat.conf"), "BAT").unwrap();
+        let target = dirs.target_dir.join("bat.conf");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "bat",
+            &[("bat.conf", target.to_str().unwrap())],
+        );
+        target
+    }
+
+    // A package `bat` with nothing to deploy here.
+    fn bat_without_dotfiles(dirs: &TestDirs) {
+        write_package_yaml(
+            &dirs.package_dir,
+            "bat",
+            "name: bat\nenvironments:\n  test:\n    install: \"echo i\"\n",
+        );
+    }
+
+    fn broken(directory: &std::path::Path, file: &str) {
+        std::fs::write(directory.join(file), "environments: {oops\n").unwrap();
+    }
+
+    // The `Could not check` warnings, in order.
+    fn unchecked_warnings(events: &[PackageEvent]) -> Vec<String> {
+        warning_messages(events)
+            .into_iter()
+            .filter(|message| message.starts_with("Could not check"))
+            .collect()
+    }
+
+    // Every `CollisionsUnchecked` event's sources, in order.
+    fn unchecked_lines(events: &[PackageEvent]) -> Vec<Vec<UncheckedSource>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::CollisionsUnchecked { sources, .. } => Some(sources.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn spec_file(base: BaseKind, file: &str) -> UncheckedSource {
+        UncheckedSource::SpecFile {
+            base,
+            file: file.to_string(),
+        }
+    }
+
+    fn skipped_count(events: &[PackageEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, PackageEvent::SpecSkipped { .. }))
+            .count()
+    }
+
+    // A named apply names the spec it could not read, by its directory, before
+    // anything it deploys, and still deploys.
+    #[tokio::test]
+    async fn a_named_apply_names_an_unreadable_package_spec() {
+        let dirs = TestDirs::new();
+        let target = bat(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            unchecked_warnings(&events),
+            [format!(
+                "Could not check packages/broken.yml {APPLY}: it could not be loaded"
+            )],
+            "{events:?}"
+        );
+        let warned_at = events
+            .iter()
+            .position(|e| matches!(e, PackageEvent::Warning { message, .. } if message.starts_with("Could not check")))
+            .unwrap();
+        let deployed_at = events
+            .iter()
+            .position(|e| matches!(e, PackageEvent::DotfileDeployed { .. }))
+            .unwrap_or_else(|| panic!("bat must still deploy: {events:?}"));
+        assert!(warned_at < deployed_at, "{events:?}");
+        assert!(target.exists(), "{events:?}");
+        assert_eq!(
+            get_operation_result(&events).map(OperationResult::outcome),
+            Some(selfie::package::event::Outcome::Clean),
+            "{events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_apply_names_an_unreadable_dotfiles_spec() {
+        let dirs = TestDirs::new();
+        bat(&dirs);
+        broken(&dirs.dotfiles_dir, "broken.yml");
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            unchecked_warnings(&events),
+            [format!(
+                "Could not check dotfiles/broken.yml {APPLY}: it could not be loaded"
+            )],
+            "{events:?}"
+        );
+    }
+
+    // One directory configured as both is read as the package directory, so a
+    // file in it that does not parse is named as a packages/ file, by apply and
+    // by the line over everything alike.
+    #[tokio::test]
+    async fn one_directory_configured_as_both_names_its_files_as_packages() {
+        let mut dirs = TestDirs::new();
+        dirs.dotfiles_dir = dirs.package_dir.clone();
+        bat(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+
+        let named =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+        let all = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            unchecked_warnings(&named),
+            [format!(
+                "Could not check packages/broken.yml {APPLY}: it could not be loaded"
+            )],
+            "{named:?}"
+        );
+        assert_eq!(
+            unchecked_lines(&all),
+            [vec![spec_file(BaseKind::PackageDirectory, "broken.yml")]],
+            "{all:?}"
+        );
+    }
+
+    // A file that fails to parse under a name another file claims is refused both
+    // as unloadable and as ambiguous. A named apply names it once, for the first
+    // reason, as the line over everything does.
+    #[tokio::test]
+    async fn a_named_apply_names_a_file_refused_twice_once() {
+        let dirs = TestDirs::new();
+        bat(&dirs);
+        std::fs::write(dirs.package_dir.join("nv.conf"), "NV").unwrap();
+        let nv = dirs.target_dir.join("nv.conf");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "nv",
+            &[("nv.conf", nv.to_str().unwrap())],
+        );
+        std::fs::rename(
+            dirs.package_dir.join("nv.yml"),
+            dirs.package_dir.join("nv.yaml"),
+        )
+        .unwrap();
+        broken(&dirs.package_dir, "nv.yml");
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            unchecked_warnings(&events),
+            [format!(
+                "Could not check packages/nv.yaml and packages/nv.yml {APPLY}: they all claim the \
+                 name 'nv', so none of them is used"
+            )],
+            "{events:?}"
+        );
+    }
+
+    // A named apply canceled before it deploys anything says nothing about what
+    // it could not check.
+    #[tokio::test]
+    async fn a_canceled_named_apply_names_nothing_unchecked() {
+        let dirs = TestDirs::new();
+        bat(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let events = collect_events(
+            dirs.service_with_runner_and_token(FakeCommandRunner::new(), token)
+                .apply("bat", ApplyOptions::default())
+                .await,
+        )
+        .await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::Canceled { .. })),
+            "{events:?}"
+        );
+        assert!(unchecked_warnings(&events).is_empty(), "{events:?}");
+    }
+
+    // Nothing deployed here can collide, so there is nothing to warn about.
+    #[tokio::test]
+    async fn a_named_apply_deploying_nothing_names_nothing() {
+        let dirs = TestDirs::new();
+        bat_without_dotfiles(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert!(unchecked_warnings(&events).is_empty(), "{events:?}");
+    }
+
+    // A dotfiles copy of the named package that does not parse is set aside:
+    // nothing would have deployed it, so nothing was left unchecked.
+    #[tokio::test]
+    async fn a_named_apply_says_nothing_of_a_shadowed_copy() {
+        let dirs = TestDirs::new();
+        bat(&dirs);
+        broken(&dirs.dotfiles_dir, "bat.yml");
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert!(unchecked_warnings(&events).is_empty(), "{events:?}");
+    }
+
+    // A named apply that could not list the dotfiles directory says so, then
+    // that it could not check it for a shared target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_named_apply_names_an_unlistable_dotfiles_directory_twice() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dirs = TestDirs::new();
+        bat(&dirs);
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        if std::fs::read_dir(&dirs.dotfiles_dir).is_ok() {
+            std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            eprintln!("SKIP a_named_apply_names_an_unlistable_dotfiles_directory_twice");
+            return;
+        }
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+        std::fs::set_permissions(&dirs.dotfiles_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        let about: Vec<String> = warning_messages(&events)
+            .into_iter()
+            .filter(|m| m.contains("standalone dotfiles"))
+            .collect();
+        assert_eq!(about.len(), 2, "{events:?}");
+        assert!(
+            about[0].starts_with("Failed to load standalone dotfiles: "),
+            "{about:?}"
+        );
+        assert!(
+            about[1].starts_with(&format!(
+                "Could not check the standalone dotfiles {APPLY}: "
+            )),
+            "{about:?}"
+        );
+    }
+
+    // Applying everything names every spec it could not read in one line, after
+    // their own warnings, each by its directory.
+    #[tokio::test]
+    async fn applying_everything_names_every_unreadable_spec_in_one_line() {
+        let dirs = TestDirs::new();
+        bat(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+        broken(&dirs.dotfiles_dir, "loose.yml");
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(
+            unchecked_lines(&events),
+            [vec![
+                spec_file(BaseKind::PackageDirectory, "broken.yml"),
+                spec_file(BaseKind::DotfilesDirectory, "loose.yml"),
+            ]],
+            "{events:?}"
+        );
+        assert_eq!(skipped_count(&events), 2, "{events:?}");
+        let line_at = events
+            .iter()
+            .position(|e| matches!(e, PackageEvent::CollisionsUnchecked { .. }))
+            .unwrap();
+        let last_skip = events
+            .iter()
+            .rposition(|e| matches!(e, PackageEvent::SpecSkipped { .. }))
+            .unwrap();
+        assert!(last_skip < line_at, "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn applying_everything_deploying_nothing_names_nothing() {
+        let dirs = TestDirs::new();
+        bat_without_dotfiles(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(unchecked_lines(&events).is_empty(), "{events:?}");
+    }
+
+    // A run stopped by `stop_on_error` deploys nothing, so no target went
+    // unchecked.
+    #[tokio::test]
+    async fn a_stopped_run_names_nothing_unchecked() {
+        let dirs = TestDirs::new().stopping_on_error(true);
+        let target = bat(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert!(
+            failure_message(&events).starts_with("Stopped before applying anything"),
+            "{events:?}"
+        );
+        assert!(!target.exists(), "{events:?}");
+        assert!(unchecked_lines(&events).is_empty(), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn drift_names_every_unreadable_spec_in_one_line() {
+        let dirs = TestDirs::new();
+        bat(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+        broken(&dirs.dotfiles_dir, "loose.yml");
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert_eq!(
+            unchecked_lines(&events),
+            [vec![
+                spec_file(BaseKind::PackageDirectory, "broken.yml"),
+                spec_file(BaseKind::DotfilesDirectory, "loose.yml"),
+            ]],
+            "{events:?}"
+        );
+        assert_eq!(skipped_count(&events), 2, "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn drift_checking_nothing_names_nothing() {
+        let dirs = TestDirs::new();
+        bat_without_dotfiles(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+
+        let events = collect_events(dirs.service().check_drift().await).await;
+
+        assert!(unchecked_lines(&events).is_empty(), "{events:?}");
+    }
+
+    // A package refused whole deploys nothing, so a run whose only entries are
+    // its own has no target to compare, whether it applies everything or that
+    // package by name, and whether it stops on the refusal or not.
+    #[tokio::test]
+    async fn a_package_refused_whole_names_nothing_unchecked() {
+        for stop_on_error in [false, true] {
+            let dirs = TestDirs::new().stopping_on_error(stop_on_error);
+            std::fs::write(dirs.package_dir.join("bat.conf"), "BAT").unwrap();
+            write_package_yaml(
+                &dirs.package_dir,
+                "bat",
+                &format!(
+                    "name: bat\nversion: 1\nenvironments:\n  test:\n    install: \"echo i\"\n\
+                     dotfiles:\n  - source: bat.conf\n    target: {}\n",
+                    dirs.target_dir.join("bat.conf").display()
+                ),
+            );
+            broken(&dirs.package_dir, "broken.yml");
+
+            let named =
+                collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+            let all = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+            let drift = collect_events(dirs.service().check_drift().await).await;
+
+            assert!(
+                named
+                    .iter()
+                    .any(|e| matches!(e, PackageEvent::PackagesRefused { .. })),
+                "bat must be refused whole: {named:?}"
+            );
+            assert!(unchecked_warnings(&named).is_empty(), "{named:?}");
+            assert!(unchecked_lines(&all).is_empty(), "{all:?}");
+            assert!(unchecked_lines(&drift).is_empty(), "{drift:?}");
+        }
+    }
+
+    // A named apply that refuses to start over a deploy state it cannot read
+    // deploys nothing, so it names nothing it could not check.
+    #[tokio::test]
+    async fn a_named_apply_refusing_an_unreadable_state_names_nothing() {
+        let dirs = TestDirs::new();
+        let target = bat(&dirs);
+        broken(&dirs.package_dir, "broken.yml");
+        std::fs::write(
+            dirs.state_dir.join("deploy-state.yml"),
+            "{{{{not valid yaml",
+        )
+        .unwrap();
+
+        let events =
+            collect_events(dirs.service().apply("bat", ApplyOptions::default()).await).await;
+
+        assert!(
+            failure_message(&events).contains("Cannot parse deploy state"),
+            "{events:?}"
+        );
+        assert!(!target.exists(), "{events:?}");
+        assert!(unchecked_warnings(&events).is_empty(), "{events:?}");
+    }
+
+    // Track names each place it could not check by full path, about the one file
+    // it tracks.
+    #[tokio::test]
+    async fn track_names_what_it_could_not_check_by_full_path() {
+        let dirs = TestDirs::new();
+        for (name, body) in [
+            (
+                "nv.yml",
+                "name: nv\nenvironments:\n  test:\n    install: \"echo i\"\n",
+            ),
+            (
+                "nv.yaml",
+                "name: nv\nenvironments:\n  test:\n    install: \"echo i\"\n",
+            ),
+        ] {
+            std::fs::write(dirs.package_dir.join(name), body).unwrap();
+        }
+        broken(&dirs.package_dir, "broken.yml");
+        let file = dirs.target_dir.join("tracked.conf");
+        std::fs::write(&file, "T").unwrap();
+
+        let events = collect_events(
+            dirs.service()
+                .track_standalone("trk", file.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        let this = "for an entry deploying this file";
+        assert_eq!(
+            unchecked_warnings(&events),
+            [
+                format!(
+                    "Could not check {} {this}: it could not be loaded",
+                    dirs.package_dir.join("broken.yml").display()
+                ),
+                format!(
+                    "Could not check {} and {} {this}: they all claim the name 'nv', so none of \
+                     them is used",
+                    dirs.package_dir.join("nv.yaml").display(),
+                    dirs.package_dir.join("nv.yml").display()
+                ),
+            ],
+            "{events:?}"
+        );
     }
 }
