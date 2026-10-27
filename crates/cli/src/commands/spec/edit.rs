@@ -40,8 +40,9 @@ pub(crate) async fn handle_edit(
         }
         Err(e) => {
             display.print_error(format!(
-                "Cannot edit '{package_name}': a file is already there and selfie could not use \
-                 it, so opening it as a new package would overwrite it. Edit it directly. {e}"
+                "Cannot edit '{package_name}': selfie could not use what already answers to \
+                 that name, and opens no new package beside it. Edit the existing file directly. \
+                 {e}"
             ));
             return Exit::Failed;
         }

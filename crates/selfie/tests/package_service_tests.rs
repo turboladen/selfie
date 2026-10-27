@@ -1199,6 +1199,10 @@ mod recommends_after_the_root_stops_loading {
             self.inner.save_package(package, path)
         }
 
+        fn create_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
+            self.inner.create_package(package, path)
+        }
+
         fn remove_package(&self, name: &str) -> Result<(), PackageRepoError> {
             self.inner.remove_package(name)
         }
@@ -3175,5 +3179,129 @@ async fn status_classifies_each_dependency_it_could_not_look_up() {
             name,
         ))) => assert_eq!(name.conflicting_paths().len(), 2, "{name:?}"),
         other => panic!("a name two files claim is ambiguous, got {other:?}"),
+    }
+}
+
+// `spec create` checks the new spec's path is free and then writes it. Whatever
+// appears there in between is the user's, and the write leaves it.
+mod a_spec_path_taken_during_create {
+    use std::os::unix::fs::MetadataExt as _;
+    use std::path::PathBuf;
+
+    use selfie::package::PackageBuilder;
+    use test_common::{
+        FakeCommandRunner, Plant, PlantsBeforeWrite, config::service_test_config_with_dir,
+        create_service_with_fs_and_runner,
+    };
+
+    use super::*;
+
+    // What a create saw when `plant` appeared at the spec path just before the
+    // write, after every check.
+    struct Created {
+        _dir: TempDir,
+        path: PathBuf,
+        fs: PlantsBeforeWrite,
+        events: Vec<PackageEvent>,
+    }
+
+    async fn create_with(plant: Plant) -> Created {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("myapp.yml");
+        let fs = PlantsBeforeWrite::new(&path, plant);
+        let service = create_service_with_fs_and_runner(
+            service_test_config_with_dir(dir.path()),
+            fs.clone(),
+            FakeCommandRunner::new(),
+        );
+        let package = PackageBuilder::default()
+            .name("myapp")
+            .environment("test", |b| b.install("true"))
+            .path(&path)
+            .build();
+        let events = collect_events(service.create(package).await).await;
+        assert!(
+            fs.planted(),
+            "control: the spec write was reached and the plant made"
+        );
+        Created {
+            _dir: dir,
+            path,
+            fs,
+            events,
+        }
+    }
+
+    // The failure a race reports: something appeared, nothing was written over it,
+    // and no claim about what it is. The occupant may be another create's spec for
+    // the same name, so neither "the name is free" nor "remove it" may appear.
+    fn assert_refused_as_appeared(created: &Created) {
+        let expected = format!(
+            "something appeared at {} while selfie was writing the spec there; nothing was \
+             written over it. Run the command again to see what is there.",
+            created.path.display()
+        );
+        match get_operation_result(&created.events) {
+            Some(OperationResult::Failure(failure @ OperationFailure::Generic(_))) => {
+                assert_eq!(failure.to_string(), expected);
+            }
+            other => panic!("an appeared spec must refuse the create, got {other:?}"),
+        }
+    }
+
+    // A file is kept byte for byte.
+    #[tokio::test]
+    async fn a_file_is_kept_and_the_create_refused() {
+        let created = create_with(Plant::File("name: someone-elses\n", 0o644)).await;
+
+        assert_refused_as_appeared(&created);
+        assert_eq!(
+            std::fs::read_to_string(&created.path).unwrap(),
+            "name: someone-elses\n"
+        );
+        assert_eq!(
+            created.fs.planted_inode(),
+            Some(std::fs::symlink_metadata(&created.path).unwrap().ino()),
+            "the planted spec was replaced by a file with the same bytes"
+        );
+    }
+
+    // A directory is kept.
+    #[tokio::test]
+    async fn a_directory_is_kept_and_the_create_refused() {
+        let created = create_with(Plant::Directory).await;
+
+        assert_refused_as_appeared(&created);
+        assert!(created.path.is_dir());
+        assert_eq!(std::fs::read_dir(&created.path).unwrap().count(), 0);
+    }
+
+    // A dangling link is refused as a link, with nothing created where it points.
+    #[tokio::test]
+    async fn a_dangling_link_is_refused_and_not_followed() {
+        let created = create_with(Plant::DanglingLink).await;
+        let path = &created.path;
+
+        match get_operation_result(&created.events) {
+            Some(OperationResult::Failure(failure)) => {
+                let said = failure.to_string();
+                assert!(
+                    said.contains(&format!("refusing to write {}", path.display()))
+                        && said.contains("it is a symlink"),
+                    "a dangling link must refuse as a link: {said}"
+                );
+            }
+            other => panic!("a dangling link must refuse the create, got {other:?}"),
+        }
+        assert!(
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            !path.with_extension("nowhere").exists(),
+            "the link's destination was created"
+        );
     }
 }

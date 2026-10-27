@@ -2942,7 +2942,8 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             | crate::package::port::PackageRepoError::UnknownTopLevelFields { .. }
             | crate::package::port::PackageRepoError::UncheckedTopLevel { .. }
             | crate::package::port::PackageRepoError::UnknownEnvironmentFields { .. }
-            | crate::package::port::PackageRepoError::UnwritablePath { .. }) => {
+            | crate::package::port::PackageRepoError::UnwritablePath { .. }
+            | crate::package::port::PackageRepoError::Occupied { .. }) => {
                 OperationFailure::Generic(err.to_string())
             }
         }

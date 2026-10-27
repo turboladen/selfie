@@ -6,7 +6,7 @@ use crate::config::{
 use selfie::{
     commands::shell::ShellCommandRunner,
     config::SelfieConfig,
-    fs::real::RealFileSystem,
+    fs::{FileSystem, real::RealFileSystem},
     package::{
         SpecOrigin, git_adapter::GixGitStatusProvider, repository::YamlPackageRepository,
         service::PackageServiceImpl,
@@ -35,13 +35,16 @@ pub fn create_test_service(
 // package directory, which for a package directory that is a tempdir's root
 // lands in the shared system temp directory, where another run's files would be
 // read as this test's.
-fn test_dotfiles_repository(config: &SelfieConfig) -> YamlPackageRepository<RealFileSystem> {
+fn test_dotfiles_repository<F: FileSystem>(
+    config: &SelfieConfig,
+    fs: F,
+) -> YamlPackageRepository<F> {
     let directory = if config.dotfiles_directory_is_expected() {
         config.dotfiles_directory()
     } else {
         config.package_directory().join("dotfiles")
     };
-    YamlPackageRepository::new(RealFileSystem, directory, SpecOrigin::DotfilesDirectory)
+    YamlPackageRepository::new(fs, directory, SpecOrigin::DotfilesDirectory)
 }
 
 /// Creates a test service with a specific configuration.
@@ -56,7 +59,7 @@ pub fn create_test_service_with_config(
 > {
     let runner =
         ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
-    service_with_runner(config, runner)
+    create_service_with_fs_and_runner(config, RealFileSystem, runner)
 }
 
 /// Creates a service over the package directory in `temp_dir`, in the "test"
@@ -69,7 +72,11 @@ pub fn create_service_test_service_with_runner<CR>(
 where
     CR: selfie::commands::runner::CommandRunner + Clone + Send + Sync + 'static,
 {
-    service_with_runner(service_test_config_with_dir(temp_dir.path()), runner)
+    create_service_with_fs_and_runner(
+        service_test_config_with_dir(temp_dir.path()),
+        RealFileSystem,
+        runner,
+    )
 }
 
 /// Creates a service with `config` that runs its commands through `runner`.
@@ -81,24 +88,27 @@ pub fn create_service_with_config_and_runner<CR>(
 where
     CR: selfie::commands::runner::CommandRunner + Clone + Send + Sync + 'static,
 {
-    service_with_runner(config, runner)
+    create_service_with_fs_and_runner(config, RealFileSystem, runner)
 }
 
-// The wiring every helper here shares: repositories over `config`'s directories,
-// and `runner` for commands.
-fn service_with_runner<CR>(
+/// Creates a service with `config` whose repositories read and write through
+/// `fs`, and that runs its commands through `runner`.
+#[must_use]
+pub fn create_service_with_fs_and_runner<F, CR>(
     config: SelfieConfig,
+    fs: F,
     runner: CR,
-) -> PackageServiceImpl<YamlPackageRepository<RealFileSystem>, CR, GixGitStatusProvider>
+) -> PackageServiceImpl<YamlPackageRepository<F>, CR, GixGitStatusProvider>
 where
+    F: FileSystem + Clone + 'static,
     CR: selfie::commands::runner::CommandRunner + Clone + Send + Sync + 'static,
 {
     let repo = YamlPackageRepository::new(
-        RealFileSystem,
+        fs.clone(),
         config.package_directory().clone(),
         SpecOrigin::PackageDirectory,
     );
-    let dotfiles_repo = test_dotfiles_repository(&config);
+    let dotfiles_repo = test_dotfiles_repository(&config, fs);
     PackageServiceImpl::new(
         repo,
         dotfiles_repo,
@@ -120,22 +130,11 @@ pub fn create_test_service_with_timeout(
     ShellCommandRunner,
     GixGitStatusProvider,
 > {
-    let config = test_config_with_dir(temp_dir.path());
-    let fs = RealFileSystem;
-    let repo = YamlPackageRepository::new(
-        fs,
-        config.package_directory().clone(),
-        SpecOrigin::PackageDirectory,
-    );
     let runner = ShellCommandRunner::new(ShellCommandRunner::default_shell(), timeout);
-    let dotfiles_repo = test_dotfiles_repository(&config);
-    PackageServiceImpl::new(
-        repo,
-        dotfiles_repo,
+    create_service_with_fs_and_runner(
+        test_config_with_dir(temp_dir.path()),
+        RealFileSystem,
         runner,
-        GixGitStatusProvider,
-        config,
-        CancellationToken::new(),
     )
 }
 

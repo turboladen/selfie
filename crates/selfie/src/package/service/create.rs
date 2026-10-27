@@ -49,9 +49,9 @@ where
 
     // Only a package that is genuinely absent may be created. Any other answer
     // means a file is there -- unparsable, refused, or ambiguous between two
-    // names -- and creating would write over it. `save_package`'s guards cannot
-    // help here: the package being written was built in memory, so it carries no
-    // top-level keys to refuse over (selfie-3p8a).
+    // names. The write below refuses only its own path, so this lookup is what
+    // finds a sibling with the other extension and names the problem
+    // (selfie-3p8a).
     match repo.get_package(&package_name) {
         Ok(existing) => {
             let error = crate::package::port::PackageError::PackageAlreadyExists {
@@ -77,8 +77,8 @@ where
         Err(e) => {
             sender
                 .send_warning(format!(
-                    "Refusing to create '{package_name}': something is already there that selfie \
-                     could not use, so creating would overwrite it. {e}"
+                    "Refusing to create '{package_name}': selfie could not use what already \
+                     answers to that name, and creates no new spec beside it. {e}"
                 ))
                 .await;
             return OperationResult::Failure(e.into());
@@ -155,7 +155,10 @@ where
 
     let file_path = package.path().to_path_buf();
 
-    if let Err(err) = repo.save_package(&package, &file_path) {
+    // Not over anything, within `IfPresent::Keep`'s guarantee: a file that appeared
+    // at the path since the check above is left in place, and the create fails
+    // saying so.
+    if let Err(err) = repo.create_package(&package, &file_path) {
         return OperationResult::Failure(err.into());
     }
 
@@ -306,7 +309,7 @@ mod tests {
             .into())
         });
         repo.expect_path_is_occupied().returning(|_| false);
-        repo.expect_save_package()
+        repo.expect_create_package()
             .times(saves)
             .returning(|_, _| Ok(()));
         repo
@@ -547,7 +550,7 @@ mod tests {
         });
         repo.expect_path_is_occupied().returning(|_| true);
         // The assertion that matters: nothing is written.
-        repo.expect_save_package().times(0);
+        repo.expect_create_package().times(0);
 
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 
@@ -595,10 +598,8 @@ mod tests {
         }
     }
 
-    // A file that is present but will not parse is not an absent package.
-    // Creating over it destroys what the user wrote, and `save_package`'s guards
-    // cannot catch it: the package being written was built in memory, so it has
-    // no top-level keys to refuse over.
+    // A file that is present but will not parse is not an absent package. The
+    // lookup refuses it, before anything is written.
     #[tokio::test]
     async fn create_refuses_when_a_file_is_there_but_cannot_be_read() {
         let (_temp, config, package) = fixture();
@@ -610,7 +611,7 @@ mod tests {
         repo.expect_get_package()
             .returning(|_| Err(a_real_parse_error().into()));
         // The assertion that matters: nothing is written.
-        repo.expect_save_package().times(0);
+        repo.expect_create_package().times(0);
 
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 
@@ -640,7 +641,9 @@ mod tests {
             }
             .into())
         });
-        repo.expect_save_package().times(1).returning(|_, _| Ok(()));
+        repo.expect_create_package()
+            .times(1)
+            .returning(|_, _| Ok(()));
 
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 
@@ -695,7 +698,7 @@ mod tests {
         let mut repo = MockPackageRepository::new();
         repo.expect_get_package().times(0);
         repo.expect_path_is_occupied().times(0);
-        repo.expect_save_package().times(0);
+        repo.expect_create_package().times(0);
         repo
     }
 
@@ -808,7 +811,7 @@ mod tests {
             }
         });
         repo.expect_path_is_occupied().returning(|_| false);
-        repo.expect_save_package().times(0);
+        repo.expect_create_package().times(0);
 
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 
@@ -866,7 +869,9 @@ mod tests {
                 crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Empty),
             )))
         });
-        repo.expect_save_package().times(1).returning(|_, _| Ok(()));
+        repo.expect_create_package()
+            .times(1)
+            .returning(|_, _| Ok(()));
 
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 
@@ -897,7 +902,7 @@ mod tests {
         repo.expect_path_is_occupied().times(0);
         // The assertion that matters: the write that would reach `create_dir_all`
         // never happens.
-        repo.expect_save_package().times(0);
+        repo.expect_create_package().times(0);
 
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 

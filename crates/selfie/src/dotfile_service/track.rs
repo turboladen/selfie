@@ -333,8 +333,12 @@ fn copy_fate(copy: &Path, removal: &CopyRemoval) -> String {
 // counting rather than by checking presence, so a variant that stops naming the
 // spec fails a test instead of going quiet.
 fn spec_save_failure(error: &PackageRepoError, copy: &Path, removal: &CopyRemoval) -> String {
+    // Several errors end their own sentence, so the frame does not add a second
+    // period. Only one is stripped: an error ending in an ellipsis keeps it.
+    let error = error.to_string();
     format!(
-        "Cannot save the spec: {error}. {}",
+        "Cannot save the spec: {}. {}",
+        error.strip_suffix('.').unwrap_or(&error),
         copy_fate(copy, removal)
     )
 }
@@ -794,7 +798,7 @@ where
 
     // Only for a spec this track would create. The other kind was loaded from
     // this path, so something being there is what was expected.
-    if matches!(spec.kind, SpecKind::New) && filesystem.path_exists(&spec.spec_path) {
+    if matches!(spec.kind, SpecKind::New) && repo.path_is_occupied(&spec.spec_path) {
         // Says what was checked: this one path. A spec under the same name with
         // another extension is the name checks' to find, not this guard's.
         return OperationResult::Failure(OperationFailure::Generic(format!(
@@ -874,7 +878,14 @@ where
     spec.package
         .add_dotfile(DotfileEntry::new(&relative_source, &recorded_target));
 
-    if let Err(e) = repo.save_package(&spec.package, &spec.spec_path) {
+    // A new spec is created, not written over, within `IfPresent::Keep`'s
+    // guarantee: one that appeared since the check above is left in place, and the
+    // save fails.
+    let saved = match spec.kind {
+        SpecKind::New => repo.create_package(&spec.package, &spec.spec_path),
+        SpecKind::Existing => repo.save_package(&spec.package, &spec.spec_path),
+    };
+    if let Err(e) = saved {
         // Only the file, and only selfie's own. `remove_own_copy` establishes the
         // second by content; the directory is the part selfie leaves, because it
         // cannot tell one it created from one that was already there and an empty
@@ -1185,6 +1196,28 @@ mod tests {
         assert!(
             survived.contains("Remove it before retrying"),
             "the remedy is missing: {survived}"
+        );
+        // The error's own sentence ends in a period, and the frame adds none.
+        assert!(!removed.contains(".."), "a doubled period: {removed}");
+    }
+
+    // Only the one period the frame would double is dropped: an error ending in an
+    // ellipsis keeps it whole.
+    #[test]
+    fn a_failed_spec_save_keeps_an_ellipsis_the_error_ends_with() {
+        let error = PackageRepoError::FileSystemError(FileSystemError::IoError(
+            std::sync::Arc::new(std::io::Error::other("the disk filled up...")),
+        ));
+
+        let message = spec_save_failure(
+            &error,
+            Path::new("/dotfiles/gemrc/gemrc"),
+            &CopyRemoval::Removed,
+        );
+
+        assert!(
+            message.contains("the disk filled up... The copy"),
+            "the ellipsis was cut: {message}"
         );
     }
 

@@ -31,7 +31,8 @@ pub trait PackageRepository: Send + Sync {
     /// the definition is malformed, or if file system access fails.
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError>;
 
-    /// Whether anything already occupies `path`.
+    /// Whether anything already occupies `path`, including a symlink whether or
+    /// not it resolves.
     ///
     /// Asked of the path, not of a package name: a caller about to write to
     /// `path` needs to know whether that write would land on something, and
@@ -77,13 +78,33 @@ pub trait PackageRepository: Send + Sync {
     /// [`PackageListError`] if the package directory cannot be accessed.
     fn find_package_files(&self, name: &str) -> Result<Vec<PathBuf>, PackageListError>;
 
-    /// Serialize a package and write it to `path`.
+    /// Serialize a package and write it to `path`, replacing whatever is there.
+    ///
+    /// For rewriting a spec that was loaded from `path`. A new spec goes through
+    /// [`Self::create_package`], which leaves what it finds, within the guarantee
+    /// it states.
     ///
     /// # Errors
     ///
     /// [`PackageRepoError`] if the package cannot be serialized to YAML, or if
     /// the target directory does not exist or cannot be written to.
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError>;
+
+    /// Serialize a new package and write it to `path`, where nothing is.
+    ///
+    /// Whatever is at `path` when the write lands is left as it is, and the
+    /// package is not written. Where the storage cannot refuse an existing name
+    /// atomically, something appearing in a short window just before the write
+    /// may still be replaced.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageRepoError::Occupied`] if a file or directory is at `path`. A
+    /// symlink, fifo, socket or device node there is refused as
+    /// [`PackageRepoError::UnwritablePath`]. A package carrying keys selfie does
+    /// not model is refused as [`Self::save_package`] refuses it, in the same
+    /// words, which speak of a rewrite. Otherwise as [`Self::save_package`].
+    fn create_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError>;
 
     /// Delete a package's definition file. Irreversible, so confirm with the user
     /// before calling it.
@@ -264,6 +285,21 @@ pub enum PackageRepoError {
         /// What was found there, phrased to follow a colon.
         reason: String,
     },
+
+    /// Refused to create a package file because something is already at its
+    /// path. What is there is left as it is.
+    // Never says "target", for the reason `UnwritablePath` gives. Worded for what
+    // reaches it: every caller finds the path free first, so the occupant arrived
+    // during the write, and whether it is a spec for the same name is unknown. So
+    // it gives no remedy beyond looking.
+    #[error(
+        "something appeared at {path} while selfie was writing the spec there; nothing was \
+         written over it. Run the command again to see what is there."
+    )]
+    Occupied {
+        /// The package file selfie declined to create.
+        path: PathBuf,
+    },
 }
 
 impl From<Arc<std::io::Error>> for PackageRepoError {
@@ -391,7 +427,7 @@ impl PackageRepoError {
             // `create_dir_all` fails against it, so it is not "no such package".
             Self::PackageListError(listing) if listing.may_be_created() => Some(Lookup::NotFound),
             Self::PackageListError(_) => Some(Lookup::PackageDirectoryUnreadable),
-            // Raised by `save_package`, never by a lookup.
+            // Raised by `save_package` or `create_package`, never by a lookup.
             Self::IoError(_)
             | Self::Unserializable(_)
             | Self::UnknownDotfileFields { .. }
@@ -399,6 +435,7 @@ impl PackageRepoError {
             | Self::UncheckedTopLevel { .. }
             | Self::UnknownEnvironmentFields { .. }
             | Self::UnwritablePath { .. }
+            | Self::Occupied { .. }
             // Raised by `dotfiles track`, never by a lookup.
             | Self::FileSystemError(_) => None,
         }
