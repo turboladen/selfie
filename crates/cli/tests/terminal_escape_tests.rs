@@ -96,6 +96,16 @@ fn torture() -> tempfile::TempDir {
         format!("name: loose\ndotfiles:\n  - source: loose.conf\n    target: \"~/.lo{HOSTILE}\"\n"),
     )
     .unwrap();
+    // A target that already holds other content, so apply shows a conflict
+    // diff of the source's content, tab and escape sequence included.
+    fs::write(
+        home.join(
+            ".t\u{1b}[2J\u{1b}]0;pwn\u{7}\u{202E}\u{200B}\u{E0041}\u{FE0F}\
+             q\u{1b}[31mq\u{1b}[2mq\u{1b}[30mq\u{1b}[90mq\u{1b}[8mz",
+        ),
+        "other\n",
+    )
+    .unwrap();
     // A file to track, whose name carries the escape sequence.
     fs::write(home.join("track\u{1b}[2Jme"), "tracked\n").unwrap();
     git(&packages, &["init", "--quiet"]);
@@ -231,12 +241,8 @@ fn without_log_lines(output: &str) -> String {
 // Each command, what it must show escaped to prove it reached the fixture, and
 // whether its output may hold a tab (a diff of content that has one).
 const COMMANDS: &[(&[&str], &str, bool)] = &[
-    (&["apply", "--dry-run"], r"src\u{1b}[2Jfile", false),
-    (
-        &["apply", "torture", "--dry-run"],
-        r"src\u{1b}[2Jfile",
-        false,
-    ),
+    (&["apply", "--dry-run"], r"+line\u{1b}[2J", true),
+    (&["apply", "torture", "--dry-run"], r"+line\u{1b}[2J", true),
     // A path is a name, so even what renders as nothing in prose is escaped.
     (
         &["dotfiles", "list"],
@@ -290,7 +296,7 @@ const COMMANDS: &[(&[&str], &str, bool)] = &[
         r".lo\u{1b}[2J\u{1b}]0;pwn\u{7}\u{202e}\u{200b}",
         true,
     ),
-    (&["apply"], r"bad\u{1b}[2Jname", false),
+    (&["apply"], r"+line\u{1b}[2J", true),
     (
         &["dotfiles", "track", "trk", "~/track\u{1b}[2Jme"],
         r"track\u{1b}[2Jme",
@@ -435,6 +441,95 @@ fn a_refusal_naming_a_hostile_path_shows_it_escaped() {
     assert!(
         stderr.contains(r"esc/a\u{1b}[2Jb") && stderr.contains(r".esc\u{1b}[2J"),
         "{stderr}"
+    );
+}
+
+// A conflict's diff shows each line of content with its escape sequences as
+// escapes and its tabs as tabs, and a content line starting `-- ` or `++ ` as
+// content, not as a header.
+#[test]
+fn a_conflict_diff_shows_content_escaped_with_tabs() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::write(
+        packages.join("conf"),
+        "one\u{1b}[2J\u{200B}\tx\n-- removed looks like a header\n++ added looks like one too\n",
+    )
+    .unwrap();
+    fs::write(
+        packages.join("conf.yaml"),
+        format!(
+            "name: conf\ndotfiles:\n  - source: conf\n    target: \"~/.conf\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join(".conf"),
+        "other\n-- gone looks like a header too\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "apply", "--dry-run"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
+    // Content is escaped as a name is, so a character that renders as nothing
+    // still shows, while its tab stays a tab.
+    assert!(stdout.contains("+one\\u{1b}[2J\\u{200b}\tx"), "{stdout}");
+    // One rule under the file names and one closing the diff. A content line
+    // taken for a `+++ ` header draws another.
+    let rules = stdout
+        .lines()
+        .filter(|line| line.trim_start().starts_with("──"))
+        .count();
+    assert_eq!(rules, 2, "{stdout}");
+    assert!(
+        stdout.contains("  --- gone looks like a header too\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("+-- removed looks like a header"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("+++ added looks like one too"), "{stdout}");
+}
+
+// A target whose name holds a line break keeps its diff header on one line,
+// so the rest of the name cannot pass for a hunk.
+#[test]
+fn a_diff_header_naming_a_line_break_stays_on_its_line() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::write(packages.join("nl"), "new\n").unwrap();
+    fs::write(
+        packages.join("nl.yaml"),
+        format!(
+            "name: nl\ndotfiles:\n  - source: nl\n    target: \"~/.nl\\n@@ -9 +9 @@\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(temp.path().join(".nl\n@@ -9 +9 @@"), "old\n").unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "apply", "--dry-run"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.lines().any(
+            |line| line.trim_start().starts_with("--- ") && line.ends_with(r".nl\n@@ -9 +9 @@")
+        ),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line.trim() == "@@ -9 +9 @@"),
+        "{stdout}"
     );
 }
 

@@ -200,6 +200,12 @@ impl Shown {
         Self::indented(Self(escape_prose(text).into_owned()), "  ")
     }
 
+    /// `line`, a line of file content, escaped as [`escape_keeping_tabs`]
+    /// escapes it.
+    pub(crate) fn content(line: &str) -> Self {
+        Self(escape_keeping_tabs(line).into_owned())
+    }
+
     /// `items`, names, each escaped as [`Shown::name`] escapes it, joined by
     /// `separator`.
     pub(crate) fn joined<S: AsRef<str>>(

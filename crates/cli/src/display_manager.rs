@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::event_processor::Exit;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
-    Shown, escape, escape_prose, escape_prose_keeping_tabs, guard, printable, shown,
+    Paint, Shown, escape, escape_prose, escape_prose_keeping_tabs, guard, printable, shown,
 };
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
@@ -326,6 +326,9 @@ pub struct DisplayManager {
     // which a test in this process cannot read back.
     #[cfg(test)]
     printed: Arc<Mutex<Vec<(Channel, String)>>>,
+    // How many times `draw` wrote, so a test can see a block written as one.
+    #[cfg(test)]
+    draws: Arc<std::sync::atomic::AtomicUsize>,
     // stderr is a terminal, so a prompt can be drawn and answered.
     #[cfg_attr(test, expect(dead_code, reason = "a test answers from `script`"))]
     can_prompt: bool,
@@ -393,6 +396,8 @@ impl DisplayManager {
             block: Arc::new(Mutex::new(())),
             #[cfg(test)]
             printed: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            draws: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             can_prompt: draws_spinner,
             cancellation: None,
             #[cfg(test)]
@@ -926,55 +931,60 @@ impl DisplayManager {
     /// Colors: `---` red, `+++` green, `@@` cyan, `-` red, `+` green,
     /// context dim, separator dim. Paths shortened with `~`.
     pub(crate) fn print_diff(&self, diff: &str) {
-        for line in diff.lines() {
-            self.record_stdout(line);
-        }
         const SEPARATOR: &str =
             "──────────────────────────────────────────────────────────────────────";
 
-        self.mp.suspend(|| {
-            let mut printed_separator = false;
-
-            for line in diff_lines(diff) {
-                if self.use_colors {
-                    match line {
-                        DiffLine::OldFile(rest) => {
-                            println!("  {}", style(format!("--- {}", shorten_path(rest))).red());
-                        }
-                        DiffLine::NewFile(rest) => {
-                            println!("  {}", style(format!("+++ {}", shorten_path(rest))).green());
-                            println!("  {}", style(SEPARATOR).dim());
-                            printed_separator = true;
-                        }
-                        DiffLine::Hunk(line) => println!("  {}", style(line).cyan()),
-                        DiffLine::Removed(line) => println!("  {}", style(line).red()),
-                        DiffLine::Added(line) => println!("  {}", style(line).green()),
-                        DiffLine::Context(line) => println!("  {}", style(line).dim()),
-                    }
-                } else {
-                    match line {
-                        DiffLine::OldFile(rest) => println!("  --- {}", shorten_path(rest)),
-                        DiffLine::NewFile(rest) => {
-                            println!("  +++ {}", shorten_path(rest));
-                            println!("  {SEPARATOR}");
-                            printed_separator = true;
-                        }
-                        DiffLine::Hunk(line)
-                        | DiffLine::Removed(line)
-                        | DiffLine::Added(line)
-                        | DiffLine::Context(line) => println!("  {line}"),
-                    }
+        // Each line is file content, so a tab stays a tab and everything else
+        // that could act on the terminal shows as an escape.
+        let mut rows: Vec<(Shown, Paint)> = Vec::new();
+        let mut printed_separator = false;
+        for line in diff_lines(diff) {
+            match line {
+                DiffLine::OldFile(rest) => {
+                    rows.push((shown!("--- {}", shorten_path(rest)), |s| s.red()));
                 }
+                DiffLine::NewFile(rest) => {
+                    rows.push((shown!("+++ {}", shorten_path(rest)), |s| s.green()));
+                    rows.push((Shown::from(SEPARATOR), |s| s.dim()));
+                    printed_separator = true;
+                }
+                DiffLine::Hunk(line) => rows.push((Shown::content(line), |s| s.cyan())),
+                DiffLine::Removed(line) => rows.push((Shown::content(line), |s| s.red())),
+                DiffLine::Added(line) => rows.push((Shown::content(line), |s| s.green())),
+                DiffLine::Context(line) => rows.push((Shown::content(line), |s| s.dim())),
             }
+        }
+        if printed_separator {
+            rows.push((Shown::from(SEPARATOR), |s| s.dim()));
+        }
 
-            if printed_separator {
-                if self.use_colors {
-                    println!("  {}", style(SEPARATOR).dim());
-                } else {
-                    println!("  {SEPARATOR}");
-                }
+        // Written in one suspend, so no other line lands between two rows of
+        // the diff and a spinner does not redraw between them.
+        let colors = self.stdout_colors();
+        let rendered: Vec<String> = rows
+            .into_iter()
+            .map(|(text, paint)| {
+                let row = shown!("  {}", text.paint(self.use_colors, paint));
+                guard(row.as_str(), colors).into_owned()
+            })
+            .collect();
+        for row in &rendered {
+            self.record_stdout(row);
+        }
+        self.draw(|| {
+            for row in &rendered {
+                println!("{row}");
             }
         });
+    }
+
+    // Write with nothing else drawing on the terminal, counting the writes
+    // under test so that a test can see a block written as one.
+    fn draw<R>(&self, write: impl FnOnce() -> R) -> R {
+        #[cfg(test)]
+        self.draws
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.mp.suspend(write)
     }
 
     /// Ask `prompt` on the terminal, with nothing else drawing on it until the
@@ -1629,6 +1639,17 @@ mod tests {
                 .any(|(_, line)| line.starts_with(&format!("✓ {shown} ("))),
             "{ended:?}"
         );
+    }
+
+    // A diff is written in one draw, so no other line lands between its rows.
+    #[test]
+    fn a_diff_is_written_in_one_draw() {
+        let display = DisplayManager::new(false);
+
+        display.print_diff("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n");
+
+        assert_eq!(display.draws.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(display.printed().len(), 7, "{:?}", display.printed());
     }
 
     // A content line that starts like a file header is content once the first
