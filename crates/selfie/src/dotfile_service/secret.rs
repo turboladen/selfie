@@ -772,7 +772,10 @@ where
         } else {
             self.apply
                 .sender
-                .send_warning(appeared::warning(&self.target.path))
+                .send_warning(appeared::warning(
+                    &self.target.path,
+                    appeared::During::Write,
+                ))
                 .await;
         }
         SecretOutcome::Skipped
