@@ -20,7 +20,6 @@ use selfie::{
     fs::RealFileSystem,
     package::{
         event::{CheckResult, OperationResult, OperationSuccess, PackageEvent},
-        git_adapter::GixGitStatusProvider,
         repository::YamlPackageRepository,
         service::{InstallOptions, PackageService, PackageServiceImpl},
     },
@@ -53,7 +52,7 @@ fn service(temp: &TempDir, runner: FakeCommandRunner) -> impl PackageService {
             SpecOrigin::DotfilesDirectory,
         ),
         runner,
-        GixGitStatusProvider,
+        test_common::isolated_git_adapter(),
         config,
         CancellationToken::new(),
     )

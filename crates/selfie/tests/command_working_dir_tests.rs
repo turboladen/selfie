@@ -14,7 +14,6 @@ use selfie::{
             AuditResult, CheckResult, EnvironmentStatus, OperationFailure, OperationResult,
             PackageEvent,
         },
-        git_adapter::GixGitStatusProvider,
         repository::YamlPackageRepository,
         service::{InstallOptions, PackageService, PackageServiceImpl},
     },
@@ -64,7 +63,7 @@ fn service_with_token<CR: CommandRunner + Clone + std::fmt::Debug + 'static>(
             SpecOrigin::DotfilesDirectory,
         ),
         runner,
-        GixGitStatusProvider,
+        test_common::isolated_git_adapter(),
         config,
         token,
     )

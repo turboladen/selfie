@@ -9,6 +9,7 @@ use selfie::{
     commands::ShellCommandRunner,
     config::{Overrides, YamlLoader, loader::ConfigLoader},
     fs::RealFileSystem,
+    git::GixGitAdapter,
     package::{
         SpecOrigin, git_adapter::GixGitStatusProvider, repository::yaml::YamlPackageRepository,
         service::PackageServiceImpl,
@@ -94,7 +95,7 @@ async fn async_main() -> Result<()> {
         repo,
         server::dotfiles_repository(&config),
         runner,
-        GixGitStatusProvider,
+        GixGitStatusProvider::default(),
         config.clone(),
         // A fresh token, deliberately: an MCP server has no signal handler and no
         // interactive user to press Ctrl+C, so there is nothing to cancel with.
@@ -103,7 +104,8 @@ async fn async_main() -> Result<()> {
         CancellationToken::new(),
     );
 
-    let mcp_server = server::SelfieServer::new(service, config, ignored_keys);
+    let mcp_server =
+        server::SelfieServer::new(service, config, ignored_keys, GixGitAdapter::default());
 
     let (stdin, stdout) = stdio();
     let service = mcp_server.serve((stdin, stdout)).await?;

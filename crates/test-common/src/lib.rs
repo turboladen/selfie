@@ -7,6 +7,7 @@ pub mod config;
 pub mod constants;
 pub mod events;
 pub mod fixtures;
+pub mod git;
 pub mod locked;
 pub mod package;
 pub mod plant;
@@ -32,6 +33,7 @@ pub use fixtures::{
     create_service_test_package_file_with_behavior, create_service_test_package_file_with_deps,
     create_test_package_file,
 };
+pub use git::{isolated_git, isolated_git_adapter};
 pub use locked::LockedDir;
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use plant::{PLANTED, Plant, PlantsBeforeWrite};
