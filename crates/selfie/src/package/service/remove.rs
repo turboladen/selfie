@@ -95,7 +95,7 @@ where
     // Step 3: Remove the package
     progress.next(sender, "Removing package file").await;
 
-    if let Err(err) = repo.remove_package(package_name) {
+    if let Err(err) = repo.remove_package(get_package.package()) {
         return OperationResult::Failure(err.into());
     }
 

@@ -116,14 +116,14 @@ pub trait PackageRepository: Send + Sync {
     /// words, which speak of a rewrite. Otherwise as [`Self::save_package`].
     fn create_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError>;
 
-    /// Delete a package's definition file. Irreversible, so confirm with the user
-    /// before calling it.
+    /// Delete the definition file `package` was loaded from. Irreversible, so
+    /// confirm with the user before calling it.
     ///
     /// # Errors
     ///
-    /// [`PackageRepoError`] if the package does not exist, permission is denied,
-    /// or the deletion otherwise fails.
-    fn remove_package(&self, name: &str) -> Result<(), PackageRepoError>;
+    /// [`PackageRepoError`] if permission is denied or the deletion otherwise
+    /// fails.
+    fn remove_package(&self, package: &Package) -> Result<(), PackageRepoError>;
 
     /// Every package listing `target_package` as a dependency in any of its
     /// environments, so a caller can say what a removal would break, paired with

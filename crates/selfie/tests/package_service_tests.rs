@@ -1202,8 +1202,8 @@ mod recommends_after_the_root_stops_loading {
             self.inner.create_package(package, path)
         }
 
-        fn remove_package(&self, name: &str) -> Result<(), PackageRepoError> {
-            self.inner.remove_package(name)
+        fn remove_package(&self, package: &Package) -> Result<(), PackageRepoError> {
+            self.inner.remove_package(package)
         }
 
         fn find_dependent_packages(

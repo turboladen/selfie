@@ -332,23 +332,6 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_operation_error_codes() {
-        let mut mock_fs = MockFileSystem::default();
-        let package_dir = PathBuf::from("/test/packages");
-
-        mock_fs.mock_directories_exist();
-        mock_fs.mock_path_exists(&package_dir, true);
-        mock_fs.mock_list_directory(&package_dir, &[]);
-
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&package_dir));
-        let repo = common::create_package_repository_with_fs(&config, mock_fs);
-
-        use selfie::package::port::PackageRepository;
-        let result = repo.remove_package("nonexistent-package");
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_remove_package_with_dependencies_mock_fs() {
         let mut mock_fs = MockFileSystem::default();
         mock_fs.mock_no_irregular_files();

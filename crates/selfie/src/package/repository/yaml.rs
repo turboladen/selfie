@@ -522,13 +522,8 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         }
     }
 
-    fn remove_package(&self, name: &str) -> Result<(), PackageRepoError> {
-        // First, get the package to find its file path
-        let package_blob = self.get_package(name)?;
-
-        // Remove the file from the file system
-        self.fs.remove_file(&package_blob.file_path)?;
-
+    fn remove_package(&self, package: &Package) -> Result<(), PackageRepoError> {
+        self.fs.remove_file(package.path())?;
         Ok(())
     }
 
@@ -3099,37 +3094,11 @@ environments:
         fs.mock_remove_file(&package_path);
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+        let loaded = repo.get_package(package_name).unwrap();
 
         // Test removing the package
-        let result = repo.remove_package(package_name);
+        let result = repo.remove_package(loaded.package());
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_remove_package_not_found() {
-        let mut fs = MockFileSystem::default();
-        fs.mock_directories_exist();
-        let package_dir = PathBuf::from("/test/packages");
-        let package_name = "nonexistent-package";
-
-        // Mock get_package to return package not found
-        fs.expect_path_exists()
-            .with(mockall::predicate::eq(package_dir.clone()))
-            .returning(|_| true);
-
-        fs.expect_list_directory()
-            .with(mockall::predicate::eq(package_dir.clone()))
-            .returning(|_| Ok(vec![])); // No packages found
-
-        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
-
-        // Test removing non-existent package should fail
-        let result = repo.remove_package(package_name);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            PackageRepoError::PackageError(_)
-        ));
     }
 
     #[test]
@@ -3176,9 +3145,10 @@ environments:
             });
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+        let loaded = repo.get_package(package_name).unwrap();
 
         // Test removing package should fail due to filesystem error
-        let result = repo.remove_package(package_name);
+        let result = repo.remove_package(loaded.package());
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
