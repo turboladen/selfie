@@ -323,7 +323,9 @@ macro_rules! trusted {
 // A `SafeTable` escapes every cell not built from a `Shown`, so a rendered
 // table may be printed.
 trusted!(Shown, DisplayPath, Literal, crate::tables::SafeTable);
-trusted!(u8, u16, u32, u64, usize, i32, i64, f64);
+trusted!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+);
 impl<T: Trusted + ?Sized> sealed::TerminalTextSeal for &T {}
 impl<T: Trusted + ?Sized> Trusted for &T {}
 
@@ -332,37 +334,37 @@ pub(crate) fn trusted<T: Trusted>(value: T) -> T {
     value
 }
 
-// Whether `format` names an argument inline, as `{name}` does. Such an
-// argument is captured by `format!` without passing through `trusted`, so
-// `shown!` refuses the format at compile time.
+// Whether every placeholder in `format` is `{}`, with `{{` as a literal brace.
+// Any other placeholder can bring in a value `trusted` never saw: `{name}`
+// captures a variable, and a width or precision argument such as `{:w$}` or
+// `{:.*}` is read without the check. An index such as `{0}` is refused too,
+// so the rule stays one a reader can check by eye.
 #[doc(hidden)]
-pub(crate) const fn has_inline_argument(format: &str) -> bool {
+pub(crate) const fn only_empty_placeholders(format: &str) -> bool {
     let bytes = format.as_bytes();
     let mut i = 0;
-    while i + 1 < bytes.len() {
+    while i < bytes.len() {
         if bytes[i] == b'{' {
-            let next = bytes[i + 1];
-            if next == b'{' {
-                i += 2;
-                continue;
+            if i + 1 == bytes.len() || (bytes[i + 1] != b'{' && bytes[i + 1] != b'}') {
+                return false;
             }
-            if next == b'_' || next.is_ascii_alphabetic() {
-                return true;
-            }
+            i += 2;
+        } else {
+            i += 1;
         }
-        i += 1;
     }
-    false
+    true
 }
 
-/// Format a [`Shown`] from [`Trusted`] arguments, given by position.
+/// Format a [`Shown`] from [`Trusted`] arguments, each placed by a `{}`.
 ///
-/// A format naming an argument inline, such as `{name}`, does not compile.
+/// A format with any other placeholder, such as `{name}`, `{0}`, `{:>4}` or
+/// `{:.2}`, does not compile. `{{` and `}}` are literal braces.
 macro_rules! shown {
     ($format:literal $(, $argument:expr)* $(,)?) => {{
         const _: () = assert!(
-            !$crate::terminal_text::has_inline_argument($format),
-            "shown! takes its arguments by position, so each is checked as Trusted"
+            $crate::terminal_text::only_empty_placeholders($format),
+            "shown! takes only {{}} placeholders, so each argument is checked as Trusted"
         );
         $crate::terminal_text::Shown::__assembled(format!(
             $format $(, $crate::terminal_text::trusted(&$argument))*
@@ -649,15 +651,34 @@ mod tests {
         assert_eq!(Shown::block("  a\n  b\u{1b}"), "  a\n  b\\u{1b}");
     }
 
-    // `shown!` refuses a format that names an argument inline, which would
-    // bypass the check that every argument is Trusted.
+    // `shown!` accepts only `{}`: any other placeholder can capture a value
+    // that never passed the check that every argument is Trusted.
     #[test]
-    fn a_format_naming_an_argument_inline_is_found() {
-        assert!(has_inline_argument("{name}"));
-        assert!(has_inline_argument("a {x:>4} b"));
-        assert!(has_inline_argument("{_x}"));
-        assert!(!has_inline_argument("{} {:>4} {0}"));
-        assert!(!has_inline_argument("{{name}} {}"));
+    fn only_empty_placeholders_are_accepted() {
+        let cases = [
+            ("", true),
+            ("plain", true),
+            ("{}", true),
+            ("a {} b {}", true),
+            ("{{}}", true),
+            ("{{name}} {}", true),
+            ("}}{{", true),
+            ("{{{}}}", true),
+            ("{name}", false),
+            ("{_x}", false),
+            ("{é}", false),
+            ("{0}", false),
+            ("{:>4}", false),
+            ("{:w$}", false),
+            ("{:.2}", false),
+            ("{:?}", false),
+            ("{ }", false),
+            ("{{{x}}}", false),
+            ("a {", false),
+        ];
+        for (format, accepted) in cases {
+            assert_eq!(only_empty_placeholders(format), accepted, "{format:?}");
+        }
     }
 
     // Escaped text has nothing left to escape, so a path escaped as a
