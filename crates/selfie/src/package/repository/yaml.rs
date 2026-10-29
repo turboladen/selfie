@@ -169,6 +169,40 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         matches
     }
 
+    // Returns the one file `name` names, or why there is not exactly one: nothing answers
+    // to it, or several files do.
+    fn resolve(&self, name: &str) -> Result<PathBuf, PackageRepoError> {
+        let search_patterns = vec![format!("{}.yml", name), format!("{}.yaml", name)];
+
+        let entries = list_spec_directory(&self.fs, &self.package_dir)?;
+        let files_examined = entries.len();
+        let mut package_files = Self::filter_matching_packages(name, &entries);
+
+        if package_files.is_empty() {
+            return Err(PackageError::PackageNotFound {
+                name: name.to_string(),
+                packages_path: self.package_dir.clone(),
+                files_examined,
+                search_patterns,
+                declared_by: Vec::new(),
+            }
+            .into());
+        }
+
+        if package_files.len() > 1 {
+            return Err(PackageError::MultiplePackagesFound {
+                name: name.to_string(),
+                packages_path: self.package_dir.clone(),
+                conflicting_paths: package_files,
+                files_examined,
+                search_patterns,
+            }
+            .into());
+        }
+
+        Ok(package_files.swap_remove(0))
+    }
+
     // The only read of a package file in the crate, and the only place the
     // irregular-file guard has to sit. Reading a fifo blocks until a writer
     // arrives, so one `mkfifo ghost.yml` in the package directory wedges every
@@ -441,43 +475,14 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn get_package(&self, name: &str) -> Result<GetPackage, PackageRepoError> {
-        let search_patterns = vec![format!("{}.yml", name), format!("{}.yaml", name)];
-
-        let entries = list_spec_directory(&self.fs, &self.package_dir)?;
-        let files_examined = entries.len();
-        let package_files = Self::filter_matching_packages(name, &entries);
-
-        if package_files.is_empty() {
-            return Err(PackageError::PackageNotFound {
-                name: name.to_string(),
-                packages_path: self.package_dir.clone(),
-                files_examined,
-                search_patterns,
-                declared_by: Vec::new(),
-            }
-            .into());
-        }
-
-        if package_files.len() > 1 {
-            return Err(PackageError::MultiplePackagesFound {
-                name: name.to_string(),
-                packages_path: self.package_dir.clone(),
-                conflicting_paths: package_files,
-                files_examined,
-                search_patterns,
-            }
-            .into());
-        }
-
-        let package_file = &package_files[0];
-
+        let package_file = self.resolve(name)?;
         let package = self
-            .load_package_from_file(package_file)
+            .load_package_from_file(&package_file)
             .map_err(|source| {
-                PackageError::unloadable(name, &self.package_dir, package_file, source)
+                PackageError::unloadable(name, &self.package_dir, &package_file, source)
             })?;
 
-        Ok(GetPackage::from_existing(package, package_file.clone()))
+        Ok(GetPackage::from_existing(package, package_file))
     }
 
     fn list_packages(&self) -> Result<ListPackagesOutput, PackageListError> {
