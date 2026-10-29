@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use selfie::fs::{
     DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent, OpenRefusal, Placed,
-    RealFileSystem, RepositoryRead, TargetPath, TargetRead,
+    RealFileSystem, Removal, RepositoryRead, TargetPath, TargetRead,
 };
 
 /// A high-entropy value standing in for another tool's own credential, written at
@@ -263,6 +263,13 @@ impl FileSystem for PlantsBeforeWrite {
     }
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
         RealFileSystem.remove_file(path)
+    }
+    fn remove_file_if_holding(
+        &self,
+        path: &TargetPath,
+        expected: &[u8],
+    ) -> Result<Removal, FileSystemError> {
+        RealFileSystem.remove_file_if_holding(path, expected)
     }
     fn path_exists(&self, path: &Path) -> bool {
         RealFileSystem.path_exists(path)

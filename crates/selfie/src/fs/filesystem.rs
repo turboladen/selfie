@@ -277,6 +277,17 @@ pub enum Placed {
     Kept,
 }
 
+/// What [`FileSystem::remove_file_if_holding`] did at its path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "a removal that kept what was at its path removed nothing"]
+pub enum Removal {
+    /// The file is gone.
+    Removed,
+    /// What was there was not the expected file, or nothing was. It is left as it
+    /// is, and nothing was removed.
+    Kept,
+}
+
 /// Port for file system operations. Every file system interaction in the selfie
 /// library goes through it.
 ///
@@ -594,6 +605,26 @@ pub trait FileSystem: Send + Sync {
     /// path is a directory rather than a file, or any other IO error occurs.
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError>;
 
+    /// Remove the file at `path` only if what `path` names is a regular file
+    /// holding exactly `expected`, as it did when the caller read it.
+    ///
+    /// A symlink at `path` is judged by the file it names, and only the link is
+    /// removed, never what it names. Anything else at `path`, or nothing, is
+    /// left in place, and the call answers [`Removal::Kept`]. A mitigation, not
+    /// a guarantee: a change made at the same instant as the removal may still
+    /// be removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FileSystemError`], naming `path`, if what is there cannot be
+    /// read back, such as a file selfie may not read, or the removal itself
+    /// fails for a reason other than the file being gone.
+    fn remove_file_if_holding(
+        &self,
+        path: &TargetPath,
+        expected: &[u8],
+    ) -> Result<Removal, FileSystemError>;
+
     /// Whether `path` exists, as either a file or a directory.
     fn path_exists(&self, path: &Path) -> bool;
 
@@ -847,7 +878,9 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
 ///
 /// fs.mock_no_irregular_files();
 /// fs.mock_write_file_no_follow(&package_path);
-/// fs.mock_remove_file(&package_path);
+/// // A spec removal goes through the compare-and-remove, never `remove_file`.
+/// fs.expect_remove_file_if_holding()
+///     .returning(|_, _| Ok(selfie::fs::Removal::Removed));
 ///
 /// let repo = YamlPackageRepository::new(
 ///     fs,
