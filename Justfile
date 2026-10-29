@@ -9,7 +9,7 @@ default:
 # uses the crate-ci action, which pins the tool version.
 
 # Run every gate CI runs except `hack`, in order, stopping at the first failure. selfie has one
-# feature, and CI's hack job covers building and testing it both ways.
+# feature, and CI's hack job covers compiling it both ways.
 check: fmt typos clippy build test docs-check
     @echo "All checks passed."
 
@@ -30,36 +30,75 @@ typos:
 
 # Lint with clippy (zero warnings)
 clippy:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
+
+# Tests build into their own directory, nested under the target directory cargo
+# reports. A test build compiles `selfie` with `with_mocks`, which `test-common`
+# requests, and its binaries would otherwise overwrite the `selfie` and
+# `selfie-mcp` in `target/debug` that a normal build leaves free of mocks. The
+# intermediate artifacts stay in the main target directory, so the third-party
+# crates both builds share are compiled once.
+#
+# The shell line that sets `target_directory` to the directory cargo builds into,
+# which `CARGO_TARGET_DIR` and `build.target-dir` both move. It parses cargo's
+# JSON, so no quoting in the path can break it.
+find_target := '''target_directory="$(cargo metadata --format-version 1 --no-deps | python3 -c "import json, sys; print(json.load(sys.stdin)['target_directory'])")"'''
+# The shell line that points a cargo command at the test directory.
+use_test_dir := find_target + '''; export CARGO_BUILD_BUILD_DIR="$target_directory" CARGO_TARGET_DIR="$target_directory/test"'''
 
 # Run all tests
-test:
-    cargo test
+[positional-arguments]
+test *args:
+    {{ use_test_dir }}; cargo test --workspace "$@"
 
 # Test library only
-test-lib:
-    cargo test -p selfie
+[positional-arguments]
+test-lib *args:
+    {{ use_test_dir }}; cargo test -p selfie "$@"
 
 # Test CLI only
-test-cli:
-    cargo test -p selfie-cli
+[positional-arguments]
+test-cli *args:
+    {{ use_test_dir }}; cargo test -p selfie-cli "$@"
 
 # Test MCP server only
-test-mcp:
-    cargo test -p selfie-mcp
+[positional-arguments]
+test-mcp *args:
+    {{ use_test_dir }}; cargo test -p selfie-mcp "$@"
 
-# `selfie` is the only crate with optional features, and a plain `cargo test`
-# always builds it with `with_mocks` on because `test-common` requests it, so
-# only this catches a feature that has stopped compiling on its own.
+# `test-common` turns `selfie`'s `with_mocks` feature on in every test build, so
+# a test run cannot show that `selfie` compiles without it. This checks each
+# feature on its own with the dev-dependencies removed, which drops `test-common`.
 
-# Test every feature combination of the library
+# Check that the library compiles with each feature on its own
 hack:
     @command -v cargo-hack >/dev/null || { echo "cargo-hack is not installed; run: cargo install cargo-hack" >&2; exit 1; }
-    cargo hack --each-feature test -p selfie
+    cargo hack --each-feature check -p selfie --no-dev-deps
 
-# Build all crates
+# `cargo build` selects `default-members`, which leave out `test-common` so that
+# its `selfie[with_mocks]` dependency does not reach the binaries. The build's
+# own artifact messages list the features each crate was compiled with, and the
+# recipe fails if any artifact carries `with_mocks`, which happens when a crate
+# that depends on `selfie[with_mocks]` joins `default-members`. The binaries
+# are already built by then, so rebuild after fixing it.
+
+# Build the crates that make the binaries, and check they carry no mocks
 build:
-    cargo build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts="$(mktemp)"
+    trap 'rm -f "$artifacts"' EXIT
+    cargo build --message-format=json-render-diagnostics > "$artifacts"
+    # An empty or reshaped message stream would pass the check below for the wrong
+    # reason, so require the one artifact it is about.
+    if ! grep -q '"reason":"compiler-artifact".*crates/selfie#' "$artifacts"; then
+        echo "the build reported no artifact for selfie, so its features could not be checked" >&2
+        exit 1
+    fi
+    if grep -q '"reason":"compiler-artifact".*"features":\[[^]]*"with_mocks"' "$artifacts"; then
+        echo "a build artifact has the with_mocks feature, so the binaries link mocks; check default-members in Cargo.toml" >&2
+        exit 1
+    fi
 
 # `--all-features` documents the `with_mocks` items too; without it their
 # links go unchecked. The previous run's output is removed first: with a reused
@@ -74,7 +113,7 @@ build:
 
 # Build the docs with a broken intra-doc link as an error
 docs-check:
-    rm -rf "$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/doc"
+    {{ find_target }}; rm -rf "$target_directory/doc"
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --all-features
 
 # Run the CLI against a throwaway sandbox: `just sandbox-run package list`
@@ -198,7 +237,7 @@ mutate-self-test *args:
 
 # Generate and open documentation
 docs:
-    cargo doc --open
+    cargo doc --workspace --open
 
 # Check for outdated dependencies
 outdated:

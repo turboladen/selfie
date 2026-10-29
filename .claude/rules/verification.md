@@ -48,8 +48,12 @@ confirm it a second way. Two of this session's accusations were withdrawn after 
 
 ```bash
 git archive <sha> | tar -x -C "$SCRATCH"
-cd "$SCRATCH" && CARGO_TARGET_DIR="$SCRATCH/target" cargo test
+cd "$SCRATCH" && CARGO_TARGET_DIR="$SCRATCH/target" cargo test --workspace
 ```
+
+A bare `cargo test` is right here because the scratch tree has a target directory of its own. In a
+real checkout a bare test run overwrites the binaries in `target/debug`, so use the `just test-*`
+recipes there.
 
 Never run `git stash`, `git reset`, or `git checkout --` in a working tree someone else may be
 using. Read-only verification of a shared workspace has to be genuinely read-only, and `git stash`

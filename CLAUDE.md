@@ -12,7 +12,7 @@ just test-cli                                  # Test CLI only
 just test-mcp                                  # Test MCP server only
 just build                                     # Build all crates
 just test                                      # Run all tests
-just hack                                      # Test every feature combination of selfie
+just hack                                      # Check selfie with each of its features on its own
 just clippy                                    # Lint with -D warnings, the CI form (see below)
 just docs-check                                # Build the docs with warnings as errors
 just typos                                     # Spell-check the tree
@@ -25,18 +25,27 @@ just mutate <spec.toml>                        # Mutation runner (crates/xtask/R
 ```
 
 CI runs these same recipes (`.github/workflows/ci.yml`), so `Justfile` is the one place a gate's
-command is written. Change a gate there, never in the workflow. Three gate commands come with a
+command is written. Change a gate there, never in the workflow. Four gate commands come with a
 catch:
 
 - `cargo clippy --all-targets` **does not fail on warnings**, so it lets work pass locally that CI
-  rejects. CI runs it with `-- -D warnings` (`.github/workflows/ci.yml`). Use the CI form when
-  running clippy directly; `just check` already does.
+  rejects. CI runs `cargo clippy --workspace --all-targets -- -D warnings`, and without
+  `--workspace` a bare run skips `xtask` and `test-common`. Use the CI form when running clippy
+  directly; `just check` already does.
 - `cargo test -p selfie` takes no feature flag — `just test-lib` is the canonical form. It compiles
   only because `crates/test-common/Cargo.toml:7` requests `features = ["with_mocks"]`. **Do not drop
   that line**, or the build fails inside `test-common` with an error naming a crate you did not
   touch. `.claude/rules/architecture.md` explains the mechanism. The command compiles today. It did
   not before PR #67, which is why older instructions prescribe a `--features with_mocks` flag that
   is now unnecessary.
+- **A bare `cargo build` builds only the CLI, the MCP server and `selfie`.** The root `Cargo.toml`
+  sets `default-members` so that `test-common`, whose `selfie[with_mocks]` dependency would put
+  mocks in the binaries, is not built with them. `just build` fails when any artifact it builds
+  carries `with_mocks`. Anything that has to cover `xtask` and `test-common` too passes
+  `--workspace`, as `just clippy` and `just test` do; a bare `cargo test` skips their tests. The
+  test recipes build into a `test` directory under cargo's target directory, so that the test build,
+  which does use `with_mocks`, never overwrites the binaries in `target/debug`. A bare `cargo test`
+  does, so use the `just test-*` recipes.
 - **Any cargo command in this repo waits on `target/`'s lock.** A `cargo-watch` the maintainer is
   running, or another agent's build, holds it — and `just check` then stalls silently rather than
   failing, so a ten-minute wait is indistinguishable from a slow compile. Point `CARGO_TARGET_DIR`
@@ -52,13 +61,13 @@ catch:
 
 ### Running the binary by hand
 
-`cargo run -p selfie-cli -- <args>` reads **your** config and writes **your** home directory. Path flags do not
-close every route: a `~` dotfile target resolves against `HOME` whatever you pass, and so does the
-deploy-state fallback whenever no `state_directory` is configured and no `--state-directory`. Use
-`just sandbox-run <args>`, which mints a throwaway `HOME`, and `sandboxed_command` in
-`crates/cli/tests/common.rs` for tests. Neither sandboxes **execution** — `install`, `check` and
-`audit` commands, and any `command:` dotfile source, still run for real on this machine, so fixtures
-must use inert commands such as `true` or `echo`.
+`cargo run -p selfie-cli -- <args>` reads **your** config and writes **your** home directory. Path
+flags do not close every route: a `~` dotfile target resolves against `HOME` whatever you pass, and
+so does the deploy-state fallback whenever no `state_directory` is configured and no
+`--state-directory`. Use `just sandbox-run <args>`, which mints a throwaway `HOME`, and
+`sandboxed_command` in `crates/cli/tests/common.rs` for tests. Neither sandboxes **execution** —
+`install`, `check` and `audit` commands, and any `command:` dotfile source, still run for real on
+this machine, so fixtures must use inert commands such as `true` or `echo`.
 
 `just sandbox-run` mints a **new** `HOME` per invocation and never reuses one, and leaves it behind
 under `TMPDIR` for inspection — the accumulation is deliberate, not a leak to report. Nothing
@@ -71,7 +80,7 @@ watch state change, drive the binary against the printed sandbox directory yours
 
 Before every commit (unless instructed otherwise), run `just check` and fix any issues. It runs
 `fmt`, `typos`, `clippy`, `build`, `test` and `docs-check`, in that order, stopping at the first
-failure. It leaves out `hack`, which tests selfie with and without its one feature and is the
+failure. It leaves out `hack`, which checks selfie with and without its one feature and is the
 slowest step; CI runs it, and `just hack` runs it locally when a change touches a feature gate.
 `Justfile` is the source of truth for these gates — do not retype the commands. Its `fmt` step
 rewrites files, so commit after it runs, then check `git status` for its output.
