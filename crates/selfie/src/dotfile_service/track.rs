@@ -10,7 +10,7 @@ use crate::{
     config::SelfieConfig,
     dotfile_service::deploy::compute_checksum,
     fs::{
-        filesystem::{FileSystem, FileSystemError, IfPresent, Placed},
+        filesystem::{FileSystem, FileSystemError, IfPresent, Placed, Removal},
         target::{
             HomeDir, TargetPath, TargetRejection, deploy_target, expand_target_path,
             portable_target, repository_path,
@@ -291,19 +291,20 @@ enum CopyRemoval {
 // deleting a file that belongs to someone else. So ownership is established by
 // content rather than assumed from the earlier guard.
 
-// Reading back is itself one moment before the removal, so this narrows the
+// The file system compares and removes in one call, the rule a spec removal
+// uses too. Its look is still one moment before the unlink, so this narrows the
 // window rather than closing it. What it buys is that the ordinary case is
 // provably selfie's own file and every other case is reported instead of acted
 // on, which is the safe direction for a delete.
 fn remove_own_copy<F: FileSystem>(filesystem: &F, path: &Path, written: &str) -> CopyRemoval {
-    match filesystem.read_file(path) {
-        Ok(found) if found == written => match filesystem.remove_file(path) {
-            Ok(()) => CopyRemoval::Removed,
-            Err(e) => CopyRemoval::Failed(e),
-        },
-        // Both arms leave the file: content that differs is not selfie's to
-        // delete, and content it could not read back is content it cannot claim.
-        Ok(_) | Err(_) => CopyRemoval::Unconfirmed,
+    match filesystem.remove_file_if_holding(&repository_path(path), written.as_bytes()) {
+        Ok(Removal::Removed) => CopyRemoval::Removed,
+        // Content that differs, or anything but a regular file, is not selfie's
+        // to delete.
+        Ok(Removal::Kept) => CopyRemoval::Unconfirmed,
+        // Content it could not read back, or a removal that failed, leaves the
+        // file, and the error says which.
+        Err(e) => CopyRemoval::Failed(e),
     }
 }
 
@@ -319,7 +320,8 @@ fn copy_fate(copy: &Path, removal: &CopyRemoval) -> String {
              it is not wanted."
         ),
         CopyRemoval::Failed(e) => format!(
-            "The copy at '{copy}' could not be removed either: {e}. Remove it before retrying."
+            "The copy at '{copy}' could not be checked or removed: {e}. Check it, and remove it \
+             yourself before retrying if it is the copy selfie wrote."
         ),
     }
 }
@@ -955,13 +957,15 @@ mod tests {
     // rather than inherited from it: without the comparison, a file another
     // process put at the path between the write and this removal is deleted.
     //
-    // `expect_remove_file().never()` is the assertion. A test that only checked
-    // the message could not see the syscall, which is the thing that does harm.
+    // The file system keeping what it found is the assertion: the comparison and
+    // the unlink are one port call, tested where they are implemented.
     #[test]
     fn a_copy_whose_content_changed_is_not_removed() {
         let copy = Path::new("/dotfiles/gemrc/gemrc");
         let mut fs = MockFileSystem::default();
-        fs.mock_read_file(copy, "someone else's file");
+        fs.expect_remove_file_if_holding()
+            .times(1)
+            .returning(|_, _| Ok(Removal::Kept));
         fs.expect_remove_file().never();
 
         let removal = remove_own_copy(&fs, copy, "gem: --no-document");
@@ -984,8 +988,13 @@ mod tests {
     fn a_copy_that_still_holds_what_was_written_is_removed() {
         let copy = Path::new("/dotfiles/gemrc/gemrc");
         let mut fs = MockFileSystem::default();
-        fs.mock_read_file(copy, "gem: --no-document");
-        fs.mock_remove_file(copy);
+        fs.expect_remove_file_if_holding()
+            .times(1)
+            .withf(|path, expected| {
+                path.path() == Path::new("/dotfiles/gemrc/gemrc")
+                    && expected == b"gem: --no-document"
+            })
+            .returning(|_, _| Ok(Removal::Removed));
 
         let removal = remove_own_copy(&fs, copy, "gem: --no-document");
 
@@ -1000,21 +1009,33 @@ mod tests {
     }
 
     // A path selfie cannot read back is a path it cannot claim, so it is left
-    // rather than removed on the assumption that the read failure is benign.
+    // rather than removed on the assumption that the read failure is benign, and
+    // the user is told why.
     #[test]
     fn a_copy_that_cannot_be_read_back_is_not_removed() {
         let copy = Path::new("/dotfiles/gemrc/gemrc");
         let mut fs = MockFileSystem::default();
-        fs.expect_read_file().returning(|_| {
+        fs.expect_remove_file_if_holding().returning(|_, _| {
             Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("gone"),
+                std::io::Error::other("/dotfiles/gemrc/gemrc: permission denied"),
             )))
         });
         fs.expect_remove_file().never();
 
         let removal = remove_own_copy(&fs, copy, "gem: --no-document");
 
-        assert!(matches!(removal, CopyRemoval::Unconfirmed));
+        assert!(matches!(removal, CopyRemoval::Failed(_)));
+        // selfie cannot claim what it could not read, so the user is asked to check
+        // the file rather than told to delete it.
+        let message = copy_fate(copy, &removal);
+        assert!(
+            message.contains("permission denied"),
+            "the user is not told why the copy survived: {message}"
+        );
+        assert!(
+            message.contains("Check it, and remove it yourself before retrying if it is the copy"),
+            "the remedy does not ask the user to check the file: {message}"
+        );
     }
 
     // selfie-ir68.20. Which stat answers first is this module's rule, and the one
@@ -1162,7 +1183,7 @@ mod tests {
             "a surviving copy is called removed: {survived}"
         );
         assert!(
-            survived.contains("Remove it before retrying"),
+            survived.contains("Check it, and remove it yourself before retrying"),
             "the remedy is missing: {survived}"
         );
         // The error's own sentence ends in a period, and the frame adds none.
