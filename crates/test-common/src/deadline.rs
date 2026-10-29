@@ -1,5 +1,25 @@
 //! Running work under a deadline, for a test whose failure mode is a hang.
 
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::PathBuf;
+
+/// A fifo a test made, released and removed when this is dropped.
+///
+/// Dropping it opens the fifo for writing without blocking, which releases a
+/// read blocked on it, then removes it, so a test that fails does not leave a
+/// thread stuck.
+pub struct ReleaseFifo(pub PathBuf);
+
+impl Drop for ReleaseFifo {
+    fn drop(&mut self) {
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+            .open(&self.0);
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// Run `work` on a thread and runtime of its own, and give up after `deadline`:
 /// `None` for a timeout, and a panic in `work` raised again here.
 ///

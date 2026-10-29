@@ -229,6 +229,16 @@ pub trait SpecService: Send + Sync {
         package_name: &str,
     ) -> impl Future<Output = Result<RemovalPlan, super::port::PackageRepoError>> + Send;
 
+    /// Remove the spec `plan` describes, if the file still holds what was loaded
+    /// and no second file answers to its name.
+    ///
+    /// For a caller that showed `plan` to the user and asked to confirm: an edit
+    /// made while the user decided, or a second file for the name appearing, is
+    /// kept and the removal refused. Sends nothing about the plan's unreadable
+    /// specs, which the caller has already shown, and reports dependents and
+    /// dotfiles only once the spec is gone.
+    fn remove_shown(&self, plan: RemovalPlan) -> impl Future<Output = EventStream> + Send;
+
     /// Get package definition info (no runtime status check)
     fn spec_info(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
 
@@ -509,12 +519,31 @@ where
         &self,
         package_name: &str,
     ) -> Result<RemovalPlan, super::port::PackageRepoError> {
-        let shown = self.package_repository.get_package(package_name)?;
+        // The not-found answer carries the name hint `remove` gives, so a caller
+        // that prompts shows the same "did you mean" a caller that does not would.
+        let shown = self
+            .package_repository
+            .get_package(package_name)
+            .map_err(|err| super::port::with_name_hint(&self.package_repository, err))?;
         Ok(remove::plan_removal(
             package_name,
             shown,
             &self.package_repository,
         ))
+    }
+
+    #[instrument(skip(plan))]
+    async fn remove_shown(&self, plan: RemovalPlan) -> EventStream {
+        let package_name = plan.package_name().to_string();
+        self.execute_operation_with_deps(
+            OperationType::PackageRemove,
+            &package_name,
+            OperationContext::default(),
+            1, // Remove
+            move |repo, _, config, sender, mut progress, _token| async move {
+                remove::remove_planned(plan, &repo, &config, &sender, &mut progress).await
+            },
+        )
     }
 
     async fn spec_info(&self, package_name: &str) -> EventStream {

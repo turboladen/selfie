@@ -15,10 +15,12 @@ use crate::{
 /// What a removal of one spec found before anything is removed: the spec as it
 /// was loaded, and what was found to depend on it.
 ///
-/// Built only by [`SpecService::prepare_removal`](super::SpecService::prepare_removal),
-/// for a caller that shows it to the user before removing.
+/// Outside selfie, only [`SpecService::prepare_removal`](super::SpecService::prepare_removal)
+/// builds one, for a caller that shows it to the user and then hands it to
+/// [`SpecService::remove_shown`](super::SpecService::remove_shown).
 #[derive(Debug)]
 pub struct RemovalPlan {
+    package_name: String,
     shown: GetPackage,
     dependents: Vec<Package>,
     unreadable: Vec<PackageParseError>,
@@ -26,6 +28,12 @@ pub struct RemovalPlan {
 }
 
 impl RemovalPlan {
+    /// The package's name, as the removal was asked for it.
+    #[must_use]
+    pub fn package_name(&self) -> &str {
+        &self.package_name
+    }
+
     /// The spec as it was loaded.
     #[must_use]
     pub fn shown(&self) -> &GetPackage {
@@ -53,7 +61,7 @@ impl RemovalPlan {
     }
 }
 
-/// Scan for the packages depending on `shown`, loaded under `package_name`.
+/// Scan for what depends on `shown`, loaded under `package_name`.
 pub(super) fn plan_removal<PR>(package_name: &str, shown: GetPackage, repo: &PR) -> RemovalPlan
 where
     PR: PackageRepository,
@@ -63,6 +71,7 @@ where
         Err(err) => (Vec::new(), Vec::new(), Some(err)),
     };
     RemovalPlan {
+        package_name: package_name.to_string(),
         shown,
         dependents,
         unreadable,
@@ -70,6 +79,8 @@ where
     }
 }
 
+/// Remove the package `package_name` names, for a caller that shows nothing
+/// first: load and scan, report what the scan could not read, then remove.
 pub(super) async fn handle_remove<PR>(
     package_name: &str,
     repo: &PR,
@@ -80,36 +91,24 @@ pub(super) async fn handle_remove<PR>(
 where
     PR: PackageRepository,
 {
-    // Step 1: Load the package (to verify it exists and get file path)
     progress.next(sender, "Loading package").await;
-
-    let get_package = match repo.get_package(package_name) {
-        Ok(pkg) => pkg,
+    let shown = match repo.get_package(package_name) {
+        Ok(shown) => shown,
         Err(err) => {
             return OperationResult::Failure(
                 crate::package::port::with_name_hint(repo, err).into(),
             );
         }
     };
-
-    // Step 2: Check for dependent packages
     progress
         .next(sender, "Checking for dependent packages")
         .await;
-
-    let RemovalPlan {
-        shown: get_package,
-        dependents: dependent_packages,
-        unreadable,
-        scan_failure,
-    } = plan_removal(package_name, get_package, repo);
-    let file_path = get_package.file_path().to_path_buf();
-    if let Some(err) = scan_failure {
+    let plan = plan_removal(package_name, shown, repo);
+    if let Some(err) = &plan.scan_failure {
         sender
             .send_warning(format!("Failed to check for dependent packages: {err}"))
             .await;
     }
-
     // A spec selfie could not read may name this package, so an empty dependent
     // list under one of these is silence rather than a clearance. The caller is
     // told, and decides.
@@ -117,30 +116,56 @@ where
     // `SpecSkipped` rather than a rendered warning: a terminal wants one line
     // and a structured consumer wants the kind and the location as fields, and
     // a sentence composed here gives the second one nothing to branch on.
-    for invalid in unreadable {
-        sender.send_spec_skipped(invalid).await;
+    for invalid in &plan.unreadable {
+        sender.send_spec_skipped(invalid.clone()).await;
+    }
+    remove_planned(plan, repo, config, sender, progress).await
+}
+
+/// Remove the spec `plan` describes, if the file still holds what was loaded and
+/// no second file answers to its name, then report what the removal leaves
+/// behind.
+pub(super) async fn remove_planned<PR>(
+    plan: RemovalPlan,
+    repo: &PR,
+    config: &SelfieConfig,
+    sender: &EventSender,
+    progress: &mut ProgressTracker,
+) -> OperationResult
+where
+    PR: PackageRepository,
+{
+    progress.next(sender, "Removing package file").await;
+    let RemovalPlan {
+        package_name,
+        shown,
+        dependents,
+        ..
+    } = plan;
+    // Everything below uses one path: the one the package was loaded from, which
+    // is the file the repository removes.
+    let file_path = shown.package().path().clone();
+
+    if let Err(err) = repo.remove_package(shown.package()) {
+        return OperationResult::Failure(err.into());
     }
 
-    let dependent_names: Vec<String> = dependent_packages
-        .iter()
-        .map(|p| p.name().to_string())
-        .collect();
-
+    // These are sent only now, about a spec that is gone: before the removal they would tell
+    // the user to delete dotfiles a spec that was kept still deploys.
+    let dependent_names: Vec<String> = dependents.iter().map(|p| p.name().to_string()).collect();
     if !dependent_names.is_empty() {
         sender
-            .send_removal_dependency_info(package_name.to_string(), dependent_names.clone())
+            .send_removal_dependency_info(package_name.clone(), dependent_names.clone())
             .await;
     }
 
-    // Step 2b: Check for dotfiles that may need cleanup — across shared and
-    // environment-specific entries (deduped by target, since an environment
-    // override shares a target with the shared entry it replaces).
-    let dotfiles = get_package.package().dotfiles_with_scope();
+    // The list covers shared and environment-specific entries, deduped by target, since an
+    // environment override shares a target with the shared entry it replaces.
+    let dotfiles = shown.package().dotfiles_with_scope();
     if !dotfiles.is_empty() {
-        // Preserve definition order (shared first, then environments) while
-        // deduping targets an environment override shares with a shared entry.
-        // By spelling, not by expanded target: this lists what the spec names in
-        // every environment, so `~/.x` and its absolute form are both shown.
+        // Definition order is kept (shared first, then environments). Targets are
+        // compared by spelling, not by expanded target: this lists what the spec
+        // names in every environment, so `~/.x` and its absolute form both show.
         let mut seen = std::collections::HashSet::new();
         let dotfile_targets: Vec<String> = dotfiles
             .iter()
@@ -148,15 +173,8 @@ where
             .filter(|t| seen.insert(t.clone()))
             .collect();
         sender
-            .send_dotfile_cleanup_info(package_name.to_string(), dotfile_targets)
+            .send_dotfile_cleanup_info(package_name.clone(), dotfile_targets)
             .await;
-    }
-
-    // Step 3: Remove the package
-    progress.next(sender, "Removing package file").await;
-
-    if let Err(err) = repo.remove_package(get_package.package()) {
-        return OperationResult::Failure(err.into());
     }
 
     sender
@@ -168,7 +186,7 @@ where
         .await;
 
     OperationResult::Success(OperationSuccess::package_removed(
-        package_name.to_string(),
+        package_name,
         file_path,
         config.environment().to_string(),
         dependent_names,

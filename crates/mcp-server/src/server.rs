@@ -1544,6 +1544,28 @@ mod tests {
         );
     }
 
+    // The remove tool deletes a spec nobody changed, through the library path that
+    // refuses a changed one.
+    #[tokio::test]
+    async fn spec_remove_deletes_an_unchanged_spec() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let server = server_over(&packages, None);
+        create(&server, "gone").await;
+        assert!(
+            packages.join("gone.yml").is_file(),
+            "control: the spec was created"
+        );
+
+        let params = RemoveParam {
+            package: "gone".to_string(),
+        };
+        let json = tool_json(&server.spec_remove(Parameters(params)).await.unwrap());
+
+        assert_eq!(json["result"]["status"], "success", "{json}");
+        assert!(!packages.join("gone.yml").exists(), "{json}");
+    }
+
     // A file at the package directory's path says nothing about the name, so the
     // tool refuses with the directory rather than calling the name invalid.
     #[tokio::test]

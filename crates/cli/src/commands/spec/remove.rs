@@ -1,7 +1,7 @@
 use crate::terminal_text::DisplayPath;
 use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::package::{
-    event::{OperationResult, PackageEvent},
+    event::{OperationResult, OperationSuccess, PackageEvent},
     service::SpecService,
 };
 
@@ -17,16 +17,25 @@ pub(crate) async fn handle_remove(
 ) -> Exit {
     info!("Removing package: {}", package_name);
 
-    // The plan is what the confirmation describes: the spec as loaded and what
-    // depends on it. `service.remove()` loads and scans again after the prompt.
+    // The plan is what the confirmation describes, and the removal is checked
+    // against it: `remove_shown` deletes the file only if it still holds the
+    // bytes loaded here and the name still resolves to it. Removing by name would
+    // load whatever is there after the prompt, an edit made while the user
+    // decided included, and delete it.
     //
     // Calling an unreadable file "not found" points the user at the wrong
     // problem: they can see the file, so selfie looks broken and the real
     // fault -- what is wrong inside it -- goes unnamed.
     let plan = match service.prepare_removal(package_name).await {
         Ok(plan) => plan,
+        // A not-found answer that names a spec declaring this name says so in its
+        // own sentence; one with nothing to suggest keeps the short line.
         Err(e) if e.means_no_such_package() => {
-            display.print_error(format!("Package '{package_name}' not found."));
+            if names_a_declaring_spec(&e) {
+                display.print_error(e.to_string());
+            } else {
+                display.print_error(format!("Package '{package_name}' not found."));
+            }
             return Exit::Failed;
         }
         // Not about a file at this name, so "could not load that spec" would be false:
@@ -65,10 +74,7 @@ pub(crate) async fn handle_remove(
     let dependent_packages = plan.dependents();
     let unreadable = plan.unreadable();
 
-    let mut already_reported: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
     for invalid in unreadable {
-        already_reported.insert(invalid.package_path().to_path_buf());
         display.print_warning(selfie::package::service::skipped_spec_warning(invalid));
     }
 
@@ -125,53 +131,60 @@ pub(crate) async fn handle_remove(
         }
     }
 
-    // Perform the actual removal through the service layer
-    let event_stream = service.remove(package_name).await;
+    // This passes the plan shown above, not the name; the comment at the load
+    // says why.
+    let event_stream = service.remove_shown(plan).await;
 
     let processor = EventProcessor::new(display.clone());
     let result = processor
         .process_events(event_stream, |event| match event {
-            PackageEvent::RemovalDependencyInfo { .. } => {
-                // Already displayed dependency info above before confirmation
+            // The dependents were listed above the prompt, and the success line
+            // below names them again as possibly broken.
+            PackageEvent::RemovalDependencyInfo { .. } => true,
+            PackageEvent::Completed {
+                result:
+                    OperationResult::Success(OperationSuccess::PackageRemoved {
+                        file_path,
+                        dependent_packages,
+                        ..
+                    }),
+                ..
+            } => {
+                display.print_success(format!(
+                    "Package '{}' removed successfully from {}",
+                    package_name,
+                    DisplayPath::of(file_path)
+                ));
+
+                if !dependent_packages.is_empty() {
+                    display.print_warning(
+                        "Note: The following packages may have broken dependencies:",
+                    );
+                    for dep in dependent_packages {
+                        display.print_warning(format!("  - {dep}"));
+                    }
+                    display.print_suggestion(
+                        "You may need to update these packages to remove the dependency.",
+                    );
+                }
                 true
             }
-            // The service repeats the dependency check, so a file named above
-            // the prompt arrives here a second time and is dropped. Matched by
-            // path rather than suppressed wholesale: the pre-flight can report
-            // nothing at all -- its own listing failed -- and the repeat can
-            // then be the only pass that sees the file. Swallowing every event
-            // would make that the one case where nothing is said.
-            PackageEvent::SpecSkipped { error, .. } => {
-                already_reported.contains(error.package_path())
-            }
-            PackageEvent::Completed { result, .. } => {
-                if let OperationResult::Success(_) = result {
-                    display.print_success(format!(
-                        "Package '{}' removed successfully from {}",
-                        package_name,
-                        DisplayPath::of(package_blob.file_path())
-                    ));
-
-                    if !dependent_packages.is_empty() {
-                        display.print_warning(
-                            "Note: The following packages may have broken dependencies:",
-                        );
-                        for dep in dependent_packages {
-                            display.print_warning(format!("  - {}", dep.name()));
-                        }
-                        display.print_suggestion(
-                            "You may need to update these packages to remove the dependency.",
-                        );
-                    }
-                    return true;
-                }
-                false // Let default handling show the error
-            }
+            // Anything else, a failure included, gets the default handling.
             _ => false,
         })
         .await;
 
     result.exit
+}
+
+// Whether a not-found answer names a spec whose `name:` field declares the name
+// that was not found, which is the hint worth showing.
+fn names_a_declaring_spec(error: &selfie::package::port::PackageRepoError) -> bool {
+    use selfie::package::port::{PackageError, PackageRepoError};
+    let PackageRepoError::PackageError(boxed) = error else {
+        return false;
+    };
+    matches!(&**boxed, PackageError::PackageNotFound { declared_by, .. } if !declared_by.is_empty())
 }
 
 #[cfg(test)]
@@ -185,7 +198,8 @@ mod tests {
 
     use crate::commands::common;
 
-    // A spec in a fresh package directory, and a service over that directory.
+    // Returns a spec in a fresh package directory, and a service over that
+    // directory.
     fn one_spec() -> (
         tempfile::TempDir,
         PathBuf,
@@ -219,6 +233,105 @@ mod tests {
 
         assert_eq!(exit, Exit::Canceled);
         assert!(spec.exists());
+    }
+
+    // An edit that lands while the confirmation waits is the user's, and the
+    // removal they confirmed was of the file as it stood before it. Nothing is
+    // removed, and the run fails naming the spec.
+    #[tokio::test]
+    async fn an_edit_made_while_the_removal_prompt_waits_is_not_removed() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        const EDITED: &str = "name: tool\ndescription: edited by hand\nenvironments: {}\n";
+        let (_temp, spec, service) = one_spec();
+        let edited = spec.clone();
+        let display = DisplayManager::new(false)
+            .on_next_prompt(move || std::fs::write(&edited, EDITED).unwrap())
+            .answering(vec![answer(true)]);
+
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&spec).ok().as_deref(),
+            Some(EDITED),
+            "the edit made while the prompt waited was removed"
+        );
+        assert_eq!(exit, Exit::Failed);
+        let expected = format!(
+            "{} changed after selfie read it, so it was not removed.",
+            spec.display()
+        );
+        let printed = display.printed();
+        assert!(
+            printed.iter().any(|(_, line)| line.contains(&expected)),
+            "{printed:?}"
+        );
+    }
+
+    // Control for the test above: a confirmed removal of a spec nobody touched
+    // removes it.
+    #[tokio::test]
+    async fn a_confirmed_removal_of_an_unchanged_spec_removes_it() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        let (_temp, spec, service) = one_spec();
+        let display = DisplayManager::new(false).answering(vec![answer(true)]);
+
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
+
+        assert_eq!(exit, Exit::Clean);
+        assert!(!spec.exists(), "the confirmed removal left the spec");
+    }
+
+    // A second file claiming the name, appearing while the confirmation waits,
+    // makes the name ambiguous. The removal refuses rather than deleting one of
+    // the two and reporting the package removed while it still resolves.
+    #[tokio::test]
+    async fn a_second_spec_for_the_name_appearing_while_the_prompt_waits_refuses() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        let (_temp, spec, service) = one_spec();
+        let rival = spec.with_extension("yaml");
+        let planted = rival.clone();
+        let display = DisplayManager::new(false)
+            .on_next_prompt(move || std::fs::write(&planted, "name: tool\n").unwrap())
+            .answering(vec![answer(true)]);
+
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
+
+        assert_eq!(exit, Exit::Failed);
+        assert!(spec.exists(), "the spec shown at the prompt was removed");
+        assert!(rival.exists(), "the file that appeared was removed");
+        // The refusal names both files, as an ambiguous name does everywhere.
+        let printed = display.printed();
+        assert!(
+            printed.iter().any(|(_, line)| line.contains("tool.yaml")),
+            "{printed:?}"
+        );
+    }
+
+    // A name no spec file answers to, but one spec's `name:` field declares, gets
+    // the hint naming that file, as the service's own removal gives it.
+    #[tokio::test]
+    async fn a_name_only_a_name_field_declares_is_answered_with_the_file() {
+        use crate::display_manager::DisplayManager;
+
+        let (_temp, spec, service) = one_spec();
+        let declared = std::fs::read_to_string(&spec)
+            .unwrap()
+            .replace("name: tool", "name: the-tool");
+        std::fs::write(&spec, declared).unwrap();
+        let display = DisplayManager::new(false);
+
+        let exit = super::handle_remove(&service, "the-tool", &display, false).await;
+
+        assert_eq!(exit, Exit::Failed);
+        assert!(spec.exists());
+        let printed = display.printed();
+        assert!(
+            printed.iter().any(|(_, line)| line.contains("tool.yml")),
+            "the hint naming the declaring file is missing: {printed:?}"
+        );
     }
 
     // No at the confirmation is a decline: the spec stays, and the run fails.

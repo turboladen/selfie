@@ -1107,6 +1107,7 @@ mod tests {
         let spec = "/dotfiles/gemrc.yml";
         let error = PackageRepoError::ChangedSinceLoad {
             path: PathBuf::from(spec),
+            refused: crate::package::port::RefusedChange::Write,
         };
 
         let message = spec_save_failure(

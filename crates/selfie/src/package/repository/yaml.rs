@@ -6,14 +6,14 @@ use std::{
 use crate::{
     fs::{
         DirectoryState, FileSystem,
-        filesystem::{FileSystemError, IfPresent, Placed, repository_read_refusal},
+        filesystem::{FileSystemError, IfPresent, Placed, Removal, repository_read_refusal},
         target::repository_path,
     },
     package::{
         GetPackage, Package, SpecOrigin, SpecRefusal,
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
-            PackageParseKind, PackageRepoError, PackageRepository,
+            PackageParseKind, PackageRepoError, PackageRepository, RefusedChange,
         },
     },
 };
@@ -167,6 +167,12 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         // sometimes between runs on one.
         matches.sort();
         matches
+    }
+
+    // Whether `a` and `b` are one file, by identity, so two spellings of one name on
+    // a case-insensitive volume count as one. Either one unreadable means no.
+    fn same_file(&self, a: &Path, b: &Path) -> bool {
+        matches!((self.fs.identity(a), self.fs.identity(b)), (Ok(a), Ok(b)) if a == b)
     }
 
     // Returns the one file `name` names, or why there is not exactly one: nothing answers
@@ -512,6 +518,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             Placed::Written => Ok(()),
             Placed::Kept => Err(PackageRepoError::ChangedSinceLoad {
                 path: path.to_path_buf(),
+                refused: RefusedChange::Write,
             }),
         }
     }
@@ -528,8 +535,44 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn remove_package(&self, package: &Package) -> Result<(), PackageRepoError> {
-        self.fs.remove_file(package.path())?;
-        Ok(())
+        let path = package.path();
+        // Only a spec this repository loaded from its own directory is removed: the loaded
+        // text is what the removal is checked against, and a spec from another
+        // directory, handed in through the public trait, is another repository's.
+        let loaded = package.raw_yaml().filter(|_| {
+            package.origin() == self.origin && path.parent() == Some(self.package_dir.as_path())
+        });
+        let (Some(loaded), Some(name)) = (loaded, package.spec_name()) else {
+            return Err(PackageRepoError::NotLoaded {
+                path: path.to_path_buf(),
+            });
+        };
+        // Removing this file must remove the package. A second file answering to
+        // the name refuses as the lookup's own ambiguity, and another file now
+        // answering to it alone refuses naming that file. The same file under
+        // another spelling, as a case-insensitive volume allows, is the same file
+        // by identity. A name that answers to nothing is left to the comparison
+        // below, which finds the file gone.
+        match self.resolve(&name) {
+            Ok(answering) if answering != *path && !self.same_file(&answering, path) => {
+                return Err(PackageRepoError::AnotherFileAnswers {
+                    path: path.to_path_buf(),
+                    answering,
+                });
+            }
+            Err(err) if !err.means_no_such_package() => return Err(err),
+            Ok(_) | Err(_) => {}
+        }
+        match self
+            .fs
+            .remove_file_if_holding(&repository_path(path), loaded.as_bytes())?
+        {
+            Removal::Removed => Ok(()),
+            Removal::Kept => Err(PackageRepoError::ChangedSinceLoad {
+                path: path.to_path_buf(),
+                refused: RefusedChange::Removal,
+            }),
+        }
     }
 
     fn find_dependent_packages(
@@ -2328,7 +2371,8 @@ environments:
             .expect_err("a write that kept what was there must not report a save");
 
         assert!(
-            matches!(&err, PackageRepoError::ChangedSinceLoad { path } if *path == package_path),
+            matches!(&err, PackageRepoError::ChangedSinceLoad { path, refused: RefusedChange::Write }
+                if *path == package_path),
             "got: {err:?}"
         );
     }
@@ -3096,7 +3140,13 @@ environments:
             .returning(move |_| Ok(package_yaml.to_string()));
 
         // Mock the remove_file operation
-        fs.mock_remove_file(&package_path);
+        let expected_path = package_path.clone();
+        fs.expect_remove_file_if_holding()
+            .times(1)
+            .withf(move |path, expected| {
+                path.path() == expected_path && expected == package_yaml.as_bytes()
+            })
+            .returning(|_, _| Ok(Removal::Removed));
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         let loaded = repo.get_package(package_name).unwrap();
@@ -3140,14 +3190,12 @@ environments:
             .with(mockall::predicate::eq(package_path_for_read.clone()))
             .returning(move |_| Ok(package_yaml.to_string()));
 
-        // Mock remove_file to fail
-        fs.expect_remove_file()
-            .with(mockall::predicate::eq(package_path.clone()))
-            .returning(|_| {
-                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
-                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
-                )))
-            });
+        // The removal fails.
+        fs.expect_remove_file_if_holding().returning(|_, _| {
+            Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
+            )))
+        });
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         let loaded = repo.get_package(package_name).unwrap();
@@ -3159,5 +3207,110 @@ environments:
             result.unwrap_err(),
             PackageRepoError::FileSystemError(_)
         ));
+    }
+
+    // A package with no loaded text, or loaded by another repository or from
+    // another directory, has nothing this repository can tell a change by, and
+    // the file at its path is not touched.
+    #[test]
+    fn remove_package_refuses_a_package_this_repository_did_not_load() {
+        let package_dir = PathBuf::from("/test/packages");
+        let in_dir = package_dir.join("app.yml");
+        let elsewhere = PathBuf::from("/test/dotfiles/app.yml");
+        let loaded_at = |path: &Path, origin: SpecOrigin| {
+            let mut package = empty_package("app", path);
+            package.set_source(path.to_path_buf(), "name: app\n".to_string(), origin);
+            package
+        };
+        for (package, path) in [
+            (empty_package("app", &in_dir), in_dir.clone()),
+            (
+                loaded_at(&elsewhere, SpecOrigin::PackageDirectory),
+                elsewhere.clone(),
+            ),
+            (
+                loaded_at(&in_dir, SpecOrigin::DotfilesDirectory),
+                in_dir.clone(),
+            ),
+        ] {
+            let mut fs = MockFileSystem::default();
+            fs.expect_remove_file_if_holding().never();
+            let repo =
+                YamlPackageRepository::new(fs, package_dir.clone(), SpecOrigin::PackageDirectory);
+
+            let err = repo
+                .remove_package(&package)
+                .expect_err("a package this repository did not load must not be removed");
+
+            assert!(
+                matches!(&err, PackageRepoError::NotLoaded { path: refused } if *refused == path),
+                "{path:?}: {err:?}"
+            );
+        }
+    }
+
+    // The file system kept what it found, because it was not the loaded file:
+    // the removal refuses as a change.
+    #[test]
+    fn remove_package_reports_a_kept_file_as_changed() {
+        let package_dir = PathBuf::from("/test/packages");
+        let path = package_dir.join("app.yml");
+        let mut package = empty_package("app", &path);
+        package.set_source(
+            path.clone(),
+            "name: app\n".to_string(),
+            SpecOrigin::PackageDirectory,
+        );
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        let listed = path.clone();
+        fs.expect_list_directory()
+            .returning(move |_| Ok(vec![listed.clone()]));
+        fs.expect_remove_file_if_holding()
+            .times(1)
+            .returning(|_, _| Ok(Removal::Kept));
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+
+        let err = repo
+            .remove_package(&package)
+            .expect_err("a kept file must not be reported removed");
+
+        assert!(
+            matches!(&err, PackageRepoError::ChangedSinceLoad { path: removed, refused: RefusedChange::Removal }
+                if *removed == path),
+            "{err:?}"
+        );
+    }
+
+    // A second file answering to the name means removing the loaded one would
+    // not remove the package: the lookup's own ambiguity refuses, and nothing is
+    // removed.
+    #[test]
+    fn remove_package_refuses_when_a_second_file_answers_to_the_name() {
+        let package_dir = PathBuf::from("/test/packages");
+        let path = package_dir.join("app.yml");
+        let mut package = empty_package("app", &path);
+        package.set_source(
+            path.clone(),
+            "name: app\n".to_string(),
+            SpecOrigin::PackageDirectory,
+        );
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        let listed = vec![path.clone(), package_dir.join("app.yaml")];
+        fs.expect_list_directory()
+            .returning(move |_| Ok(listed.clone()));
+        fs.expect_remove_file_if_holding().never();
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+
+        let err = repo
+            .remove_package(&package)
+            .expect_err("an ambiguous name must not be removed");
+
+        assert!(
+            matches!(&err, PackageRepoError::PackageError(e)
+                if matches!(**e, PackageError::MultiplePackagesFound { .. })),
+            "{err:?}"
+        );
     }
 }
