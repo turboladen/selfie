@@ -19,6 +19,7 @@ mod info;
 mod install;
 mod list;
 mod remove;
+pub use remove::RemovalPlan;
 mod spec_common;
 mod spec_list;
 mod spec_search;
@@ -214,6 +215,19 @@ pub trait SpecService: Send + Sync {
 
     /// Remove a package from the repository
     fn remove(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
+
+    /// Load a package and scan for what depends on it, for a caller that shows
+    /// both before removing it. Nothing is removed and no event is sent.
+    ///
+    /// # Errors
+    ///
+    /// [`PackageRepoError`](super::port::PackageRepoError) when the package
+    /// cannot be loaded, as [`PackageRepository::get_package`] reports it. A
+    /// failed dependents scan is not an error: the plan carries it.
+    fn prepare_removal(
+        &self,
+        package_name: &str,
+    ) -> impl Future<Output = Result<RemovalPlan, super::port::PackageRepoError>> + Send;
 
     /// Get package definition info (no runtime status check)
     fn spec_info(&self, package_name: &str) -> impl Future<Output = EventStream> + Send;
@@ -489,6 +503,18 @@ where
                     .await
             },
         )
+    }
+
+    async fn prepare_removal(
+        &self,
+        package_name: &str,
+    ) -> Result<RemovalPlan, super::port::PackageRepoError> {
+        let shown = self.package_repository.get_package(package_name)?;
+        Ok(remove::plan_removal(
+            package_name,
+            shown,
+            &self.package_repository,
+        ))
     }
 
     async fn spec_info(&self, package_name: &str) -> EventStream {

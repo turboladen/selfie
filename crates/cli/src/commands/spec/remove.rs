@@ -2,39 +2,29 @@ use crate::terminal_text::DisplayPath;
 use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::package::{
     event::{OperationResult, PackageEvent},
-    port::PackageRepository,
     service::SpecService,
 };
 
-use crate::config::CliConfig;
 use crate::display_manager::DisplayManager;
 use crate::event_processor::{EventProcessor, Exit};
 use tracing::info;
 
-use crate::commands::common;
-
 pub(crate) async fn handle_remove(
     service: &impl SpecService,
     package_name: &str,
-    config: &CliConfig,
     display: &DisplayManager,
     skip_confirm: bool,
 ) -> Exit {
     info!("Removing package: {}", package_name);
 
-    // Pre-flight: verify the package exists and check dependencies for the confirmation prompt.
-    // These read-only repo calls gather info for UX before we commit to removal via the service.
-    // Note: service.remove() repeats the get_package + find_dependent_packages internally.
-    // This is an intentional tradeoff — the service needs to be self-contained for non-CLI
-    // consumers (like the MCP server) that skip confirmation, while the CLI needs dependency
-    // info before prompting the user. A dry-run API could eliminate this but adds complexity.
-    let repo = common::create_package_repository(config);
-
+    // The plan is what the confirmation describes: the spec as loaded and what
+    // depends on it. `service.remove()` loads and scans again after the prompt.
+    //
     // Calling an unreadable file "not found" points the user at the wrong
     // problem: they can see the file, so selfie looks broken and the real
     // fault -- what is wrong inside it -- goes unnamed.
-    let package_blob = match repo.get_package(package_name) {
-        Ok(pkg) => pkg,
+    let plan = match service.prepare_removal(package_name).await {
+        Ok(plan) => plan,
         Err(e) if e.means_no_such_package() => {
             display.print_error(format!("Package '{package_name}' not found."));
             return Exit::Failed;
@@ -59,25 +49,25 @@ pub(crate) async fn handle_remove(
         }
     };
 
+    let package_blob = plan.shown();
     display.print_run_note(format!("Package '{package_name}' found at:"));
     display.print_run_note(format!("  {}", DisplayPath::of(package_blob.file_path())));
 
     // `checked` is what separates "nothing depends on this" from "selfie does not
-    // know". Both used to arrive here as an empty list, and the line below then
-    // reported the first while meaning the second -- directly under the warning
-    // saying the check had failed.
-    let (dependent_packages, unreadable, checked) = match repo.find_dependent_packages(package_name)
-    {
-        Ok((deps, unreadable)) => (deps, unreadable, true),
-        Err(e) => {
+    // know". An empty dependents list means the first only when the scan ran.
+    let checked = match plan.scan_failure() {
+        None => true,
+        Some(e) => {
             display.print_warning(format!("Could not check for dependent packages: {e}"));
-            (Vec::new(), Vec::new(), false)
+            false
         }
     };
+    let dependent_packages = plan.dependents();
+    let unreadable = plan.unreadable();
 
     let mut already_reported: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
-    for invalid in &unreadable {
+    for invalid in unreadable {
         already_reported.insert(invalid.package_path().to_path_buf());
         display.print_warning(selfie::package::service::skipped_spec_warning(invalid));
     }
@@ -102,7 +92,7 @@ pub(crate) async fn handle_remove(
         display.print_warning(format!(
             "Package '{package_name}' is a dependency of the following packages:"
         ));
-        for dep in &dependent_packages {
+        for dep in dependent_packages {
             display.print_warning(format!("  - {}", dep.name()));
         }
         (
@@ -166,7 +156,7 @@ pub(crate) async fn handle_remove(
                         display.print_warning(
                             "Note: The following packages may have broken dependencies:",
                         );
-                        for dep in &dependent_packages {
+                        for dep in dependent_packages {
                             display.print_warning(format!("  - {}", dep.name()));
                         }
                         display.print_suggestion(
@@ -195,12 +185,10 @@ mod tests {
 
     use crate::commands::common;
 
-    // A spec in a fresh package directory, a config naming that directory, and a
-    // service over it.
+    // A spec in a fresh package directory, and a service over that directory.
     fn one_spec() -> (
         tempfile::TempDir,
         PathBuf,
-        CliConfig,
         impl selfie::package::service::SpecService,
     ) {
         let temp = tempfile::tempdir().unwrap();
@@ -215,9 +203,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let config = CliConfig::wrap_for_test(test_config_with_dir(&packages));
         let service = test_common::create_test_service_with_config(test_config_with_dir(&packages));
-        (temp, spec, config, service)
+        (temp, spec, service)
     }
 
     // Ctrl+C at the confirmation ends the run canceled, and removes nothing.
@@ -225,10 +212,10 @@ mod tests {
     async fn ctrl_c_at_the_confirmation_is_canceled_and_keeps_the_spec() {
         use crate::display_manager::{DisplayManager, ctrl_c};
 
-        let (_temp, spec, config, service) = one_spec();
+        let (_temp, spec, service) = one_spec();
         let display = DisplayManager::new(false).answering(vec![ctrl_c()]);
 
-        let exit = super::handle_remove(&service, "tool", &config, &display, false).await;
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
 
         assert_eq!(exit, Exit::Canceled);
         assert!(spec.exists());
@@ -239,10 +226,10 @@ mod tests {
     async fn declining_the_removal_fails_and_keeps_the_spec() {
         use crate::display_manager::{DisplayManager, answer};
 
-        let (_temp, spec, config, service) = one_spec();
+        let (_temp, spec, service) = one_spec();
         let display = DisplayManager::new(false).answering(vec![answer(false)]);
 
-        let exit = super::handle_remove(&service, "tool", &config, &display, false).await;
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
 
         assert_eq!(exit, Exit::Failed);
         assert!(spec.exists());

@@ -5,11 +5,70 @@
 use crate::{
     config::SelfieConfig,
     package::{
+        GetPackage, Package,
         event::{EventSender, OperationResult, OperationSuccess},
-        port::PackageRepository,
+        port::{PackageParseError, PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
 };
+
+/// What a removal of one spec found before anything is removed: the spec as it
+/// was loaded, and what was found to depend on it.
+///
+/// Built only by [`SpecService::prepare_removal`](super::SpecService::prepare_removal),
+/// for a caller that shows it to the user before removing.
+#[derive(Debug)]
+pub struct RemovalPlan {
+    shown: GetPackage,
+    dependents: Vec<Package>,
+    unreadable: Vec<PackageParseError>,
+    scan_failure: Option<PackageRepoError>,
+}
+
+impl RemovalPlan {
+    /// The spec as it was loaded.
+    #[must_use]
+    pub fn shown(&self) -> &GetPackage {
+        &self.shown
+    }
+
+    /// The packages found to depend on the spec.
+    #[must_use]
+    pub fn dependents(&self) -> &[Package] {
+        &self.dependents
+    }
+
+    /// The specs that could not be read while looking for dependents. Any of them
+    /// may depend on the spec, so a non-empty list means the scan is incomplete.
+    #[must_use]
+    pub fn unreadable(&self) -> &[PackageParseError] {
+        &self.unreadable
+    }
+
+    /// Why the scan for dependents could not run at all, when it could not. Then
+    /// nothing is known about dependents.
+    #[must_use]
+    pub fn scan_failure(&self) -> Option<&PackageRepoError> {
+        self.scan_failure.as_ref()
+    }
+}
+
+/// Scan for the packages depending on `shown`, loaded under `package_name`.
+pub(super) fn plan_removal<PR>(package_name: &str, shown: GetPackage, repo: &PR) -> RemovalPlan
+where
+    PR: PackageRepository,
+{
+    let (dependents, unreadable, scan_failure) = match repo.find_dependent_packages(package_name) {
+        Ok((dependents, unreadable)) => (dependents, unreadable, None),
+        Err(err) => (Vec::new(), Vec::new(), Some(err)),
+    };
+    RemovalPlan {
+        shown,
+        dependents,
+        unreadable,
+        scan_failure,
+    }
+}
 
 pub(super) async fn handle_remove<PR>(
     package_name: &str,
@@ -33,22 +92,23 @@ where
         }
     };
 
-    let file_path = get_package.file_path().to_path_buf();
-
     // Step 2: Check for dependent packages
     progress
         .next(sender, "Checking for dependent packages")
         .await;
 
-    let (dependent_packages, unreadable) = match repo.find_dependent_packages(package_name) {
-        Ok(found) => found,
-        Err(err) => {
-            sender
-                .send_warning(format!("Failed to check for dependent packages: {err}"))
-                .await;
-            (vec![], vec![])
-        }
-    };
+    let RemovalPlan {
+        shown: get_package,
+        dependents: dependent_packages,
+        unreadable,
+        scan_failure,
+    } = plan_removal(package_name, get_package, repo);
+    let file_path = get_package.file_path().to_path_buf();
+    if let Some(err) = scan_failure {
+        sender
+            .send_warning(format!("Failed to check for dependent packages: {err}"))
+            .await;
+    }
 
     // A spec selfie could not read may name this package, so an empty dependent
     // list under one of these is silence rather than a clearance. The caller is
