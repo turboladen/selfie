@@ -8,7 +8,7 @@ use selfie::validation::ValidationLevel;
 
 use crate::display_manager::{Channel, DisplayManager};
 use crate::tables::{Cell, SafeTable};
-use crate::terminal_text::{Shown, shown};
+use crate::terminal_text::{Shown, lit, shown};
 
 /// A single validation issue row, used as a common representation for both
 /// event-driven validation results and sync push validation failures.
@@ -69,7 +69,7 @@ pub(crate) fn display_validation_groups(
         (0, 0, n) if n > 0 => format!("Validation Notices ({n})"),
         _ => format!("Validation Issues ({})", counted.join(", ")),
     };
-    display.line_to(channel, "");
+    display.line_to(channel, lit!(""));
     display.print_section_header_to(channel, header);
 
     for group in groups {
@@ -81,9 +81,9 @@ pub(crate) fn display_validation_groups(
         // a failure, so it must not be marked with a red cross.
         let blocking = group.rows.iter().any(|r| r.level != ValidationLevel::Info);
         let marker = if blocking {
-            Shown::from("✗").paint(use_colors, |s| s.red())
+            Shown::from(lit!("✗")).paint(use_colors, |s| s.red())
         } else {
-            Shown::from("ℹ").paint(use_colors, |s| s.blue())
+            Shown::from(lit!("ℹ")).paint(use_colors, |s| s.blue())
         };
         let label = Shown::name(group.label).paint(use_colors, |s| s.bold());
         display.line_to(channel, shown!("  {} {}", marker, label));

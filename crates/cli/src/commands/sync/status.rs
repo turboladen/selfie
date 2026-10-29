@@ -1,6 +1,6 @@
 //! Handler for `selfie sync status`.
 
-use crate::terminal_text::{Shown, shown};
+use crate::terminal_text::{Shown, lit, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -71,15 +71,15 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                 // File changes summary
                 if total_changes > 0 {
                     let parts = [
-                        (*modified_count, "modified"),
-                        (*staged_count, "staged"),
-                        (*untracked_count, "untracked"),
-                        (*deleted_count, "deleted"),
+                        (*modified_count, lit!("modified")),
+                        (*staged_count, lit!("staged")),
+                        (*untracked_count, lit!("untracked")),
+                        (*deleted_count, lit!("deleted")),
                     ]
                     .into_iter()
                     .filter(|(count, _)| *count > 0)
                     .map(|(count, word)| shown!("{} {}", count, word));
-                    display.println(shown!("{}{}", INDENT, Shown::join(parts, ", ")));
+                    display.println(shown!("{}{}", INDENT, Shown::join(parts, lit!(", "))));
                 }
 
                 // Remote tracking
@@ -91,10 +91,18 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                         *behind
                     ));
                 } else if *ahead > 0 {
-                    let label = selfie::pluralize(*ahead, "commit", "commits");
+                    let label = if *ahead == 1 {
+                        lit!("commit")
+                    } else {
+                        lit!("commits")
+                    };
                     display.println(shown!("{}{} {} ahead of remote", INDENT, *ahead, label));
                 } else if *behind > 0 {
-                    let label = selfie::pluralize(*behind, "commit", "commits");
+                    let label = if *behind == 1 {
+                        lit!("commit")
+                    } else {
+                        lit!("commits")
+                    };
                     display.println(shown!("{}{} {} behind remote", INDENT, *behind, label));
                 } else {
                     display.println(shown!("{}Up to date with remote", INDENT));
@@ -115,7 +123,7 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             drift_outcome,
             ..
         } => {
-            display.println("");
+            display.println(lit!(""));
             // Something drift could not check is neither drifted nor clean, and
             // saying "no drift" for it answers a question nobody asked. The
             // count is reported first because it bounds what the rest of the

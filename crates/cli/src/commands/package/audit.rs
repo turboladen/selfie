@@ -4,7 +4,7 @@ use selfie::package::{
     service::PackageService,
 };
 
-use crate::terminal_text::{Paint, Shown, shown, tool_output};
+use crate::terminal_text::{Literal, Paint, Shown, lit, shown, tool_output};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -80,7 +80,7 @@ fn display_environment_error(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    display.print_note("");
+    display.print_note(lit!(""));
 
     if let OperationFailure::Package(PackageError::EnvironmentNotFound {
         available_environments,
@@ -93,7 +93,7 @@ fn display_environment_error(
             available_environments,
             config,
             display,
-            "audit",
+            presentation::PackageCommand::Audit,
         );
     } else {
         presentation::display_generic_environment_suggestion(
@@ -101,7 +101,7 @@ fn display_environment_error(
             config.environment(),
             config,
             display,
-            "audit",
+            presentation::PackageCommand::Audit,
         );
     }
 }
@@ -160,12 +160,12 @@ fn display_audit_summary_line(
     display: &DisplayManager,
 ) {
     let use_colors = config.use_colors();
-    let label = |text: &'static str, paint: Paint| Shown::from(text).paint(use_colors, paint);
+    let label = |text: Literal, paint: Paint| Shown::from(text).paint(use_colors, paint);
     let error = |err: &str| {
         shown!(
             "{}: {}",
-            label("error", |s| s.red()),
-            Shown::tool_output(err, "    ")
+            label(lit!("error"), |s| s.red()),
+            Shown::tool_output(err, lit!("    "))
         )
     };
 
@@ -173,19 +173,19 @@ fn display_audit_summary_line(
         AuditResult::Clean { sources } => {
             shown!(
                 "{} ({})",
-                label("clean", |s| s.green()),
-                Shown::joined(sources, ", ")
+                label(lit!("clean"), |s| s.green()),
+                Shown::joined(sources, lit!(", "))
             )
         }
         AuditResult::Conflicts {
             sources, expected, ..
         } => shown!(
             "{} — unexpected: {}",
-            label("CONFLICTS", |s| s.red().bold()),
-            Shown::joined(unexpected(sources, expected), ", ")
+            label(lit!("CONFLICTS"), |s| s.red().bold()),
+            Shown::joined(unexpected(sources, expected), lit!(", "))
         ),
-        AuditResult::NotInstalled => label("not installed", |s| s.dim()),
-        AuditResult::NoAuditCommand => label("no audit command", |s| s.dim()),
+        AuditResult::NotInstalled => label(lit!("not installed"), |s| s.dim()),
+        AuditResult::NoAuditCommand => label(lit!("no audit command"), |s| s.dim()),
         AuditResult::Error(err) => error(err),
         AuditResult::CouldNotRun(failure) => error(&failure.to_string()),
     };
@@ -215,52 +215,52 @@ fn display_audit_result_card(
     // Common fields via ResultCard
     display
         .result_card("Audit Results")
-        .field("Package", &audit_result.package_name)
-        .field("Environment", &audit_result.environment)
-        .field_if("Command", audit_result.audit_command.as_deref())
+        .field(lit!("Package"), &audit_result.package_name)
+        .field(lit!("Environment"), &audit_result.environment)
+        .field_if(lit!("Command"), audit_result.audit_command.as_deref())
         .print();
 
     // Status line stays inline — variant-dependent sub-fields
-    let key = |field: &'static str| shown!("{}{}: ", INDENT, format_key(field, use_colors));
+    let key = |field: Literal| shown!("{}{}: ", INDENT, format_key(field, use_colors));
     let error = |err: &str| {
         shown!(
             "{}{}\n{}{}",
-            key("Status"),
+            key(lit!("Status")),
             status_style::format_status_error(use_colors),
-            key("Details"),
-            Shown::tool_output(err, "    ")
+            key(lit!("Details")),
+            Shown::tool_output(err, lit!("    "))
         )
     };
     let status_line = match &audit_result.result {
         AuditResult::Clean { sources } => shown!(
             "{}{}\n{}{}",
-            key("Status"),
+            key(lit!("Status")),
             status_style::format_audit_clean(use_colors),
-            key("Sources"),
-            Shown::joined(sources, ", ")
+            key(lit!("Sources")),
+            Shown::joined(sources, lit!(", "))
         ),
         AuditResult::Conflicts {
             sources, expected, ..
         } => shown!(
             "{}{}\n{}{}\n{}{}\n{}{}",
-            key("Status"),
+            key(lit!("Status")),
             status_style::format_audit_conflicts(use_colors),
-            key("All sources"),
-            Shown::joined(sources, ", "),
-            key("Expected"),
-            Shown::joined(expected, ", "),
-            key("Unexpected"),
-            Shown::joined(unexpected(sources, expected), ", ")
+            key(lit!("All sources")),
+            Shown::joined(sources, lit!(", ")),
+            key(lit!("Expected")),
+            Shown::joined(expected, lit!(", ")),
+            key(lit!("Unexpected")),
+            Shown::joined(unexpected(sources, expected), lit!(", "))
         ),
         AuditResult::NotInstalled => shown!(
             "{}{}",
-            key("Status"),
+            key(lit!("Status")),
             status_style::format_not_installed(use_colors)
         ),
         AuditResult::NoAuditCommand => {
             shown!(
                 "{}{}",
-                key("Status"),
+                key(lit!("Status")),
                 status_style::format_no_audit(use_colors)
             )
         }

@@ -49,3 +49,6 @@ selfie = { path = "../selfie/", features = ["with_mocks"] }
 tempfile.workspace = true
 test-common = { path = "../test-common/" }
 tokio-test = "0.4"
+# Compile-fail checks for terminal_text.rs: what must not compile is the
+# guarantee, so a case that starts compiling fails the test.
+trybuild = "1.0.122"

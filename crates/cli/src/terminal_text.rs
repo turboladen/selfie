@@ -177,7 +177,8 @@ pub(crate) type Paint = fn(console::StyledObject<String>) -> console::StyledObje
 ///
 /// The printers that keep styling take this type, so text from outside selfie
 /// reaches them only through [`Shown::name`], [`Shown::prose`], a
-/// [`DisplayPath`], or [`shown!`], whose arguments must each be [`Trusted`].
+/// [`DisplayPath`], or [`shown!`], whose arguments must each be [`Trusted`];
+/// selfie's own text reaches them as a [`Literal`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Shown(String);
 
@@ -191,7 +192,7 @@ impl Shown {
     /// with every line after the first indented two columns, so that none of
     /// them starts at the left margin or a table cell's edge.
     pub(crate) fn prose(text: &str) -> Self {
-        Self::indented(Self(escape_prose(text).into_owned()), "  ")
+        Self::indented(Self(escape_prose(text).into_owned()), lit!("  "))
     }
 
     /// `line`, a line of file content, escaped as [`escape_keeping_tabs`]
@@ -204,19 +205,19 @@ impl Shown {
     /// `separator`.
     pub(crate) fn joined<S: AsRef<str>>(
         items: impl IntoIterator<Item = S>,
-        separator: &'static str,
+        separator: Literal,
     ) -> Self {
-        Self(escape_joined(items, separator))
+        Self(escape_joined(items, separator.as_str()))
     }
 
     /// `items` joined by `separator`, each shown as it is.
-    pub(crate) fn join(items: impl IntoIterator<Item = Shown>, separator: &'static str) -> Self {
+    pub(crate) fn join(items: impl IntoIterator<Item = Shown>, separator: Literal) -> Self {
         Self(
             items
                 .into_iter()
                 .map(|item| item.0)
                 .collect::<Vec<_>>()
-                .join(separator),
+                .join(separator.as_str()),
         )
     }
 
@@ -229,13 +230,13 @@ impl Shown {
 
     /// `text`, a command's output, cleaned as [`tool_output`] cleans it, with
     /// every line after the first starting with `indent`.
-    pub(crate) fn tool_output(text: &str, indent: &'static str) -> Self {
+    pub(crate) fn tool_output(text: &str, indent: Literal) -> Self {
         Self(tool_output(text).replace('\n', &format!("\n{indent}")))
     }
 
     /// `text` with every line after the first starting with `indent`, so no
     /// line of it starts at the left margin.
-    pub(crate) fn indented(text: Shown, indent: &'static str) -> Self {
+    pub(crate) fn indented(text: Shown, indent: Literal) -> Self {
         Self(text.0.replace('\n', &format!("\n{indent}")))
     }
 
@@ -258,17 +259,16 @@ impl Shown {
     }
 
     // Only `shown!` calls this, once it has checked that every argument is
-    // `Trusted`.
+    // `Trusted`. A test holds every other file to that.
     #[doc(hidden)]
-    pub(crate) fn assembled(text: String) -> Self {
+    pub(crate) fn __assembled(text: String) -> Self {
         Self(text)
     }
 }
 
-impl From<&'static str> for Shown {
-    /// Shows selfie's own literal text as it is written.
-    fn from(text: &'static str) -> Self {
-        Self(text.to_string())
+impl From<Literal> for Shown {
+    fn from(text: Literal) -> Self {
+        Self(text.0.to_string())
     }
 }
 
@@ -298,17 +298,34 @@ impl PartialEq<&str> for Shown {
     }
 }
 
-/// A value [`shown!`] may format: text already safe to print, or a number.
-pub(crate) trait Trusted: fmt::Display {}
-
-impl Trusted for Shown {}
-impl Trusted for DisplayPath {}
-impl Trusted for &'static str {}
-impl<T: Trusted + ?Sized> Trusted for &T {}
-macro_rules! trusted_numbers {
-    ($($number:ty),*) => { $(impl Trusted for $number {})* };
+// `Trusted` requires this trait, which only this module can name, so no other
+// module can implement `Trusted` for a type of its own. Its name is its own, so
+// rustc's note on a refused implementation names no other crate's trait.
+mod sealed {
+    #[diagnostic::on_unimplemented(
+        message = "only terminal_text.rs implements Trusted, and not for `{Self}`"
+    )]
+    pub trait TerminalTextSeal {}
 }
-trusted_numbers!(u8, u16, u32, u64, usize, i32, i64, f64);
+
+/// A value [`shown!`] may format: text already safe to print, or a number.
+///
+/// Only this module implements it.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not Trusted, so shown! cannot format it",
+    label = "escape it first, or write selfie's own text with lit!"
+)]
+pub(crate) trait Trusted: fmt::Display + sealed::TerminalTextSeal {}
+
+macro_rules! trusted {
+    ($($trusted:ty),*) => { $(impl sealed::TerminalTextSeal for $trusted {} impl Trusted for $trusted {})* };
+}
+// A `SafeTable` escapes every cell not built from a `Shown`, so a rendered
+// table may be printed.
+trusted!(Shown, DisplayPath, Literal, crate::tables::SafeTable);
+trusted!(u8, u16, u32, u64, usize, i32, i64, f64);
+impl<T: Trusted + ?Sized> sealed::TerminalTextSeal for &T {}
+impl<T: Trusted + ?Sized> Trusted for &T {}
 
 #[doc(hidden)]
 pub(crate) fn trusted<T: Trusted>(value: T) -> T {
@@ -347,12 +364,55 @@ macro_rules! shown {
             !$crate::terminal_text::has_inline_argument($format),
             "shown! takes its arguments by position, so each is checked as Trusted"
         );
-        $crate::terminal_text::Shown::assembled(format!(
+        $crate::terminal_text::Shown::__assembled(format!(
             $format $(, $crate::terminal_text::trusted(&$argument))*
         ))
     }};
 }
 pub(crate) use shown;
+
+/// Holds selfie's own text, which is shown as it is written. Only [`lit!`]
+/// makes one, from a string literal in selfie's source. The printer's guard
+/// still escapes a control character or a color sequence in it that selfie's
+/// own styling does not write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Literal(&'static str);
+
+impl Literal {
+    // Only `lit!` calls this, with a string-literal token: a `&'static str`
+    // can also come from `String::leak`. A test holds every other file to
+    // that.
+    #[doc(hidden)]
+    pub(crate) const fn __from_literal(text: &'static str) -> Self {
+        Self(text)
+    }
+
+    /// Returns the text.
+    pub(crate) const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl fmt::Display for Literal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+/// Makes a [`Literal`] from one string literal, and works in a `const`.
+///
+/// Anything but a string literal does not compile: a variable or a macro call
+/// gets this macro's own error, and a literal of another type, such as `1` or
+/// `b"x"`, gets rustc's type error.
+macro_rules! lit {
+    ($text:literal) => {
+        $crate::terminal_text::Literal::__from_literal($text)
+    };
+    ($($other:tt)*) => {
+        compile_error!("lit! takes one string literal")
+    };
+}
+pub(crate) use lit;
 
 /// A path or source as the terminal shows it, made only by
 /// [`DisplayPath::new`], so text of this type has been through [`escape`].

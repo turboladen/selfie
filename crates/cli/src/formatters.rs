@@ -1,6 +1,6 @@
 //! Shared text formatting utilities for consistent styling
 
-use crate::terminal_text::Shown;
+use crate::terminal_text::{Literal, Shown};
 
 /// A spec name as the last argument of a command shown to the user: quoted
 /// where the shell would split it, and after `--` when it starts with a dash.
@@ -15,7 +15,7 @@ pub(crate) fn name_argument(name: &str) -> String {
 }
 
 /// `text`, a field's name, in key styling: bold and cyan when `use_colors`.
-pub(crate) fn format_key(text: &'static str, use_colors: bool) -> Shown {
+pub(crate) fn format_key(text: Literal, use_colors: bool) -> Shown {
     Shown::from(text).paint(use_colors, |s| s.bold().cyan())
 }
 

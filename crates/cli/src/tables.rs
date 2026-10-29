@@ -2,7 +2,7 @@ use std::fmt;
 
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 
-use crate::terminal_text::{Paint, Shown, Trusted};
+use crate::terminal_text::{Paint, Shown};
 use selfie::validation::ValidationIssue;
 
 /// A table in the CLI's style, rounded and fitted to the terminal, whose cells
@@ -100,9 +100,6 @@ impl SafeTable {
         self
     }
 }
-
-// Every cell is escaped or selfie's own, so a rendered table may be printed.
-impl Trusted for SafeTable {}
 
 impl fmt::Display for SafeTable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -3,12 +3,12 @@
 //! Pure formatting functions that produce styled text strings for use in
 //! table cells and status displays. No spinner or progress bar dependency.
 
-use crate::terminal_text::{Paint, Shown, shown};
+use crate::terminal_text::{Literal, Paint, Shown, lit, shown};
 
 /// Format a status indicator with a marker prefix and optional color styling
 fn format_status_indicator(
-    marker: &'static str,
-    label: &'static str,
+    marker: Literal,
+    label: Literal,
     use_colors: bool,
     paint: Paint,
 ) -> Shown {
@@ -17,37 +17,41 @@ fn format_status_indicator(
 
 /// Format an "installed" status indicator
 pub(crate) fn format_installed(use_colors: bool) -> Shown {
-    format_status_indicator("✓", "Installed", use_colors, |s| s.green())
+    format_status_indicator(lit!("✓"), lit!("Installed"), use_colors, |s| s.green())
 }
 
 /// Format a "valid" status indicator (for validation results)
 pub(crate) fn format_valid(use_colors: bool) -> Shown {
-    format_status_indicator("✓", "Valid", use_colors, |s| s.green())
+    format_status_indicator(lit!("✓"), lit!("Valid"), use_colors, |s| s.green())
 }
 
 /// Format a "not installed" status indicator
 pub(crate) fn format_not_installed(use_colors: bool) -> Shown {
-    format_status_indicator("✗", "Not installed", use_colors, |s| s.cyan())
+    format_status_indicator(lit!("✗"), lit!("Not installed"), use_colors, |s| s.cyan())
 }
 
 /// Format a status check error indicator
 pub(crate) fn format_status_error(use_colors: bool) -> Shown {
-    format_status_indicator("✗", "Error", use_colors, |s| s.red())
+    format_status_indicator(lit!("✗"), lit!("Error"), use_colors, |s| s.red())
 }
 
 /// Format a "clean" audit status indicator
 pub(crate) fn format_audit_clean(use_colors: bool) -> Shown {
-    format_status_indicator("✓", "Clean", use_colors, |s| s.green())
+    format_status_indicator(lit!("✓"), lit!("Clean"), use_colors, |s| s.green())
 }
 
 /// Format a "conflicts detected" audit status indicator
 pub(crate) fn format_audit_conflicts(use_colors: bool) -> Shown {
-    format_status_indicator("⚠", "Conflicts Detected", use_colors, |s| s.yellow())
+    format_status_indicator(lit!("⚠"), lit!("Conflicts Detected"), use_colors, |s| {
+        s.yellow()
+    })
 }
 
 /// Format a "no audit command" status indicator
 pub(crate) fn format_no_audit(use_colors: bool) -> Shown {
-    format_status_indicator("⚠", "No audit command", use_colors, |s| s.yellow())
+    format_status_indicator(lit!("⚠"), lit!("No audit command"), use_colors, |s| {
+        s.yellow()
+    })
 }
 
 /// The status cell of a `package list` row: a few words, styled when

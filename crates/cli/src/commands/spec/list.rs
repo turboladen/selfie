@@ -1,6 +1,6 @@
 use crate::tables::{Cell, SafeTable};
 use crate::terminal_text::DisplayPath;
-use crate::terminal_text::{Shown, shown};
+use crate::terminal_text::{Shown, lit, shown};
 use selfie::package::{
     event::{PackageEvent, SpecListData},
     service::SpecService,
@@ -119,10 +119,10 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
 // not, so the two cases cannot drift apart. The lines after its first start
 // under its text, past the mark.
 fn issue_line(text: Shown, use_colors: bool) -> Shown {
-    let text = Shown::indented(text, "    ");
+    let text = Shown::indented(text, lit!("    "));
     shown!(
         "  {} {}",
-        Shown::from("⚠").paint(use_colors, |s| s.yellow()),
+        Shown::from(lit!("⚠")).paint(use_colors, |s| s.yellow()),
         text.paint(use_colors, |s| s.dim())
     )
 }

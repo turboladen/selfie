@@ -4,7 +4,7 @@ use selfie::package::{
     service::PackageService,
 };
 
-use crate::terminal_text::{Shown, shown, tool_output};
+use crate::terminal_text::{Literal, Shown, lit, shown, tool_output};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -67,7 +67,7 @@ fn display_environment_error(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    display.print_note("");
+    display.print_note(lit!(""));
 
     if let OperationFailure::Package(PackageError::EnvironmentNotFound {
         available_environments,
@@ -80,7 +80,7 @@ fn display_environment_error(
             available_environments,
             config,
             display,
-            "check",
+            presentation::PackageCommand::Check,
         );
     } else if let OperationFailure::Package(PackageError::NoCheckCommand {
         environment,
@@ -92,7 +92,7 @@ fn display_environment_error(
         // environment advice below would be false.
         presentation::display_missing_command(
             display,
-            "check",
+            presentation::PackageCommand::Check,
             package_name,
             environment,
             other_envs_with_check,
@@ -103,7 +103,7 @@ fn display_environment_error(
             config.environment(),
             config,
             display,
-            "check",
+            presentation::PackageCommand::Check,
         );
     }
 }
@@ -143,22 +143,22 @@ fn display_check_result_card(
     let use_colors = config.use_colors();
 
     // Status line stays inline — complex branching with conditional sub-fields
-    let key = |field: &'static str| shown!("{}{}: ", INDENT, format_key(field, use_colors));
-    let output = |field: &'static str, text: &str| {
-        shown!("\n{}{}", key(field), Shown::tool_output(text, "    "))
+    let key = |field: Literal| shown!("{}{}: ", INDENT, format_key(field, use_colors));
+    let output = |field: Literal, text: &str| {
+        shown!("\n{}{}", key(field), Shown::tool_output(text, lit!("    ")))
     };
 
     let status_line = match &check_result.result {
         CheckResult::Success { stdout, stderr } => {
             let status = shown!(
                 "{}{}",
-                key("Status"),
+                key(lit!("Status")),
                 status_style::format_installed(use_colors)
             );
             if !stdout.trim().is_empty() {
-                shown!("{}{}", status, output("Output", stdout))
+                shown!("{}{}", status, output(lit!("Output"), stdout))
             } else if !stderr.trim().is_empty() {
-                shown!("{}{}", status, output("Output", stderr))
+                shown!("{}{}", status, output(lit!("Output"), stderr))
             } else {
                 status
             }
@@ -171,15 +171,15 @@ fn display_check_result_card(
         } => {
             let status = shown!(
                 "{}{}",
-                key("Status"),
+                key(lit!("Status")),
                 status_style::format_not_installed(use_colors)
             );
             if !stderr.is_empty() {
-                shown!("{}{}", status, output("Details", stderr))
+                shown!("{}{}", status, output(lit!("Details"), stderr))
             } else if !stdout.is_empty() {
-                shown!("{}{}", status, output("Details", stdout))
+                shown!("{}{}", status, output(lit!("Details"), stdout))
             } else if let Some(code) = exit_code {
-                shown!("{}\n{}Exit code {}", status, key("Details"), *code)
+                shown!("{}\n{}Exit code {}", status, key(lit!("Details")), *code)
             } else {
                 status
             }
@@ -190,9 +190,9 @@ fn display_check_result_card(
 
     display
         .result_card("Check Results")
-        .field("Package", &check_result.package_name)
-        .field("Environment", &check_result.environment)
-        .field_if("Command", check_result.check_command.as_deref())
+        .field(lit!("Package"), &check_result.package_name)
+        .field(lit!("Environment"), &check_result.environment)
+        .field_if(lit!("Command"), check_result.check_command.as_deref())
         .print();
     display.println(status_line);
 }

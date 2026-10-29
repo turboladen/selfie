@@ -56,7 +56,7 @@ fn no_table_is_built_except_through_safe_table() {
 
     let found: Vec<String> = files
         .iter()
-        .filter(|file| file.file_name().is_some_and(|name| name != "tables.rs"))
+        .filter(|file| **file != src.join("tables.rs"))
         .flat_map(|file| {
             let text = std::fs::read_to_string(file).unwrap();
             outside_test_modules(&text)
@@ -75,38 +75,73 @@ fn no_table_is_built_except_through_safe_table() {
     );
 }
 
-// Text reaches a styled printer only as a `Shown`, and only terminal_text.rs
-// builds one from a bare string: `shown!` expands to `Shown::assembled` after
-// checking each argument, so a direct call elsewhere skips that check.
+// Text reaches a styled printer only as a `Shown`. `shown!` builds one through
+// `Shown::__assembled` after checking each argument, and `lit!` builds a
+// `Literal` through `Literal::__from_literal` from a string-literal token. Both
+// are callable from any file, since a macro's expansion is checked for privacy
+// where it is used, so a direct call elsewhere skips the check.
+//
+// This matches the names as text, test modules included. A call has to name
+// the function, an alias cannot rename an associated function, and a comment
+// or string naming one fails the test rather than hiding a call.
+const HIDDEN: &[&str] = &["__assembled", "__from_literal"];
+
 #[test]
-fn no_shown_is_assembled_outside_terminal_text() {
+fn hidden_constructors_are_called_only_in_terminal_text() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     collect_rust_files(&src, &mut files);
+    assert!(files.len() > 20, "the walk found too few files: {files:?}");
+    assert!(
+        files
+            .iter()
+            .any(|file| file.ends_with("commands/package/check.rs")),
+        "the walk did not reach nested modules: {files:?}"
+    );
 
     let found: Vec<String> = files
         .iter()
-        .filter(|file| {
-            file.file_name()
-                .is_some_and(|name| name != "terminal_text.rs")
-        })
+        .filter(|file| **file != src.join("terminal_text.rs"))
         .flat_map(|file| {
             let text = std::fs::read_to_string(file).unwrap();
-            text.lines()
-                .enumerate()
-                .filter(|(_, line)| line.contains("Shown::assembled"))
-                .map(|(index, line)| {
-                    format!("{}:{}: {}", file.to_string_lossy(), index + 1, line.trim())
-                })
+            hidden_calls(&text)
+                .into_iter()
+                .map(|(number, line)| format!("{}:{number}: {}", file.to_string_lossy(), line))
                 .collect::<Vec<_>>()
         })
         .collect();
 
     assert!(
         found.is_empty(),
-        "build these with shown!, Shown::name or Shown::prose:\n{}",
+        "build these with shown! or lit!:\n{}",
         found.join("\n")
     );
+}
+
+// The scan must see what it is meant to forbid: a direct call, a raw
+// identifier, and a call through an alias of the type.
+#[test]
+fn the_hidden_constructor_scan_sees_a_direct_call() {
+    let text = "use crate::terminal_text::{Literal as L, Shown};\n\
+                fn a() -> Shown { Shown::__assembled(String::new()) }\n\
+                fn b() -> L { L::r#__from_literal(leaked()) }\n\
+                fn c() -> Shown { shown!(\"{}\", lit!(\"x\")) }\n";
+
+    let lines: Vec<usize> = hidden_calls(text)
+        .into_iter()
+        .map(|(number, _)| number)
+        .collect();
+
+    assert_eq!(lines, [2, 3]);
+}
+
+// The lines of `text`, numbered from 1, that name a hidden constructor.
+fn hidden_calls(text: &str) -> Vec<(usize, &str)> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| HIDDEN.iter().any(|name| line.contains(name)))
+        .map(|(index, line)| (index + 1, line.trim()))
+        .collect()
 }
 
 // The gate must see what it is meant to forbid: a `.display()` outside a test

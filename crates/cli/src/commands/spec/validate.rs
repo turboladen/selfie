@@ -1,4 +1,4 @@
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, lit};
 use selfie::package::{
     event::{
         CollectionRefusal, OperationResult, OperationSuccess, Outcome, PackageEvent,
@@ -380,9 +380,12 @@ fn display_validation_success_card(
 ) {
     display
         .result_card("Validation Results")
-        .field("Package", &validation_result.package_name)
-        .field("Environment", &validation_result.environment)
-        .styled_field("Status", status_style::format_valid(config.use_colors()))
+        .field(lit!("Package"), &validation_result.package_name)
+        .field(lit!("Environment"), &validation_result.environment)
+        .styled_field(
+            lit!("Status"),
+            status_style::format_valid(config.use_colors()),
+        )
         .print();
 }
 

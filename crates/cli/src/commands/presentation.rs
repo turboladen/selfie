@@ -1,11 +1,30 @@
 //! How commands lay out what they print: tables, field styling, and the
 //! report for a package that does not support the current environment.
 
-use crate::terminal_text::{Paint, Shown, shown};
+use crate::terminal_text::{Literal, Paint, Shown, lit, shown};
 
 use crate::config::CliConfig;
 use crate::display_manager::{DisplayManager, INDENT};
 use crate::tables::SafeTable;
+
+/// The package command a report is about.
+#[derive(Clone, Copy)]
+pub(crate) enum PackageCommand {
+    Install,
+    Check,
+    Audit,
+}
+
+impl PackageCommand {
+    /// Returns the command's name, as `selfie package` takes it.
+    pub(crate) fn word(self) -> Literal {
+        match self {
+            Self::Install => lit!("install"),
+            Self::Check => lit!("check"),
+            Self::Audit => lit!("audit"),
+        }
+    }
+}
 
 /// How a table row turned out, which decides its marker.
 pub(crate) enum RowResult {
@@ -44,9 +63,9 @@ pub(crate) fn paint_row_text(text: &str, result: &RowResult, use_colors: bool) -
 /// The marker cell for a row.
 pub(crate) fn row_marker(result: &RowResult, use_colors: bool) -> Shown {
     let marker = match result {
-        RowResult::Success => "✓",
-        RowResult::Warning => "⚠",
-        RowResult::Failure => "✗",
+        RowResult::Success => lit!("✓"),
+        RowResult::Warning => lit!("⚠"),
+        RowResult::Failure => lit!("✗"),
     };
     let color = row_color(result);
     Shown::from(marker)
@@ -68,12 +87,7 @@ pub(crate) fn format_environment_names(
             Shown::name(env_name).paint(config.use_colors(), |s| s.dim().green())
         }
     });
-    Shown::join(names, ", ")
-}
-
-/// Format a key with consistent styling
-pub(crate) fn format_field_key(key: &'static str, use_colors: bool) -> Shown {
-    Shown::from(key).paint(use_colors, |s| s.cyan().bold())
+    Shown::join(names, lit!(", "))
 }
 
 /// Display environment error with available environments for a specific package
@@ -83,7 +97,7 @@ pub(crate) fn display_environment_summary(
     available_environments: &[String],
     config: &CliConfig,
     display: &DisplayManager,
-    context: &'static str, // "check" or "install"
+    command: PackageCommand,
 ) {
     if available_environments.is_empty() {
         display_generic_environment_suggestion(
@@ -91,7 +105,7 @@ pub(crate) fn display_environment_summary(
             current_environment,
             config,
             display,
-            context,
+            command,
         );
     } else {
         display.print_error(format!(
@@ -114,23 +128,27 @@ pub(crate) fn display_environment_summary(
 
         display.print_styled_suggestion(shown!(
             "{} with one of the environments above",
-            shown!("selfie package {} --environment <env> <package>", context)
-                .paint(config.use_colors(), |s| s.yellow())
+            shown!(
+                "selfie package {} --environment <env> <package>",
+                command.word()
+            )
+            .paint(config.use_colors(), |s| s.yellow())
         ));
     }
 }
 
-/// Report that `package_name` has no `kind` command ("check", "install") in
-/// `environment`, naming the environments that have one (stderr).
+/// Report that `package_name` has no `command` command in `environment`,
+/// naming the environments that have one (stderr).
 pub(crate) fn display_missing_command(
     display: &DisplayManager,
-    kind: &'static str,
+    command: PackageCommand,
     package_name: &str,
     environment: &str,
     others: &[String],
 ) {
     display.print_error(format!(
-        "No {kind} command defined for '{package_name}' in environment '{environment}'."
+        "No {} command defined for '{package_name}' in environment '{environment}'.",
+        command.word()
     ));
     if !others.is_empty() {
         // Sorted, so the line reads the same on every run.
@@ -138,8 +156,8 @@ pub(crate) fn display_missing_command(
         others.sort();
         display.print_note(shown!(
             "Environments with {} commands: {}",
-            kind,
-            Shown::joined(&others, ", ")
+            command.word(),
+            Shown::joined(&others, lit!(", "))
         ));
     }
 }
@@ -150,7 +168,7 @@ pub(crate) fn display_generic_environment_suggestion(
     current_environment: &str,
     config: &CliConfig,
     display: &DisplayManager,
-    context: &'static str, // "check" or "install"
+    command: PackageCommand,
 ) {
     display.print_error(format!(
         "Package '{package_name}' doesn't support environment '{current_environment}'."
@@ -160,14 +178,17 @@ pub(crate) fn display_generic_environment_suggestion(
     display.print_note(shown!(
         "{}• {} to {} with a different environment",
         INDENT,
-        shown!("selfie package {} --environment <env> <package>", context)
-            .paint(use_colors, |s| s.yellow()),
-        context
+        shown!(
+            "selfie package {} --environment <env> <package>",
+            command.word()
+        )
+        .paint(use_colors, |s| s.yellow()),
+        command.word()
     ));
     display.print_note(shown!(
         "{}• {} to see which environments this package supports",
         INDENT,
-        Shown::from("selfie spec info <package>").paint(use_colors, |s| s.yellow())
+        Shown::from(lit!("selfie spec info <package>")).paint(use_colors, |s| s.yellow())
     ));
 }
 
@@ -175,6 +196,30 @@ pub(crate) fn display_generic_environment_suggestion(
 mod tests {
     use super::*;
     use test_common::test_config_with_dir;
+
+    // Each word a report names is a `selfie package` subcommand, so the enum
+    // cannot drift from the CLI. The match fails to compile when a variant is
+    // added without a row here.
+    #[test]
+    fn each_package_command_word_is_a_subcommand() {
+        use clap::CommandFactory;
+
+        let cli = crate::cli::ClapCli::command();
+        let package = cli
+            .find_subcommand("package")
+            .expect("selfie has a package command");
+        for command in [
+            PackageCommand::Install,
+            PackageCommand::Check,
+            PackageCommand::Audit,
+        ] {
+            match command {
+                PackageCommand::Install | PackageCommand::Check | PackageCommand::Audit => {}
+            }
+            let word = command.word().as_str();
+            assert!(package.find_subcommand(word).is_some(), "{word}");
+        }
+    }
 
     // The environments that have the command are listed in order, whatever
     // order the spec's map gave them.
@@ -184,7 +229,7 @@ mod tests {
 
         display_missing_command(
             &display,
-            "check",
+            PackageCommand::Check,
             "bat",
             "test",
             &["macos-work".to_string(), "linux".to_string()],
@@ -211,7 +256,7 @@ mod tests {
             &["macos".to_string(), "linux".to_string()],
             &config,
             &display,
-            "check",
+            PackageCommand::Check,
         );
 
         let printed = display.printed();
@@ -236,7 +281,13 @@ mod tests {
         let config = CliConfig::wrap_for_test(test_config_with_dir(std::path::Path::new("/p")));
         let display = DisplayManager::new(false);
 
-        display_generic_environment_suggestion("bat", "test", &config, &display, "check");
+        display_generic_environment_suggestion(
+            "bat",
+            "test",
+            &config,
+            &display,
+            PackageCommand::Check,
+        );
 
         let printed = display.printed();
         assert!(printed.len() > 2, "{printed:?}");
@@ -259,7 +310,7 @@ mod tests {
             &["zeta".to_string(), "alpha".to_string()],
             &config,
             &display,
-            "install",
+            PackageCommand::Install,
         );
 
         let printed: String = display
@@ -324,14 +375,5 @@ mod tests {
         // Should not contain asterisk since current environment is not in the list
         assert!(!result.contains('*'));
         assert_eq!(result, "arch-home, ubuntu-server");
-    }
-
-    #[test]
-    fn test_format_field_key() {
-        let key = format_field_key("Test Key", false);
-        assert_eq!(key, "Test Key");
-
-        // Test with colors (just ensure no panic)
-        let _colored_key = format_field_key("Test Key", true);
     }
 }

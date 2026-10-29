@@ -1,6 +1,6 @@
 //! Handler for `selfie sync push`.
 
-use crate::terminal_text::{Shown, shown};
+use crate::terminal_text::{Shown, lit, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -146,13 +146,17 @@ fn show_pending_commits(
 ) {
     let count = commits.len();
     let label = selfie::pluralize(count, "commit", "commits");
-    display.println("");
+    display.println(lit!(""));
     display.print_info(format!("{count} {label} to push:"));
-    display.println("");
+    display.println(lit!(""));
     for (i, commit) in commits.iter().enumerate() {
         let num = i + 1;
         let file_count = commit.files.len();
-        let file_label = selfie::pluralize(file_count, "file", "files");
+        let file_label = if file_count == 1 {
+            lit!("file")
+        } else {
+            lit!("files")
+        };
         let message = Shown::prose(&commit.message).paint(use_colors, |s| s.bold());
         display.println(shown!(
             "  {}. {} ({} {})",
@@ -162,7 +166,7 @@ fn show_pending_commits(
             file_label
         ));
     }
-    display.println("");
+    display.println(lit!(""));
 }
 
 /// The message a commit gets from its prompt's `answer`: the answer, or the
@@ -258,7 +262,7 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager) -> bool {
                 OperationResult::Success(OperationSuccess::SyncPushComplete { commits_pushed, .. }),
             ..
         } => {
-            display.println("");
+            display.println(lit!(""));
             if *commits_pushed == 0 {
                 display.print_success("Pushed to remote");
             } else {

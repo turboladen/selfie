@@ -1,3 +1,4 @@
+use crate::terminal_text::lit;
 use selfie::package::{
     event::{OperationFailure, OperationResult, PackageEvent},
     port::PackageError,
@@ -54,7 +55,7 @@ fn display_environment_error(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
-    display.print_note("");
+    display.print_note(lit!(""));
 
     match failure {
         OperationFailure::Package(PackageError::EnvironmentNotFound {
@@ -69,7 +70,7 @@ fn display_environment_error(
                 available_environments,
                 config,
                 display,
-                "install",
+                presentation::PackageCommand::Install,
             );
             display_required_by(display, required_by.as_deref());
         }
@@ -82,7 +83,7 @@ fn display_environment_error(
         }) => {
             presentation::display_missing_command(
                 display,
-                "install",
+                presentation::PackageCommand::Install,
                 failing,
                 environment,
                 other_envs_with_install,
@@ -95,7 +96,7 @@ fn display_environment_error(
                 config.environment(),
                 config,
                 display,
-                "install",
+                presentation::PackageCommand::Install,
             );
         }
     }
@@ -145,7 +146,7 @@ mod tests {
 
         // Test that DisplayManager output methods don't panic
         display.print_progress("test progress");
-        display.println("test output line");
+        display.println(lit!("test output line"));
         display.print_info("test info");
         display.print_success("test success");
         display.print_error("test error");

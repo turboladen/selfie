@@ -5,7 +5,7 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
-use crate::terminal_text::{DisplayPath, Shown};
+use crate::terminal_text::{DisplayPath, Shown, lit};
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -553,7 +553,7 @@ impl EventProcessor {
             } => {
                 // A blank line first, so the diff under the row does not read as
                 // part of the row above.
-                self.display.println("");
+                self.display.println(lit!(""));
                 self.print_entry_row(EntryOutcome::Conflict, &source, &target, None);
                 self.display.print_diff(&detail.to_string());
             }
@@ -608,7 +608,7 @@ impl EventProcessor {
             // One message: the printer keeps the note's line breaks and indents
             // the lines after the first under it.
             PackageEvent::PostInstallNote { note, .. } => {
-                self.display.println("");
+                self.display.println(lit!(""));
                 self.display.print_info(format!("📋 {note}"));
             }
 
@@ -617,7 +617,7 @@ impl EventProcessor {
                 dotfile_targets,
                 ..
             } => {
-                self.display.println("");
+                self.display.println(lit!(""));
                 self.display
                     .print_info(format!("Package '{package_name}' has deployed dotfiles:"));
                 for target in &dotfile_targets {
