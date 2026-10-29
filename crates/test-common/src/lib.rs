@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod constants;
+pub mod deadline;
 pub mod events;
 pub mod fixtures;
 pub mod git;
@@ -21,6 +22,7 @@ pub use config::{
     test_config, test_config_for_env, test_config_with_dir, test_config_with_dir_and_env,
 };
 pub use constants::*;
+pub use deadline::within_deadline;
 pub use events::{
     assert_failed_answer, assert_failed_operation, assert_successful_operation, collect_events,
     create_test_operation_info, get_operation_result,
