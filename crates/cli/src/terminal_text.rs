@@ -54,9 +54,14 @@ fn in_base_set(c: char) -> bool {
 }
 
 // The strict set, for names and paths, where two values that read alike are
-// two different things.
+// two different things: the base set, every space separator other than U+0020,
+// and U+2800, the braille blank. Those blanks are not added to the base set
+// because in file content U+00A0 and U+3000 are ordinary French and CJK text.
 fn in_strict_set(c: char) -> bool {
     in_base_set(c)
+        || c == '\u{2800}'
+        || (c != ' '
+            && CodePointMapData::<GeneralCategory>::new().get(c) == GeneralCategory::SpaceSeparator)
 }
 
 // One variant per distinct escape. `Name` and `DisplayPath` share `Strict`.
@@ -600,14 +605,14 @@ mod tests {
             ('\u{3164}', false, true, true),
             ('\u{FFF9}', false, true, true),
             ('\u{600}', false, true, true),
-            ('\u{A0}', false, false, false),
-            ('\u{1680}', false, false, false),
-            ('\u{2000}', false, false, false),
-            ('\u{200A}', false, false, false),
-            ('\u{202F}', false, false, false),
-            ('\u{205F}', false, false, false),
-            ('\u{3000}', false, false, false),
-            ('\u{2800}', false, false, false),
+            ('\u{A0}', false, false, true),
+            ('\u{1680}', false, false, true),
+            ('\u{2000}', false, false, true),
+            ('\u{200A}', false, false, true),
+            ('\u{202F}', false, false, true),
+            ('\u{205F}', false, false, true),
+            ('\u{3000}', false, false, true),
+            ('\u{2800}', false, false, true),
             (' ', false, false, false),
             ('a', false, false, false),
             ('\u{301}', false, false, false),
@@ -624,13 +629,23 @@ mod tests {
     }
 
     // Each set holds the one before it: what can act on the terminal is also
-    // what a name or a line of content escapes.
+    // what a name or a line of content escapes. The strict set adds exactly
+    // the 16 space separators other than U+0020, and U+2800.
     #[test]
     fn the_sets_nest() {
+        let mut blanks = Vec::new();
         for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
             assert!(!in_guard_set(c) || in_base_set(c), "{c:?}");
             assert!(!in_base_set(c) || in_strict_set(c), "{c:?}");
+            if in_strict_set(c) && !in_base_set(c) {
+                blanks.push(c);
+            }
         }
+        assert_eq!(blanks.len(), 17, "{blanks:?}");
+        assert!(
+            blanks.contains(&'\u{2800}') && !blanks.contains(&' '),
+            "{blanks:?}"
+        );
     }
 
     // Each kind against each class of character, as (text, name, prose,
@@ -761,11 +776,17 @@ mod tests {
                 "a\u{AD}b",
             ),
             (
-                "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b",
+                "a\u{A0}b",
+                "a\\u{a0}b",
+                "a\u{A0}b",
+                "a\u{A0}b",
+                "a\u{A0}b",
+                "a\u{A0}b",
+                "a\u{A0}b",
             ),
             (
                 "a\u{2800}b",
-                "a\u{2800}b",
+                "a\\u{2800}b",
                 "a\u{2800}b",
                 "a\u{2800}b",
                 "a\u{2800}b",
@@ -774,7 +795,7 @@ mod tests {
             ),
             (
                 "a\u{3000}b",
-                "a\u{3000}b",
+                "a\\u{3000}b",
                 "a\u{3000}b",
                 "a\u{3000}b",
                 "a\u{3000}b",
@@ -862,6 +883,10 @@ mod tests {
             "evil\u{FEFF}good",
             "evil\u{E0041}good",
             "evil\u{FE0F}good",
+            "evil good",
+            "evil\u{A0}good",
+            "evil\u{2800}good",
+            "evil\u{3000}good",
         ];
 
         let shown: std::collections::BTreeSet<Name> =

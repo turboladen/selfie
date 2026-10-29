@@ -586,3 +586,64 @@ fn a_parse_error_caret_lands_past_escaped_characters() {
     // Byte offsets: everything before the colon on both lines is ASCII.
     assert_eq!(caret.find('^'), line.find(": c"), "{stderr}");
 }
+
+// A blank that is not a space, such as U+00A0 or U+2800, makes one name or path
+// read as another, so a listing naming a spec file shows it as an escape.
+#[test]
+fn a_spec_file_named_with_a_visible_blank_shows_it_escaped() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("a\u{A0}b.yaml"),
+        format!("name: \"a\\u00A0b\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "spec", "list"])
+        .output()
+        .unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The library's sentence after the path names the spec unescaped, as prose
+    // does, so only the path is checked here.
+    assert!(both.contains(r"a\u{a0}b.yaml"), "{both}");
+    assert!(!both.contains("a\u{A0}b.yaml"), "{both:?}");
+}
+
+// A dotfile target holding U+2800 or U+3000 shows each as an escape in the
+// plan apply prints.
+#[test]
+fn a_target_holding_a_visible_blank_shows_it_escaped() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::write(packages.join("blank.conf"), "x\n").unwrap();
+    fs::write(
+        packages.join("blank.yaml"),
+        format!(
+            "name: blank\ndotfiles:\n  - source: blank.conf\n    target: \"~/.br\\u2800aille\"\n\
+             \x20 - source: blank.conf\n    target: \"~/.ideo\\u3000space\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "apply", "--dry-run"])
+        .output()
+        .unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        both.contains(r".br\u{2800}aille") && both.contains(r".ideo\u{3000}space"),
+        "{both}"
+    );
+    assert!(!both.contains(['\u{2800}', '\u{3000}']), "{both:?}");
+}
