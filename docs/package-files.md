@@ -769,6 +769,13 @@ selfie apply --dry-run
 selfie apply --yes
 ```
 
+Each file `selfie apply` writes gets a `deployed` row naming its source and target, followed by the
+summary count. A file that is already up to date gets a `skipped` row saying so, and under
+`--dry-run` each file that would be written gets a `skipped` row saying it is a dry run. When the
+write replaced content, the row is followed by a line naming the copy kept (see
+[What an overwrite keeps](#what-an-overwrite-keeps)). A conflict you accept at the prompt prints its
+`conflict` row and then the `deployed` row.
+
 ### Conflict Detection
 
 Selfie tracks checksums of deployed files. If you modify a deployed file locally _and_ the source

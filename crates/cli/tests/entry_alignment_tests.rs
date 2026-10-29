@@ -58,6 +58,20 @@ fn rows(stdout: &str) -> Vec<&str> {
     stdout.lines().filter(|line| line.contains(" → ")).collect()
 }
 
+// The rows that open with an outcome label, so an indented line that happens to
+// hold an arrow is not counted as an entry.
+fn outcome_rows(stdout: &str) -> Vec<&str> {
+    const OUTCOMES: [&str; 5] = ["deployed", "skipped", "conflict", "drifted", "unverified"];
+    rows(stdout)
+        .into_iter()
+        .filter(|row| {
+            OUTCOMES
+                .iter()
+                .any(|label| row.starts_with(&format!("{label} ")))
+        })
+        .collect()
+}
+
 // The terminal column where `needle` starts on each row.
 fn columns(stdout: &str, needle: &str) -> Vec<usize> {
     rows(stdout)
@@ -165,4 +179,71 @@ fn a_drifted_row_lines_up_with_an_unverified_one() {
         detail(rows[1], "provider-sourced"),
         "{stdout}"
     );
+}
+
+// A plain apply of fresh targets keeps no copy and settles no conflict, and
+// still names every file it wrote. No line announces an entry before its
+// deploy, which would name it twice.
+#[test]
+fn a_plain_apply_names_each_file_it_deployed() {
+    let temp_dir = setup_default_test_config();
+    let root = temp_dir.path();
+    package(root, "app", &["a", "much/longer-name"], "");
+
+    let (code, stdout, stderr) = run(&temp_dir, &["apply"]);
+
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
+    let rows = outcome_rows(&stdout);
+    assert_eq!(rows.len(), 2, "{stdout}");
+    assert!(
+        rows.iter().all(|row| row.starts_with("deployed ")),
+        "{stdout}"
+    );
+    assert!(
+        rows[0].contains("app/a") && rows[0].ends_with(".a"),
+        "{stdout}"
+    );
+    assert!(
+        rows[1].contains("app/much/longer-name") && rows[1].ends_with(".much-longer-name"),
+        "{stdout}"
+    );
+    assert!(all_equal(&columns(&stdout, " → ")), "{stdout}");
+    assert!(!stdout.contains("Deploying"), "{stdout}");
+    assert!(!stdout.contains("previous content copied to"), "{stdout}");
+    assert_eq!(fs::read_to_string(root.join(".a")).unwrap(), "a\n");
+    assert_eq!(
+        fs::read_to_string(root.join(".much-longer-name")).unwrap(),
+        "much/longer-name\n"
+    );
+}
+
+// An accepted conflict ends in a deployed row, with no conflict row left
+// standing for an entry the run wrote, and the row is followed by the line
+// naming the copy of what it replaced.
+#[test]
+fn an_accepted_overwrite_ends_in_a_deployed_row_naming_its_copy() {
+    let temp_dir = setup_default_test_config();
+    let root = temp_dir.path();
+    package(root, "app", &["a"], "");
+    let (code, stdout, stderr) = run(&temp_dir, &["apply"]);
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
+    fs::write(root.join(".a"), "mine\n").unwrap();
+    fs::write(root.join("packages/app/a"), "changed\n").unwrap();
+
+    let (code, stdout, stderr) = run(&temp_dir, &["apply", "--yes"]);
+
+    assert_eq!(code, Some(CLEAN), "{stdout}{stderr}");
+    let rows = outcome_rows(&stdout);
+    assert_eq!(rows.len(), 1, "{stdout}");
+    assert!(rows[0].starts_with("deployed "), "{stdout}");
+    // Order is the property: the copy is named directly under the row it belongs to.
+    let lines: Vec<&str> = stdout.lines().collect();
+    let at = lines.iter().position(|line| *line == rows[0]).unwrap();
+    assert!(
+        lines[at + 1]
+            .trim_start()
+            .starts_with("previous content copied to"),
+        "{stdout}"
+    );
+    assert_eq!(fs::read_to_string(root.join(".a")).unwrap(), "changed\n");
 }

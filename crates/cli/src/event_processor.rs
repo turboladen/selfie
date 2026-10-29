@@ -198,8 +198,7 @@ impl EventProcessor {
         // them.
         let _block = matches!(
             event,
-            PackageEvent::DotfileDeploying { .. }
-                | PackageEvent::DotfileDeployed { .. }
+            PackageEvent::DotfileDeployed { .. }
                 | PackageEvent::DotfileSkipped { .. }
                 | PackageEvent::DotfileConflict { .. }
                 | PackageEvent::DotfileOrphaned { .. }
@@ -508,13 +507,6 @@ impl EventProcessor {
                 ));
             }
 
-            PackageEvent::DotfileDeploying { source, target, .. } => {
-                let short_source = source_paths::label(&self.display, Channel::Stdout, &source);
-                let short_target = crate::display_manager::shorten_path(&target);
-                self.display
-                    .print_info(format!("  Deploying {short_source} → {short_target}"));
-            }
-
             // Each entry's row prints as its event arrives, in columns fixed by
             // the announcement before the first.
             PackageEvent::DotfileEntriesPlanned { entries, .. } => {
@@ -657,6 +649,10 @@ impl EventProcessor {
                 // These structured events are handled by command-specific handlers
                 // If no custom handler processed them, just continue
             }
+
+            // The entry's deployed row names it, so announcing it first would print
+            // the entry twice.
+            PackageEvent::DotfileDeploying { .. } => {}
         }
     }
 
