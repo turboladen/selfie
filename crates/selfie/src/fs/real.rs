@@ -107,12 +107,28 @@ enum Replacement {
 /// # Errors
 ///
 /// A refusal for an irregular target, or for a symlink under `KeepingMode`,
-/// present when checked; or an IO error naming `path` for anything else.
+/// present when checked; an irregular target under `ReplaceIfHolding` is kept
+/// instead. An IO error naming `path` for anything else, including a target that
+/// cannot be read back under `ReplaceIfHolding`.
 fn write_by_rename(
     path: &Path,
     data: &[u8],
     how: Replacement,
     if_present: IfPresent,
+) -> Result<Placed, FileSystemError> {
+    write_by_rename_with(path, data, how, if_present, || {})
+}
+
+// `write_by_rename`, calling `before_rename` once the new content is flushed and
+// before the target is looked at for the last time. Production passes nothing;
+// a test passes a change to the target, landing where no double above the port
+// can reach.
+fn write_by_rename_with(
+    path: &Path,
+    data: &[u8],
+    how: Replacement,
+    if_present: IfPresent,
+    before_rename: impl FnOnce(),
 ) -> Result<Placed, FileSystemError> {
     use std::io::Write as _;
 
@@ -159,7 +175,14 @@ fn write_by_rename(
     if keep_mode && let Some(refusal) = symlink_refusal(path) {
         return Err(refusal);
     }
+    // Under `ReplaceIfHolding` the caller read a regular file here, so a fifo,
+    // socket or device node in its place is a change, kept like any other. A
+    // symlink is still refused above: the caller may have read the file through
+    // it, so it is not evidence of a change.
     if let Some(refusal) = irregular_refusal(path) {
+        if matches!(if_present, IfPresent::ReplaceIfHolding(_)) {
+            return Ok(Placed::Kept);
+        }
         return Err(refusal);
     }
 
@@ -225,15 +248,29 @@ fn write_by_rename(
     // and the entry would become a sticky conflict blamed on the user
     // (selfie-aub). Ordering is the fix, so it belongs here, before the record.
     tmp.as_file().sync_all().map_err(target_err)?;
+    before_rename();
 
     // Puts the file in place by rename, so readers see either the old file or the
     // complete new one, and a symlink at the final component is replaced rather
     // than followed.
+    //
+    // `ReplaceIfHolding` looks after the flush, the slow part of the write, so
+    // the window between that look and the rename is as short as an ordinary
+    // rename can make it. A change landing inside it is still replaced; closing it
+    // needs a rename that swaps only an unchanged file (selfie-sq39).
     let placed = match if_present {
         IfPresent::Replace => tmp
             .persist(path)
             .map(|_| Placed::Written)
             .map_err(|e| rename_failure(path, e.error))?,
+        IfPresent::ReplaceIfHolding(expected) => {
+            if !still_holds(path, &expected)? {
+                return Ok(Placed::Kept);
+            }
+            tmp.persist(path)
+                .map(|_| Placed::Written)
+                .map_err(|e| rename_failure(path, e.error))?
+        }
         IfPresent::Keep => {
             rename_keeping(tmp, path, |tmp, path| tmp.persist_noclobber(path).map(drop))?
         }
@@ -256,6 +293,60 @@ fn write_by_rename(
     }
 
     Ok(Placed::Written)
+}
+
+/// Whether `path` is a regular file holding exactly `expected`.
+///
+/// # Errors
+///
+/// A failure to look or to read that says nothing about whether the file
+/// changed, such as a file selfie may not read, worded to name `path`.
+// Anything but a regular file is not what was expected, and neither is nothing at
+// all. The non-following stat comes first and opens nothing: opening a fifo
+// releases a writer blocked on it, and opening a device node can act on the
+// device. Only a regular file is opened, through the no-follow read, which checks
+// the descriptor's type again in case something else took its place in between.
+fn still_holds(path: &Path, expected: &[u8]) -> Result<bool, FileSystemError> {
+    still_holds_with(path, expected, |path| {
+        RealFileSystem.read_file_no_follow(&crate::fs::target::repository_path(path))
+    })
+}
+
+// `still_holds`, opening the file through `read`. Production passes the no-follow
+// read; a test passes one that records whether it was asked, which no file system
+// effect can show reliably.
+fn still_holds_with(
+    path: &Path,
+    expected: &[u8],
+    read: impl FnOnce(&Path) -> Result<TargetRead, FileSystemError>,
+) -> Result<bool, FileSystemError> {
+    let tagged_error = |e: &io::Error| FileSystemError::IoError(tagged(path, e));
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => return Ok(false),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(e) => return Err(tagged_error(&e)),
+    }
+    match read(path) {
+        Ok(TargetRead::Bytes(found)) => Ok(found == expected),
+        Ok(
+            TargetRead::Absent
+            | TargetRead::BelowNonDirectory { .. }
+            | TargetRead::Directory
+            | TargetRead::Link { .. }
+            | TargetRead::Irregular { .. },
+        ) => Ok(false),
+        Ok(TargetRead::Unreadable(e)) => Err(tagged_error(&e)),
+        Err(FileSystemError::IoError(e)) => Err(tagged_error(&e)),
+        Err(e) => Err(e),
+    }
 }
 
 /// `error`, worded to name `path`, keeping its kind.
@@ -667,6 +758,10 @@ impl FileSystem for RealFileSystem {
         write_by_rename(path.path(), data, Replacement::OwnerOnly, if_present)
     }
 
+    // Under `ReplaceIfHolding`, the target is looked at once more after the new
+    // content is flushed and immediately before the rename, without following a
+    // link and opening only a regular file. A fifo, socket or device node there
+    // when the write starts is kept, as a change; a symlink is refused as always.
     fn write_file_no_follow(
         &self,
         path: &TargetPath,
@@ -3342,5 +3437,213 @@ mod keep_write_tests {
         assert!(!linked.exists(), "the second name survived");
         assert_eq!(fs::read(&other).unwrap(), b"someone else's");
         assert_eq!(fs::metadata(&target).unwrap().nlink(), 1);
+    }
+}
+
+// A rewrite that replaces only the bytes it read, through both writers, and the look
+// it takes just before the rename.
+#[cfg(test)]
+mod replace_if_holding_tests {
+    use std::os::unix::fs::{FileTypeExt as _, symlink};
+    use std::time::Duration;
+
+    use super::*;
+    use tempfile::tempdir;
+
+    fn holding(bytes: &[u8]) -> IfPresent {
+        IfPresent::ReplaceIfHolding(Arc::from(bytes))
+    }
+
+    fn writers() -> [(&'static str, Replacement); 2] {
+        [
+            ("private", Replacement::OwnerOnly),
+            ("no-follow", Replacement::KeepingMode),
+        ]
+    }
+
+    #[test]
+    fn a_file_holding_the_expected_bytes_is_replaced() {
+        for (name, how) in writers() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("spec.yml");
+            fs::write(&target, b"as loaded").unwrap();
+
+            let result = write_by_rename(&target, b"rewritten", how, holding(b"as loaded"));
+
+            assert!(matches!(result, Ok(Placed::Written)), "{name}: {result:?}");
+            assert_eq!(fs::read(&target).unwrap(), b"rewritten", "{name}");
+        }
+    }
+
+    // Other bytes, nothing at all, a directory or a fifo: none is what was read, so
+    // each is left as it is, and the write leaves no temporary file behind.
+    #[test]
+    fn anything_but_the_expected_bytes_is_kept() {
+        for (name, how) in writers() {
+            let dir = tempdir().unwrap();
+            let edited = dir.path().join("edited.yml");
+            fs::write(&edited, b"edited by hand").unwrap();
+            let not_utf8 = dir.path().join("binary.yml");
+            fs::write(&not_utf8, b"\xff\xfe").unwrap();
+            let removed = dir.path().join("removed.yml");
+            let directory = dir.path().join("directory.yml");
+            fs::create_dir(&directory).unwrap();
+            let fifo = dir.path().join("fifo.yml");
+            nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+            for (target, found) in [
+                (&edited, Some(&b"edited by hand"[..])),
+                (&not_utf8, Some(&b"\xff\xfe"[..])),
+                (&removed, None),
+                (&directory, None),
+                (&fifo, None),
+            ] {
+                let result = write_by_rename(target, b"rewritten", how, holding(b"as loaded"));
+
+                assert!(matches!(result, Ok(Placed::Kept)), "{name}: {result:?}");
+                // Reading the fifo back would block, so the directory and the fifo
+                // are checked after the loop instead.
+                if found.is_some() || !target.exists() {
+                    assert_eq!(
+                        fs::read(target).ok().as_deref(),
+                        found,
+                        "{name}: {target:?}"
+                    );
+                }
+            }
+            assert!(directory.is_dir(), "{name}: the directory was replaced");
+            assert!(
+                fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo(),
+                "{name}: the fifo was replaced"
+            );
+            assert_eq!(
+                entries(dir.path()),
+                ["binary.yml", "directory.yml", "edited.yml", "fifo.yml"],
+                "{name}: debris left"
+            );
+        }
+    }
+
+    // The look before the rename finds a directory, a link and a fifo not to be the
+    // expected file, and answers about the fifo at once.
+    #[test]
+    fn the_last_look_reports_what_is_not_a_regular_file_as_changed() {
+        let dir = tempdir().unwrap();
+        let directory = dir.path().join("dir.yml");
+        fs::create_dir(&directory).unwrap();
+        let file = dir.path().join("file.yml");
+        fs::write(&file, b"as loaded").unwrap();
+        let link = dir.path().join("link.yml");
+        symlink(&file, &link).unwrap();
+        let fifo = dir.path().join("fifo.yml");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+        for target in [directory, link] {
+            assert!(
+                !still_holds(&target, b"as loaded").unwrap(),
+                "{target:?} was taken for the expected file"
+            );
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(still_holds(&fifo, b"as loaded").map_err(drop)));
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Ok(Ok(false)),
+            "the look at a fifo must answer at once, and answer that it changed"
+        );
+    }
+
+    // A file selfie may not read is not known to have changed. The write refuses,
+    // naming the file, and leaves it.
+    #[test]
+    fn an_unreadable_file_is_refused_naming_it() {
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("spec.yml");
+        fs::write(&target, b"as loaded").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = write_by_rename(
+            &target,
+            b"rewritten",
+            Replacement::KeepingMode,
+            holding(b"as loaded"),
+        );
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        match result {
+            Err(FileSystemError::IoError(e)) => {
+                assert!(e.to_string().contains(target.to_str().unwrap()), "{e}");
+            }
+            other => panic!("expected a read failure naming the file, got {other:?}"),
+        }
+        assert_eq!(fs::read(&target).unwrap(), b"as loaded");
+        assert_eq!(entries(dir.path()), ["spec.yml"], "debris left");
+    }
+
+    // A change landing after the new content is flushed, while the rename has not
+    // happened yet, is the case the look before the rename exists for.
+    #[test]
+    fn a_change_made_after_the_flush_is_kept() {
+        for (name, how) in writers() {
+            let dir = tempdir().unwrap();
+            let target = dir.path().join("spec.yml");
+            fs::write(&target, b"as loaded").unwrap();
+
+            let result =
+                write_by_rename_with(&target, b"rewritten", how, holding(b"as loaded"), || {
+                    fs::write(&target, b"edited by hand").unwrap();
+                });
+
+            assert!(matches!(result, Ok(Placed::Kept)), "{name}: {result:?}");
+            assert_eq!(fs::read(&target).unwrap(), b"edited by hand", "{name}");
+            assert_eq!(entries(dir.path()), ["spec.yml"], "{name}: debris left");
+        }
+    }
+
+    // The last look opens only a regular file: opening a fifo would release a
+    // writer blocked on it, and opening a device node can act on the device. What
+    // it would open with is replaced by one that records the call.
+    #[test]
+    fn the_last_look_opens_only_a_regular_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file.yml");
+        fs::write(&file, b"as loaded").unwrap();
+        let fifo = dir.path().join("fifo.yml");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let directory = dir.path().join("dir.yml");
+        fs::create_dir(&directory).unwrap();
+        let link = dir.path().join("link.yml");
+        symlink(&file, &link).unwrap();
+        let absent = dir.path().join("absent.yml");
+
+        for target in [&fifo, &directory, &link, &absent] {
+            let mut opened = false;
+            let held = still_holds_with(target, b"as loaded", |_| {
+                opened = true;
+                Ok(TargetRead::Bytes(b"as loaded".to_vec()))
+            });
+            assert!(matches!(held, Ok(false)), "{target:?}: {held:?}");
+            assert!(!opened, "{target:?} was opened");
+        }
+
+        // Control: a regular file is opened, and its bytes decide.
+        let mut opened = false;
+        let held = still_holds_with(&file, b"as loaded", |_| {
+            opened = true;
+            Ok(TargetRead::Bytes(b"as loaded".to_vec()))
+        });
+        assert!(matches!(held, Ok(true)), "{held:?}");
+        assert!(opened, "the regular file was not read");
+    }
+
+    #[test]
+    fn the_expected_bytes_are_not_printed() {
+        assert_eq!(
+            format!("{:?}", holding(b"pl4nted-t0ken")),
+            "ReplaceIfHolding(13 bytes)"
+        );
     }
 }

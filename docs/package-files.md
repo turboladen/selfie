@@ -345,6 +345,17 @@ does not model, and a deploy would write content the unread key may have changed
 the cost of the refusal: a declined write costs a retry, while a declined deploy leaves the machine
 without the file until the spec is corrected.
 
+They also refuse to save a file that changed after selfie read it, such as one an editor saved, a
+`git pull` updated, or another selfie run rewrote while the command was running, and a file that was
+removed in that time. Nothing is written over the change: the command fails, exits 1 and names the
+file. Running it again reads the file as it is now: it makes the change to what the file holds, or
+says why it cannot, for one that was removed. selfie tells a change by the file's content, so a save
+that left the bytes as they were does not count as one. It looks at the file once more after writing
+the new content and immediately before putting it in place. A change made between that look and the
+rename may still be replaced, and that includes another selfie run saving the same spec at the same
+instant. `selfie_spec_update_batch` saves its specs one at a time, in order, so the specs before a
+refused one are already saved; run the refused ones again.
+
 `selfie spec edit` is not among them, because it does not rewrite. It opens an existing file exactly
 as written, so anchors, comments and key order survive editing, and a file carrying a key selfie
 would refuse to write can still be opened to fix it. Only a package that does not exist yet is
@@ -1509,9 +1520,10 @@ Those three steps are ordered so a failure leaves nothing half-finished. A spec 
 takes the copy with it: selfie removes the file it had just written, so a retry after fixing the
 cause does not trip over a file you never knowingly created. If that removal fails too, selfie says
 so and names the file to delete. The causes are ordinary ones: a permission problem, a spec carrying
-a key selfie will not rewrite, or, for a new spec, something that appeared at the spec's path while
-selfie was writing it, which is left as it is. If the copy itself is refused, no spec is written, so
-no entry ever names a file that is not there.
+a key selfie will not rewrite, an existing spec that changed after selfie read it, or, for a new
+spec, something that appeared at the spec's path while selfie was writing it. Either change is left
+as it is. If the copy itself is refused, no spec is written, so no entry ever names a file that is
+not there.
 
 The deploy state is recorded last, and a failure there is the one case that leaves work in place:
 the copy and the spec entry are both correct and only the record is missing. Selfie says so and

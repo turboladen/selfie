@@ -78,16 +78,26 @@ pub trait PackageRepository: Send + Sync {
     /// [`PackageListError`] if the package directory cannot be accessed.
     fn find_package_files(&self, name: &str) -> Result<Vec<PathBuf>, PackageListError>;
 
-    /// Serialize a package and write it to `path`, replacing whatever is there.
+    /// Serialize a package and write it back to `path`, the file it was loaded
+    /// from, if that file still holds what was loaded.
     ///
-    /// For rewriting a spec that was loaded from `path`. A new spec goes through
+    /// For rewriting a loaded spec. A change made to the file since the load is
+    /// left as it is, and the package is not written. Where the storage cannot
+    /// compare and replace atomically, a change made at the same moment as the
+    /// write may still be replaced. A new spec goes through
     /// [`Self::create_package`], which leaves what it finds, within the guarantee
     /// it states.
     ///
     /// # Errors
     ///
-    /// [`PackageRepoError`] if the package cannot be serialized to YAML, or if
-    /// the target directory does not exist or cannot be written to.
+    /// [`PackageRepoError::ChangedSinceLoad`] if the file at `path` no longer
+    /// holds what the package was loaded from, including when it is gone or a
+    /// fifo, socket or device node has taken its place.
+    /// [`PackageRepoError::UnwritablePath`] if a symlink is at `path`, as for any
+    /// spec write. [`PackageRepoError::NotLoaded`]
+    /// if the package was not loaded from `path`. Otherwise [`PackageRepoError`]
+    /// if the package cannot be serialized to YAML, or if the file cannot be read
+    /// back or written.
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError>;
 
     /// Serialize a new package and write it to `path`, where nothing is.
@@ -300,6 +310,31 @@ pub enum PackageRepoError {
         /// The package file selfie declined to create.
         path: PathBuf,
     },
+
+    /// Refused to rewrite a spec because the file at its path no longer holds
+    /// what it was loaded from. Nothing was written.
+    // Covers a removed file, and anything other than a regular file that takes
+    // its place after the writer's own refusals: none is what was loaded. The
+    // remedy is worded for all of them, since a run that reads the file again
+    // either makes the change to what is there or reports why it cannot. A read
+    // failure that says nothing about the file is passed through as itself
+    // rather than called a change.
+    #[error(
+        "{path} changed after selfie read it, so nothing was written to it. \
+         Run the command again, which reads the file as it is now."
+    )]
+    ChangedSinceLoad {
+        /// The spec selfie declined to rewrite.
+        path: PathBuf,
+    },
+
+    /// Refused to rewrite a spec that was not loaded from the path it would be
+    /// written to, so there is nothing to tell a change by. Nothing was written.
+    #[error("refusing to rewrite {path}: the spec was not read from it first")]
+    NotLoaded {
+        /// The path selfie declined to write.
+        path: PathBuf,
+    },
 }
 
 impl From<Arc<std::io::Error>> for PackageRepoError {
@@ -436,6 +471,8 @@ impl PackageRepoError {
             | Self::UnknownEnvironmentFields { .. }
             | Self::UnwritablePath { .. }
             | Self::Occupied { .. }
+            | Self::ChangedSinceLoad { .. }
+            | Self::NotLoaded { .. }
             // Raised by `dotfiles track`, never by a lookup.
             | Self::FileSystemError(_) => None,
         }

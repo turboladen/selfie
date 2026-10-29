@@ -8,6 +8,7 @@ selfie = { path = "../selfie/", features = ["with_mocks"] }
 tempfile.workspace = true
 shlex = "2.0"
 futures.workspace = true
+nix = { workspace = true, features = ["fs"] }
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync"] }
 

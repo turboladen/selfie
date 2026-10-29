@@ -3292,3 +3292,165 @@ mod a_spec_path_taken_during_create {
         );
     }
 }
+
+// An update loads a spec, changes it and writes it back. An edit that lands on the
+// spec in between is the user's, and the save refuses rather than writing over
+// it. The MCP update tools reach the same code.
+mod a_spec_changed_after_it_was_loaded {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use selfie::package::event::PackageUpdateFields;
+    use test_common::{
+        FakeCommandRunner, PlantsBeforeWrite, Rewrite, config::service_test_config_with_dir,
+        create_service_with_fs_and_runner, within_deadline,
+    };
+
+    use super::*;
+
+    const LOADED: &str = "name: myapp\nenvironments:\n  test:\n    install: \"true\"\n";
+    const EDITED: &str =
+        "name: myapp\ndescription: edited by hand\nenvironments:\n  test:\n    install: \"true\"\n";
+
+    // Returns the path at which `update_with` puts the spec in `dir`.
+    fn spec_path(dir: &Path) -> PathBuf {
+        dir.join("myapp.yml")
+    }
+
+    // Writes a spec holding `LOADED` at `spec_path(dir)`, then updates its
+    // description through a file system that applies `rewrite` just before the
+    // spec is written back.
+    async fn update_with(dir: &Path, rewrite: Rewrite) -> (PlantsBeforeWrite, Vec<PackageEvent>) {
+        let path = spec_path(dir);
+        std::fs::write(&path, LOADED).unwrap();
+        let fs = PlantsBeforeWrite::rewritten_before_write(&path, rewrite);
+        let service = create_service_with_fs_and_runner(
+            service_test_config_with_dir(dir),
+            fs.clone(),
+            FakeCommandRunner::new(),
+        );
+        let fields = PackageUpdateFields {
+            description: Some("set by selfie".to_string()),
+            ..PackageUpdateFields::default()
+        };
+        let events = collect_events(service.update("myapp", fields).await).await;
+        assert!(
+            fs.rewritten(),
+            "control: the spec was changed after the load"
+        );
+        (fs, events)
+    }
+
+    fn assert_refused_as_changed(path: &Path, events: &[PackageEvent]) {
+        let expected = format!(
+            "{} changed after selfie read it, so nothing was written to it. Run the command \
+             again, which reads the file as it is now.",
+            path.display()
+        );
+        match get_operation_result(events) {
+            Some(OperationResult::Failure(failure @ OperationFailure::Generic(_))) => {
+                assert_eq!(failure.to_string(), expected);
+            }
+            other => panic!("a changed spec must refuse the update, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_update_does_not_overwrite_a_spec_edited_after_it_was_loaded() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        let (_, events) = update_with(dir.path(), Rewrite::File(EDITED)).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            EDITED,
+            "the edit made after the load was overwritten"
+        );
+        assert_refused_as_changed(&path, &events);
+    }
+
+    #[tokio::test]
+    async fn an_update_does_not_recreate_a_spec_removed_after_it_was_loaded() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        let (_, events) = update_with(dir.path(), Rewrite::Removed).await;
+
+        assert!(
+            std::fs::symlink_metadata(&path).is_err(),
+            "the spec removed after the load was written again"
+        );
+        assert_refused_as_changed(&path, &events);
+    }
+
+    // Opens the fifo for writing without blocking, which releases a read blocked on
+    // it, then removes it, so a failing run does not leave a thread stuck.
+    struct ReleaseFifo(PathBuf);
+
+    impl Drop for ReleaseFifo {
+        fn drop(&mut self) {
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+                .open(&self.0);
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    // A fifo in the spec's place is a change, and the save refuses it as one
+    // without opening it: a read of a fifo blocks until a writer arrives.
+    #[test]
+    fn an_update_refuses_a_fifo_at_the_spec_after_it_was_loaded() {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        let _release = ReleaseFifo(path.clone());
+        let root = dir.path().to_path_buf();
+        let (_, events) = within_deadline(Duration::from_secs(10), move || async move {
+            update_with(&root, Rewrite::Fifo).await
+        })
+        .expect("the update must not block on the fifo");
+
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_fifo(),
+            "the fifo was replaced"
+        );
+        assert_refused_as_changed(&path, &events);
+    }
+
+    // Replaced by rename with the bytes that were loaded: a new inode and a later
+    // modification time, and nothing a rewrite would discard. The save goes ahead.
+    #[tokio::test]
+    async fn an_update_saves_over_a_spec_rewritten_with_the_bytes_it_loaded() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        let (fs, events) = update_with(dir.path(), Rewrite::File(LOADED)).await;
+
+        let ((inode_before, mtime_before), (inode_after, mtime_after)) = fs
+            .stamps()
+            .expect("control: the rewrite recorded its stamps");
+        assert_ne!(inode_before, inode_after, "control: the inode moved");
+        assert_ne!(
+            mtime_before, mtime_after,
+            "control: the modification time moved"
+        );
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("set by selfie"),
+            "the update was not saved"
+        );
+    }
+}
