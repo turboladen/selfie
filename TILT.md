@@ -48,12 +48,12 @@ docker compose exec alpine bash
 # Inside the container, the usual commands work:
 cargo test --all
 cargo test --test cli_tests
-cargo run -- --help
-cargo run -- spec list
-cargo run -- spec validate my-package
-cargo run -- package check my-package
-cargo run -- --verbose package list
-cargo run -- config validate
+cargo run -p selfie-cli -- --help
+cargo run -p selfie-cli -- spec list
+cargo run -p selfie-cli -- spec validate my-package
+cargo run -p selfie-cli -- package check my-package
+cargo run -p selfie-cli -- --verbose package list
+cargo run -p selfie-cli -- config validate
 ```
 
 `cargo run` inside a container reads the container user's home directory, not yours, so it needs a
@@ -62,7 +62,7 @@ config file there before commands that read the package directory succeed.
 The same commands run without a shell:
 
 ```bash
-docker compose exec -T debian cargo run -- spec list
+docker compose exec -T debian cargo run -p selfie-cli -- spec list
 docker compose exec -T alpine cargo test --test cli_tests
 docker compose exec -T debian bash -c "apt list --installed | head -5"
 docker compose exec -T alpine sh -c "apk list --installed | head -5"

@@ -18,7 +18,7 @@ just docs-check                                # Build the docs with warnings as
 just typos                                     # Spell-check the tree
 just fmt                                       # cargo fmt + dprint fmt (Markdown/YAML)
 just fmt-check                                 # Verify both without modifying
-cargo run -- <args>                            # Run the CLI (from workspace root)
+cargo run -p selfie-cli -- <args>              # Run the CLI (from workspace root)
 just sandbox-run <args>                        # Run the CLI against a throwaway sandbox (see below)
 just percommit <base>                          # just clippy on every commit below the tip
 just mutate <spec.toml>                        # Mutation runner (crates/xtask/README.md)
@@ -52,7 +52,7 @@ catch:
 
 ### Running the binary by hand
 
-`cargo run -- <args>` reads **your** config and writes **your** home directory. Path flags do not
+`cargo run -p selfie-cli -- <args>` reads **your** config and writes **your** home directory. Path flags do not
 close every route: a `~` dotfile target resolves against `HOME` whatever you pass, and so does the
 deploy-state fallback whenever no `state_directory` is configured and no `--state-directory`. Use
 `just sandbox-run <args>`, which mints a throwaway `HOME`, and `sandboxed_command` in
