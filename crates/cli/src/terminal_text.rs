@@ -83,12 +83,6 @@ pub(crate) fn escape_keeping_tabs(line: &str) -> Cow<'_, str> {
     escape_with(line, is_escaped, |c| c == '\t', Sgr::Escape)
 }
 
-/// As [`escape_prose`], but for one line: a tab stays a tab and a newline is
-/// escaped.
-pub(crate) fn escape_prose_keeping_tabs(line: &str) -> Cow<'_, str> {
-    escape_with(line, is_escaped_in_prose, |c| c == '\t', Sgr::Escape)
-}
-
 /// As [`escape_prose`], but a control character is left for the caller to
 /// drop: for command output, whose colors and carriage returns are removed
 /// rather than shown.

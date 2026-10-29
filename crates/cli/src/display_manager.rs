@@ -19,7 +19,7 @@ use crate::event_processor::Exit;
 use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
-    Paint, Shown, escape, escape_prose, escape_prose_keeping_tabs, guard, printable, shown,
+    Paint, Shown, escape, escape_keeping_tabs, escape_prose, guard, printable, shown,
 };
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
@@ -776,13 +776,15 @@ impl DisplayManager {
     /// Print supporting lines under an error (stderr), one per line.
     ///
     /// For a block a reader looks at rather than reads — a source window under a
-    /// parse failure. `block` is split on its own line breaks, so a trailing
-    /// newline costs nothing. Each line is indented and dimmed and carries no `✗`;
-    /// the marker belongs to the sentence above, not to every line of its evidence.
+    /// parse failure. `block` is split on its line breaks, LF or CRLF, so a
+    /// trailing one costs nothing. Each line is escaped as a line of file
+    /// content, so an invisible character shows as its escape and a tab stays a
+    /// tab. Each line is indented and dimmed and carries no `✗`; the marker
+    /// belongs to the sentence above, not to every line of its evidence.
     pub(crate) fn print_error_context(&self, block: &str) {
         let lines: Vec<String> = block
             .lines()
-            .map(|line| escape_prose_keeping_tabs(line).into_owned())
+            .map(|line| escape_keeping_tabs(line).into_owned())
             .collect();
         for line in &lines {
             self.record_stderr(line);
@@ -1640,6 +1642,44 @@ mod tests {
                 (Channel::Stderr, "three\\u{1b}]0;t\\u{7}".to_string()),
             ]
         );
+    }
+
+    // Error context is evidence a reader inspects, such as a source window or a
+    // failed tool's stderr, so each line is escaped as file content: an
+    // invisible character shows, and a tab stays a tab.
+    #[test]
+    fn error_context_lines_show_invisible_characters_and_keep_tabs() {
+        let display = DisplayManager::new(false);
+        display.print_error_context("a\u{200B}b\tc\nd\u{200D}e\u{1b}[2J");
+
+        assert_eq!(
+            display.printed(),
+            [
+                (Channel::Stderr, "a\\u{200b}b\tc".to_string()),
+                (Channel::Stderr, "d\\u{200d}e\\u{1b}[2J".to_string()),
+            ]
+        );
+    }
+
+    // A carriage return before a line feed ends the line with it, as a file
+    // read line by line ends it, so a block from a CRLF file shows no `\r`. An
+    // empty block prints no line at all.
+    #[test]
+    fn error_context_treats_crlf_as_a_line_break_and_prints_nothing_for_nothing() {
+        let crlf = DisplayManager::new(false);
+        crlf.print_error_context("one\r\ntwo\r\n");
+        let empty = DisplayManager::new(false);
+        empty.print_error_context("");
+
+        let lines = |display: &DisplayManager| -> Vec<String> {
+            display
+                .printed()
+                .into_iter()
+                .map(|(_, line)| line)
+                .collect()
+        };
+        assert_eq!(lines(&crlf), ["one", "two"]);
+        assert!(lines(&empty).is_empty(), "{:?}", lines(&empty));
     }
 
     // A run without colors prints no styling, whatever console decides about
