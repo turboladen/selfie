@@ -129,3 +129,44 @@ fn apply_without_a_terminal_says_only_a_terminal_accepts_a_secret_conflict() {
     assert!(!out.stderr.contains("Pass --yes"), "{}", out.stderr);
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "EXISTING");
 }
+
+// A secret-bearing entry never keeps a copy, so its deployed row is the only
+// line naming it. The row carries the command that produced the content, and
+// the content itself appears nowhere in the output.
+#[test]
+fn a_plain_apply_names_a_deployed_secret_target_without_its_content() {
+    let temp = setup_default_test_config();
+    let target = temp.path().join("credentials");
+    std::fs::write(
+        temp.path().join("packages/creds.yaml"),
+        format!(
+            "name: creds\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  \
+             - command: \"printf resolvedvalue\"\n    target: \"{}\"\n",
+            target.display()
+        ),
+    )
+    .unwrap();
+
+    let out = common::run_sandboxed(&temp, &["apply"]);
+
+    assert_eq!(out.code, Some(CLEAN), "{}{}", out.stdout, out.stderr);
+    let row = out
+        .stdout
+        .lines()
+        .find(|line| line.starts_with("deployed "))
+        .unwrap_or_else(|| panic!("no deployed row:\n{}", out.stdout));
+    assert!(row.contains("command: printf resolvedvalue"), "{row}");
+    assert!(
+        !out.stdout.contains("previous content copied to"),
+        "{}",
+        out.stdout
+    );
+    // Once, in the command's label.
+    assert_eq!(
+        out.stdout.matches("resolvedvalue").count(),
+        1,
+        "{}",
+        out.stdout
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "resolvedvalue");
+}

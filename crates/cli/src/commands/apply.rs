@@ -331,13 +331,6 @@ fn summary_to_render(
     }
 }
 
-/// Whether apply hides a deploy's row. A deploy's row is hidden unless the
-/// deploy kept a copy of what it overwrote or settled a conflict the user
-/// accepted.
-fn deployed_row_hidden(backup: Option<&str>, accepted_conflict: bool) -> bool {
-    backup.is_none() && !accepted_conflict
-}
-
 /// Handle the apply command
 ///
 /// Creates a `DotfileServiceImpl` over the package and standalone dotfiles
@@ -378,20 +371,6 @@ pub(crate) async fn handle_apply(
         .process_events(event_stream, |event| match event {
             // The prompt already showed a conflict the resolver declined.
             selfie::package::event::PackageEvent::DotfileConflict { declined, .. } => *declined,
-
-            // Suppress per-file progress lines — the summary is sufficient.
-            //
-            // A deploy that displaced content is let through, because it is not
-            // progress: it carries the only path that leads back to what was
-            // overwritten, and the summary counts deployments without naming any.
-            // So is one the user accepted at a prompt: its last row would
-            // otherwise say `conflict` for an entry the run deployed.
-            selfie::package::event::PackageEvent::DotfileDeploying { .. } => true,
-            selfie::package::event::PackageEvent::DotfileDeployed {
-                backup,
-                accepted_conflict,
-                ..
-            } => deployed_row_hidden(backup.as_deref(), *accepted_conflict),
 
             selfie::package::event::PackageEvent::Completed { result, .. } => {
                 match summary_to_render(result) {
@@ -572,16 +551,6 @@ mod tests {
                 format!("conflict    {:<30} → /h/.creds", "creds.tpl")
             ]
         );
-    }
-
-    // A deploy that settled an accepted conflict shows its row even with no
-    // copy kept, as a secret-bearing entry never keeps one; any other deploy
-    // shows only when it kept a copy.
-    #[test]
-    fn an_accepted_conflict_lets_its_deployed_row_through() {
-        assert!(!deployed_row_hidden(None, true));
-        assert!(deployed_row_hidden(None, false));
-        assert!(!deployed_row_hidden(Some("/backups/x"), false));
     }
 
     // The prompt asks on stderr, so when stdout is not a terminal the target
