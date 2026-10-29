@@ -1,6 +1,6 @@
 //! Handler for `selfie sync pull`.
 
-use crate::terminal_text::{Shown, lit, shown};
+use crate::terminal_text::{Name, Shown, lit, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -83,7 +83,7 @@ fn format_package_list(names: &[String], use_colors: bool) -> Shown {
     Shown::join(
         names
             .iter()
-            .map(|name| Shown::name(name).paint(use_colors, |s| s.bold())),
+            .map(|name| Shown::from(Name::new(name)).paint(use_colors, |s| s.bold())),
         lit!(", "),
     )
 }

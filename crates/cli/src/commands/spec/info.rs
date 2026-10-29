@@ -1,5 +1,5 @@
 use crate::tables::{Cell, SafeTable};
-use crate::terminal_text::{Literal, Shown, lit, shown};
+use crate::terminal_text::{Literal, Name, Shown, lit, shown};
 use selfie::package::{
     event::{
         DependencyStatus, EnvironmentStatus, EnvironmentStatusData, OperationResult, PackageEvent,
@@ -90,7 +90,7 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
         let text = format!("selfie apply would refuse this spec here: {refusal}");
         table.add_row([
             key(lit!("Refused")),
-            Shown::prose(&text).paint(use_colors, |s| s.red()).into(),
+            status_style::styled_text(&text, use_colors, |s| s.red()).into(),
         ]);
     } else {
         let env_names = presentation::format_environment_names(
@@ -155,9 +155,10 @@ pub(crate) fn create_environment_table(
     let use_colors = config.use_colors();
     let name = &env_status.environment_name;
     let env_header = if env_status.is_current {
-        Shown::name(&format!("Environment: *{name}")).paint(use_colors, |s| s.bold().green())
+        Shown::from(Name::new(&format!("Environment: *{name}")))
+            .paint(use_colors, |s| s.bold().green())
     } else {
-        Shown::name(&format!("Environment: {name}")).paint(use_colors, |s| s.bold())
+        Shown::from(Name::new(&format!("Environment: {name}"))).paint(use_colors, |s| s.bold())
     };
     env_table.set_header([Cell::from(env_header), "".into()]);
 
@@ -223,7 +224,9 @@ pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Sho
         EnvironmentStatus::Installed => status_style::format_installed(use_colors),
         EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
         EnvironmentStatus::Unknown(reason) => {
-            Shown::prose(&format!("Unknown ({reason})")).paint(use_colors, |s| s.yellow().italic())
+            status_style::styled_text(&format!("Unknown ({reason})"), use_colors, |s| {
+                s.yellow().italic()
+            })
         }
     }
 }
@@ -231,7 +234,7 @@ pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Sho
 fn format_dependency_with_status(dep: &DependencyStatus, use_colors: bool) -> Shown {
     shown!(
         "{}: {}",
-        Shown::name(&dep.name),
+        Name::new(&dep.name),
         format_status(&dep.status, use_colors)
     )
 }

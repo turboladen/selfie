@@ -5,7 +5,7 @@
 use console::measure_text_width;
 use selfie::package::event::SkipReason;
 
-use crate::terminal_text::{DisplayPath, Literal, Paint, Shown, lit, shown};
+use crate::terminal_text::{DisplayPath, Literal, Name, Paint, Shown, lit, shown};
 
 /// The widest a source or target column grows, in terminal columns. A longer
 /// value overflows its column on its own row.
@@ -164,7 +164,7 @@ fn padded(text: &DisplayPath, width: usize) -> Shown {
 }
 
 fn spaces(count: usize) -> Shown {
-    Shown::name(&" ".repeat(count))
+    Shown::from(Name::new(&" ".repeat(count)))
 }
 
 #[cfg(test)]
@@ -176,7 +176,7 @@ mod tests {
             outcome,
             source: DisplayPath::new(source),
             target: DisplayPath::new(target),
-            detail: detail.map(Shown::name),
+            detail: detail.map(|detail| Shown::from(Name::new(detail))),
         }
     }
 

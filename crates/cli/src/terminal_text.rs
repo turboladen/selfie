@@ -8,10 +8,12 @@
 //! a reader can see: control characters as their Rust escapes (`\t`, `\u{1b}`),
 //! everything else as its code point (`\u{202e}`).
 //!
-//! How much is escaped depends on what the text is. A name or a path is escaped
-//! strictly ([`escape`]), since an invisible character in it makes it read as
-//! another. Prose and tool output ([`escape_prose`]) escape only what can act on
-//! the terminal or reorder the text, so emoji sequences and joiners render.
+//! What a text is decides how much is escaped, and each kind of text is a type
+//! that holds its escaped form: a [`Name`] or a [`DisplayPath`] escapes
+//! strictly, since an invisible character in it makes it read as another; a
+//! [`Content`] line of a file keeps its tabs; [`Prose`] and a tool's
+//! [`Output`] escape only what can act on the terminal or reorder the text, so
+//! emoji sequences and joiners render. selfie's own text is a [`Literal`].
 
 use std::borrow::Cow;
 use std::fmt;
@@ -19,13 +21,29 @@ use std::fmt;
 use icu_properties::props::{DefaultIgnorableCodePoint, GeneralCategory};
 use icu_properties::{CodePointMapData, CodePointSetData};
 
-/// Whether `c` is escaped in a name or a path: a control character (general
-/// category Cc), a format character (Cf), a line or paragraph separator (Zl,
-/// Zp), or a default-ignorable code point, which renders as nothing.
-///
-/// Combining marks are none of these, so an accented name stored decomposed, as
-/// macOS often stores it, shows as written.
-pub(crate) fn is_escaped(c: char) -> bool {
+// The guard set: what can act on the terminal or reorder the text around it.
+// Controls other than a newline and a tab, the line and paragraph separators,
+// the bidi controls and the tag characters. Joiners, variation selectors and
+// soft hyphens are left to render, so an emoji sequence or a Persian word reads
+// as written. Each policy decides for itself whether a newline and a tab show.
+fn in_guard_set(c: char) -> bool {
+    (c.is_control() && c != '\n' && c != '\t')
+        || matches!(
+            CodePointMapData::<GeneralCategory>::new().get(c),
+            GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator
+        )
+        || matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+        || ('\u{E0000}'..='\u{E007F}').contains(&c)
+}
+
+// The base set: a control character (Cc), a format character (Cf), a line or
+// paragraph separator (Zl, Zp), or a default-ignorable code point, which
+// renders as nothing. Combining marks are none of these, so an accented name
+// stored decomposed, as macOS often stores it, shows as written.
+fn in_base_set(c: char) -> bool {
     matches!(
         CodePointMapData::<GeneralCategory>::new().get(c),
         GeneralCategory::Control
@@ -35,70 +53,64 @@ pub(crate) fn is_escaped(c: char) -> bool {
     ) || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
 }
 
-// Whether `c` is escaped in prose: what can act on the terminal, break a line
-// or reorder the text around it. Controls, the line and paragraph separators,
-// the bidi controls and the tag characters. Joiners, variation selectors and
-// soft hyphens are left to render, so an emoji sequence or a Persian word reads
-// as written.
-fn is_escaped_in_prose(c: char) -> bool {
-    matches!(
-        CodePointMapData::<GeneralCategory>::new().get(c),
-        GeneralCategory::Control
-            | GeneralCategory::LineSeparator
-            | GeneralCategory::ParagraphSeparator
-    ) || matches!(
-        c,
-        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-    ) || ('\u{E0000}'..='\u{E007F}').contains(&c)
+// The strict set, for names and paths, where two values that read alike are
+// two different things.
+fn in_strict_set(c: char) -> bool {
+    in_base_set(c)
 }
 
-/// `text`, a name or a path, with every character [`is_escaped`] names written
-/// as an escape, a newline included, so it stays on one line.
-pub(crate) fn escape(text: &str) -> Cow<'_, str> {
-    escape_with(text, is_escaped, |_| false, Sgr::Escape)
+// One variant per distinct escape. `Name` and `DisplayPath` share `Strict`.
+#[derive(Clone, Copy)]
+enum Policy {
+    // The strict set, a newline and a tab included, so the text stays on one
+    // line.
+    Strict,
+    // The base set except a tab: one line of file content.
+    Content,
+    // The guard set and a tab; a newline stays.
+    Prose,
+    // One line of a tool's output, cleaned as a terminal would leave it, then
+    // the guard set.
+    Output,
+    // The guard set, a newline and a tab kept, with selfie's own SGR sequences
+    // handled as the `Sgr` says.
+    Guard(Sgr),
+    // The base set, a newline and a tab included: what a command or a step's
+    // description has always been escaped with, until a kind for each exists.
+    Interim,
 }
 
-/// `items`, each through [`escape`], joined by `separator`: a list of names
-/// or values from outside selfie, on one line.
-pub(crate) fn escape_joined<S: AsRef<str>>(
-    items: impl IntoIterator<Item = S>,
-    separator: &str,
-) -> String {
-    items
-        .into_iter()
-        .map(|item| escape(item.as_ref()).into_owned())
-        .collect::<Vec<_>>()
-        .join(separator)
+// The one escaping function; the kind constructors, `guard` and
+// `interim_one_line` are its only callers.
+fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
+    match policy {
+        Policy::Strict => escape_with(text, in_strict_set, Sgr::Escape),
+        Policy::Content => escape_with(text, |c| c != '\t' && in_base_set(c), Sgr::Escape),
+        Policy::Prose => escape_with(text, |c| c == '\t' || in_guard_set(c), Sgr::Escape),
+        Policy::Output => Cow::Owned(cleaned(text)),
+        Policy::Guard(sgr) => escape_with(text, in_guard_set, sgr),
+        Policy::Interim => escape_with(text, in_base_set, Sgr::Escape),
+    }
 }
 
-/// `text`, prose or a tool's output, with what could act on the terminal or
-/// reorder the text written as an escape. A newline stays a newline.
-pub(crate) fn escape_prose(text: &str) -> Cow<'_, str> {
-    escape_with(text, is_escaped_in_prose, |c| c == '\n', Sgr::Escape)
+/// Shows `text`, a command or a step's description, on one line, with every
+/// control, format or invisible character written as an escape. A blank such
+/// as U+00A0 shows as written, so a command quoting French or CJK text still
+/// pastes as it runs.
+// Neither is a name, so neither takes the strict set; the Command kind and a
+// one-line prose kind replace this.
+pub(crate) fn interim_one_line(text: &str) -> Shown {
+    Shown(escape(text, Policy::Interim).into_owned())
 }
 
-/// As [`escape`], but a tab stays a tab: for a line of file content, where a
-/// tab is ordinary and an invisible character must still show.
-pub(crate) fn escape_keeping_tabs(line: &str) -> Cow<'_, str> {
-    escape_with(line, is_escaped, |c| c == '\t', Sgr::Escape)
-}
-
-/// As [`escape_prose`], but a control character is left for the caller to
-/// drop: for command output, whose colors and carriage returns are removed
-/// rather than shown.
-fn escape_unrendered(text: &str) -> Cow<'_, str> {
-    escape_with(text, is_escaped_in_prose, char::is_control, Sgr::Escape)
-}
-
-/// `line`, one line of a command's output, as a terminal would leave it: its
-/// colors removed, only the text after its last carriage return kept, tabs as
-/// spaces, and no other control character left, with what could still reorder
-/// the text written as an escape.
-pub(crate) fn printable(line: &str) -> String {
-    if !line
-        .chars()
-        .any(|c| c.is_control() || is_escaped_in_prose(c))
-    {
+// `line`, one line of a command's output, as a terminal would leave it: its
+// colors removed, only the text after its last carriage return kept, tabs as
+// spaces, and no other control character left, a line break included, with
+// what could still reorder the text written as an escape. Cleaning removes
+// every control character, so only the guard set's other members are left to
+// escape.
+fn cleaned(line: &str) -> String {
+    if !line.chars().any(|c| c.is_control() || in_guard_set(c)) {
         return line.to_string();
     }
     let line = console::strip_ansi_codes(line);
@@ -113,17 +125,7 @@ pub(crate) fn printable(line: &str) -> String {
         .map(|c| if c == '\t' { ' ' } else { c })
         .filter(|c| !c.is_control())
         .collect();
-    escape_unrendered(&kept).into_owned()
-}
-
-/// `text`, a command's output with its surrounding blank space trimmed, each
-/// line through [`printable`], with its line breaks kept.
-pub(crate) fn tool_output(text: &str) -> String {
-    text.trim()
-        .lines()
-        .map(printable)
-        .collect::<Vec<_>>()
-        .join("\n")
+    escape_with(&kept, in_guard_set, Sgr::Escape).into_owned()
 }
 
 /// `block`, text a printer is about to write, as the stream gets it. Every
@@ -132,8 +134,10 @@ pub(crate) fn tool_output(text: &str) -> String {
 /// the terminal except a newline or a tab. selfie's own color and weight
 /// sequences are kept when `colors` is on and removed when it is off.
 pub(crate) fn guard(block: &str, colors: bool) -> Cow<'_, str> {
-    let sgr = if colors { Sgr::Keep } else { Sgr::Strip };
-    escape_with(block, is_escaped_in_prose, |c| c == '\n' || c == '\t', sgr)
+    escape(
+        block,
+        Policy::Guard(if colors { Sgr::Keep } else { Sgr::Strip }),
+    )
 }
 
 // What the escaping loop does with an SGR sequence selfie's own styling writes.
@@ -185,68 +189,31 @@ fn painted(text: String, paint: Paint) -> String {
 /// and only selfie styled it.
 ///
 /// The printers that keep styling take this type, so text from outside selfie
-/// reaches them only through [`Shown::name`], [`Shown::prose`], a
-/// [`DisplayPath`], or [`shown!`], whose arguments must each be [`Trusted`];
-/// selfie's own text reaches them as a [`Literal`].
+/// reaches them only as one of the kinds, such as a [`Name`] or [`Prose`], or
+/// through [`shown!`], whose arguments must each be [`Trusted`]; selfie's own
+/// text reaches them as a [`Literal`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Shown(String);
 
 impl Shown {
-    /// `text`, a name, escaped as [`escape`] escapes it.
-    pub(crate) fn name(text: &str) -> Self {
-        Self(escape(text).into_owned())
-    }
-
-    /// `text`, prose or a tool's output, escaped as [`escape_prose`] escapes it,
-    /// with every line after the first indented two columns, so that none of
-    /// them starts at the left margin or a table cell's edge.
-    pub(crate) fn prose(text: &str) -> Self {
-        Self::indented(Self(escape_prose(text).into_owned()), lit!("  "))
-    }
-
-    /// `line`, a line of file content, escaped as [`escape_keeping_tabs`]
-    /// escapes it.
-    pub(crate) fn content(line: &str) -> Self {
-        Self(escape_keeping_tabs(line).into_owned())
-    }
-
-    /// `items`, names, each escaped as [`Shown::name`] escapes it, joined by
-    /// `separator`.
-    pub(crate) fn joined<S: AsRef<str>>(
-        items: impl IntoIterator<Item = S>,
+    /// `items` joined by `separator`, each shown as it is.
+    pub(crate) fn join(
+        items: impl IntoIterator<Item = impl Into<Shown>>,
         separator: Literal,
     ) -> Self {
-        Self(escape_joined(items, separator.as_str()))
-    }
-
-    /// `items` joined by `separator`, each shown as it is.
-    pub(crate) fn join(items: impl IntoIterator<Item = Shown>, separator: Literal) -> Self {
         Self(
             items
                 .into_iter()
-                .map(|item| item.0)
+                .map(|item| item.into().0)
                 .collect::<Vec<_>>()
                 .join(separator.as_str()),
         )
     }
 
-    /// `text`, prose whose lines another layer lays out, escaped as
-    /// [`escape_prose`] escapes it with nothing added: a block the library
-    /// already indented, or text the caller indents itself.
-    pub(crate) fn block(text: &str) -> Self {
-        Self(escape_prose(text).into_owned())
-    }
-
-    /// `text`, a command's output, cleaned as [`tool_output`] cleans it, with
-    /// every line after the first starting with `indent`.
-    pub(crate) fn tool_output(text: &str, indent: Literal) -> Self {
-        Self(tool_output(text).replace('\n', &format!("\n{indent}")))
-    }
-
     /// `text` with every line after the first starting with `indent`, so no
     /// line of it starts at the left margin.
-    pub(crate) fn indented(text: Shown, indent: Literal) -> Self {
-        Self(text.0.replace('\n', &format!("\n{indent}")))
+    pub(crate) fn indented(text: impl Into<Shown>, indent: Literal) -> Self {
+        Self(text.into().0.replace('\n', &format!("\n{indent}")))
     }
 
     /// `self` styled by `paint` when `use_colors`.
@@ -278,12 +245,6 @@ impl Shown {
 impl From<Literal> for Shown {
     fn from(text: Literal) -> Self {
         Self(text.0.to_string())
-    }
-}
-
-impl From<DisplayPath> for Shown {
-    fn from(path: DisplayPath) -> Self {
-        Self(path.0)
     }
 }
 
@@ -331,7 +292,7 @@ macro_rules! trusted {
 }
 // A `SafeTable` escapes every cell not built from a `Shown`, so a rendered
 // table may be printed.
-trusted!(Shown, DisplayPath, Literal, crate::tables::SafeTable);
+trusted!(Shown, Literal, crate::tables::SafeTable);
 trusted!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
 );
@@ -425,52 +386,133 @@ macro_rules! lit {
 }
 pub(crate) use lit;
 
-/// A path or source as the terminal shows it, made only by
-/// [`DisplayPath::new`], so text of this type has been through [`escape`].
-// Escaped rather than dropped: dropping would show `evil\rgood` as the name of
-// a real file `evilgood`. Two names can still read alike in two ways, both
-// accepted: a backslash is not escaped, so a name holding the six characters
-// `\u{1b}` reads like one holding ESC, and `DisplayPath::of` shows a path that
-// is not UTF-8 lossily, so two such names can show the same replacement
-// characters.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct DisplayPath(String);
+// Each kind holds its escaped text, and only its constructors, below, build
+// one. Each is `Trusted`, so `shown!` formats it, and becomes a `Shown` as it
+// is.
+macro_rules! kinds {
+    ($($(#[$meta:meta])* $kind:ident;)*) => {$(
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+        pub(crate) struct $kind(String);
 
-impl DisplayPath {
-    /// `text` with its escaped characters written as escapes.
+        impl $kind {
+            /// Returns the escaped text.
+            #[allow(dead_code, reason = "not every kind's text is read outside tests")]
+            pub(crate) fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl fmt::Display for $kind {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        trusted!($kind);
+
+        impl From<$kind> for Shown {
+            fn from(text: $kind) -> Self {
+                Self(text.0)
+            }
+        }
+    )*};
+}
+
+kinds! {
+    /// Holds a spec, package, environment or file-stem name, or a list item, on
+    /// one line, with every invisible or controlling character shown as an
+    /// escape.
+    Name;
+    /// Holds a path or a dotfile source, escaped as a [`Name`] is.
+    // Escaped rather than dropped: dropping would show `evil\rgood` as the name
+    // of a real file `evilgood`. Two names can still read alike in two ways,
+    // both accepted: a backslash is not escaped, so a name holding the six
+    // characters `\u{1b}` reads like one holding ESC, and `DisplayPath::of`
+    // shows a path that is not UTF-8 lossily, so two such names can show the
+    // same replacement characters.
+    DisplayPath;
+    /// Holds a library sentence, description, note or refusal reason. What
+    /// could act on the terminal or reorder the text is escaped, a tab
+    /// included, and its line breaks are kept.
+    Prose;
+    /// Holds one line of file content, as in a diff. A control, format or
+    /// invisible character shows as an escape, a tab stays a tab, and a blank
+    /// such as U+00A0 shows as written.
+    Content;
+    /// Holds what a tool printed, as a terminal would leave it: its colors are
+    /// removed, a line redrawn by carriage returns shows its final state, tabs
+    /// become spaces, no control character is left but the line breaks between
+    /// its lines, and what could reorder the text is escaped.
+    Output;
+}
+
+impl Name {
+    /// Escapes `text`.
     pub(crate) fn new(text: &str) -> Self {
-        Self(escape(text).into_owned())
+        Self(escape(text, Policy::Strict).into_owned())
     }
 
-    /// `path` as [`DisplayPath::new`] shows its text.
+    /// Whether `text` shows as written when escaped as a name: nothing in it
+    /// acts on the terminal, renders as nothing, or reads as another name.
+    pub(crate) fn is_plain(text: &str) -> bool {
+        matches!(escape(text, Policy::Strict), Cow::Borrowed(_))
+    }
+}
+
+impl DisplayPath {
+    /// Escapes `text`.
+    pub(crate) fn new(text: &str) -> Self {
+        Self(escape(text, Policy::Strict).into_owned())
+    }
+
+    /// Shows `path`'s text as [`DisplayPath::new`] does.
     pub(crate) fn of(path: &std::path::Path) -> Self {
         // The one place outside tests a path's text is taken for display; the
         // gate in tests/no_raw_path_display.rs holds every other one to it.
         Self::new(&path.display().to_string())
     }
+}
 
-    /// Returns the escaped text.
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
+impl Prose {
+    /// Escapes `text`.
+    pub(crate) fn new(text: &str) -> Self {
+        Self(escape(text, Policy::Prose).into_owned())
     }
 }
 
-impl fmt::Display for DisplayPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+impl Content {
+    /// Escapes `line`.
+    pub(crate) fn new(line: &str) -> Self {
+        Self(escape(line, Policy::Content).into_owned())
     }
 }
 
-// The one escaping loop. A character `escaped` names and `kept` does not keep
-// is written as an escape; an SGR sequence selfie's own styling writes is kept,
-// removed or escaped as `sgr` says.
-fn escape_with(
-    text: &str,
-    escaped: fn(char) -> bool,
-    kept: impl Fn(char) -> bool,
-    sgr: Sgr,
-) -> Cow<'_, str> {
-    if !text.chars().any(|c| escaped(c) && !kept(c)) {
+impl Output {
+    /// Cleans `text`, a tool's whole output, line by line, keeping its line
+    /// breaks and trimming the blank space around it.
+    pub(crate) fn new(text: &str) -> Self {
+        Self(
+            text.trim()
+                .lines()
+                .map(|line| escape(line, Policy::Output).into_owned())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    /// Cleans `line`, one line of a tool's output as it streams, without
+    /// trimming it. A line break inside it is removed.
+    pub(crate) fn line(line: &str) -> Self {
+        Self(escape(line, Policy::Output).into_owned())
+    }
+}
+
+// The one escaping loop. A character `escaped` names is written as an escape;
+// an SGR sequence selfie's own styling writes is kept, removed or escaped as
+// `sgr` says.
+fn escape_with(text: &str, escaped: impl Fn(char) -> bool, sgr: Sgr) -> Cow<'_, str> {
+    if !text.chars().any(&escaped) {
         return Cow::Borrowed(text);
     }
     let mut shown = String::with_capacity(text.len() + 8);
@@ -486,7 +528,7 @@ fn escape_with(
             rest = &rest[length..];
             continue;
         }
-        if escaped(c) && !kept(c) {
+        if escaped(c) {
             push_escaped(&mut shown, c);
         } else {
             shown.push(c);
@@ -513,47 +555,297 @@ fn push_escaped(shown: &mut String, c: char) {
 mod tests {
     use super::*;
 
-    // Each kind of character that acts on a terminal or hides in a name shows
-    // as its escape, with the visible text around it kept.
+    // Each set's members, one row per class: (character, guard, base, strict).
+    // The rows sit on the edges of each hand-written range, so a range one code
+    // point too wide or too narrow fails here.
     #[test]
-    fn each_kind_shows_as_its_escape() {
-        let cases = [
-            ("a\u{1b}[2Jb", "a\\u{1b}[2Jb"),
-            ("a\u{1b}]0;pwned\u{7}b", "a\\u{1b}]0;pwned\\u{7}b"),
-            ("a\u{9b}b", "a\\u{9b}b"),
-            ("evil\rgood", "evil\\rgood"),
-            ("evil\ngood", "evil\\ngood"),
-            ("a\tb", "a\\tb"),
-            ("a\u{7f}b", "a\\u{7f}b"),
-            ("a\u{202E}txt.exe", "a\\u{202e}txt.exe"),
-            ("a\u{2066}b", "a\\u{2066}b"),
-            ("pay\u{200B}pal", "pay\\u{200b}pal"),
-            ("a\u{200D}b", "a\\u{200d}b"),
-            ("\u{FEFF}a", "\\u{feff}a"),
-            ("a\u{AD}b", "a\\u{ad}b"),
-            ("a\u{61C}b", "a\\u{61c}b"),
-            ("a\u{180E}b", "a\\u{180e}b"),
-            ("a\u{2028}b", "a\\u{2028}b"),
-            ("a\u{2029}b", "a\\u{2029}b"),
-            ("evil\u{E0001}\u{E0041}", "evil\\u{e0001}\\u{e0041}"),
-            ("config\u{FE0F}", "config\\u{fe0f}"),
-            ("a\u{34F}b", "a\\u{34f}b"),
-            ("a\u{3164}b", "a\\u{3164}b"),
-            ("a\u{FFF9}b", "a\\u{fff9}b"),
-            ("a\u{600}b", "a\\u{600}b"),
+    fn the_sets_are_pinned() {
+        let rows = [
+            ('\0', true, true, true),
+            ('\t', false, true, true),
+            ('\n', false, true, true),
+            ('\r', true, true, true),
+            ('\u{1b}', true, true, true),
+            ('\u{7f}', true, true, true),
+            ('\u{85}', true, true, true),
+            ('\u{9b}', true, true, true),
+            ('\u{61B}', false, false, false),
+            ('\u{61C}', true, true, true),
+            ('\u{61D}', false, false, false),
+            ('\u{200E}', true, true, true),
+            ('\u{200F}', true, true, true),
+            ('\u{2029}', true, true, true),
+            ('\u{2028}', true, true, true),
+            ('\u{202A}', true, true, true),
+            ('\u{202E}', true, true, true),
+            ('\u{2060}', false, true, true),
+            ('\u{2065}', false, true, true),
+            ('\u{2066}', true, true, true),
+            ('\u{2069}', true, true, true),
+            ('\u{206A}', false, true, true),
+            ('\u{DFFFF}', false, false, false),
+            ('\u{E0000}', true, true, true),
+            ('\u{E0041}', true, true, true),
+            ('\u{E007F}', true, true, true),
+            ('\u{E0080}', false, true, true),
+            ('\u{E0100}', false, true, true),
+            ('\u{200B}', false, true, true),
+            ('\u{200C}', false, true, true),
+            ('\u{200D}', false, true, true),
+            ('\u{FEFF}', false, true, true),
+            ('\u{AD}', false, true, true),
+            ('\u{180E}', false, true, true),
+            ('\u{FE0F}', false, true, true),
+            ('\u{34F}', false, true, true),
+            ('\u{3164}', false, true, true),
+            ('\u{FFF9}', false, true, true),
+            ('\u{600}', false, true, true),
+            ('\u{A0}', false, false, false),
+            ('\u{1680}', false, false, false),
+            ('\u{2000}', false, false, false),
+            ('\u{200A}', false, false, false),
+            ('\u{202F}', false, false, false),
+            ('\u{205F}', false, false, false),
+            ('\u{3000}', false, false, false),
+            ('\u{2800}', false, false, false),
+            (' ', false, false, false),
+            ('a', false, false, false),
+            ('\u{301}', false, false, false),
+            ('日', false, false, false),
+            ('\u{1F980}', false, false, false),
         ];
-
-        for (text, shown) in cases {
-            assert_eq!(escape(text), shown, "{text:?}");
+        for (c, guard, base, strict) in rows {
+            assert_eq!(
+                (in_guard_set(c), in_base_set(c), in_strict_set(c)),
+                (guard, base, strict),
+                "{c:?}"
+            );
         }
     }
 
-    // Combining marks, other scripts and emoji show as written: an accented
-    // name stored decomposed must read as the name it is.
+    // Each set holds the one before it: what can act on the terminal is also
+    // what a name or a line of content escapes.
     #[test]
-    fn ordinary_text_is_unchanged() {
-        for text in ["cafe\u{301}", "/tmp/日本/conf", "🦀 crab", "plain-name.yml"] {
-            assert!(matches!(escape(text), Cow::Borrowed(_)), "{text:?}");
+    fn the_sets_nest() {
+        for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
+            assert!(!in_guard_set(c) || in_base_set(c), "{c:?}");
+            assert!(!in_base_set(c) || in_strict_set(c), "{c:?}");
+        }
+    }
+
+    // Each kind against each class of character, as (text, name, prose,
+    // content, output, guarded without colors, guarded with them). A path
+    // escapes as a name does.
+    #[test]
+    fn each_kind_escapes_each_class() {
+        let own = "\u{1b}[31mx\u{1b}[0m";
+        let rows = [
+            (
+                "a\u{1b}[2Jb",
+                "a\\u{1b}[2Jb",
+                "a\\u{1b}[2Jb",
+                "a\\u{1b}[2Jb",
+                "ab",
+                "a\\u{1b}[2Jb",
+                "a\\u{1b}[2Jb",
+            ),
+            ("a\rb", "a\\rb", "a\\rb", "a\\rb", "b", "a\\rb", "a\\rb"),
+            ("a\nb", "a\\nb", "a\nb", "a\\nb", "ab", "a\nb", "a\nb"),
+            ("a\tb", "a\\tb", "a\\tb", "a\tb", "a b", "a\tb", "a\tb"),
+            (
+                "a\u{7f}b",
+                "a\\u{7f}b",
+                "a\\u{7f}b",
+                "a\\u{7f}b",
+                "ab",
+                "a\\u{7f}b",
+                "a\\u{7f}b",
+            ),
+            (
+                "a\u{85}b",
+                "a\\u{85}b",
+                "a\\u{85}b",
+                "a\\u{85}b",
+                "ab",
+                "a\\u{85}b",
+                "a\\u{85}b",
+            ),
+            (
+                "a\u{202E}b",
+                "a\\u{202e}b",
+                "a\\u{202e}b",
+                "a\\u{202e}b",
+                "a\\u{202e}b",
+                "a\\u{202e}b",
+                "a\\u{202e}b",
+            ),
+            (
+                "a\u{2066}b",
+                "a\\u{2066}b",
+                "a\\u{2066}b",
+                "a\\u{2066}b",
+                "a\\u{2066}b",
+                "a\\u{2066}b",
+                "a\\u{2066}b",
+            ),
+            (
+                "a\u{61C}b",
+                "a\\u{61c}b",
+                "a\\u{61c}b",
+                "a\\u{61c}b",
+                "a\\u{61c}b",
+                "a\\u{61c}b",
+                "a\\u{61c}b",
+            ),
+            (
+                "a\u{E0041}b",
+                "a\\u{e0041}b",
+                "a\\u{e0041}b",
+                "a\\u{e0041}b",
+                "a\\u{e0041}b",
+                "a\\u{e0041}b",
+                "a\\u{e0041}b",
+            ),
+            (
+                "a\u{2028}b",
+                "a\\u{2028}b",
+                "a\\u{2028}b",
+                "a\\u{2028}b",
+                "a\\u{2028}b",
+                "a\\u{2028}b",
+                "a\\u{2028}b",
+            ),
+            (
+                "a\u{200B}b",
+                "a\\u{200b}b",
+                "a\u{200B}b",
+                "a\\u{200b}b",
+                "a\u{200B}b",
+                "a\u{200B}b",
+                "a\u{200B}b",
+            ),
+            (
+                "a\u{200D}b",
+                "a\\u{200d}b",
+                "a\u{200D}b",
+                "a\\u{200d}b",
+                "a\u{200D}b",
+                "a\u{200D}b",
+                "a\u{200D}b",
+            ),
+            (
+                "a\u{FE0F}b",
+                "a\\u{fe0f}b",
+                "a\u{FE0F}b",
+                "a\\u{fe0f}b",
+                "a\u{FE0F}b",
+                "a\u{FE0F}b",
+                "a\u{FE0F}b",
+            ),
+            (
+                "a\u{FEFF}b",
+                "a\\u{feff}b",
+                "a\u{FEFF}b",
+                "a\\u{feff}b",
+                "a\u{FEFF}b",
+                "a\u{FEFF}b",
+                "a\u{FEFF}b",
+            ),
+            (
+                "a\u{AD}b",
+                "a\\u{ad}b",
+                "a\u{AD}b",
+                "a\\u{ad}b",
+                "a\u{AD}b",
+                "a\u{AD}b",
+                "a\u{AD}b",
+            ),
+            (
+                "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b",
+            ),
+            (
+                "a\u{2800}b",
+                "a\u{2800}b",
+                "a\u{2800}b",
+                "a\u{2800}b",
+                "a\u{2800}b",
+                "a\u{2800}b",
+                "a\u{2800}b",
+            ),
+            (
+                "a\u{3000}b",
+                "a\u{3000}b",
+                "a\u{3000}b",
+                "a\u{3000}b",
+                "a\u{3000}b",
+                "a\u{3000}b",
+                "a\u{3000}b",
+            ),
+            (
+                "cafe\u{301}",
+                "cafe\u{301}",
+                "cafe\u{301}",
+                "cafe\u{301}",
+                "cafe\u{301}",
+                "cafe\u{301}",
+                "cafe\u{301}",
+            ),
+            (
+                own,
+                "\\u{1b}[31mx\\u{1b}[0m",
+                "\\u{1b}[31mx\\u{1b}[0m",
+                "\\u{1b}[31mx\\u{1b}[0m",
+                "x",
+                "x",
+                own,
+            ),
+        ];
+        for (text, name, prose, content, output, plain, colored) in rows {
+            let shown = (
+                Name::new(text).as_str().to_owned(),
+                DisplayPath::new(text).as_str().to_owned(),
+                Prose::new(text).as_str().to_owned(),
+                Content::new(text).as_str().to_owned(),
+                Output::line(text).as_str().to_owned(),
+                guard(text, false).into_owned(),
+                guard(text, true).into_owned(),
+            );
+            let expected = (name, name, prose, content, output, plain, colored);
+            assert_eq!(
+                (
+                    shown.0.as_str(),
+                    shown.1.as_str(),
+                    shown.2.as_str(),
+                    shown.3.as_str(),
+                    shown.4.as_str(),
+                    shown.5.as_str(),
+                    shown.6.as_str()
+                ),
+                expected,
+                "{text:?}"
+            );
+        }
+    }
+
+    // A command or a step's description is not a name: a blank in it shows as
+    // written, so a command pastes as it runs, and a line break or an invisible
+    // character still shows as an escape.
+    #[test]
+    fn a_command_keeps_its_blanks_and_stays_on_one_line() {
+        assert_eq!(
+            interim_one_line("echo 'a\u{A0}b'\n\u{200B}x").as_str(),
+            "echo 'a\u{A0}b'\\n\\u{200b}x"
+        );
+    }
+
+    // A name shows as written exactly when escaping leaves it unchanged.
+    #[test]
+    fn a_plain_name_is_one_escaping_leaves_unchanged() {
+        for text in ["plain-name", "café", "e\u{301}", "a b"] {
+            assert!(Name::is_plain(text), "{text:?}");
+        }
+        for text in ["a\u{200B}b", "a\nb", "a\u{1b}b"] {
+            assert!(!Name::is_plain(text), "{text:?}");
         }
     }
 
@@ -572,50 +864,29 @@ mod tests {
             "evil\u{FE0F}good",
         ];
 
-        let shown: std::collections::BTreeSet<String> =
-            names.iter().map(|name| escape(name).into_owned()).collect();
+        let shown: std::collections::BTreeSet<Name> =
+            names.iter().map(|name| Name::new(name)).collect();
 
         assert_eq!(shown.len(), names.len(), "{shown:?}");
     }
 
+    // A tool's whole output loses the blank space around it and keeps the line
+    // breaks and indentation inside it. One streamed line is not trimmed, and a
+    // line break inside it is removed.
     #[test]
-    fn a_line_of_content_keeps_its_tabs() {
-        assert_eq!(
-            escape_keeping_tabs("key\tvalue\u{1b}[2J"),
-            "key\tvalue\\u{1b}[2J"
-        );
+    fn output_trims_a_whole_output_and_not_a_line() {
+        assert_eq!(Output::new("\n  1.2.3\n").as_str(), "1.2.3");
+        assert_eq!(Output::new("\n\none\n  two\n\n").as_str(), "one\n  two");
+        assert_eq!(Output::line("  indented").as_str(), "  indented");
+        assert_eq!(Output::line("a\nb").as_str(), "ab");
     }
 
-    // Prose escapes only what acts on the terminal or reorders text, so an
-    // emoji sequence, a Persian word and a soft hyphen render as written.
+    // A redrawn line whose last part is blank shows its last part with text, so
+    // a progress meter ending in a bare carriage return shows its final state.
     #[test]
-    fn prose_keeps_joiners_and_escapes_what_acts_on_the_terminal() {
-        for text in [
-            "👨\u{200D}💻 dev",
-            "⚠\u{FE0F} warning",
-            "می\u{200C}خواهم",
-            "hy\u{AD}phen",
-            "zero\u{200B}width",
-            "one\ntwo",
-        ] {
-            assert!(matches!(escape_prose(text), Cow::Borrowed(_)), "{text:?}");
-        }
-        let cases = [
-            ("a\u{1b}[2Jb", "a\\u{1b}[2Jb"),
-            ("a\rb", "a\\rb"),
-            ("a\tb", "a\\tb"),
-            ("a\u{7f}b", "a\\u{7f}b"),
-            ("a\u{9b}b", "a\\u{9b}b"),
-            ("a\u{202E}b", "a\\u{202e}b"),
-            ("a\u{2067}b", "a\\u{2067}b"),
-            ("a\u{200F}b", "a\\u{200f}b"),
-            ("a\u{61C}b", "a\\u{61c}b"),
-            ("a\u{2028}b", "a\\u{2028}b"),
-            ("a\u{E0041}b", "a\\u{e0041}b"),
-        ];
-        for (text, shown) in cases {
-            assert_eq!(escape_prose(text), shown, "{text:?}");
-        }
+    fn a_redrawn_line_shows_its_last_state() {
+        assert_eq!(Output::line("10%\r50%\r100%\r").as_str(), "100%");
+        assert_eq!(Output::line("old\rnew").as_str(), "new");
     }
 
     // The printer's guard keeps selfie's own styling only when the stream has
@@ -641,23 +912,15 @@ mod tests {
     // printer then keeps or removes it for the stream it writes to.
     #[test]
     fn paint_writes_styling_only_when_colors_are_on() {
-        let painted = Shown::name("x").paint(true, |s| s.red());
+        let painted = Shown::from(Name::new("x")).paint(true, |s| s.red());
         assert_eq!(painted.as_str(), "\u{1b}[31mx\u{1b}[0m");
-        assert_eq!(Shown::name("x").paint(false, |s| s.red()), "x");
+        assert_eq!(Shown::from(Name::new("x")).paint(false, |s| s.red()), "x");
     }
 
-    // A command's output loses the blank space around it, as a trimmed string
-    // does, and keeps the line breaks inside it.
+    // Prose the library laid out is escaped and gains no indentation.
     #[test]
-    fn tool_output_trims_the_blank_space_around_it() {
-        assert_eq!(tool_output("\n  1.2.3\n"), "1.2.3");
-        assert_eq!(tool_output("\n\none\n  two\n\n"), "one\n  two");
-    }
-
-    // A block the library laid out is escaped and gains no indentation.
-    #[test]
-    fn a_block_keeps_its_own_layout() {
-        assert_eq!(Shown::block("  a\n  b\u{1b}"), "  a\n  b\\u{1b}");
+    fn prose_keeps_its_own_layout() {
+        assert_eq!(Prose::new("  a\n  b\u{1b}").as_str(), "  a\n  b\\u{1b}");
     }
 
     // `shown!` accepts only `{}`: any other placeholder can capture a value
@@ -690,13 +953,17 @@ mod tests {
         }
     }
 
-    // Escaped text has nothing left to escape, so a path escaped as a
-    // DisplayPath and again by a printer reads the same.
+    // Escaped text has nothing left to escape, so text escaped as one kind and
+    // again as another, or by a printer, reads the same.
     #[test]
     fn escaping_twice_is_escaping_once() {
-        let once = escape("a\u{1b}[2J\u{202E}\u{FE0F}\tb").into_owned();
-        assert_eq!(escape(&once), once);
-        assert_eq!(escape_prose(&once), once);
-        assert_eq!(guard(&once, false), once);
+        let once = Name::new("a\u{1b}[2J\u{202E}\u{FE0F}\tb\u{A0}\u{2800}");
+        let once = once.as_str();
+        assert_eq!(Name::new(once).as_str(), once);
+        assert_eq!(DisplayPath::new(once).as_str(), once);
+        assert_eq!(Prose::new(once).as_str(), once);
+        assert_eq!(Content::new(once).as_str(), once);
+        assert_eq!(Output::line(once).as_str(), once);
+        assert_eq!(guard(once, false), once);
     }
 }

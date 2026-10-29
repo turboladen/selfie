@@ -1,6 +1,6 @@
 use crate::tables::{Cell, SafeTable};
 use crate::terminal_text::DisplayPath;
-use crate::terminal_text::{Shown, lit, shown};
+use crate::terminal_text::{Name, Shown, lit, shown};
 use selfie::package::{event, service::PackageService};
 
 use crate::source_paths::base_directory_line;
@@ -144,8 +144,9 @@ fn handle_list_event(
             }
             table.set_header(header);
             let package_dir = std::path::Path::new(&package_list.package_directory);
-            let failed =
-                |text: String| Cell::from(Shown::prose(&text).paint(use_colors, |s| s.red()));
+            let failed = |text: String| {
+                Cell::from(status_style::styled_text(&text, use_colors, |s| s.red()))
+            };
             let mut add = |result: &RowResult, name: &str, status: Cell, envs: Option<Shown>| {
                 let mut row = vec![row_marker(result, use_colors).into(), name.into(), status];
                 if show_all {
@@ -215,7 +216,7 @@ fn handle_list_event(
             } else if valid + invalid + refused == 0 {
                 display.println(shown!(
                     "No packages found for environment '{}'.",
-                    Shown::name(config.environment())
+                    Name::new(config.environment())
                 ));
                 display_environment_stats(&package_list.environment_stats, config, display);
             }

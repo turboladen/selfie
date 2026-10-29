@@ -4,7 +4,7 @@ use selfie::package::{
     service::PackageService,
 };
 
-use crate::terminal_text::{Literal, Paint, Shown, lit, shown, tool_output};
+use crate::terminal_text::{Literal, Name, Output, Paint, Shown, lit, shown};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -145,7 +145,7 @@ fn display_audit_output_only(audit_result: &AuditResultData, display: &DisplayMa
             display.print_error(format!(
                 "{} — error: {}",
                 audit_result.package_name,
-                tool_output(err)
+                Output::new(err)
             ));
         }
         AuditResult::CouldNotRun(failure) => {
@@ -165,7 +165,7 @@ fn display_audit_summary_line(
         shown!(
             "{}: {}",
             label(lit!("error"), |s| s.red()),
-            Shown::tool_output(err, lit!("    "))
+            Shown::indented(Output::new(err), lit!("    "))
         )
     };
 
@@ -174,7 +174,7 @@ fn display_audit_summary_line(
             shown!(
                 "{} ({})",
                 label(lit!("clean"), |s| s.green()),
-                Shown::joined(sources, lit!(", "))
+                Shown::join(sources.iter().map(|name| Name::new(name)), lit!(", "))
             )
         }
         AuditResult::Conflicts {
@@ -182,7 +182,12 @@ fn display_audit_summary_line(
         } => shown!(
             "{} — unexpected: {}",
             label(lit!("CONFLICTS"), |s| s.red().bold()),
-            Shown::joined(unexpected(sources, expected), lit!(", "))
+            Shown::join(
+                unexpected(sources, expected)
+                    .into_iter()
+                    .map(|name| Name::new(name)),
+                lit!(", ")
+            )
         ),
         AuditResult::NotInstalled => label(lit!("not installed"), |s| s.dim()),
         AuditResult::NoAuditCommand => label(lit!("no audit command"), |s| s.dim()),
@@ -192,7 +197,7 @@ fn display_audit_summary_line(
 
     display.println(shown!(
         "  {}: {}",
-        Shown::name(&audit_result.package_name),
+        Name::new(&audit_result.package_name),
         status
     ));
 }
@@ -217,7 +222,7 @@ fn display_audit_result_card(
         .result_card("Audit Results")
         .field(lit!("Package"), &audit_result.package_name)
         .field(lit!("Environment"), &audit_result.environment)
-        .field_if(lit!("Command"), audit_result.audit_command.as_deref())
+        .command_if(lit!("Command"), audit_result.audit_command.as_deref())
         .print();
 
     // Status line stays inline — variant-dependent sub-fields
@@ -228,7 +233,7 @@ fn display_audit_result_card(
             key(lit!("Status")),
             status_style::format_status_error(use_colors),
             key(lit!("Details")),
-            Shown::tool_output(err, lit!("    "))
+            Shown::indented(Output::new(err), lit!("    "))
         )
     };
     let status_line = match &audit_result.result {
@@ -237,7 +242,7 @@ fn display_audit_result_card(
             key(lit!("Status")),
             status_style::format_audit_clean(use_colors),
             key(lit!("Sources")),
-            Shown::joined(sources, lit!(", "))
+            Shown::join(sources.iter().map(|name| Name::new(name)), lit!(", "))
         ),
         AuditResult::Conflicts {
             sources, expected, ..
@@ -246,11 +251,16 @@ fn display_audit_result_card(
             key(lit!("Status")),
             status_style::format_audit_conflicts(use_colors),
             key(lit!("All sources")),
-            Shown::joined(sources, lit!(", ")),
+            Shown::join(sources.iter().map(|name| Name::new(name)), lit!(", ")),
             key(lit!("Expected")),
-            Shown::joined(expected, lit!(", ")),
+            Shown::join(expected.iter().map(|name| Name::new(name)), lit!(", ")),
             key(lit!("Unexpected")),
-            Shown::joined(unexpected(sources, expected), lit!(", "))
+            Shown::join(
+                unexpected(sources, expected)
+                    .into_iter()
+                    .map(|name| Name::new(name)),
+                lit!(", ")
+            )
         ),
         AuditResult::NotInstalled => shown!(
             "{}{}",

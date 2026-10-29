@@ -1,0 +1,5 @@
+error[E0451]: field `0` of struct `Name` is private
+  --> tests/compile_fail/kind_private_field.rs:13:20
+   |
+13 |     let _ = Name { 0: String::from("a\u{1b}[2Jb") };
+   |                    ^ private field

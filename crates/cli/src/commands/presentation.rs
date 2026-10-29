@@ -1,7 +1,7 @@
 //! How commands lay out what they print: tables, field styling, and the
 //! report for a package that does not support the current environment.
 
-use crate::terminal_text::{Literal, Paint, Shown, lit, shown};
+use crate::terminal_text::{Literal, Name, Paint, Shown, lit, shown};
 
 use crate::config::CliConfig;
 use crate::display_manager::{DisplayManager, INDENT};
@@ -82,9 +82,10 @@ pub(crate) fn format_environment_names(
 ) -> Shown {
     let names = environments.iter().map(|env_name| {
         if env_name == current_environment {
-            Shown::name(&format!("*{env_name}")).paint(config.use_colors(), |s| s.bold().green())
+            Shown::from(Name::new(&format!("*{env_name}")))
+                .paint(config.use_colors(), |s| s.bold().green())
         } else {
-            Shown::name(env_name).paint(config.use_colors(), |s| s.dim().green())
+            Shown::from(Name::new(env_name)).paint(config.use_colors(), |s| s.dim().green())
         }
     });
     Shown::join(names, lit!(", "))
@@ -157,7 +158,7 @@ pub(crate) fn display_missing_command(
         display.print_note(shown!(
             "Environments with {} commands: {}",
             command.word(),
-            Shown::joined(&others, lit!(", "))
+            Shown::join(others.iter().map(|name| Name::new(name)), lit!(", "))
         ));
     }
 }

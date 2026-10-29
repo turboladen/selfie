@@ -16,7 +16,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::terminal_text::escape_keeping_tabs;
+use crate::terminal_text::Content;
 
 /// Lines either side of the failing one.
 const CONTEXT: u64 = 2;
@@ -116,12 +116,7 @@ pub(crate) fn window(path: &Path, line: u64, column: u64) -> Option<String> {
 // takes.
 fn shown_chars(line: &str) -> Vec<(char, String)> {
     line.chars()
-        .map(|c| {
-            (
-                c,
-                escape_keeping_tabs(c.encode_utf8(&mut [0; 4])).into_owned(),
-            )
-        })
+        .map(|c| (c, Content::new(c.encode_utf8(&mut [0; 4])).to_string()))
         .collect()
 }
 
@@ -209,10 +204,14 @@ mod tests {
         // `x`, not a letter that ends the escape `\u{1b}`, so a pad that counts
         // the raw character as one cell lands on a different letter.
         let line = "a\u{1b}[2Jx: {oops";
-        let shown = escape_keeping_tabs(line);
+        let shown = Content::new(line);
         let caret = pad(line, 6);
 
-        assert_eq!(&shown[caret.len()..caret.len() + 1], "x", "{shown}");
+        assert_eq!(
+            &shown.as_str()[caret.len()..caret.len() + 1],
+            "x",
+            "{shown}"
+        );
     }
 
     // A line cut at the screen's width never ends inside an escape: the

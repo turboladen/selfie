@@ -9,11 +9,10 @@ help: the trait `From<&str>` is not implemented for `Shown`
    |
    | pub(crate) struct Shown(String);
    | ^^^^^^^^^^^^^^^^^^^^^^^
-help: `Shown` implements trait `From<T>`
-  --> tests/compile_fail/../../src/terminal_text.rs
-   |
-   | impl From<Literal> for Shown {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<Literal>`
-...
-   | impl From<DisplayPath> for Shown {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<DisplayPath>`
+   = help: `Shown` implements trait `From<T>`:
+             From<Content>
+             From<DisplayPath>
+             From<Literal>
+             From<Name>
+             From<Prose>
+             From<terminal_text::Output>

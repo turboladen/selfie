@@ -2,7 +2,7 @@ use std::fmt;
 
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 
-use crate::terminal_text::{Paint, Shown};
+use crate::terminal_text::{Name, Paint, Prose, Shown, lit};
 use selfie::validation::ValidationIssue;
 
 /// A table in the CLI's style, rounded and fitted to the terminal, whose cells
@@ -17,16 +17,16 @@ pub(crate) struct SafeTable(Table);
 pub(crate) struct Cell(Shown);
 
 impl Cell {
-    /// Builds a cell from `text`, prose, escaped as [`Shown::prose`] escapes
-    /// it, so a line break stays inside the cell.
+    /// Builds a cell from `text`, escaped as [`Prose`], with its continuation
+    /// lines indented two columns so a line break stays inside the cell.
     pub(crate) fn prose(text: &str) -> Self {
-        Self(Shown::prose(text))
+        Self(Shown::indented(Prose::new(text), lit!("  ")))
     }
 
     /// Builds a cell from `text`, a name, escaped and then styled by `paint`
     /// when `use_colors`.
     pub(crate) fn painted(text: &str, use_colors: bool, paint: Paint) -> Self {
-        Self(Shown::name(text).paint(use_colors, paint))
+        Self(Shown::from(Name::new(text)).paint(use_colors, paint))
     }
 }
 
@@ -38,21 +38,21 @@ impl From<Shown> for Cell {
 }
 
 impl From<&str> for Cell {
-    /// Builds a cell from `text`, a name, escaped as [`Shown::name`] escapes it.
+    /// Builds a cell from `text`, a name, escaped as a [`Name`].
     fn from(text: &str) -> Self {
-        Self(Shown::name(text))
+        Self(Shown::from(Name::new(text)))
     }
 }
 
 impl From<String> for Cell {
-    /// Builds a cell from `text`, a name, escaped as [`Shown::name`] escapes it.
+    /// Builds a cell from `text`, a name, escaped as a [`Name`].
     fn from(text: String) -> Self {
         Self::from(text.as_str())
     }
 }
 
 impl From<&String> for Cell {
-    /// Builds a cell from `text`, a name, escaped as [`Shown::name`] escapes it.
+    /// Builds a cell from `text`, a name, escaped as a [`Name`].
     fn from(text: &String) -> Self {
         Self::from(text.as_str())
     }

@@ -4,7 +4,7 @@
 //! dotfiles defined in package YAML files to their target
 //! locations on the system.
 
-use crate::terminal_text::{Shown, lit, shown};
+use crate::terminal_text::{Prose, Shown, lit, shown};
 use std::sync::{Arc, Mutex};
 
 use selfie::package::event::{DotfileSource, PlannedEntry};
@@ -286,7 +286,7 @@ impl ConflictResolver for InteractiveConflictResolver {
                 current,
             } => {
                 self.print_conflict_row(source, target);
-                self.display.println(Shown::block(summary));
+                self.display.println(Shown::from(Prose::new(summary)));
 
                 // Reveal is offered only when stdout is a terminal as well as
                 // stderr: the values print on stdout, and a redirected stdout

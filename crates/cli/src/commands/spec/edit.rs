@@ -189,7 +189,7 @@ fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(
         Confirm::with_theme(&SimpleTheme)
             .with_prompt(format!(
                 "Create new package '{}'?",
-                crate::terminal_text::escape(package_name)
+                crate::terminal_text::Name::new(package_name)
             ))
             .default(false),
     );

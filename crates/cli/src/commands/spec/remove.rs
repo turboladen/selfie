@@ -86,7 +86,7 @@ pub(crate) async fn handle_remove(
     // unreadable spec nor a failed listing can support a clearance.
     let complete = checked && unreadable.is_empty();
 
-    let shown_name = crate::terminal_text::escape(package_name);
+    let shown_name = crate::terminal_text::Name::new(package_name);
     let (prompt, default_answer) = if dependent_packages.is_empty() && complete {
         display.print_run_note(format!(
             "Package '{package_name}' is not a dependency of any other packages."

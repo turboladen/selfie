@@ -3,7 +3,7 @@
 //! Pure formatting functions that produce styled text strings for use in
 //! table cells and status displays. No spinner or progress bar dependency.
 
-use crate::terminal_text::{Literal, Paint, Shown, lit, shown};
+use crate::terminal_text::{Literal, Paint, Prose, Shown, lit, shown};
 
 /// Format a status indicator with a marker prefix and optional color styling
 fn format_status_indicator(
@@ -85,7 +85,7 @@ pub(crate) fn format_list_status(
 
 /// `text`, prose, escaped and then styled by `paint` when `use_colors`.
 pub(crate) fn styled_text(text: &str, use_colors: bool, paint: Paint) -> Shown {
-    Shown::prose(text).paint(use_colors, paint)
+    Shown::indented(Prose::new(text), lit!("  ")).paint(use_colors, paint)
 }
 
 #[cfg(test)]

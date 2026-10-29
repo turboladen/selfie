@@ -5,7 +5,7 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
-use crate::terminal_text::{DisplayPath, Shown, lit};
+use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit};
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -541,7 +541,7 @@ impl EventProcessor {
                     EntryOutcome::from(&reason),
                     &source,
                     &target,
-                    Some(Shown::prose(&reason.to_string())),
+                    Some(Shown::indented(Prose::new(&reason.to_string()), lit!("  "))),
                 );
             }
 
@@ -569,7 +569,7 @@ impl EventProcessor {
                     EntryOutcome::Drifted,
                     &source,
                     &target,
-                    Some(Shown::name(&drift_type.to_string())),
+                    Some(Shown::from(Name::new(&drift_type.to_string()))),
                 );
             }
 
