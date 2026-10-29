@@ -15,7 +15,7 @@ use futures::StreamExt;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
-use test_common::FakeCommandRunner;
+use test_common::{FakeCommandRunner, within_deadline};
 
 use selfie::{
     config::SelfieConfigBuilder,
@@ -220,40 +220,6 @@ fn unverified(events: &[PackageEvent]) -> usize {
             ..
         })) => *unverified_count,
         other => panic!("expected a drift completion, got: {other:?}"),
-    }
-}
-
-// Run `work` on a thread and runtime of its own, and give up after `deadline`:
-// `None` for a timeout, and a panic in `work` raised again here.
-//
-// For a test whose failure mode is a read blocked on a fifo. That read cannot be
-// canceled, and a runtime whose worker is stuck in it never finishes dropping, so a
-// `tokio::time::timeout` inside the test's own runtime fires and then hangs the test
-// at teardown: the deadline turns a hang into a later hang, not a failure. Here the
-// blocked thread is abandoned instead, and the process ends with the test binary.
-fn within_deadline<T, Fut, F>(deadline: std::time::Duration, work: F) -> Option<T>
-where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = T>,
-    T: Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let _ = tx.send(runtime.block_on(work()));
-    });
-    match rx.recv_timeout(deadline) {
-        Ok(value) => Some(value),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
-        // The work panicked, which dropped the sender: raise that panic here, so a
-        // failing fixture reads as itself rather than as a hang.
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => match worker.join() {
-            Err(panic) => std::panic::resume_unwind(panic),
-            Ok(()) => unreachable!("the worker returned without sending"),
-        },
     }
 }
 
@@ -21839,5 +21805,69 @@ mod accepted_conflicts {
         let events = collect_events(dirs.service().apply_all(options).await).await;
 
         assert_eq!(accepted_flags(&events), vec![false], "{events:?}");
+    }
+}
+
+// A track into an existing spec loads it, copies the file, adds an entry and
+// writes the spec back. An edit that lands on the spec in between, here after the
+// copy is written, is the user's, and the save refuses rather than writing over
+// it.
+mod a_spec_changed_after_it_was_loaded {
+    use super::*;
+    use test_common::{PlantsBeforeWrite, Rewrite};
+
+    const LOADED: &str = "name: bat\nenvironments:\n  test:\n    install: \"true\"\n";
+    const EDITED: &str =
+        "name: bat\ndescription: edited by hand\nenvironments:\n  test:\n    install: \"true\"\n";
+
+    #[tokio::test]
+    async fn a_track_does_not_overwrite_a_spec_edited_after_it_was_loaded() {
+        let dirs = TestDirs::new();
+        let spec = dirs.package_dir.join("bat.yml");
+        std::fs::write(&spec, LOADED).unwrap();
+        let target = dirs.target_dir.join("config");
+        std::fs::write(&target, "--theme=ansi").unwrap();
+        let fs = PlantsBeforeWrite::rewritten_before_write(&spec, Rewrite::File(EDITED));
+
+        let events = collect_events(
+            dirs.service_with_repository_fs(fs.clone())
+                .track_for_package("bat", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            fs.rewritten(),
+            "control: the spec was edited after the load"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&spec).unwrap(),
+            EDITED,
+            "the edit made after the load was overwritten"
+        );
+        let failure = failure_message(&events);
+        let named = format!(
+            "Cannot save the spec: {} changed after selfie read it, so nothing was written to \
+             it. Run the command again, which reads the file as it is now. ",
+            spec.display()
+        );
+        assert!(failure.starts_with(&named), "{failure}");
+        assert_eq!(
+            failure.matches(spec.to_str().unwrap()).count(),
+            1,
+            "the spec must be named exactly once: {failure}"
+        );
+        let copy = dirs.package_dir.join("bat").join("config");
+        assert!(
+            failure.contains(&format!("The copy at '{}' was removed.", copy.display())),
+            "{failure}"
+        );
+        assert!(!copy.exists(), "the copy track made was left behind");
+        let state =
+            std::fs::read_to_string(dirs.state_dir.join("deploy-state.yml")).unwrap_or_default();
+        assert!(
+            !state.contains(target.to_str().unwrap()),
+            "a refused track was recorded: {state}"
+        );
     }
 }

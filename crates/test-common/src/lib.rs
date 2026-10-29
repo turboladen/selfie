@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod constants;
+pub mod deadline;
 pub mod events;
 pub mod fixtures;
 pub mod git;
@@ -21,6 +22,7 @@ pub use config::{
     test_config, test_config_for_env, test_config_with_dir, test_config_with_dir_and_env,
 };
 pub use constants::*;
+pub use deadline::within_deadline;
 pub use events::{
     assert_failed_answer, assert_failed_operation, assert_successful_operation, collect_events,
     create_test_operation_info, get_operation_result,
@@ -36,7 +38,7 @@ pub use fixtures::{
 pub use git::{isolated_git, isolated_git_adapter};
 pub use locked::LockedDir;
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
-pub use plant::{PLANTED, Plant, PlantsBeforeWrite};
+pub use plant::{PLANTED, Plant, PlantsBeforeWrite, Rewrite};
 pub use runner::FakeCommandRunner;
 pub use scripts::{two_marking_lines, write_executable};
 pub use secrets::assert_secret_free;

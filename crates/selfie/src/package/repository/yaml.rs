@@ -18,6 +18,18 @@ use crate::{
     },
 };
 
+// What a spec write may land on, which decides what the write does with what it
+// finds there.
+#[derive(Clone, Copy)]
+enum Over<'a> {
+    // A new spec is written where nothing is.
+    Nothing,
+    // The file the package was parsed from still holds this text.
+    Loaded(&'a str),
+    // The package was not parsed from the file at the path.
+    NotLoaded,
+}
+
 #[derive(Debug, Clone)]
 pub struct YamlPackageRepository<F: FileSystem> {
     fs: F,
@@ -208,7 +220,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         &self,
         package: &Package,
         path: &Path,
-        if_present: IfPresent,
+        over: Over<'_>,
     ) -> Result<Placed, PackageRepoError> {
         // A write serializes the file from the struct, dropping every key it does not
         // model. In a dotfile entry that key is what refuses the entry, so writing
@@ -277,6 +289,24 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         // Serialize the package to YAML
         let yaml_content =
             crate::yaml::serialize(package).map_err(PackageRepoError::Unserializable)?;
+
+        // This comes after every refusal that needs no look at the file, so those
+        // keep their order and kind. A rewrite asks the writer to replace only the
+        // text that was loaded. Content is the test because a modification time
+        // can stay the same across an edit, and an editor's save by rename changes
+        // the inode of a file whose bytes it left alone.
+        let if_present = match over {
+            Over::Nothing => IfPresent::Keep,
+            Over::Loaded(loaded) => IfPresent::ReplaceIfHolding(Arc::from(loaded.as_bytes())),
+            // A package that did not come from `path` has no loaded text to
+            // compare, and writing it there anyway is the blind replace the
+            // comparison exists to prevent.
+            Over::NotLoaded => {
+                return Err(PackageRepoError::NotLoaded {
+                    path: path.to_path_buf(),
+                });
+            }
+        };
 
         // Write the YAML content to the specified path.
         //
@@ -469,11 +499,13 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     }
 
     fn save_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
-        match self.write_package(package, path, IfPresent::Replace)? {
+        let over = match package.raw_yaml() {
+            Some(loaded) if package.path() == path => Over::Loaded(loaded),
+            _ => Over::NotLoaded,
+        };
+        match self.write_package(package, path, over)? {
             Placed::Written => Ok(()),
-            // A replacing write does not keep what it finds. If one ever answers
-            // that it did, nothing was written, and the caller must hear so.
-            Placed::Kept => Err(PackageRepoError::Occupied {
+            Placed::Kept => Err(PackageRepoError::ChangedSinceLoad {
                 path: path.to_path_buf(),
             }),
         }
@@ -482,7 +514,7 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
     // `IfPresent::Keep` is the whole mechanism: the rename into place refuses an
     // existing name, within that variant's guarantee per volume.
     fn create_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError> {
-        match self.write_package(package, path, IfPresent::Keep)? {
+        match self.write_package(package, path, Over::Nothing)? {
             Placed::Written => Ok(()),
             Placed::Kept => Err(PackageRepoError::Occupied {
                 path: path.to_path_buf(),
@@ -2233,6 +2265,7 @@ environments:
             package_path.clone(),
         );
 
+        let package = loaded_from(package, &package_path);
         // Mock the write operation
         fs.mock_write_file_no_follow(&package_path);
 
@@ -2251,45 +2284,81 @@ environments:
             .build()
     }
 
-    // A replacing write that answers it kept what it found wrote nothing, so the
-    // save must fail rather than report success.
+    // Returns `package` as if loaded from `path`, holding the text a save would
+    // write.
+    fn loaded_from(package: Package, path: &Path) -> Package {
+        let text = crate::yaml::serialize(&package).unwrap();
+        loaded_with_text(package, path, &text)
+    }
+
+    // Returns `package` as if it had been parsed from `text` at `path`.
+    fn loaded_with_text(mut package: Package, path: &Path, text: &str) -> Package {
+        package.set_source(
+            path.to_path_buf(),
+            text.to_string(),
+            SpecOrigin::PackageDirectory,
+        );
+        package
+    }
+
+    // A rewrite hands the writer the text the package was loaded from, and a
+    // writer that kept what it found, because the file no longer held that text,
+    // wrote nothing: the save refuses as a change.
     #[test]
-    fn a_save_whose_write_kept_what_was_there_fails() {
+    fn save_package_refuses_a_file_that_changed_since_it_was_loaded() {
         let mut fs = MockFileSystem::default();
         fs.mock_directories_exist();
         let package_dir = PathBuf::from("/test/packages");
         let package_path = package_dir.join("app.yml");
+        let package = loaded_with_text(
+            empty_package("app", &package_path),
+            &package_path,
+            "name: app\n",
+        );
         fs.expect_write_file_no_follow()
+            .times(1)
+            .withf(|_, _, if_present| {
+                *if_present == IfPresent::ReplaceIfHolding(Arc::from(&b"name: app\n"[..]))
+            })
             .returning(|_, _, _| Ok(Placed::Kept));
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         let err = repo
-            .save_package(&empty_package("app", &package_path), &package_path)
+            .save_package(&package, &package_path)
             .expect_err("a write that kept what was there must not report a save");
 
         assert!(
-            matches!(&err, PackageRepoError::Occupied { path } if *path == package_path),
+            matches!(&err, PackageRepoError::ChangedSinceLoad { path } if *path == package_path),
             "got: {err:?}"
         );
     }
 
     // The choice each writer hands the file system, pinned on a mock so it does
-    // not depend on what the test volume can do: a rewrite replaces, a create
-    // never does.
+    // not depend on what the test volume can do: a rewrite replaces only what it
+    // loaded, a create never replaces.
     #[test]
-    fn save_replaces_and_create_keeps() {
-        for (create, expected) in [(false, IfPresent::Replace), (true, IfPresent::Keep)] {
+    fn save_replaces_what_it_loaded_and_create_keeps() {
+        for create in [false, true] {
             let mut fs = MockFileSystem::default();
             fs.mock_directories_exist();
             let package_dir = PathBuf::from("/test/packages");
             let package_path = package_dir.join("app.yml");
+            let package = empty_package("app", &package_path);
+            let (package, expected) = if create {
+                (package, IfPresent::Keep)
+            } else {
+                let text = crate::yaml::serialize(&package).unwrap();
+                (
+                    loaded_with_text(package, &package_path, &text),
+                    IfPresent::ReplaceIfHolding(Arc::from(text.as_bytes())),
+                )
+            };
             fs.expect_write_file_no_follow()
                 .times(1)
                 .withf(move |_, _, if_present| *if_present == expected)
                 .returning(|_, _, _| Ok(Placed::Written));
 
             let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
-            let package = empty_package("app", &package_path);
             let result = if create {
                 repo.create_package(&package, &package_path)
             } else {
@@ -2297,6 +2366,74 @@ environments:
             };
             assert!(result.is_ok(), "create={create}: {result:?}");
         }
+    }
+
+    // A save is a rewrite of what was loaded. A package that was never loaded, or
+    // was loaded from another path, has nothing to tell a change by, and the file
+    // is not touched.
+    #[test]
+    fn save_package_refuses_a_package_that_was_not_loaded() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        fs.expect_write_file_no_follow().never();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("app.yml");
+
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+        let err = repo
+            .save_package(&empty_package("app", &package_path), &package_path)
+            .expect_err("a package that was never loaded must not be saved");
+
+        assert!(
+            matches!(&err, PackageRepoError::NotLoaded { path } if *path == package_path),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn save_package_refuses_a_path_the_package_was_not_loaded_from() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        let package_dir = PathBuf::from("/test/packages");
+        let loaded_path = package_dir.join("a.yml");
+        let other_path = package_dir.join("b.yml");
+        let package = loaded_from(empty_package("a", &loaded_path), &loaded_path);
+        fs.expect_write_file_no_follow().never();
+
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+        let err = repo
+            .save_package(&package, &other_path)
+            .expect_err("a save to another path must not be written");
+
+        assert!(
+            matches!(&err, PackageRepoError::NotLoaded { path } if *path == other_path),
+            "got: {err:?}"
+        );
+    }
+
+    // The guards that need no look at the file refuse before the write, so a spec
+    // carrying a key selfie would drop is reported as that, whatever the file now
+    // holds.
+    #[test]
+    fn save_package_reports_an_unknown_key_before_the_write() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        fs.expect_write_file_no_follow().never();
+        let package_dir = PathBuf::from("/test/packages");
+        let package_path = package_dir.join("app.yml");
+        let text = "name: app\nenvironments:\n  test:\n    install: echo i\ndotfiles:\n  \
+                    - source: app.tpl\n    target: ~/.app\n    var:\n      k: v\n";
+        let package = loaded_with_text(crate::yaml::parse(text).unwrap(), &package_path, text);
+
+        let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("an unknown key must refuse the save");
+
+        assert!(
+            matches!(&err, PackageRepoError::UnknownDotfileFields { .. }),
+            "got: {err:?}"
+        );
     }
 
     // A real file, and a real directory, at the path a new spec would take: both
@@ -2737,6 +2874,7 @@ environments:
              - source: creds.tpl\n    target: ~/.creds\n    vars:\n      k: op read x\n",
         )
         .unwrap();
+        let package = loaded_from(package, &package_path);
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         assert!(repo.save_package(&package, &package_path).is_ok());
@@ -2760,6 +2898,7 @@ environments:
             package_path.clone(),
         );
 
+        let package = loaded_from(package, &package_path);
         // Mock the write to fail
         let expected = package_path.clone();
         fs.expect_write_file_no_follow()
@@ -2796,6 +2935,7 @@ environments:
                 sink.lock().unwrap().extend_from_slice(data);
                 Ok(crate::fs::Placed::Written)
             });
+        let package = loaded_from(package, &package_path);
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         repo.save_package(&package, &package_path)
@@ -2869,6 +3009,7 @@ environments:
 
         fs.expect_write_file_no_follow()
             .returning(move |_, _, _| Err(refusal.clone()));
+        let package = loaded_from(package, &package_path);
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
         repo.save_package(&package, &package_path)

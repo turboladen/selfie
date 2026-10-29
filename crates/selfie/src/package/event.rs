@@ -3107,7 +3107,9 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             | crate::package::port::PackageRepoError::UncheckedTopLevel { .. }
             | crate::package::port::PackageRepoError::UnknownEnvironmentFields { .. }
             | crate::package::port::PackageRepoError::UnwritablePath { .. }
-            | crate::package::port::PackageRepoError::Occupied { .. }) => {
+            | crate::package::port::PackageRepoError::Occupied { .. }
+            | crate::package::port::PackageRepoError::ChangedSinceLoad { .. }
+            | crate::package::port::PackageRepoError::NotLoaded { .. }) => {
                 OperationFailure::Generic(err.to_string())
             }
         }

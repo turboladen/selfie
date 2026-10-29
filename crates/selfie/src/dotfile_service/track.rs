@@ -1100,6 +1100,32 @@ mod tests {
         );
     }
 
+    // The refusal of a spec that changed after the load carries its own path, so
+    // the frame must not add a second mention.
+    #[test]
+    fn a_spec_save_refused_as_changed_names_the_spec_exactly_once() {
+        let spec = "/dotfiles/gemrc.yml";
+        let error = PackageRepoError::ChangedSinceLoad {
+            path: PathBuf::from(spec),
+        };
+
+        let message = spec_save_failure(
+            &error,
+            Path::new("/dotfiles/gemrc/gemrc"),
+            &CopyRemoval::Removed,
+        );
+
+        assert_eq!(
+            message.matches(spec).count(),
+            1,
+            "the spec must be named exactly once: {message}"
+        );
+        assert!(
+            !message.contains(".."),
+            "the frame doubled a period: {message}"
+        );
+    }
+
     // A copy that survived says so, and says it differently. The two arms are
     // opposite advice -- one needs nothing from the user, the other needs a file
     // deleted before a retry can work -- so a reader must be able to tell them

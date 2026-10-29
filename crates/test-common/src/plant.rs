@@ -1,10 +1,13 @@
 //! A file system double that makes something appear at a target just before a
-//! write reaches it, the race a write to an absent target has to survive.
+//! write reaches it, the race a write to an absent target has to survive, or that
+//! changes a file just before a write reaches it, the race a rewrite has to
+//! survive.
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use selfie::fs::{
     DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent, OpenRefusal, Placed,
@@ -27,6 +30,22 @@ pub enum Plant {
     DanglingLink,
 }
 
+/// What another writer does to a file selfie read earlier.
+#[derive(Clone, Copy, Debug)]
+pub enum Rewrite {
+    /// The file is replaced by a rename with this content, as an editor or
+    /// `git checkout` replaces one. It gets a new inode and a modification time
+    /// ten seconds after the old one, whether or not the content differs.
+    File(&'static str),
+    /// The file is removed.
+    Removed,
+    /// The file is removed, and a named pipe is made in its place.
+    Fifo,
+}
+
+/// A file's inode and modification time, which a [`Rewrite::File`] changes.
+pub type Stamp = (u64, SystemTime);
+
 /// [`RealFileSystem`], except that `plant` appears at `target` immediately before
 /// the first write to it is delegated, as an app writing its first config would.
 /// Optionally, what is at `target` is removed again at the first read after that.
@@ -38,6 +57,10 @@ pub struct PlantsBeforeWrite {
     planted: Arc<AtomicBool>,
     planted_inode: Arc<Mutex<Option<u64>>>,
     vanished: Arc<AtomicBool>,
+    rewrite: Option<Rewrite>,
+    rewrite_claimed: Arc<AtomicBool>,
+    rewritten: Arc<AtomicBool>,
+    stamps: Arc<Mutex<Option<(Stamp, Stamp)>>>,
 }
 
 impl PlantsBeforeWrite {
@@ -52,6 +75,33 @@ impl PlantsBeforeWrite {
     #[must_use]
     pub fn vanishing_at_first_read(target: &Path) -> Self {
         Self::with(target, None).vanishing()
+    }
+
+    /// Plant nothing, and apply `rewrite` to `target` immediately before the
+    /// first write to it, by either writer, is delegated.
+    #[must_use]
+    pub fn rewritten_before_write(target: &Path, rewrite: Rewrite) -> Self {
+        let mut fs = Self::with(target, None);
+        fs.rewrite = Some(rewrite);
+        fs
+    }
+
+    /// Whether the rewrite was made and finished, so a test can confirm it was
+    /// reached.
+    #[must_use]
+    pub fn rewritten(&self) -> bool {
+        self.rewritten.load(SeqCst)
+    }
+
+    /// The file's inode and modification time just before and just after a
+    /// [`Rewrite::File`], so a test can confirm both moved.
+    ///
+    /// # Panics
+    ///
+    /// If another thread panicked while recording them.
+    #[must_use]
+    pub fn stamps(&self) -> Option<(Stamp, Stamp)> {
+        *self.stamps.lock().unwrap()
     }
 
     /// Also remove what was planted at the first read of `target` after it was
@@ -92,7 +142,41 @@ impl PlantsBeforeWrite {
             planted: Arc::default(),
             planted_inode: Arc::default(),
             vanished: Arc::default(),
+            rewrite: None,
+            rewrite_claimed: Arc::default(),
+            rewritten: Arc::default(),
+            stamps: Arc::default(),
         }
+    }
+
+    fn rewrite_if_first(&self, path: &Path) {
+        let Some(rewrite) = self.rewrite else {
+            return;
+        };
+        if path != self.target || self.rewrite_claimed.swap(true, SeqCst) {
+            return;
+        }
+        match rewrite {
+            Rewrite::File(content) => {
+                let before = stamp(path);
+                let staged = path.with_extension("rewrite");
+                std::fs::write(&staged, content).unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(&staged)
+                    .unwrap()
+                    .set_modified(before.1 + Duration::from_secs(10))
+                    .unwrap();
+                std::fs::rename(&staged, path).unwrap();
+                *self.stamps.lock().unwrap() = Some((before, stamp(path)));
+            }
+            Rewrite::Removed => std::fs::remove_file(path).unwrap(),
+            Rewrite::Fifo => {
+                std::fs::remove_file(path).unwrap();
+                nix::unistd::mkfifo(path, nix::sys::stat::Mode::S_IRWXU).unwrap();
+            }
+        }
+        self.rewritten.store(true, SeqCst);
     }
 
     fn plant_if_first(&self, path: &Path) {
@@ -126,6 +210,11 @@ impl PlantsBeforeWrite {
     }
 }
 
+fn stamp(path: &Path) -> Stamp {
+    let metadata = std::fs::symlink_metadata(path).unwrap();
+    (metadata.ino(), metadata.modified().unwrap())
+}
+
 impl FileSystem for PlantsBeforeWrite {
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
         RealFileSystem.read_file(path)
@@ -143,6 +232,7 @@ impl FileSystem for PlantsBeforeWrite {
         data: &[u8],
         if_present: IfPresent,
     ) -> Result<Placed, FileSystemError> {
+        self.rewrite_if_first(path.path());
         self.plant_if_first(path.path());
         RealFileSystem.write_file_private(path, data, if_present)
     }
@@ -152,6 +242,7 @@ impl FileSystem for PlantsBeforeWrite {
         data: &[u8],
         if_present: IfPresent,
     ) -> Result<Placed, FileSystemError> {
+        self.rewrite_if_first(path.path());
         self.plant_if_first(path.path());
         RealFileSystem.write_file_no_follow(path, data, if_present)
     }

@@ -223,10 +223,20 @@ fn clone_io_error(error: &io::Error) -> io::Error {
 
 /// What a write does with anything already at its target when the rename that
 /// puts the new file in place lands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum IfPresent {
     /// Replace it.
     Replace,
+    /// Replace it only if it is still a regular file holding exactly these
+    /// bytes, as it did when the caller read it. Otherwise nothing is written
+    /// and the write answers [`Placed::Kept`]: whatever is there is left in
+    /// place, and where nothing is, nothing is created. A symlink is not the
+    /// expected file: the private writer keeps one, and the no-follow writer
+    /// refuses it as it does under every variant.
+    ///
+    /// A mitigation, not a guarantee: a change made at the same instant as the
+    /// write may still be replaced.
+    ReplaceIfHolding(Arc<[u8]>),
     /// Leave it in place, write nothing, and answer [`Placed::Kept`]. For a
     /// target the caller last found absent, so that something appearing there
     /// since is never replaced unseen.
@@ -241,6 +251,20 @@ pub enum IfPresent {
     Keep,
 }
 
+// Written by hand, so the expected bytes, which may be a file's whole content,
+// never reach a log line.
+impl std::fmt::Debug for IfPresent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Replace => f.write_str("Replace"),
+            Self::ReplaceIfHolding(bytes) => {
+                write!(f, "ReplaceIfHolding({} bytes)", bytes.len())
+            }
+            Self::Keep => f.write_str("Keep"),
+        }
+    }
+}
+
 /// What a write did at its target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use = "a write that kept what was at its target wrote nothing"]
@@ -248,7 +272,8 @@ pub enum Placed {
     /// The new file is at the target.
     Written,
     /// Under [`IfPresent::Keep`], something was at the target when the rename
-    /// landed. It is left there, and nothing was written.
+    /// landed; under [`IfPresent::ReplaceIfHolding`], the target no longer held
+    /// the expected bytes. It is left there, and nothing was written.
     Kept,
 }
 
@@ -263,6 +288,9 @@ pub enum Placed {
 /// |---|---|---|---|
 /// | [`write_file_private`](FileSystem::write_file_private) | replaced | owner-only | yes |
 /// | [`write_file_no_follow`](FileSystem::write_file_no_follow) | refused, as an error | kept | yes |
+///
+/// Under [`IfPresent::ReplaceIfHolding`] the private writer keeps a link rather
+/// than replacing it, since a link is not the file the caller read.
 ///
 /// Secret-bearing content takes the first; everything else takes the second.
 /// Each takes an [`IfPresent`] saying whether the rename may replace what is at
@@ -336,13 +364,17 @@ pub trait FileSystem: Send + Sync {
     ///
     /// # Errors
     ///
-    /// [`FileSystemError::IrregularTarget`] if the path resolves to a fifo,
-    /// socket or device node, which is left as it is rather than renamed over.
-    /// Otherwise [`FileSystemError`] if the parent directory cannot be created,
-    /// the temporary file cannot be created or written, the rename into place
-    /// fails, or flushing to disk fails — which can happen after the write
-    /// itself succeeded, `ENOSPC` surfacing only at flush time being the usual
-    /// case. Every such error names the target path.
+    /// Returns [`FileSystemError::IrregularTarget`] if the path resolves to a
+    /// fifo, socket or device node, which is left as it is rather than renamed
+    /// over. Under [`IfPresent::ReplaceIfHolding`] such a node is not an error:
+    /// it is kept, and the write answers [`Placed::Kept`].
+    ///
+    /// Returns another [`FileSystemError`], naming the target path, if the
+    /// parent directory cannot be created, the temporary file cannot be created
+    /// or written, the target cannot be read back under
+    /// [`IfPresent::ReplaceIfHolding`], the rename into place fails, or flushing
+    /// to disk fails. Flushing can fail after the write itself succeeded, and
+    /// `ENOSPC` surfacing only at flush time is the usual case.
     ///
     /// Like [`write_file_no_follow`](FileSystem::write_file_no_follow), this
     /// cannot succeed on an existing file inside a directory the caller cannot
@@ -396,18 +428,23 @@ pub trait FileSystem: Send + Sync {
     /// The refusals are decided when the write is checked. A symlink or fifo
     /// planted after that is never followed or opened: under
     /// [`IfPresent::Replace`] the rename replaces it and the write succeeds, and
-    /// under [`IfPresent::Keep`] it is left in place, within that variant's
-    /// guarantee.
+    /// under [`IfPresent::Keep`] and [`IfPresent::ReplaceIfHolding`] it is left
+    /// in place, within that variant's guarantee.
     ///
     /// # Errors
     ///
-    /// [`FileSystemError::SymlinkedTarget`] if the final component is a symlink,
-    /// [`FileSystemError::IrregularTarget`] if it resolves to a fifo, socket or
-    /// device node, or [`FileSystemError`] naming the target if the parent
+    /// Returns [`FileSystemError::SymlinkedTarget`] if the final component is a
+    /// symlink. Returns [`FileSystemError::IrregularTarget`] if it resolves to a
+    /// fifo, socket or device node, except under [`IfPresent::ReplaceIfHolding`],
+    /// which keeps such a node and answers [`Placed::Kept`].
+    ///
+    /// Returns another [`FileSystemError`], naming the target, if the parent
     /// directory cannot be created, the temporary file cannot be created,
-    /// written or flushed, or the rename fails. Replacing a file needs write
-    /// permission on its directory, not on the file: a read-only file is
-    /// replaced, and a file in a directory the caller cannot write to is not.
+    /// written or flushed, the target cannot be read back under
+    /// [`IfPresent::ReplaceIfHolding`], or the rename fails. Replacing a file
+    /// needs write permission on its directory, not on the file: a read-only
+    /// file is replaced, and a file in a directory the caller cannot write to is
+    /// not.
     /// In a directory with the sticky bit set, a file owned by another user is
     /// not replaced either, because rename there requires owning the file.
     fn write_file_no_follow(
