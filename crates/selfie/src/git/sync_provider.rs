@@ -30,6 +30,10 @@ pub enum GitSyncError {
     #[error("remote has diverged — resolve manually with git")]
     Diverged,
 
+    /// The remote has commits the local branch lacks, so the push was refused.
+    #[error("the remote has new commits. Run 'selfie sync pull' first")]
+    PushRejected,
+
     /// Committing is disabled, so no commit was created.
     #[error(
         "sync push is disabled: its commit can record every tracked file as deleted. \

@@ -504,7 +504,7 @@ where
             if let Err(e) = pushed {
                 sender
                     .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                        format!("Push failed: {e}. Your commits are preserved locally — run 'selfie sync pull' first, then try again."),
+                        format!("Push failed: {e}. Your commits are preserved locally."),
                     )))
                     .await;
                 return;
@@ -3329,6 +3329,8 @@ mod credential_egress_tests {
     enum FailAt {
         RepoStatus,
         Push,
+        // The push is refused because the remote has new commits.
+        PushRejected,
     }
 
     // A `GitSyncProvider` that fails one operation with git's real leaky
@@ -3378,10 +3380,11 @@ mod credential_egress_tests {
         }
 
         fn push(&self, _: &Path) -> Result<(), GitSyncError> {
-            if self.fail_at == FailAt::Push {
-                return Err(self.error());
+            match self.fail_at {
+                FailAt::Push => Err(self.error()),
+                FailAt::PushRejected => Err(GitSyncError::PushRejected),
+                FailAt::RepoStatus => Ok(()),
             }
-            Ok(())
         }
 
         fn fetch(&self, _: &Path) -> Result<(), GitSyncError> {
@@ -3507,6 +3510,43 @@ mod credential_egress_tests {
         assert!(
             rendered.contains("could not read Password"),
             "git's diagnosis must survive redaction, got: {rendered}"
+        );
+    }
+
+    // The text of the failure a push ends with.
+    async fn push_failure_text(fail_at: FailAt) -> String {
+        let events: Vec<PackageEvent> = service(fail_at).execute_push(vec![]).await.collect().await;
+        events
+            .iter()
+            .find_map(|e| match e {
+                PackageEvent::Completed {
+                    result: OperationResult::Failure(f),
+                    ..
+                } => Some(f.to_string()),
+                _ => None,
+            })
+            .expect("the push must have failed")
+    }
+
+    #[tokio::test]
+    async fn a_rejected_push_names_the_pull_to_run_once() {
+        let text = push_failure_text(FailAt::PushRejected).await;
+
+        assert_eq!(
+            text,
+            "Push failed: the remote has new commits. Run 'selfie sync pull' first. \
+             Your commits are preserved locally."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_that_fails_for_another_reason_gives_no_pull_advice() {
+        let text = push_failure_text(FailAt::Push).await;
+
+        assert!(!text.contains("sync pull"), "got: {text}");
+        assert!(
+            text.ends_with("Your commits are preserved locally."),
+            "got: {text}"
         );
     }
 

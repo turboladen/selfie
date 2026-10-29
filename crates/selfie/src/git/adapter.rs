@@ -13,7 +13,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
 };
 
 use super::message::GitMessage;
@@ -165,24 +165,46 @@ fn git_sync_err(operation: &str, e: impl std::fmt::Display) -> GitSyncError {
 /// from blocking on credential prompts, which is critical for non-interactive
 /// callers like the MCP server.
 fn run_git(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Result<String, GitSyncError> {
-    let output = git_command(scope, repo_root, args).output().map_err(|e| {
-        GitSyncError::OperationFailed {
-            operation: GitMessage::new(format!("git {}", args.join(" "))),
-            message: GitMessage::new(e),
-        }
-    })?;
+    let output = git_output(scope, repo_root, args)?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
-        // git's stderr is process output selfie does not control, and it reaches
-        // an AI assistant's transcript through the sync MCP tools.
-        // `GitMessage::from_stderr` is what redacts a credential out of it and
-        // bounds what is left; there is no path here that hands the raw bytes on.
-        Err(GitSyncError::OperationFailed {
+        Err(failure(args, &output, ""))
+    }
+}
+
+// Run `git` and hand back its output whatever its exit status, for a caller
+// that reads stdout of a failed run. Fails only when git cannot be started.
+fn git_output(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Result<Output, GitSyncError> {
+    git_command(scope, repo_root, args)
+        .output()
+        .map_err(|e| GitSyncError::OperationFailed {
             operation: GitMessage::new(format!("git {}", args.join(" "))),
-            message: GitMessage::from_stderr(output.stderr.trim_ascii()),
+            message: GitMessage::new(e),
         })
+}
+
+// The error for a git run that exited non-zero.
+//
+// git's stderr is process output selfie does not control, and it reaches an AI
+// assistant's transcript through the sync MCP tools. `GitMessage::from_stderr`
+// is what redacts a credential out of it and bounds what is left; there is no
+// path here that hands the raw bytes on.
+//
+// `status_lines` is extra text for the message, which is redacted and bounded
+// together with stderr.
+fn failure(args: &[&str], output: &Output, status_lines: &str) -> GitSyncError {
+    let mut text = output.stderr.trim_ascii().to_vec();
+    if !status_lines.is_empty() {
+        if !text.is_empty() {
+            text.push(b'\n');
+        }
+        text.extend_from_slice(status_lines.as_bytes());
+    }
+    GitSyncError::OperationFailed {
+        operation: GitMessage::new(format!("git {}", args.join(" "))),
+        message: GitMessage::from_stderr(&text),
     }
 }
 
@@ -197,6 +219,47 @@ fn git_command(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Command {
         .env("GIT_TERMINAL_PROMPT", "0");
     scope.apply(&mut command);
     command
+}
+
+// The arguments `push` runs git with. `--porcelain` puts one tab-separated
+// status line per ref on stdout, which the classification below reads.
+const PUSH_ARGS: [&str; 2] = ["push", "--porcelain"];
+
+// Whether `git push --porcelain` refused to send `current_ref`, the branch being
+// pushed, because the remote has commits it lacks. The current branch is named
+// by its full ref, or as `HEAD` when a `HEAD` or `HEAD:<ref>` refspec pushed it.
+// Each ref's line is
+// `<flag>\t<from>:<to>\t<summary> (<reason>)`. A flag of `!` with the summary
+// and reason `[rejected] (fetch first)` or `[rejected] (non-fast-forward)` on
+// the current branch's own line is that refusal. git's transport.c prints these
+// strings untranslated, so they hold under any locale.
+//
+// Other lines do not count: `[remote rejected]` (a server hook or a protected
+// branch) and `[remote failure]` are not fixed by pulling, nor is a tag or
+// another branch rejected beside the current one.
+fn push_was_rejected(porcelain_stdout: &str, current_ref: &str) -> bool {
+    porcelain_stdout.lines().any(|line| {
+        let mut fields = line.split('\t');
+        let (flag, refs, status) = (fields.next(), fields.next(), fields.next());
+        flag == Some("!")
+            && refs
+                .and_then(|refs| refs.split_once(':'))
+                .is_some_and(|(from, _)| from == current_ref || from == "HEAD")
+            && matches!(
+                status,
+                Some("[rejected] (fetch first)" | "[rejected] (non-fast-forward)")
+            )
+    })
+}
+
+// The `!` lines of `git push --porcelain`'s stdout: which refs failed and why.
+// The `To <url>` line is left out, since a remote URL can carry a credential.
+fn failed_ref_lines(porcelain_stdout: &str) -> String {
+    porcelain_stdout
+        .lines()
+        .filter(|line| line.starts_with("!\t"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Intermediate representation of gix status output, shared between
@@ -486,20 +549,25 @@ impl GitSyncProvider for GixGitAdapter {
         // Shells out because gix's transport layer (blocking-network-client)
         // doesn't automatically integrate with the user's SSH agent and
         // credential helpers the way the git CLI does.
-        run_git(self.scope, repo_root, &["push"]).map_err(|e| {
-            // Detect common push failure: remote has new commits
-            let msg = e.to_string();
-            if msg.contains("rejected") || msg.contains("non-fast-forward") {
-                GitSyncError::OperationFailed {
-                    operation: GitMessage::new("push"),
-                    message: GitMessage::new(
-                        "Remote has new commits. Run 'selfie sync pull' first.",
-                    ),
-                }
-            } else {
-                e
-            }
-        })?;
+        //
+        // The classification reads the porcelain status lines rather than
+        // git's messages, so it holds under any locale and leaves git's own
+        // error text, which is relayed to the user, in their language.
+        let output = git_output(self.scope, repo_root, &PUSH_ARGS)?;
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // A detached HEAD has no branch to pull into, so it has no current
+            // ref and keeps the generic failure.
+            let current_ref =
+                run_git(self.scope, repo_root, &["symbolic-ref", "--quiet", "HEAD"]).ok();
+            return Err(
+                if current_ref.is_some_and(|current| push_was_rejected(&stdout, &current)) {
+                    GitSyncError::PushRejected
+                } else {
+                    failure(&PUSH_ARGS, &output, &failed_ref_lines(&stdout))
+                },
+            );
+        }
         Ok(())
     }
 
@@ -514,38 +582,33 @@ impl GitSyncProvider for GixGitAdapter {
         // gix can update refs, but a full working-tree checkout (handling file
         // modes, symlinks, dirty-file guards) requires gix-worktree-state which
         // we don't pull in.
-        let old_head = run_git(self.scope, repo_root, &["rev-parse", "HEAD"])?;
-
-        match run_git(self.scope, repo_root, &["merge", "--ff-only", "@{u}"]) {
-            Ok(output) => {
-                if output.contains("Already up to date") {
-                    return Ok(FastForwardResult::AlreadyUpToDate);
-                }
-
-                let new_head = run_git(self.scope, repo_root, &["rev-parse", "HEAD"])?;
-                let commit_count = run_git(
-                    self.scope,
-                    repo_root,
-                    &["rev-list", "--count", &format!("{old_head}..{new_head}")],
-                )?
-                .parse::<usize>()
-                .unwrap_or(0);
-
-                Ok(FastForwardResult::Advanced {
-                    from: CommitId(old_head),
-                    to: CommitId(new_head),
-                    commit_count,
-                })
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("Not possible to fast-forward") || msg.contains("divergent") {
-                    Ok(FastForwardResult::Diverged)
-                } else {
-                    Err(e)
-                }
-            }
+        // The counts decide before git runs, so a fast-forward that fails for
+        // another reason (an untracked file in the way) stays an error.
+        let (ahead, behind) = self.ahead_behind(repo_root)?;
+        if behind == 0 {
+            return Ok(FastForwardResult::AlreadyUpToDate);
         }
+        if ahead > 0 {
+            return Ok(FastForwardResult::Diverged);
+        }
+
+        let old_head = run_git(self.scope, repo_root, &["rev-parse", "HEAD"])?;
+        run_git(self.scope, repo_root, &["merge", "--ff-only", "@{u}"])?;
+        let new_head = run_git(self.scope, repo_root, &["rev-parse", "HEAD"])?;
+
+        let commit_count = run_git(
+            self.scope,
+            repo_root,
+            &["rev-list", "--count", &format!("{old_head}..{new_head}")],
+        )?
+        .parse::<usize>()
+        .unwrap_or(0);
+
+        Ok(FastForwardResult::Advanced {
+            from: CommitId(old_head),
+            to: CommitId(new_head),
+            commit_count,
+        })
     }
 
     fn diff_commits(
@@ -567,20 +630,24 @@ impl GixGitAdapter {
     /// Get ahead/behind counts relative to the upstream tracking branch.
     /// Returns (0, 0) if no upstream is configured.
     fn ahead_behind_counts(&self, repo_root: &Path) -> (usize, usize) {
-        let output = run_git(
+        self.ahead_behind(repo_root).unwrap_or((0, 0))
+    }
+
+    /// Get ahead/behind counts relative to the upstream tracking branch, or the
+    /// error git gave, which includes there being no upstream.
+    fn ahead_behind(&self, repo_root: &Path) -> Result<(usize, usize), GitSyncError> {
+        let counts = run_git(
             self.scope,
             repo_root,
             &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
-        );
-
-        match output {
-            Ok(s) => {
-                let mut parts = s.split_whitespace();
-                let ahead = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                let behind = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                (ahead, behind)
-            }
-            Err(_) => (0, 0), // No upstream configured
+        )?;
+        let mut parts = counts.split_whitespace().map(str::parse::<usize>);
+        match (parts.next(), parts.next()) {
+            (Some(Ok(ahead)), Some(Ok(behind))) => Ok((ahead, behind)),
+            _ => Err(git_sync_err(
+                "rev-list --count",
+                format!("unexpected output {counts:?}"),
+            )),
         }
     }
 }
@@ -676,6 +743,7 @@ fn commit_tree(
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     use test_common::assert_secret_free;
 
@@ -715,12 +783,7 @@ mod tests {
         let (temp, path) = init_repo();
         // gix, opened isolated, reads no identity from the environment, so the
         // repository carries one for `commit_tree`.
-        git(
-            &path,
-            &["config", "user.email", "selfie-test@example.invalid"],
-        )
-        .unwrap();
-        git(&path, &["config", "user.name", "selfie-test"]).unwrap();
+        configure_identity(&path);
         // Create an initial commit so the index file exists on disk.
         git(&path, &["commit", "--allow-empty", "-m", "initial"]).unwrap();
         (temp, path)
@@ -1057,7 +1120,7 @@ mod tests {
         let port = spawn_401_server();
         let (_temp, path) = repo_with_a_credential_bearing_remote(port);
 
-        assert_git_really_leaks_the_token(&path, &["push"]);
+        assert_git_really_leaks_the_token(&path, &PUSH_ARGS);
 
         let error = isolated()
             .push(&path)
@@ -1069,5 +1132,341 @@ mod tests {
             error.to_string().contains("127.0.0.1"),
             "the error must stay diagnosable, got: {error}"
         );
+    }
+
+    // ─── message locale and result classification ───────────────────────────
+
+    #[test]
+    fn push_was_rejected_reads_the_status_line_of_the_current_branch() {
+        let main = "refs/heads/main";
+        let line = |refs: &str, status: &str| format!("!\t{refs}\t{status}\nDone\n");
+        let on_main = |status: &str| line("refs/heads/main:refs/heads/main", status);
+
+        assert!(push_was_rejected(
+            &on_main("[rejected] (fetch first)"),
+            main
+        ));
+        assert!(push_was_rejected(
+            &on_main("[rejected] (non-fast-forward)"),
+            main
+        ));
+        // A `HEAD` refspec prints `HEAD` as the local side.
+        assert!(push_was_rejected(
+            &line("HEAD:refs/heads/main", "[rejected] (fetch first)"),
+            main
+        ));
+        assert!(!push_was_rejected(
+            &on_main("[remote rejected] (pre-receive hook declined)"),
+            main
+        ));
+        assert!(!push_was_rejected(
+            &on_main("[remote failure] (timeout)"),
+            main
+        ));
+        assert!(!push_was_rejected(
+            &on_main("[rejected] (already exists)"),
+            main
+        ));
+        // A tag or another branch rejected beside the current one is not the
+        // current branch being behind.
+        assert!(!push_was_rejected(
+            &line("refs/tags/v1:refs/tags/v1", "[rejected] (already exists)"),
+            main
+        ));
+        assert!(!push_was_rejected(
+            &line(
+                "refs/heads/other:refs/heads/other",
+                "[rejected] (fetch first)"
+            ),
+            main
+        ));
+        assert!(!push_was_rejected(
+            "=\trefs/heads/main:refs/heads/main\t[up to date]\nDone\n",
+            main
+        ));
+        assert!(!push_was_rejected("", main));
+    }
+
+    #[test]
+    fn a_failure_with_no_stderr_starts_at_its_status_lines() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+
+        let error = failure(&PUSH_ARGS, &output, "!\tx:y\t[rejected] (z)");
+
+        assert!(
+            matches!(
+                &error,
+                GitSyncError::OperationFailed { message, .. }
+                    if message.as_str() == "!\tx:y\t[rejected] (z)"
+            ),
+            "got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn failed_ref_lines_keeps_only_the_failed_refs() {
+        let stdout = "To https://user:tok@host/r\n!\trefs/heads/main:refs/heads/main\t[remote rejected] (hook)\n \trefs/heads/x:refs/heads/x\ta..b\nDone\n";
+
+        assert_eq!(
+            failed_ref_lines(stdout),
+            "!\trefs/heads/main:refs/heads/main\t[remote rejected] (hook)"
+        );
+    }
+
+    // A bare remote and a clone of it with one pushed commit, so `@{u}` exists.
+    fn clone_with_upstream() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let remote = temp.path().join("remote.git");
+        let local = temp.path().join("local");
+        fs::create_dir(&remote).unwrap();
+        git(&remote, &["init", "--bare", "--initial-branch=main"]).unwrap();
+        fs::create_dir(&local).unwrap();
+        git(&local, &["init", "--initial-branch=main"]).unwrap();
+        configure_identity(&local);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&local, &["commit", "--allow-empty", "-m", "one"]).unwrap();
+        git(&local, &["push", "-u", "origin", "main"]).unwrap();
+        (temp, remote, local)
+    }
+
+    fn configure_identity(path: &Path) {
+        git(
+            path,
+            &["config", "user.email", "selfie-test@example.invalid"],
+        )
+        .unwrap();
+        git(path, &["config", "user.name", "selfie-test"]).unwrap();
+        git(path, &["config", "commit.gpgsign", "false"]).unwrap();
+    }
+
+    // A second clone of the remote, made once.
+    fn other_clone(temp: &Path, remote: &Path) -> PathBuf {
+        let other = temp.join("other");
+        if !other.exists() {
+            git(
+                temp,
+                &["clone", remote.to_str().unwrap(), other.to_str().unwrap()],
+            )
+            .unwrap();
+            configure_identity(&other);
+        }
+        other
+    }
+
+    // The second clone adds a commit to the remote.
+    fn advance_remote(temp: &Path, remote: &Path) {
+        let other = other_clone(temp, remote);
+        git(&other, &["commit", "--allow-empty", "-m", "remote work"]).unwrap();
+        git(&other, &["push"]).unwrap();
+    }
+
+    #[test]
+    fn fast_forward_reports_up_to_date_from_an_unmoved_head() {
+        let (_temp, _remote, local) = clone_with_upstream();
+
+        let result = isolated().fast_forward(&local).unwrap();
+        assert!(
+            matches!(result, FastForwardResult::AlreadyUpToDate),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fast_forward_reports_up_to_date_when_only_ahead() {
+        let (_temp, _remote, local) = clone_with_upstream();
+        git(&local, &["commit", "--allow-empty", "-m", "local"]).unwrap();
+
+        let result = isolated().fast_forward(&local).unwrap();
+        assert!(
+            matches!(result, FastForwardResult::AlreadyUpToDate),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fast_forward_advances_over_new_remote_commits() {
+        let (temp, remote, local) = clone_with_upstream();
+        advance_remote(temp.path(), &remote);
+        git(&local, &["fetch"]).unwrap();
+
+        let result = isolated().fast_forward(&local).unwrap();
+
+        assert!(
+            matches!(
+                result,
+                FastForwardResult::Advanced {
+                    commit_count: 1,
+                    ..
+                }
+            ),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fast_forward_that_fails_without_divergence_is_an_error() {
+        let (temp, remote, local) = clone_with_upstream();
+        // The remote adds a file that an untracked local file is in the way of,
+        // so the fast-forward is refused although nothing has diverged.
+        let other = other_clone(temp.path(), &remote);
+        fs::write(other.join("f"), "remote").unwrap();
+        git(&other, &["add", "f"]).unwrap();
+        git(&other, &["commit", "-m", "add f"]).unwrap();
+        git(&other, &["push"]).unwrap();
+        git(&local, &["fetch"]).unwrap();
+        fs::write(local.join("f"), "local").unwrap();
+
+        let result = isolated().fast_forward(&local);
+
+        assert!(
+            matches!(result, Err(GitSyncError::OperationFailed { .. })),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fast_forward_without_an_upstream_is_an_error_not_up_to_date() {
+        let (_temp, _remote, local) = clone_with_upstream();
+        git(&local, &["branch", "--unset-upstream"]).unwrap();
+
+        let result = isolated().fast_forward(&local);
+
+        assert!(
+            matches!(result, Err(GitSyncError::OperationFailed { .. })),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fast_forward_reports_a_diverged_branch() {
+        let (temp, remote, local) = clone_with_upstream();
+        advance_remote(temp.path(), &remote);
+        git(&local, &["commit", "--allow-empty", "-m", "local"]).unwrap();
+        git(&local, &["fetch"]).unwrap();
+
+        let result = isolated().fast_forward(&local).unwrap();
+        assert!(
+            matches!(result, FastForwardResult::Diverged),
+            "got {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_push_the_remote_is_ahead_of_is_rejected_with_the_pull_advice() {
+        let (temp, remote, local) = clone_with_upstream();
+        advance_remote(temp.path(), &remote);
+        git(&local, &["commit", "--allow-empty", "-m", "local"]).unwrap();
+
+        let error = isolated().push(&local).expect_err("push must be rejected");
+
+        assert!(matches!(error, GitSyncError::PushRejected), "got: {error}");
+    }
+
+    #[test]
+    fn a_push_by_a_head_refspec_that_the_remote_is_ahead_of_is_rejected() {
+        let (temp, remote, local) = clone_with_upstream();
+        advance_remote(temp.path(), &remote);
+        git(&local, &["commit", "--allow-empty", "-m", "local"]).unwrap();
+        git(
+            &local,
+            &["config", "remote.origin.push", "HEAD:refs/heads/main"],
+        )
+        .unwrap();
+
+        let error = isolated().push(&local).expect_err("push must be rejected");
+
+        assert!(matches!(error, GitSyncError::PushRejected), "got: {error}");
+    }
+
+    #[test]
+    fn a_push_the_remote_refuses_gives_no_pull_advice() {
+        let (_temp, remote, local) = clone_with_upstream();
+        // The isolated template directory is empty, so the bare remote has no
+        // hooks directory yet.
+        fs::create_dir_all(remote.join("hooks")).unwrap();
+        let hook = remote.join("hooks/pre-receive");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        git(&local, &["commit", "--allow-empty", "-m", "local"]).unwrap();
+
+        let error = isolated().push(&local).expect_err("the hook must refuse");
+
+        assert!(
+            matches!(error, GitSyncError::OperationFailed { .. }),
+            "got: {error}"
+        );
+        assert!(!error.to_string().contains("sync pull"), "got: {error}");
+    }
+
+    #[test]
+    fn a_rejected_tag_beside_a_pushed_branch_gives_no_pull_advice() {
+        let (_temp, remote, local) = clone_with_upstream();
+        // The remote already has `v1` at the first commit; the local `v1` is on a
+        // newer one, and the push refspecs send both it and the branch.
+        git(&remote, &["tag", "v1"]).unwrap();
+        git(&local, &["commit", "--allow-empty", "-m", "local"]).unwrap();
+        git(&local, &["tag", "v1"]).unwrap();
+        for refspec in ["refs/heads/main", "refs/tags/v1"] {
+            git(
+                &local,
+                &[
+                    "config",
+                    "--add",
+                    "remote.origin.push",
+                    &format!("{refspec}:{refspec}"),
+                ],
+            )
+            .unwrap();
+        }
+
+        let error = isolated()
+            .push(&local)
+            .expect_err("the tag must be rejected");
+
+        assert!(
+            matches!(error, GitSyncError::OperationFailed { .. }),
+            "got: {error}"
+        );
+        assert!(!error.to_string().contains("sync pull"), "got: {error}");
+        assert!(
+            error.to_string().contains("refs/tags/v1:refs/tags/v1"),
+            "the failed ref must be named, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_refused_push_names_the_ref_and_the_reason() {
+        let (_temp, remote, local) = clone_with_upstream();
+        fs::create_dir_all(remote.join("hooks")).unwrap();
+        let hook = remote.join("hooks/pre-receive");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        git(&local, &["commit", "--allow-empty", "-m", "local"]).unwrap();
+
+        let error = isolated().push(&local).expect_err("the hook must refuse");
+
+        assert!(
+            error
+                .to_string()
+                .contains("[remote rejected] (pre-receive hook declined)"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_push_accepted_by_the_remote_succeeds() {
+        let (_temp, _remote, local) = clone_with_upstream();
+        git(&local, &["commit", "--allow-empty", "-m", "local"]).unwrap();
+
+        isolated().push(&local).unwrap();
     }
 }
