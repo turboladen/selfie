@@ -170,7 +170,16 @@ fn own_sgr_length(text: &str) -> Option<usize> {
 }
 
 /// How a caller styles text: a color, a weight, or both.
-pub(crate) type Paint = fn(console::StyledObject<String>) -> console::StyledObject<String>;
+// A style in and a style out, never the styled text, so a paint cannot put
+// other text in place of the text it styles.
+pub(crate) type Paint = fn(console::Style) -> console::Style;
+
+// `text` styled by `paint`, the styling written whatever the stream.
+fn painted(text: String, paint: Paint) -> String {
+    paint(console::Style::new().force_styling(true))
+        .apply_to(text)
+        .to_string()
+}
 
 /// Text safe to print: every part of it from outside selfie has been escaped,
 /// and only selfie styled it.
@@ -247,7 +256,7 @@ impl Shown {
     #[must_use]
     pub(crate) fn paint(self, use_colors: bool, paint: Paint) -> Self {
         if use_colors {
-            Self(paint(console::style(self.0).force_styling(true)).to_string())
+            Self(painted(self.0, paint))
         } else {
             self
         }
