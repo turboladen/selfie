@@ -272,7 +272,8 @@ pub(crate) fn spec_name_from_file_name(file_name: &str) -> Option<String> {
 /// Whether `name` is usable as a package or dotfile spec name.
 ///
 /// A name is letters, digits, `-`, `_`, `.`, `@` and `+`, neither starting nor
-/// ending with a dot, and not ending in `.yml` or `.yaml` in any case.
+/// ending with a dot, and not ending in `.yml` or `.yaml` in any case. The
+/// invisible Hangul fillers are not letters here, though Unicode counts them.
 pub(crate) fn is_valid_spec_name(name: &str) -> bool {
     // One rule for a spec file's stem at load, the `name:` field at validation,
     // and the name `dotfiles track` is given, so no package loads that cannot
@@ -289,9 +290,19 @@ pub(crate) fn is_valid_spec_name(name: &str) -> bool {
         && !name.ends_with('.')
         && !lower.ends_with(".yml")
         && !lower.ends_with(".yaml")
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '@' | '+'))
+        && name.chars().all(|c| {
+            (c.is_alphanumeric() && !is_hangul_filler(c))
+                || matches!(c, '-' | '_' | '.' | '@' | '+')
+        })
+}
+
+/// Whether `c` is one of the Hangul fillers, which show as nothing.
+// They render as nothing yet pass `is_alphanumeric`, so `git` and `git` plus a
+// filler would be two specs that read alike. They are the only such
+// characters, which is what lets the CLI show every name the rule accepts as it
+// is written.
+fn is_hangul_filler(c: char) -> bool {
+    matches!(c, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}')
 }
 
 /// Why a spec cannot be created under `name`, or `None` when it can: `name`
@@ -305,8 +316,9 @@ pub fn spec_name_refusal(name: &str) -> Option<crate::package::event::Uncreatabl
 }
 
 /// The rule every spec's name follows, worded as a remedy for a refusal.
-pub const SPEC_NAME_RULE: &str = "use only letters, digits, '-', '_', '.', '@' and '+', \
-     with no dot at the start or end and no '.yml' or '.yaml' ending";
+pub const SPEC_NAME_RULE: &str = "use only letters other than the invisible Hangul fillers, \
+     digits, '-', '_', '.', '@' and '+', with no dot at the start or end and no '.yml' or '.yaml' \
+     ending";
 
 /// The package name a spec file's path claims, or `None` if it names no spec.
 pub(crate) fn spec_name_of(path: &std::path::Path) -> Option<String> {
@@ -3064,12 +3076,28 @@ mod spec_name_tests {
 
     // `.` and `..` would put a copy directory at or above the package directory,
     // and a hidden name is not a package anyone asked for. Everything else here
-    // is a character that is not in the rule.
+    // is a character that is not in the rule, the four Hangul fillers included.
     #[test]
     fn the_name_rule_refuses_leading_dots_and_other_characters() {
         for name in [
-            "", ".", "..", "...", ".hidden", "my tool", "a/b", "a\\b", "a:b", "a\tb", "a\nb",
-            "a\0b", "a\u{7f}b", "a#b",
+            "",
+            ".",
+            "..",
+            "...",
+            ".hidden",
+            "my tool",
+            "a/b",
+            "a\\b",
+            "a:b",
+            "a\tb",
+            "a\nb",
+            "a\0b",
+            "a\u{7f}b",
+            "a#b",
+            "a\u{115f}",
+            "a\u{1160}",
+            "\u{3164}",
+            "git\u{ffa0}",
         ] {
             assert!(!is_valid_spec_name(name), "{name:?} must be refused");
         }

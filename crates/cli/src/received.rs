@@ -748,6 +748,32 @@ mod tests {
     use super::*;
     use selfie::package::event::UnknownStatus;
 
+    // Every name the spec-name rule accepts shows as it is written, so a prompt
+    // can pre-fill any valid name, and a suggestion that would show escaped can
+    // never be a valid one. Every character is tried, not a sample, at the
+    // start, in the middle and at the end of a name. One buffer is reused, and
+    // the escape check, which allocates nothing for a plain name, runs first.
+    #[test]
+    fn every_name_the_rule_accepts_shows_as_written() {
+        let mut name = String::new();
+        let mut shown_escaped = Vec::new();
+        for c in '\0'..=char::MAX {
+            for (before, after) in [("", "ab"), ("a", "b"), ("ab", "")] {
+                name.clear();
+                name.push_str(before);
+                name.push(c);
+                name.push_str(after);
+                if !crate::terminal_text::Name::is_plain(&name)
+                    && selfie::package::spec_name_refusal(&name).is_none()
+                {
+                    shown_escaped.push(name.clone());
+                }
+            }
+        }
+
+        assert_eq!(shown_escaped, Vec::<String>::new());
+    }
+
     fn environment(dependencies: &[&str]) -> EnvironmentStatusData {
         EnvironmentStatusData {
             environment_name: "env".to_string(),
