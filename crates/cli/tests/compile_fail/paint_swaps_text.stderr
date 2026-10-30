@@ -1,0 +1,8 @@
+error[E0308]: mismatched types
+  --> tests/compile_fail/paint_swaps_text.rs:13:52
+   |
+13 |     let _ = Shown::from(lit!("x")).paint(true, |_| console::style(String::from("\u{1b}[2J")));
+   |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Style`, found `StyledObject<String>`
+   |
+   = note: expected struct `Style`
+              found struct `StyledObject<String>`

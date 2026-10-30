@@ -1,0 +1,16 @@
+error[E0080]: evaluation panicked: shown! takes only {} placeholders, so each argument is checked as Trusted
+  --> tests/compile_fail/../../src/terminal_text.rs
+   |
+   |           const _: () = assert!(
+   |  _______________________^
+   | |             $crate::terminal_text::only_empty_placeholders($format),
+   | |             "shown! takes only {{}} placeholders, so each argument is checked as Trusted"
+   | |         );
+   | |_________^ evaluation of `main::_` failed here
+   |
+  ::: tests/compile_fail/format_width_capture.rs:13:13
+   |
+13 |       let _ = shown!("{:w$}", 1u8);
+   |               -------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `$crate::panic::panic_2021` which comes from the expansion of the macro `shown` (in Nightly builds, run with -Z macro-backtrace for more info)

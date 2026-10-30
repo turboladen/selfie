@@ -5,7 +5,7 @@
 use console::measure_text_width;
 use selfie::package::event::SkipReason;
 
-use crate::terminal_text::{DisplayPath, Paint, Shown, shown};
+use crate::terminal_text::{DisplayPath, Literal, Paint, Shown, lit, shown};
 
 /// The widest a source or target column grows, in terminal columns. A longer
 /// value overflows its column on its own row.
@@ -45,13 +45,13 @@ impl EntryOutcome {
     ];
 
     /// The word the row starts with.
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> Literal {
         match self {
-            Self::Deployed => "deployed",
-            Self::Skipped => "skipped",
-            Self::Conflict => "conflict",
-            Self::Drifted => "drifted",
-            Self::Unverified => "unverified",
+            Self::Deployed => lit!("deployed"),
+            Self::Skipped => lit!("skipped"),
+            Self::Conflict => lit!("conflict"),
+            Self::Drifted => lit!("drifted"),
+            Self::Unverified => lit!("unverified"),
         }
     }
 
@@ -132,7 +132,7 @@ pub(crate) struct EntryRow {
 /// own row right.
 pub(crate) fn entry_line(row: &EntryRow, columns: EntryColumns, use_colors: bool) -> Shown {
     let label = row.outcome.label();
-    let after_label = spaces(LABEL_WIDTH.saturating_sub(label.len()) + 2);
+    let after_label = spaces(LABEL_WIDTH.saturating_sub(label.as_str().len()) + 2);
     let label = match row.outcome.paint() {
         Some(paint) => Shown::from(label).paint(use_colors, paint),
         None => Shown::from(label),

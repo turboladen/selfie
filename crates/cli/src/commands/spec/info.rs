@@ -1,5 +1,5 @@
 use crate::tables::{Cell, SafeTable};
-use crate::terminal_text::{Shown, shown};
+use crate::terminal_text::{Literal, Shown, lit, shown};
 use selfie::package::{
     event::{
         DependencyStatus, EnvironmentStatus, EnvironmentStatusData, OperationResult, PackageEvent,
@@ -70,16 +70,16 @@ pub(crate) async fn handle_info(
 fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig) -> SafeTable {
     let mut table = SafeTable::new();
     let use_colors = config.use_colors();
-    let key = |name: &'static str| Cell::from(format_key(name, use_colors));
+    let key = |name: Literal| Cell::from(format_key(name, use_colors));
 
-    table.add_row([key("Name"), package_info.name.as_str().into()]);
+    table.add_row([key(lit!("Name")), package_info.name.as_str().into()]);
     if let Some(desc) = &package_info.description {
-        table.add_row([key("Description"), Cell::prose(desc)]);
+        table.add_row([key(lit!("Description")), Cell::prose(desc)]);
     }
 
     if let Some(homepage) = &package_info.homepage {
         table.add_row([
-            key("Homepage"),
+            key(lit!("Homepage")),
             Cell::painted(homepage, use_colors, |s| s.underlined().blue()),
         ]);
     }
@@ -89,7 +89,7 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
     if let Some(refusal) = &package_info.refusal {
         let text = format!("selfie apply would refuse this spec here: {refusal}");
         table.add_row([
-            key("Refused"),
+            key(lit!("Refused")),
             Shown::prose(&text).paint(use_colors, |s| s.red()).into(),
         ]);
     } else {
@@ -98,12 +98,12 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
             &package_info.current_environment,
             config,
         );
-        table.add_row([key("Environments"), env_names.into()]);
+        table.add_row([key(lit!("Environments")), env_names.into()]);
     }
 
     if let Some(git_status) = &package_info.git_status {
         table.add_row([
-            key("Git Status"),
+            key(lit!("Git Status")),
             git_style::format_git_status_long(git_status, use_colors).into(),
         ]);
     }
@@ -161,8 +161,7 @@ pub(crate) fn create_environment_table(
     };
     env_table.set_header([Cell::from(env_header), "".into()]);
 
-    let format_env_key =
-        |key: &'static str| Cell::from(presentation::format_field_key(key, use_colors));
+    let format_env_key = |key: Literal| Cell::from(format_key(key, use_colors));
     // Commands and package names, as prose: a block-scalar command keeps its
     // line breaks inside the cell.
     let format_env_value = Cell::prose;
@@ -170,7 +169,7 @@ pub(crate) fn create_environment_table(
     // Add installation status if this is the current environment and we have status
     if env_status.is_current {
         let status_text = format_status(&env_status.status, config.use_colors());
-        env_table.add_row([format_env_key("Status"), status_text.into()]);
+        env_table.add_row([format_env_key(lit!("Status")), status_text.into()]);
     }
 
     // Add environment detail rows
@@ -178,10 +177,10 @@ pub(crate) fn create_environment_table(
     let install = env_status.install_command.as_deref().unwrap_or(
         "none (blank: `package install` refuses it unless the check says it is installed)",
     );
-    env_table.add_row([format_env_key("Install"), format_env_value(install)]);
+    env_table.add_row([format_env_key(lit!("Install")), format_env_value(install)]);
 
     if let Some(check) = &env_status.check_command {
-        env_table.add_row([format_env_key("Check"), format_env_value(check)]);
+        env_table.add_row([format_env_key(lit!("Check")), format_env_value(check)]);
     }
 
     if !env_status.dependency_statuses.is_empty() {
@@ -190,12 +189,12 @@ pub(crate) fn create_environment_table(
             .iter()
             .map(|dep| format_dependency_with_status(dep, use_colors));
         env_table.add_row([
-            format_env_key("Dependencies"),
-            Shown::join(dep_display, ", ").into(),
+            format_env_key(lit!("Dependencies")),
+            Shown::join(dep_display, lit!(", ")).into(),
         ]);
     } else if !env_status.dependencies.is_empty() {
         env_table.add_row([
-            format_env_key("Dependencies"),
+            format_env_key(lit!("Dependencies")),
             format_env_value(&env_status.dependencies.join(", ")),
         ]);
     }
@@ -206,12 +205,12 @@ pub(crate) fn create_environment_table(
             .iter()
             .map(|dep| format_dependency_with_status(dep, use_colors));
         env_table.add_row([
-            format_env_key("Recommends"),
-            Shown::join(rec_display, ", ").into(),
+            format_env_key(lit!("Recommends")),
+            Shown::join(rec_display, lit!(", ")).into(),
         ]);
     } else if !env_status.recommends.is_empty() {
         env_table.add_row([
-            format_env_key("Recommends"),
+            format_env_key(lit!("Recommends")),
             format_env_value(&env_status.recommends.join(", ")),
         ]);
     }

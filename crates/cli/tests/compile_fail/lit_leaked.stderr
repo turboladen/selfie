@@ -1,0 +1,12 @@
+error: lit! takes one string literal
+  --> tests/compile_fail/../../src/terminal_text.rs
+   |
+   |         compile_error!("lit! takes one string literal")
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+  ::: tests/compile_fail/lit_leaked.rs:13:13
+   |
+13 |     let _ = lit!(leaked);
+   |             ------------ in this macro invocation
+   |
+   = note: this error originates in the macro `lit` (in Nightly builds, run with -Z macro-backtrace for more info)

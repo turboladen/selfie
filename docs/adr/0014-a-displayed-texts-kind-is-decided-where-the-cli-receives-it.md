@@ -204,7 +204,7 @@ when it is pasted.
 2. `Literal` is built by `lit!`, which takes a string-literal token, so a leaked `String` cannot
    become one. Its constructor can run in a `const`, so a constant such as a diff separator is a
    `Literal`.
-3. `Shown::assembled` and `Literal`'s constructor are hidden, and a test rejects a direct call to
+3. `Shown::__assembled` and `Literal`'s constructor are hidden, and a test rejects a direct call to
    either outside `terminal_text.rs`.
 4. A path's text is taken for display only in `DisplayPath`. The test enforcing it parses each
    source file with `syn` to find the items under `#[cfg(test)]` and skip them, then walks every

@@ -1,6 +1,6 @@
 //! Showing dotfile sources relative to the directory they were read from.
 
-use crate::terminal_text::{Shown, shown};
+use crate::terminal_text::{Shown, lit, shown};
 use std::path::Path;
 
 use selfie::package::event::{BaseKind, DotfileSource, RepoPath};
@@ -11,8 +11,8 @@ use crate::display_manager::{Channel, DisplayManager, DisplayPath, shorten_path}
 /// it: "Packages: ~/…" or "Dotfiles: ~/…".
 pub(crate) fn base_directory_line(kind: BaseKind, directory: &Path) -> Shown {
     let label = match kind {
-        BaseKind::PackageDirectory => "Packages",
-        BaseKind::DotfilesDirectory => "Dotfiles",
+        BaseKind::PackageDirectory => lit!("Packages"),
+        BaseKind::DotfilesDirectory => lit!("Dotfiles"),
     };
     shown!("{}: {}", label, shorten_path(&directory.to_string_lossy()))
 }

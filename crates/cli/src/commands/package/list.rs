@@ -1,6 +1,6 @@
 use crate::tables::{Cell, SafeTable};
 use crate::terminal_text::DisplayPath;
-use crate::terminal_text::{Shown, shown};
+use crate::terminal_text::{Shown, lit, shown};
 use selfie::package::{event, service::PackageService};
 
 use crate::source_paths::base_directory_line;
@@ -211,7 +211,7 @@ fn handle_list_event(
             // The hints are about what the environment filter left, so they are
             // given only when the listing found nothing at all to show.
             if valid + invalid + refused == 0 && package_list.environment_stats.is_empty() {
-                display.println("No packages found.");
+                display.println(lit!("No packages found."));
             } else if valid + invalid + refused == 0 {
                 display.println(shown!(
                     "No packages found for environment '{}'.",
@@ -237,8 +237,8 @@ fn display_environment_stats(
         return;
     }
 
-    display.println("");
-    display.println("Packages by environment in this directory:");
+    display.println(lit!(""));
+    display.println(lit!("Packages by environment in this directory:"));
 
     // Sort environments by package count (descending), then by name
     let mut env_counts: Vec<(String, usize)> = environment_stats
@@ -270,8 +270,8 @@ fn display_environment_stats(
     display.print_styled_suggestion(shown!(
         "{} to see packages for a different environment, or {} to see all packages regardless \
          of environment",
-        Shown::from("--environment <env>").paint(use_colors, |s| s.yellow()),
-        Shown::from("--all").paint(use_colors, |s| s.yellow())
+        Shown::from(lit!("--environment <env>")).paint(use_colors, |s| s.yellow()),
+        Shown::from(lit!("--all")).paint(use_colors, |s| s.yellow())
     ));
 }
 

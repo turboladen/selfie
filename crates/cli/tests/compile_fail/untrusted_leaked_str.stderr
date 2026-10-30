@@ -1,0 +1,39 @@
+error[E0277]: `str` is not Trusted, so shown! cannot format it
+  --> tests/compile_fail/../../src/terminal_text.rs
+   |
+   |             $format $(, $crate::terminal_text::trusted(&$argument))*
+   |                         ------------------------------ ^^^^^^^^^^ escape it first, or write selfie's own text with lit!
+   |                         |
+   |                         required by a bound introduced by this call
+   |
+  ::: tests/compile_fail/untrusted_leaked_str.rs:13:13
+   |
+13 |     let _ = shown!("{}", leaked);
+   |             -------------------- in this macro invocation
+   |
+   = help: the trait `Trusted` is not implemented for `str`
+   = help: the following other types implement trait `Trusted`:
+             &T
+             DisplayPath
+             Literal
+             SafeTable
+             Shown
+             f32
+             f64
+             i128
+           and $N others
+note: required for `&str` to implement `Trusted`
+  --> tests/compile_fail/../../src/terminal_text.rs
+   |
+   | impl<T: Trusted + ?Sized> Trusted for &T {}
+   |         -------           ^^^^^^^     ^^
+   |         |
+   |         unsatisfied trait bound introduced here
+   = note: 1 redundant requirement hidden
+   = note: required for `&&str` to implement `Trusted`
+note: required by a bound in `trusted`
+  --> tests/compile_fail/../../src/terminal_text.rs
+   |
+   | pub(crate) fn trusted<T: Trusted>(value: T) -> T {
+   |                          ^^^^^^^ required by this bound in `trusted`
+   = note: this error originates in the macro `shown` (in Nightly builds, run with -Z macro-backtrace for more info)

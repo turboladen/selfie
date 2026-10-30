@@ -4,7 +4,7 @@
 //! dotfiles defined in package YAML files to their target
 //! locations on the system.
 
-use crate::terminal_text::{Shown, shown};
+use crate::terminal_text::{Shown, lit, shown};
 use std::sync::{Arc, Mutex};
 
 use selfie::package::event::{DotfileSource, PlannedEntry};
@@ -243,7 +243,7 @@ impl InteractiveConflictResolver {
         let _block = self.display.hold_block();
         // A blank line first, so the block's diff and prompt do not read as part
         // of the row above.
-        self.display.println("");
+        self.display.println(lit!(""));
         if let Some(base) = source.base() {
             force_heading(&self.display, Channel::Stdout, base.kind, &base.directory);
         }

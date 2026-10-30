@@ -19,7 +19,7 @@ use crate::event_processor::Exit;
 use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
-    Paint, Shown, escape, escape_prose, escape_prose_keeping_tabs, guard, printable, shown,
+    Literal, Paint, Shown, escape, escape_keeping_tabs, escape_prose, guard, lit, printable, shown,
 };
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
@@ -51,7 +51,7 @@ fn shorten_path_under(path: &str, home: &str) -> String {
 
 /// Standard indentation for structured CLI output (e.g., section content,
 /// result cards, list suggestions, and other indented fields).
-pub(crate) const INDENT: &str = "   ";
+pub(crate) const INDENT: Literal = lit!("   ");
 
 /// A terminal prompt [`DisplayManager::prompt`] can ask.
 ///
@@ -776,13 +776,15 @@ impl DisplayManager {
     /// Print supporting lines under an error (stderr), one per line.
     ///
     /// For a block a reader looks at rather than reads — a source window under a
-    /// parse failure. `block` is split on its own line breaks, so a trailing
-    /// newline costs nothing. Each line is indented and dimmed and carries no `✗`;
-    /// the marker belongs to the sentence above, not to every line of its evidence.
+    /// parse failure. `block` is split on its line breaks, LF or CRLF, so a
+    /// trailing one costs nothing. Each line is escaped as a line of file
+    /// content, so an invisible character shows as its escape and a tab stays a
+    /// tab. Each line is indented and dimmed and carries no `✗`; the marker
+    /// belongs to the sentence above, not to every line of its evidence.
     pub(crate) fn print_error_context(&self, block: &str) {
         let lines: Vec<String> = block
             .lines()
-            .map(|line| escape_prose_keeping_tabs(line).into_owned())
+            .map(|line| escape_keeping_tabs(line).into_owned())
             .collect();
         for line in &lines {
             self.record_stderr(line);
@@ -965,8 +967,8 @@ impl DisplayManager {
     /// Colors: `---` red, `+++` green, `@@` cyan, `-` red, `+` green,
     /// context dim, separator dim. Paths shortened with `~`.
     pub(crate) fn print_diff(&self, diff: &str) {
-        const SEPARATOR: &str =
-            "──────────────────────────────────────────────────────────────────────";
+        const SEPARATOR: Literal =
+            lit!("──────────────────────────────────────────────────────────────────────");
 
         // Each line is file content, so a tab stays a tab and everything else
         // that could act on the terminal shows as an escape.
@@ -1218,9 +1220,9 @@ impl DisplayManager {
     /// Usage:
     /// ```ignore
     /// display.result_card("Check Results")
-    ///     .field("Package", &package_name)
-    ///     .field("Environment", &environment)
-    ///     .field_if("Command", check_command.as_deref())
+    ///     .field(lit!("Package"), &package_name)
+    ///     .field(lit!("Environment"), &environment)
+    ///     .field_if(lit!("Command"), check_command.as_deref())
     ///     .print();
     /// ```
     pub(crate) fn result_card(&self, title: impl Display) -> ResultCard<'_> {
@@ -1281,7 +1283,7 @@ impl DisplayManager {
 pub(crate) struct ResultCard<'a> {
     display: &'a DisplayManager,
     title: String,
-    fields: Vec<(&'static str, Shown)>,
+    fields: Vec<(Literal, Shown)>,
 }
 
 impl<'a> ResultCard<'a> {
@@ -1295,14 +1297,14 @@ impl<'a> ResultCard<'a> {
 
     /// Add a key-value field to the card. The value is shown escaped, a
     /// newline included, so it may come from outside selfie.
-    pub(crate) fn field(mut self, key: &'static str, value: impl Display) -> Self {
+    pub(crate) fn field(mut self, key: Literal, value: impl Display) -> Self {
         self.fields.push((key, Shown::name(&value.to_string())));
         self
     }
 
     /// Add a field only if the value is `Some`, shown as [`field`](Self::field)
     /// shows it.
-    pub(crate) fn field_if(self, key: &'static str, value: Option<impl Display>) -> Self {
+    pub(crate) fn field_if(self, key: Literal, value: Option<impl Display>) -> Self {
         match value {
             Some(value) => self.field(key, value),
             None => self,
@@ -1310,7 +1312,7 @@ impl<'a> ResultCard<'a> {
     }
 
     /// Add a field whose value selfie styled itself.
-    pub(crate) fn styled_field(mut self, key: &'static str, value: Shown) -> Self {
+    pub(crate) fn styled_field(mut self, key: Literal, value: Shown) -> Self {
         self.fields.push((key, value));
         self
     }
@@ -1319,7 +1321,7 @@ impl<'a> ResultCard<'a> {
     pub(crate) fn print(self) {
         use crate::formatters::format_key;
 
-        self.display.println("");
+        self.display.println(lit!(""));
         self.display.print_section_header(&self.title);
 
         let use_colors = self.display.use_colors();
@@ -1630,8 +1632,8 @@ mod tests {
     #[test]
     fn the_plain_line_printers_escape_all_but_line_breaks() {
         let display = DisplayManager::new(false);
-        display.println("one\u{1b}[31m\ntwo\u{202E}\t");
-        display.print_note("three\u{1b}]0;t\u{7}");
+        display.println(lit!("one\u{1b}[31m\ntwo\u{202E}\t"));
+        display.print_note(lit!("three\u{1b}]0;t\u{7}"));
 
         assert_eq!(
             display.printed(),
@@ -1642,13 +1644,51 @@ mod tests {
         );
     }
 
+    // Error context is evidence a reader inspects, such as a source window or a
+    // failed tool's stderr, so each line is escaped as file content: an
+    // invisible character shows, and a tab stays a tab.
+    #[test]
+    fn error_context_lines_show_invisible_characters_and_keep_tabs() {
+        let display = DisplayManager::new(false);
+        display.print_error_context("a\u{200B}b\tc\nd\u{200D}e\u{1b}[2J");
+
+        assert_eq!(
+            display.printed(),
+            [
+                (Channel::Stderr, "a\\u{200b}b\tc".to_string()),
+                (Channel::Stderr, "d\\u{200d}e\\u{1b}[2J".to_string()),
+            ]
+        );
+    }
+
+    // A carriage return before a line feed ends the line with it, as a file
+    // read line by line ends it, so a block from a CRLF file shows no `\r`. An
+    // empty block prints no line at all.
+    #[test]
+    fn error_context_treats_crlf_as_a_line_break_and_prints_nothing_for_nothing() {
+        let crlf = DisplayManager::new(false);
+        crlf.print_error_context("one\r\ntwo\r\n");
+        let empty = DisplayManager::new(false);
+        empty.print_error_context("");
+
+        let lines = |display: &DisplayManager| -> Vec<String> {
+            display
+                .printed()
+                .into_iter()
+                .map(|(_, line)| line)
+                .collect()
+        };
+        assert_eq!(lines(&crlf), ["one", "two"]);
+        assert!(lines(&empty).is_empty(), "{:?}", lines(&empty));
+    }
+
     // A run without colors prints no styling, whatever console decides about
     // the stream: the printers do not read the environment's color settings
     // alone.
     #[test]
     fn a_run_without_colors_prints_no_styling() {
         let display = DisplayManager::new(false);
-        display.println(Shown::from("x").paint(true, |s| s.red()));
+        display.println(Shown::from(lit!("x")).paint(true, |s| s.red()));
 
         assert_eq!(display.printed(), [(Channel::Stdout, "x".to_string())]);
     }
@@ -1768,7 +1808,7 @@ mod tests {
         dm.print_progress("test progress");
         dm.print_suggestion("test suggestion");
         dm.print_section_header("test section");
-        dm.println("test println");
+        dm.println(lit!("test println"));
         dm.print_field("key:", "value");
     }
 
@@ -1879,8 +1919,8 @@ mod tests {
         let dm = DisplayManager::new(false);
         // Verify the builder API works without panicking
         dm.result_card("Test Results")
-            .field("Package", "test-pkg")
-            .field("Environment", "macos")
+            .field(lit!("Package"), "test-pkg")
+            .field(lit!("Environment"), "macos")
             .print();
     }
 
@@ -1888,8 +1928,8 @@ mod tests {
     fn test_result_card_with_colors() {
         let dm = DisplayManager::new(true);
         dm.result_card("Test Results")
-            .field("Package", "test-pkg")
-            .field("Status", "valid")
+            .field(lit!("Package"), "test-pkg")
+            .field(lit!("Status"), "valid")
             .print();
     }
 
@@ -1900,9 +1940,9 @@ mod tests {
         let missing: Option<&str> = None;
 
         dm.result_card("Test Results")
-            .field("Package", "test-pkg")
-            .field_if("Command", cmd)
-            .field_if("Missing", missing)
+            .field(lit!("Package"), "test-pkg")
+            .field_if(lit!("Command"), cmd)
+            .field_if(lit!("Missing"), missing)
             .print();
     }
 
@@ -1915,7 +1955,7 @@ mod tests {
         dm.print_warning("warning during spinner");
         dm.print_error("error during spinner");
         dm.print_success("success during spinner");
-        dm.println("plain during spinner");
+        dm.println(lit!("plain during spinner"));
         dm.print_section_header("header during spinner");
         dm.print_progress("progress during spinner");
         dm.print_suggestion("suggestion during spinner");

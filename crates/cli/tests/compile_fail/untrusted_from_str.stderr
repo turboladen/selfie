@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `Shown: From<&str>` is not satisfied
+  --> tests/compile_fail/untrusted_from_str.rs:13:13
+   |
+13 |     let _ = Shown::from(leaked);
+   |             ^^^^^ unsatisfied trait bound
+   |
+help: the trait `From<&str>` is not implemented for `Shown`
+  --> tests/compile_fail/../../src/terminal_text.rs
+   |
+   | pub(crate) struct Shown(String);
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+help: `Shown` implements trait `From<T>`
+  --> tests/compile_fail/../../src/terminal_text.rs
+   |
+   | impl From<Literal> for Shown {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<Literal>`
+...
+   | impl From<DisplayPath> for Shown {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `From<DisplayPath>`
