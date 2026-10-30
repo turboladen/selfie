@@ -158,13 +158,10 @@ fn show_pending_commits(
             lit!("files")
         };
         let message = crate::status_style::styled_text(&commit.message, use_colors, |s| s.bold());
-        display.println(shown!(
-            "  {}. {} ({} {})",
-            num,
-            message,
-            file_count,
-            file_label
-        ));
+        display.println_after(
+            shown!("  {}. ", num),
+            shown!("{} ({} {})", message, file_count, file_label),
+        );
     }
     display.println(lit!(""));
 }
@@ -450,6 +447,27 @@ mod tests {
 
         // Exercises the use_colors=true branch
         show_pending_commits(&commits, &display, true);
+    }
+
+    // A commit message's lines after its first start under its first line,
+    // past the commit's number.
+    #[test]
+    fn a_pending_commit_message_continues_under_its_first_line() {
+        let display = DisplayManager::new(false);
+        let commits = vec![make_pending_commit(
+            "starship",
+            "feat(starship): add\nthe body",
+            &["starship.yml"],
+        )];
+
+        show_pending_commits(&commits, &display, true);
+
+        let line = display
+            .written()
+            .into_iter()
+            .find(|line| line.contains("feat"))
+            .expect("the commit was listed");
+        assert_eq!(line, "  1. feat(starship): add\n     the body (1 file)");
     }
 
     // --- confirm_commits tests ---

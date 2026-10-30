@@ -213,10 +213,34 @@ impl Shown {
         )
     }
 
-    /// `text` with every line after the first starting with `indent`, so no
-    /// line of it starts at the left margin.
-    pub(crate) fn indented(text: impl Into<Shown>, indent: Literal) -> Self {
-        Self(text.into().0.replace('\n', &format!("\n{indent}")))
+    /// `self` as [`guard`] leaves it: selfie's own styling kept when `colors`
+    /// and removed otherwise.
+    #[must_use]
+    pub(crate) fn guarded(self, colors: bool) -> Self {
+        Self(guard(&self.0, colors).into_owned())
+    }
+
+    /// `self` with `column` spaces after each line break, so its continuation
+    /// lines start `column` columns in. An empty line stays empty.
+    // Only the layout that places a text calls this, with the column where the
+    // text starts.
+    #[must_use]
+    pub(crate) fn hang(self, column: usize) -> Self {
+        if column == 0 || !self.0.contains('\n') {
+            return self;
+        }
+        let indent = " ".repeat(column);
+        let mut lines = self.0.split('\n');
+        let mut hung = lines.next().unwrap_or_default().to_string();
+        for line in lines {
+            hung.push('\n');
+            // Spaces on an empty line are trailing space, which shows nothing.
+            if !line.is_empty() {
+                hung.push_str(&indent);
+            }
+            hung.push_str(line);
+        }
+        Self(hung)
     }
 
     /// `self` styled by `paint` when `use_colors`.
@@ -235,6 +259,11 @@ impl Shown {
     /// Returns the text, escapes and styling included.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Returns the text, escapes and styling included, without copying it.
+    pub(crate) fn into_string(self) -> String {
+        self.0
     }
 
     // Only `shown!` calls this, once it has checked that every argument is
@@ -922,6 +951,23 @@ mod tests {
     #[test]
     fn prose_keeps_its_own_layout() {
         assert_eq!(Prose::new("  a\n  b\u{1b}").to_string(), "  a\n  b\\u{1b}");
+    }
+
+    // A hang starts every line after the first at the column it is given, and
+    // leaves the first where it is.
+    #[test]
+    fn hang_inserts_spaces_after_each_line_break() {
+        assert_eq!(Shown::from(Prose::new("a\nb\nc")).hang(3), "a\n   b\n   c");
+        assert_eq!(Shown::from(Prose::new("a")).hang(3), "a");
+        assert_eq!(Shown::from(Prose::new("a\nb")).hang(0), "a\nb");
+    }
+
+    // An empty line in a hung text stays empty, so the hang writes no trailing
+    // space.
+    #[test]
+    fn hang_leaves_an_empty_line_empty() {
+        assert_eq!(Shown::from(Prose::new("a\n\nb")).hang(2), "a\n\n  b");
+        assert_eq!(Shown::from(Prose::new("a\n")).hang(2), "a\n");
     }
 
     // `shown!` accepts only `{}`: any other placeholder can capture a value
