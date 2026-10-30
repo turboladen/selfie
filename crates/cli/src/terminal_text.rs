@@ -219,6 +219,18 @@ impl Shown {
         Self(text.into().0.replace('\n', &format!("\n{indent}")))
     }
 
+    /// `self` with `column` spaces after each line break, so its continuation
+    /// lines start `column` columns in.
+    // Only the layout that places a text calls this, with the column where the
+    // text starts.
+    #[must_use]
+    pub(crate) fn hang(self, column: usize) -> Self {
+        if column == 0 {
+            return self;
+        }
+        Self(self.0.replace('\n', &format!("\n{}", " ".repeat(column))))
+    }
+
     /// `self` styled by `paint` when `use_colors`.
     ///
     /// The styling is written whatever the stream; the printer removes it when
@@ -922,6 +934,15 @@ mod tests {
     #[test]
     fn prose_keeps_its_own_layout() {
         assert_eq!(Prose::new("  a\n  b\u{1b}").to_string(), "  a\n  b\\u{1b}");
+    }
+
+    // A hang starts every line after the first at the column it is given, and
+    // leaves the first where it is.
+    #[test]
+    fn hang_inserts_spaces_after_each_line_break() {
+        assert_eq!(Shown::from(Prose::new("a\nb\nc")).hang(3), "a\n   b\n   c");
+        assert_eq!(Shown::from(Prose::new("a")).hang(3), "a");
+        assert_eq!(Shown::from(Prose::new("a\nb")).hang(0), "a\nb");
     }
 
     // `shown!` accepts only `{}`: any other placeholder can capture a value

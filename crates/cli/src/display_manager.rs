@@ -226,7 +226,7 @@ impl ErrorCollector {
                 error.operation
             ));
             if !error.message.is_empty() {
-                lines.push(format!("  {}", untrusted(&error.message, 2)));
+                lines.push(led(&Shown::from(lit!("  ")), untrusted(&error.message)).to_string());
             }
             if let Some(cmd) = &error.command {
                 lines.push(format!("  Command: {}", interim_one_line(cmd)));
@@ -757,31 +757,24 @@ impl DisplayManager {
 
     /// Print an informational message (stdout)
     pub(crate) fn print_info(&self, message: impl Display) {
-        let message = untrusted(message, 2);
-        self.record_stdout(&message);
-        if self.use_colors {
-            self.mp
-                .suspend(|| println!("{} {}", style("ℹ").blue(), style(message).blue()));
-        } else {
-            self.mp.suspend(|| println!("ℹ {message}"));
-        }
+        self.print_marked(
+            Channel::Stdout,
+            lit!("ℹ"),
+            |s| s.blue(),
+            |s| s.blue(),
+            message,
+        );
     }
 
     /// Print an error message (stderr)
     pub(crate) fn print_error(&self, message: impl Display) {
-        let message = untrusted(message, 2);
-        self.record_stderr(&message);
-        if self.use_colors {
-            self.mp.suspend(|| {
-                eprintln!(
-                    "{} {}",
-                    style("✗").red().bold(),
-                    style(message).red().bold()
-                )
-            });
-        } else {
-            self.mp.suspend(|| eprintln!("✗ {message}"));
-        }
+        self.print_marked(
+            Channel::Stderr,
+            lit!("✗"),
+            |s| s.red().bold(),
+            |s| s.red().bold(),
+            message,
+        );
     }
 
     /// Print supporting lines under an error (stderr), one per line.
@@ -822,63 +815,45 @@ impl DisplayManager {
     ) {
         use selfie::package::event::Outcome;
 
-        let message = untrusted(message, 2);
-        self.record_stdout(&message);
-        let (mark, line) = match outcome {
-            Outcome::Clean => ("✓", style(message.as_str()).green()),
-            Outcome::Found => ("⚠", style(message.as_str()).yellow()),
-            Outcome::Failed => ("✗", style(message.as_str()).red()),
+        let (mark, mark_paint, paint): (Literal, Paint, Paint) = match outcome {
+            Outcome::Clean => (lit!("✓"), |s| s.green().bold(), |s| s.green()),
+            Outcome::Found => (lit!("⚠"), |s| s.yellow().bold(), |s| s.yellow()),
+            Outcome::Failed => (lit!("✗"), |s| s.red().bold(), |s| s.red()),
         };
-        if self.use_colors {
-            let mark = match outcome {
-                Outcome::Clean => style(mark).green().bold(),
-                Outcome::Found => style(mark).yellow().bold(),
-                Outcome::Failed => style(mark).red().bold(),
-            };
-            self.mp.suspend(|| println!("{mark} {line}"));
-        } else {
-            self.mp.suspend(|| println!("{mark} {message}"));
-        }
+        self.print_marked(Channel::Stdout, mark, mark_paint, paint, message);
     }
 
     /// Print a success message (stdout)
     pub(crate) fn print_success(&self, message: impl Display) {
-        let message = untrusted(message, 2);
-        self.record_stdout(&message);
-        if self.use_colors {
-            self.mp
-                .suspend(|| println!("{} {}", style("✓").green().bold(), style(message).green()));
-        } else {
-            self.mp.suspend(|| println!("✓ {message}"));
-        }
+        self.print_marked(
+            Channel::Stdout,
+            lit!("✓"),
+            |s| s.green().bold(),
+            |s| s.green(),
+            message,
+        );
     }
 
     /// Print a warning message (stderr)
     pub(crate) fn print_warning(&self, message: impl Display) {
-        let message = untrusted(message, 2);
-        self.record_stderr(&message);
-        if self.use_colors {
-            self.mp.suspend(|| {
-                eprintln!(
-                    "{} {}",
-                    style("⚠").yellow().bold(),
-                    style(message).yellow().bold()
-                )
-            });
-        } else {
-            self.mp.suspend(|| eprintln!("⚠ {message}"));
-        }
+        self.print_marked(
+            Channel::Stderr,
+            lit!("⚠"),
+            |s| s.yellow().bold(),
+            |s| s.yellow().bold(),
+            message,
+        );
     }
 
     /// Print a line about the run's progress (stderr).
     pub(crate) fn print_progress(&self, message: impl Display) {
-        let message = untrusted(message, 2);
-        self.record_stderr(&message);
-        if self.use_colors {
-            self.mp.suspend(|| eprintln!("  {}", style(message).dim()));
-        } else {
-            self.mp.suspend(|| eprintln!("  {message}"));
-        }
+        let text = untrusted(message).paint(self.use_colors, |s| s.dim());
+        self.print_led(
+            Channel::Stderr,
+            Shown::from(lit!("  ")),
+            Shown::default(),
+            text,
+        );
     }
 
     /// Print a line saying what the command is doing (stderr), only under
@@ -895,19 +870,57 @@ impl DisplayManager {
 
     /// Print a note about the run (stderr), such as the operation header.
     pub(crate) fn print_run_note(&self, message: impl Display) {
-        let message = untrusted(message, 2);
-        self.record_stderr(&message);
-        if self.use_colors {
-            self.mp
-                .suspend(|| eprintln!("{} {}", style("ℹ").blue(), style(message).blue()));
-        } else {
-            self.mp.suspend(|| eprintln!("ℹ {message}"));
+        self.print_marked(
+            Channel::Stderr,
+            lit!("ℹ"),
+            |s| s.blue(),
+            |s| s.blue(),
+            message,
+        );
+    }
+
+    // `message`, escaped and painted with `paint`, after `mark` painted with
+    // `mark_paint` and a space.
+    fn print_marked(
+        &self,
+        channel: Channel,
+        mark: Literal,
+        mark_paint: Paint,
+        paint: Paint,
+        message: impl Display,
+    ) {
+        // The space stays outside the mark's styling.
+        let mark = shown!("{} ", Shown::from(mark).paint(self.use_colors, mark_paint));
+        let text = untrusted(message).paint(self.use_colors, paint);
+        self.print_led(channel, mark, Shown::default(), text);
+    }
+
+    // Print `lead` and then `text` on `channel`, the text's continuation lines
+    // under its first character, after `mark`. What a test reads back is the
+    // line without `mark`, as the stream gets it with its styling removed.
+    fn print_led(&self, channel: Channel, mark: Shown, lead: Shown, text: impl Into<Shown>) {
+        let line = led(&shown!("{}{}", mark, lead), text);
+        let plain = guard(line.as_str(), false);
+        let plain_mark = guard(mark.as_str(), false);
+        let recorded = plain.strip_prefix(plain_mark.as_ref()).unwrap_or(&plain);
+        // Every printer takes stdout's color decision, stderr's included, as
+        // console's own styling does; ADR 0014's slice 6 decides per stream.
+        let rendered = guard(line.as_str(), self.stdout_colors()).into_owned();
+        match channel {
+            Channel::Stdout => {
+                self.record_stdout(recorded);
+                self.mp.suspend(|| println!("{rendered}"));
+            }
+            Channel::Stderr => {
+                self.record_stderr(recorded);
+                self.mp.suspend(|| eprintln!("{rendered}"));
+            }
         }
     }
 
     /// Print a suggestion (stderr): advice about the run, never the answer.
     pub(crate) fn print_suggestion(&self, message: impl Display) {
-        let message = untrusted(message, 2);
+        let message = untrusted(message).hang(2);
         self.suggest(&message, &message);
     }
 
@@ -1373,14 +1386,21 @@ impl<'a> ResultCard<'a> {
 }
 
 // `text` from outside selfie, as a message printer shows it: escaped as prose,
-// its line breaks kept, and every line after the first indented by `indent`
-// columns so that no line of it starts at the left margin.
-fn untrusted(text: impl Display, indent: usize) -> String {
+// its line breaks kept and its trailing one removed. The printer hangs it.
+fn untrusted(text: impl Display) -> Shown {
     let text = text.to_string();
-    let shown = Prose::new(text.trim_end_matches(['\r', '\n']));
-    shown
-        .to_string()
-        .replace('\n', &format!("\n{}", " ".repeat(indent)))
+    Shown::from(Prose::new(text.trim_end_matches(['\r', '\n'])))
+}
+
+// `lead`, then `text` with its continuation lines starting under its first
+// character: at the width of the lead's last line, as the terminal shows it.
+fn led(lead: &Shown, text: impl Into<Shown>) -> Shown {
+    let last = lead.rsplit('\n').next().unwrap_or_default();
+    shown!(
+        "{}{}",
+        lead,
+        text.into().hang(console::measure_text_width(last))
+    )
 }
 
 // Each line of a unified diff is classified by where it stands as well as by
@@ -1773,6 +1793,45 @@ mod tests {
         let ended = drawn.printed();
         assert_eq!(ended.len(), 1, "{ended:?}");
         assert!(ended[0].1.starts_with(&format!("✓ {shown} (")), "{ended:?}");
+    }
+
+    // A text after a lead continues under its first character: the lead is
+    // measured as the terminal shows it, its last line only, and its styling
+    // takes no room.
+    #[test]
+    fn led_measures_only_the_leads_last_line() {
+        let text = || Shown::from(Prose::new("a\nb"));
+
+        assert_eq!(led(&Shown::from(lit!("x\n  ")), text()), "x\n  a\n  b");
+        let painted = shown!("{} ", Shown::from(lit!("✓")).paint(true, |s| s.green()));
+        assert!(
+            painted.len() > 2,
+            "control: the lead has more bytes than columns"
+        );
+        assert_eq!(guard(led(&painted, text()).as_str(), false), "✓ a\n  b");
+    }
+
+    // The end-of-run summary continues a multi-line message under its first
+    // line.
+    #[test]
+    fn the_error_summary_continues_a_message_under_it() {
+        let mut collector = ErrorCollector::default();
+        for (name, message) in [("one", "a\nb"), ("two", "c")] {
+            collector.collect(ErrorDetail {
+                package_name: name.to_string(),
+                operation: "install".to_string(),
+                command: None,
+                exit_code: None,
+                stderr: None,
+                message: message.to_string(),
+            });
+        }
+
+        let summary = collector
+            .format_summary()
+            .expect("two errors make a summary");
+
+        assert!(summary.contains("\n  a\n  b\n"), "{summary}");
     }
 
     // A diff is written in one draw, so no other line lands between its rows.
