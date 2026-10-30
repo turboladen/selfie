@@ -14,13 +14,13 @@ error[E0277]: `str` is not Trusted, so shown! cannot format it
    = help: the trait `Trusted` is not implemented for `str`
    = help: the following other types implement trait `Trusted`:
              &T
+             Content
              DisplayPath
              Literal
+             Name
+             Prose
              SafeTable
              Shown
-             f32
-             f64
-             i128
            and $N others
 note: required for `&str` to implement `Trusted`
   --> tests/compile_fail/../../src/terminal_text.rs

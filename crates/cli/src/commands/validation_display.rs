@@ -8,7 +8,7 @@ use selfie::validation::ValidationLevel;
 
 use crate::display_manager::{Channel, DisplayManager};
 use crate::tables::{Cell, SafeTable};
-use crate::terminal_text::{Shown, lit, shown};
+use crate::terminal_text::{Name, Shown, lit, shown};
 
 /// A single validation issue row, used as a common representation for both
 /// event-driven validation results and sync push validation failures.
@@ -85,7 +85,7 @@ pub(crate) fn display_validation_groups(
         } else {
             Shown::from(lit!("ℹ")).paint(use_colors, |s| s.blue())
         };
-        let label = Shown::name(group.label).paint(use_colors, |s| s.bold());
+        let label = Shown::from(Name::new(group.label)).paint(use_colors, |s| s.bold());
         display.line_to(channel, shown!("  {} {}", marker, label));
 
         let mut table = SafeTable::new();

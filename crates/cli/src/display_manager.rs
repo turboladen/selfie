@@ -19,7 +19,7 @@ use crate::event_processor::Exit;
 use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
-    Literal, Paint, Shown, escape, escape_keeping_tabs, escape_prose, guard, lit, printable, shown,
+    Content, Literal, Name, Output, Paint, Prose, Shown, guard, interim_one_line, lit, shown,
 };
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
@@ -222,14 +222,14 @@ impl ErrorCollector {
         for error in &self.errors {
             lines.push(format!(
                 "✗ {} ({})",
-                escape(&error.package_name),
+                Name::new(&error.package_name),
                 error.operation
             ));
             if !error.message.is_empty() {
                 lines.push(format!("  {}", untrusted(&error.message, 2)));
             }
             if let Some(cmd) = &error.command {
-                lines.push(format!("  Command: {}", escape(cmd)));
+                lines.push(format!("  Command: {}", interim_one_line(cmd)));
             }
             if let Some(code) = error.exit_code {
                 lines.push(format!("  Exit code: {code}"));
@@ -241,7 +241,7 @@ impl ErrorCollector {
                     // A tool's own stderr, cleaned as command output is: its
                     // colors stripped, not shown as escapes.
                     for line in stderr.lines() {
-                        lines.push(format!("    {}", printable(line)));
+                        lines.push(format!("    {}", Output::line(line)));
                     }
                 }
             }
@@ -515,7 +515,7 @@ impl DisplayManager {
     /// spinner on a terminal, otherwise one status line (stderr). Steps may
     /// overlap; each lasts until [`end_waiting`](Self::end_waiting) with its id.
     pub(crate) fn start_waiting(&self, step: StepId, subject: impl Display) {
-        let subject = escape(&subject.to_string()).into_owned();
+        let subject = interim_one_line(&subject.to_string()).to_string();
         let bar = if self.draws_spinner {
             Some(self.spinner(&subject))
         } else {
@@ -606,7 +606,7 @@ impl DisplayManager {
     /// Fix the entry table's columns for `entries`, the entries a run is about
     /// to walk, as their rows will show them. Prints nothing.
     pub(crate) fn plan_entry_columns(&self, entries: &[PlannedEntry]) {
-        let shown: Vec<(DisplayPath, DisplayPath)> = entries
+        let shown: Vec<(Shown, DisplayPath)> = entries
             .iter()
             .map(|entry| (relative_text(&entry.source), shorten_path(&entry.target)))
             .collect();
@@ -650,7 +650,7 @@ impl DisplayManager {
             .unwrap_or_default();
         let rest: Vec<String> = stderr
             .lines()
-            .map(printable)
+            .map(|line| Output::line(line).to_string())
             .filter(|line| !shown.contains(line))
             .collect();
         if rest.iter().any(|line| !line.trim().is_empty()) {
@@ -665,7 +665,7 @@ impl DisplayManager {
     /// printed: indented and dimmed on a terminal, and prefixed with what the
     /// step waits on without one.
     pub(crate) fn command_output(&self, step: StepId, line: &str) {
-        let line = printable(line);
+        let line = Output::line(line).to_string();
         if line.trim().is_empty() {
             return;
         }
@@ -795,7 +795,7 @@ impl DisplayManager {
     pub(crate) fn print_error_context(&self, block: &str) {
         let lines: Vec<String> = block
             .lines()
-            .map(|line| escape_keeping_tabs(line).into_owned())
+            .map(|line| Content::new(line).to_string())
             .collect();
         for line in &lines {
             self.record_stderr(line);
@@ -944,7 +944,7 @@ impl DisplayManager {
 
     /// Print a section header on `channel`.
     pub(crate) fn print_section_header_to(&self, channel: Channel, title: impl Display) {
-        let title = escape(&title.to_string()).into_owned();
+        let title = Name::new(&title.to_string()).to_string();
         let rendered = if self.use_colors {
             format!("── {} ──", style(&title).bold())
         } else {
@@ -995,10 +995,16 @@ impl DisplayManager {
                     rows.push((Shown::from(SEPARATOR), |s| s.dim()));
                     printed_separator = true;
                 }
-                DiffLine::Hunk(line) => rows.push((Shown::content(line), |s| s.cyan())),
-                DiffLine::Removed(line) => rows.push((Shown::content(line), |s| s.red())),
-                DiffLine::Added(line) => rows.push((Shown::content(line), |s| s.green())),
-                DiffLine::Context(line) => rows.push((Shown::content(line), |s| s.dim())),
+                DiffLine::Hunk(line) => rows.push((Shown::from(Content::new(line)), |s| s.cyan())),
+                DiffLine::Removed(line) => {
+                    rows.push((Shown::from(Content::new(line)), |s| s.red()))
+                }
+                DiffLine::Added(line) => {
+                    rows.push((Shown::from(Content::new(line)), |s| s.green()))
+                }
+                DiffLine::Context(line) => {
+                    rows.push((Shown::from(Content::new(line)), |s| s.dim()))
+                }
             }
         }
         if printed_separator {
@@ -1225,9 +1231,9 @@ impl DisplayManager {
     }
 
     /// Print a styled key-value pair (stdout, for config display, etc.)
-    pub(crate) fn print_field(&self, key: impl Display, value: impl Display) {
-        let key = escape(&key.to_string()).into_owned();
-        let value = escape(&value.to_string()).into_owned();
+    pub(crate) fn print_field(&self, key: Literal, value: impl Into<Shown>) {
+        // The printer styles the value itself, so any styling in it is removed.
+        let value = guard(value.into().as_str(), false).into_owned();
         self.record_stdout(&format!("{key} {value}"));
         if self.use_colors {
             self.mp
@@ -1251,7 +1257,7 @@ impl DisplayManager {
     /// display.result_card("Check Results")
     ///     .field(lit!("Package"), &package_name)
     ///     .field(lit!("Environment"), &environment)
-    ///     .field_if(lit!("Command"), check_command.as_deref())
+    ///     .command_if(lit!("Command"), check_command.as_deref())
     ///     .print();
     /// ```
     pub(crate) fn result_card(&self, title: impl Display) -> ResultCard<'_> {
@@ -1307,7 +1313,7 @@ impl DisplayManager {
 
 /// Builder for structured result cards (section header + key-value pairs)
 ///
-/// Created by [`DisplayManager::result_card()`]. Call `.field()` / `.field_if()`
+/// Created by [`DisplayManager::result_card()`]. Call `.field()` / `.command_if()`
 /// to add rows, then `.print()` to render.
 pub(crate) struct ResultCard<'a> {
     display: &'a DisplayManager,
@@ -1327,17 +1333,18 @@ impl<'a> ResultCard<'a> {
     /// Add a key-value field to the card. The value is shown escaped, a
     /// newline included, so it may come from outside selfie.
     pub(crate) fn field(mut self, key: Literal, value: impl Display) -> Self {
-        self.fields.push((key, Shown::name(&value.to_string())));
+        self.fields
+            .push((key, Shown::from(Name::new(&value.to_string()))));
         self
     }
 
-    /// Add a field only if the value is `Some`, shown as [`field`](Self::field)
-    /// shows it.
-    pub(crate) fn field_if(self, key: Literal, value: Option<impl Display>) -> Self {
-        match value {
-            Some(value) => self.field(key, value),
-            None => self,
+    /// Add a field holding a command, only if there is one. It shows on one
+    /// line with its blanks as written, so it still pastes as it runs.
+    pub(crate) fn command_if(mut self, key: Literal, command: Option<&str>) -> Self {
+        if let Some(command) = command {
+            self.fields.push((key, interim_one_line(command)));
         }
+        self
     }
 
     /// Add a field whose value selfie styled itself.
@@ -1370,8 +1377,10 @@ impl<'a> ResultCard<'a> {
 // columns so that no line of it starts at the left margin.
 fn untrusted(text: impl Display, indent: usize) -> String {
     let text = text.to_string();
-    let shown = escape_prose(text.trim_end_matches(['\r', '\n']));
-    shown.replace('\n', &format!("\n{}", " ".repeat(indent)))
+    let shown = Prose::new(text.trim_end_matches(['\r', '\n']));
+    shown
+        .to_string()
+        .replace('\n', &format!("\n{}", " ".repeat(indent)))
 }
 
 // Each line of a unified diff is classified by where it stands as well as by
@@ -1744,6 +1753,28 @@ mod tests {
         );
     }
 
+    // A waiting step's description can name a path holding a line break. It
+    // stays on its one line, on the spinner and on the line it collapses to,
+    // so it cannot print a line of its own such as a fake `✓`. A blank in it,
+    // as in a command quoting French text, shows as written.
+    #[test]
+    fn a_waiting_subject_stays_on_one_line() {
+        let subject = "Running the commands that produce ~/.a\n✓ b\u{A0}c";
+        let shown = "Running the commands that produce ~/.a\\n✓ b\u{A0}c";
+
+        let plain = DisplayManager::new(false);
+        plain.start_waiting(ONE, subject);
+        assert_eq!(plain.printed(), [(Channel::Stderr, format!("{shown}..."))]);
+
+        let drawn = DisplayManager::new(false).drawing_as_a_terminal();
+        drawn.start_waiting(ONE, subject);
+        assert_eq!(drawn.waiting_messages(), [shown]);
+        drawn.end_waiting(ONE, StepEnding::Succeeded);
+        let ended = drawn.printed();
+        assert_eq!(ended.len(), 1, "{ended:?}");
+        assert!(ended[0].1.starts_with(&format!("✓ {shown} (")), "{ended:?}");
+    }
+
     // A diff is written in one draw, so no other line lands between its rows.
     #[test]
     fn a_diff_is_written_in_one_draw() {
@@ -1780,8 +1811,11 @@ mod tests {
     // keeps a variation selector, which renders.
     #[test]
     fn command_output_shows_format_characters_as_escapes() {
-        assert_eq!(printable("\u{1b}[31mred\u{1b}[0m"), "red");
-        assert_eq!(printable("a\u{202E}b\u{FE0F}c"), "a\\u{202e}b\u{FE0F}c");
+        assert_eq!(Output::line("\u{1b}[31mred\u{1b}[0m").to_string(), "red");
+        assert_eq!(
+            Output::line("a\u{202E}b\u{FE0F}c").to_string(),
+            "a\\u{202e}b\u{FE0F}c"
+        );
     }
 
     const ONE: StepId = StepId::from_raw(1);
@@ -1838,7 +1872,7 @@ mod tests {
         dm.print_suggestion("test suggestion");
         dm.print_section_header("test section");
         dm.println(lit!("test println"));
-        dm.print_field("key:", "value");
+        dm.print_field(lit!("key:"), lit!("value"));
     }
 
     #[test]
@@ -1962,17 +1996,29 @@ mod tests {
             .print();
     }
 
+    // A card's command shows with its blanks as written, so it pastes as it
+    // runs, and a missing one leaves no row.
     #[test]
-    fn test_result_card_field_if() {
+    fn a_result_card_shows_a_command_as_written() {
         let dm = DisplayManager::new(false);
-        let cmd: Option<&str> = Some("brew install foo");
-        let missing: Option<&str> = None;
 
         dm.result_card("Test Results")
             .field(lit!("Package"), "test-pkg")
-            .field_if(lit!("Command"), cmd)
-            .field_if(lit!("Missing"), missing)
+            .command_if(lit!("Command"), Some("echo 'a\u{A0}b'"))
+            .command_if(lit!("Missing"), None)
             .print();
+
+        let lines: Vec<String> = dm.printed().into_iter().map(|(_, line)| line).collect();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.ends_with("Command: echo 'a\u{A0}b'")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("Missing")),
+            "{lines:?}"
+        );
     }
 
     #[test]
@@ -1988,7 +2034,7 @@ mod tests {
         dm.print_section_header("header during spinner");
         dm.print_progress("progress during spinner");
         dm.print_suggestion("suggestion during spinner");
-        dm.print_field("key:", "value");
+        dm.print_field(lit!("key:"), lit!("value"));
         // An ordinary line does not end the wait.
         assert!(!dm.waiting_messages().is_empty());
         dm.end_waiting(ONE, StepEnding::Succeeded);
@@ -2203,8 +2249,8 @@ mod tests {
     // on screen. A tab separates fields.
     #[test]
     fn a_redrawn_line_shows_its_last_state_and_a_tab_separates() {
-        assert_eq!(printable("10%\r50%\r100%\r"), "100%");
-        assert_eq!(printable("Name\tVersion"), "Name Version");
+        assert_eq!(Output::line("10%\r50%\r100%\r").to_string(), "100%");
+        assert_eq!(Output::line("Name\tVersion").to_string(), "Name Version");
     }
 
     // A stream that ends without a result leaves no spinner behind.

@@ -1,4 +1,4 @@
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, Literal, Name, Shown, lit, shown};
 use selfie::{
     config::{YamlLoader, loader::ConfigLoader},
     fs::FileSystem,
@@ -83,61 +83,52 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         // Each value as a run would take it from the file: `~` expanded and
         // defaults filled in. Both required settings are present here, since a
         // file without one fails validation above.
-        report_with_style(
-            display,
-            "environment:",
-            raw_config.environment().unwrap_or_default(),
+        display.print_field(
+            lit!("environment:"),
+            Name::new(raw_config.environment().unwrap_or_default()),
         );
-        report_with_style(
-            display,
-            "package_directory:",
+        display.print_field(
+            lit!("package_directory:"),
             DisplayPath::of(&raw_config.package_directory(fs).unwrap_or_default()),
         );
         // The directories in effect: the configured value, or the default the
         // file leaves selfie to derive. Whether either exists is reported in the
         // table above, so a wrong value is visible here before a command
         // behaves oddly.
-        report_with_style(
-            display,
-            "dotfiles_directory:",
+        display.print_field(
+            lit!("dotfiles_directory:"),
             DisplayPath::of(&raw_config.dotfiles_directory(fs).unwrap_or_default()),
         );
-        report_with_style(
-            display,
-            "state_directory:",
+        display.print_field(
+            lit!("state_directory:"),
             match selfie::fs::state_directory(fs, raw_config.state_directory(fs).as_deref()) {
-                Ok(directory) => DisplayPath::of(&directory).to_string(),
-                Err(error) => format!("(unresolved: {error})"),
+                Ok(directory) => Shown::from(DisplayPath::of(&directory)),
+                Err(error) => Shown::from(Name::new(&format!("(unresolved: {error})"))),
             },
         );
-        report_with_style(
-            display,
-            "command_timeout:",
-            format!("{} seconds", raw_config.command_timeout().as_secs()),
+        display.print_field(
+            lit!("command_timeout:"),
+            shown!("{} seconds", raw_config.command_timeout().as_secs()),
         );
-        report_with_style(
-            display,
-            "max_concurrency:",
-            raw_config.max_concurrency().get(),
+        display.print_field(
+            lit!("max_concurrency:"),
+            shown!("{}", raw_config.max_concurrency().get()),
         );
-        report_with_style(display, "stop_on_error:", raw_config.stop_on_error());
+        display.print_field(lit!("stop_on_error:"), yes_no(raw_config.stop_on_error()));
         // From the file's `cli:` section, not the run's flags. Every other line
         // here reports the file, and this command exists so a flag cannot mask a
         // problem in it -- `--no-color` must not make a file saying
         // `use_colors: true` read as false.
-        report_with_style(display, "verbose:", cli_load.section.verbose);
-        report_with_style(display, "use_colors:", cli_load.section.use_colors);
+        display.print_field(lit!("verbose:"), yes_no(cli_load.section.verbose));
+        display.print_field(lit!("use_colors:"), yes_no(cli_load.section.use_colors));
 
         Exit::from(outcome)
     }
 }
 
-fn report_with_style(
-    display: &DisplayManager,
-    param1: impl std::fmt::Display,
-    param2: impl std::fmt::Display,
-) {
-    display.print_field(param1, param2);
+// A setting's value as the file spells it.
+fn yes_no(value: bool) -> Literal {
+    if value { lit!("true") } else { lit!("false") }
 }
 
 #[cfg(test)]

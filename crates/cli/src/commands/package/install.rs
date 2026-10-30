@@ -1,4 +1,4 @@
-use crate::terminal_text::lit;
+use crate::terminal_text::{Name, lit};
 use selfie::package::{
     event::{OperationFailure, OperationResult, PackageEvent},
     port::PackageError,
@@ -109,7 +109,7 @@ fn display_required_by(display: &DisplayManager, required_by: Option<&str>) {
         display.print_note(crate::terminal_text::shown!(
             "{}'{}' requires it.",
             crate::display_manager::INDENT,
-            crate::terminal_text::Shown::name(required_by)
+            crate::terminal_text::Shown::from(Name::new(required_by))
         ));
     }
 }
