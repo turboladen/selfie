@@ -3314,8 +3314,8 @@ pub enum PackageEvent {
     /// it deployed or checked shares a target with one of them was not
     /// checked. Sent once per run, after the reasons each could not be used,
     /// by an apply over every package and by a drift check. An apply of one
-    /// package sends a `Warning` for each instead, saying why it could not be
-    /// used.
+    /// package, and a validation of one spec, send a `Warning` for each instead,
+    /// saying why it could not be used.
     CollisionsUnchecked {
         operation_info: OperationInfo,
         /// What could not be used, in the order collection found it.

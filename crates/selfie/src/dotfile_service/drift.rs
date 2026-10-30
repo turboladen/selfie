@@ -84,8 +84,13 @@ where
         return None;
     }
     // Sent where apply sends it, once the run is known to carry on.
-    super::unchecked::send_unchecked_line(sender, collection_refusals, catalog.packages, config)
-        .await;
+    crate::package::collect::unchecked::send_unchecked_line(
+        sender,
+        collection_refusals,
+        catalog.packages,
+        config,
+    )
+    .await;
 
     // Asked once, so every package compares targets against the same home.
     let home = ResolvedHome::of(filesystem);

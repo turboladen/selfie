@@ -46,6 +46,20 @@ impl Finding {
         about.is_some_and(|about| about != name.to_lowercase())
     }
 
+    /// Whether a run for the one package `name` reports this finding: not one
+    /// about a spec of another name, and no ambiguity.
+    pub(crate) fn reported_for(&self, name: &str) -> bool {
+        // A run that finds its package has no use for either kind it leaves out,
+        // and one that does not find it fails with a message naming the files.
+        !self.is_about_another_name(name)
+            && !matches!(self, Self::Refusal(CollectionRefusal::AmbiguousName { .. }))
+    }
+
+    /// Whether this finding is a warning, and not about a spec of another name.
+    pub(crate) fn is_warning_for(&self, name: &str) -> bool {
+        matches!(self, Self::Warning(_)) && !self.is_about_another_name(name)
+    }
+
     /// Emit this finding on the event stream, as the event its kind calls for.
     pub(crate) async fn send(&self, sender: &crate::package::event::EventSender) {
         match self {
@@ -287,5 +301,51 @@ pub(crate) fn no_such_package(
         name: name.to_string(),
         reason,
         declared_by,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::event::BaseKind;
+
+    fn ambiguity(name: &str) -> Finding {
+        Finding::Refusal(CollectionRefusal::AmbiguousName {
+            name: name.to_string(),
+            paths: vec![PathBuf::from("/p/gem.yml"), PathBuf::from("/p/gem.yaml")],
+            base: BaseKind::PackageDirectory,
+        })
+    }
+
+    // A run for one name reports an ambiguity of no name, whichever name it is
+    // about: its own failure names the files, and another name's is not its concern.
+    #[test]
+    fn a_run_for_one_name_reports_no_ambiguity() {
+        assert!(!ambiguity("gem").reported_for("gem"));
+        assert!(!ambiguity("gem").reported_for("alpha"));
+    }
+
+    #[test]
+    fn a_run_for_one_name_reports_a_finding_about_no_name() {
+        let finding = Finding::Warning(ApplyWarning::AbsentDotfilesDirectory {
+            path: PathBuf::from("/d"),
+            reason: crate::fs::AbsentReason::Empty,
+        });
+
+        assert!(finding.reported_for("alpha"));
+    }
+
+    #[test]
+    fn only_a_warning_not_about_another_name_is_a_warning_for_a_name() {
+        let named = |name: &str| {
+            Finding::Warning(ApplyWarning::Named {
+                name: name.to_string(),
+                message: String::new(),
+            })
+        };
+
+        assert!(named("alpha").is_warning_for("alpha"));
+        assert!(!named("beta").is_warning_for("alpha"));
+        assert!(!ambiguity("alpha").is_warning_for("alpha"));
     }
 }

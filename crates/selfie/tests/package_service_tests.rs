@@ -1980,6 +1980,380 @@ mod validate_all_covers_standalone_specs {
         assert_successful_operation(&events);
         assert_eq!(results(&events), [("gemrc".to_string(), Outcome::Clean)]);
     }
+
+    // `spec validate <name>` judges the spec against the others as `--all` does,
+    // and attaches only its own collisions.
+    fn names_both_specs(issues: &[(String, String)]) -> bool {
+        issues.iter().any(|(field, message)| {
+            field == "dotfiles[0].target"
+                && message.contains("package 'alpha' (dotfiles[0])")
+                && message.contains("standalone dotfile 'gem' (dotfiles[0])")
+        })
+    }
+
+    fn write_colliding_pair(dirs: &Dirs) {
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.gemrc\n",
+        );
+        write_standalone(&dirs.dotfiles, "gem", "");
+    }
+
+    // The warnings the run sent saying what it could not check, as sent.
+    fn unchecked(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } if message.starts_with("Could not check") => {
+                    Some(message.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn validating_a_spec_by_name_reports_a_collision_with_another_spec() {
+        let dirs = dirs();
+        write_colliding_pair(&dirs);
+
+        for name in ["alpha", "gem"] {
+            let events = collect_events(dirs.service().validate(name, None).await).await;
+
+            assert_failed_answer(&events);
+            // Only the named spec has a result.
+            assert_eq!(
+                results(&events),
+                [(name.to_string(), Outcome::Failed)],
+                "{name}"
+            );
+            let issues = issues_of(&events, name);
+            assert_eq!(issues.len(), 1, "{name}: {issues:?}");
+            assert!(names_both_specs(&issues), "{name}: {issues:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn validating_a_spec_by_name_beside_specs_that_do_not_collide_is_clean() {
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.alpharc\n",
+        );
+        write_standalone(&dirs.dotfiles, "gem", "");
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        assert_successful_operation(&events);
+        assert_eq!(results(&events), [("alpha".to_string(), Outcome::Clean)]);
+    }
+
+    // Two specs that deploy one target in different environments never meet, so
+    // neither is an error on the other.
+    #[tokio::test]
+    async fn specs_deploying_one_target_in_different_environments_do_not_collide() {
+        let dirs = dirs();
+        for (name, environment) in [("alpha", "test"), ("beta", "work")] {
+            std::fs::write(
+                dirs.packages.join(format!("{name}.yml")),
+                format!(
+                    "name: {name}\nenvironments:\n  {environment}:\n    install: \"true\"\n    \
+                     dotfiles:\n      - source: {name}/rc\n        target: ~/.gemrc\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        assert_eq!(results(&events), [("alpha".to_string(), Outcome::Clean)]);
+    }
+
+    // A neighbor that does not parse takes no part, and is named once as a spec no
+    // collision was checked against. Its fault is not the named spec's.
+    #[tokio::test]
+    async fn an_unparsable_neighbor_is_named_unchecked_and_does_not_fail_the_named_spec() {
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.alpharc\n",
+        );
+        std::fs::write(dirs.packages.join("broken.yml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        assert_successful_operation(&events);
+        assert_eq!(results(&events), [("alpha".to_string(), Outcome::Clean)]);
+        let named = unchecked(&events);
+        assert_eq!(named.len(), 1, "{events:?}");
+        assert!(
+            named[0].contains("packages/broken.yml") && named[0].contains("could not be loaded"),
+            "{named:?}"
+        );
+        // A run for one name says nothing more about a file that is another name's.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, PackageEvent::SpecSkipped { .. })),
+            "{events:?}"
+        );
+    }
+
+    // The collision with the specs that did load is still found.
+    #[tokio::test]
+    async fn a_collision_is_found_beside_an_unparsable_neighbor() {
+        let dirs = dirs();
+        write_colliding_pair(&dirs);
+        std::fs::write(dirs.packages.join("broken.yml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        assert_failed_answer(&events);
+        assert!(names_both_specs(&issues_of(&events, "alpha")), "{events:?}");
+        assert_eq!(unchecked(&events).len(), 1, "{events:?}");
+    }
+
+    // An unparsable file beside a file of the same name is refused as both an
+    // ambiguity and an unloadable spec, and is named once.
+    #[tokio::test]
+    async fn a_file_refused_twice_is_named_once() {
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.alpharc\n",
+        );
+        std::fs::write(dirs.packages.join("tool.yml"), "environments: {oops\n").unwrap();
+        std::fs::write(dirs.packages.join("tool.yaml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        let named = unchecked(&events);
+        for file in ["tool.yml", "tool.yaml"] {
+            let mentions = named.iter().filter(|line| line.contains(file)).count();
+            assert_eq!(mentions, 1, "{file}: {named:?}");
+        }
+    }
+
+    // A spec with no entries cannot share a target, so nothing is unchecked for it.
+    #[tokio::test]
+    async fn a_spec_with_no_entries_is_not_told_what_could_not_be_checked() {
+        let dirs = dirs();
+        write_package(&dirs.packages, "loner.yml", "");
+        // Another spec has an entry, which would make the run say what it could not
+        // check if the gate looked at every spec instead of this one.
+        write_package(
+            &dirs.packages,
+            "other.yml",
+            "dotfiles:\n  - source: other/rc\n    target: ~/.otherrc\n",
+        );
+        std::fs::write(dirs.packages.join("broken.yml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(dirs.service().validate("loner", None).await).await;
+
+        assert_eq!(results(&events), [("loner".to_string(), Outcome::Clean)]);
+        assert!(unchecked(&events).is_empty(), "{events:?}");
+    }
+
+    // Two files claiming a name that deploy only in another environment are
+    // ignored by an apply here, but a collision in that environment can still hide
+    // in them, so they are named.
+    #[tokio::test]
+    async fn files_claiming_one_name_are_named_even_when_they_deploy_elsewhere() {
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.alpharc\n",
+        );
+        for file in ["gem.yml", "gem.yaml"] {
+            std::fs::write(
+                dirs.packages.join(file),
+                "name: gem\nenvironments:\n  work:\n    install: \"true\"\n    dotfiles:\n      - \
+                 source: gem/rc\n        target: ~/.alpharc\n",
+            )
+            .unwrap();
+        }
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        let named = unchecked(&events);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert!(
+            named[0].contains("packages/gem.yml") && named[0].contains("packages/gem.yaml"),
+            "{named:?}"
+        );
+    }
+
+    // Puts a directory's mode back when dropped, so a failing assertion cannot leave
+    // a directory no one can remove.
+    struct RestoreMode(std::path::PathBuf);
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    // A dotfiles directory that exists and cannot be listed hides specs: the run
+    // names it once, and the named spec's result stands.
+    #[tokio::test]
+    async fn an_unlistable_dotfiles_directory_is_named_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.alpharc\n",
+        );
+        let _restore = RestoreMode(dirs.dotfiles.clone());
+        std::fs::set_permissions(&dirs.dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root lists it anyway, and then there is nothing to test.
+        if std::fs::read_dir(&dirs.dotfiles).is_ok() {
+            eprintln!("SKIP: running as root, so the dotfiles directory is listable");
+            return;
+        }
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        assert_eq!(results(&events), [("alpha".to_string(), Outcome::Clean)]);
+        let about_the_directory: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } if message.contains("dotfiles") => {
+                    Some(message.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(about_the_directory.len(), 1, "{about_the_directory:?}");
+        assert!(
+            about_the_directory[0].starts_with("Could not check the standalone dotfiles"),
+            "{about_the_directory:?}"
+        );
+    }
+
+    // An entry in an environment other than the one in use can meet a spec that could
+    // not be read, since validation compares in every environment any spec declares.
+    #[tokio::test]
+    async fn an_entry_in_another_environment_is_told_what_could_not_be_checked() {
+        let dirs = dirs();
+        std::fs::write(
+            dirs.packages.join("alpha.yml"),
+            "name: alpha\nenvironments:\n  test:\n    install: \"true\"\n  work:\n    install: \
+             \"true\"\n    dotfiles:\n      - source: alpha/rc\n        target: ~/.gemrc\n",
+        )
+        .unwrap();
+        std::fs::write(dirs.packages.join("beta.yml"), "environments: {oops\n").unwrap();
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        let named = unchecked(&events);
+        assert_eq!(named.len(), 1, "{events:?}");
+        assert!(named[0].contains("packages/beta.yml"), "{named:?}");
+    }
+
+    // With the package directory gone, a name several standalone files claim is still
+    // used by none of them: they are named as not checked, and no collision is
+    // reported against one apply would never use.
+    #[tokio::test]
+    async fn files_claiming_one_standalone_name_are_not_compared_when_the_package_directory_is_gone()
+     {
+        let dirs = dirs();
+        write_standalone(&dirs.dotfiles, "alpha", "");
+        for file in ["gem.yml", "gem.yaml"] {
+            std::fs::write(
+                dirs.dotfiles.join(file),
+                "name: gem\ndotfiles:\n  - source: alpha/rc\n    target: ~/.alpharc\n",
+            )
+            .unwrap();
+        }
+        std::fs::remove_dir_all(&dirs.packages).unwrap();
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        assert_eq!(results(&events), [("alpha".to_string(), Outcome::Clean)]);
+        let named = unchecked(&events);
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert!(
+            named[0].contains("dotfiles/gem.yml") && named[0].contains("dotfiles/gem.yaml"),
+            "{named:?}"
+        );
+    }
+
+    // When the package directory cannot be listed, the standalone specs are still
+    // compared with each other.
+    #[tokio::test]
+    async fn standalone_specs_are_compared_when_the_package_directory_is_gone() {
+        let dirs = dirs();
+        write_standalone(&dirs.dotfiles, "gem", "");
+        std::fs::write(
+            dirs.dotfiles.join("other.yml"),
+            "name: other\ndotfiles:\n  - source: gem/rc\n    target: ~/.gemrc\n",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&dirs.packages).unwrap();
+
+        let events = collect_events(dirs.service().validate("gem", None).await).await;
+
+        assert_failed_answer(&events);
+        assert!(
+            issues_of(&events, "gem")
+                .iter()
+                .any(|(_, message)| message.contains("standalone dotfile 'other'")),
+            "{events:?}"
+        );
+    }
+
+    // A dotfiles directory that cannot be read hides specs. The run says so as
+    // `--all` does, and the named spec's result stands.
+    #[tokio::test]
+    async fn an_unreadable_dotfiles_directory_is_said_and_does_not_change_the_result() {
+        let dirs = dirs();
+        write_package(
+            &dirs.packages,
+            "alpha.yml",
+            "dotfiles:\n  - source: alpha/rc\n    target: ~/.alpharc\n",
+        );
+        std::fs::remove_dir_all(&dirs.dotfiles).unwrap();
+        std::fs::write(&dirs.dotfiles, "not a directory").unwrap();
+
+        let events = collect_events(dirs.service().validate("alpha", None).await).await;
+
+        assert_eq!(results(&events), [("alpha".to_string(), Outcome::Clean)]);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                PackageEvent::Warning { message, .. } if message.contains("is not a directory")
+            )),
+            "{events:?}"
+        );
+    }
+
+    // A spec with no entry in any environment cannot collide, so what collection
+    // found about the dotfiles directory is nothing to it.
+    #[tokio::test]
+    async fn a_spec_that_cannot_collide_hears_nothing_about_the_dotfiles_directory() {
+        let dirs = dirs();
+        write_package(&dirs.packages, "loner.yml", "");
+        std::fs::remove_dir_all(&dirs.dotfiles).unwrap();
+        std::fs::write(&dirs.dotfiles, "not a directory").unwrap();
+
+        let events = collect_events(dirs.service().validate("loner", None).await).await;
+
+        assert_eq!(results(&events), [("loner".to_string(), Outcome::Clean)]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, PackageEvent::Warning { .. })),
+            "{events:?}"
+        );
+    }
 }
 
 // A failed install command's warning names the command that failed, since the

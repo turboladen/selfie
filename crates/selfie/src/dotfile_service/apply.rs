@@ -352,11 +352,24 @@ where
     if stopped.is_none() && !token.is_cancelled() {
         match &scope {
             Scope::All(refusals) => {
-                super::unchecked::send_unchecked_line(sender, refusals, packages, config).await;
+                crate::package::collect::unchecked::send_unchecked_line(
+                    sender, refusals, packages, config,
+                )
+                .await;
             }
             Scope::Named(_, refusals) => {
-                super::unchecked::send_unchecked_sentences(sender, refusals, packages, config)
-                    .await;
+                let places: Vec<_> = refusals
+                    .iter()
+                    .map(crate::package::collect::unchecked::Unchecked::from)
+                    .collect();
+                crate::package::collect::unchecked::send_unchecked_warnings(
+                    sender,
+                    &places,
+                    packages,
+                    config,
+                    crate::package::collect::unchecked::Checking::Apply,
+                )
+                .await;
             }
         }
     }

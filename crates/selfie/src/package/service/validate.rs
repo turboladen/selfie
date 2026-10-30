@@ -6,13 +6,14 @@ use crate::{
     config::SelfieConfig,
     package::{
         Package,
+        collect::unchecked::{Checking, collect_others, send_unchecked_warnings},
         event::{
             EventSender, OperationFailure, OperationResult, OperationSuccess, Outcome, SpecWrite,
             ValidationIssueData, ValidationResultData,
         },
         port::PackageRepository,
         service::ProgressTracker,
-        validate::{unreadable_template_issue, validate_template_vars},
+        validate::{cross_spec_issues, unreadable_template_issue, validate_template_vars},
     },
     validation::{ValidationIssue, ValidationIssues},
 };
@@ -115,6 +116,50 @@ pub(super) async fn refuse_or_report(
     None
 }
 
+/// The errors for `package`'s entries that deploy to a target another spec
+/// deploys, found by collecting the specs as `--all` does.
+///
+/// Sends, as a run for one name does, the warnings collecting found and a warning
+/// for each place it could not use. A spec with no dotfile entry in any
+/// environment it declares gets neither, and no collection is done for it.
+async fn collisions_with_other_specs<PR>(
+    package: &Package,
+    package_name: &str,
+    repo: &PR,
+    dotfiles_repo: &PR,
+    config: &SelfieConfig,
+    sender: &EventSender,
+) -> Vec<ValidationIssue>
+where
+    PR: PackageRepository,
+{
+    // Such a spec cannot share a target, so nothing collection found is about it.
+    if !package.has_dotfiles_in_any_environment() {
+        return Vec::new();
+    }
+    let others = collect_others(repo, dotfiles_repo, config);
+
+    // A refusal is told once, as the place it left unchecked, so only the warnings
+    // are sent here. A neighbor's fault does not change the named spec's own result.
+    for finding in &others.findings {
+        if finding.is_warning_for(package_name) {
+            finding.send(sender).await;
+        }
+    }
+    send_unchecked_warnings(
+        sender,
+        &others.unchecked,
+        std::slice::from_ref(package),
+        config,
+        Checking::Validate,
+    )
+    .await;
+
+    cross_spec_issues(&others.packages, config.environment())
+        .remove(package.path())
+        .unwrap_or_default()
+}
+
 pub(super) async fn handle_validate<PR>(
     package_name: &str,
     repo: &PR,
@@ -158,7 +203,22 @@ where
     // Step 2: Validate the package for the current environment
     progress.next(sender, "Validating package definition").await;
 
-    let issues = &all_issues(&package_blob.package, source, config.environment());
+    let environment = config.environment();
+    let mut issues = all_issues(&package_blob.package, source, environment);
+    // The spec is judged against the others as `--all` judges every spec, and
+    // only its own collisions are attached.
+    issues.extend(
+        collisions_with_other_specs(
+            &package_blob.package,
+            package_name,
+            repo,
+            dotfiles_repo,
+            config,
+            sender,
+        )
+        .await,
+    );
+    let issues = &issues;
 
     // Step 3: Process validation results
     progress.next(sender, "Processing validation results").await;
@@ -246,5 +306,55 @@ mod tests {
             .collect();
 
         assert_eq!(fields, ["e1", "e2", "w1", "w2", "i1"]);
+    }
+
+    // A spec with no dotfile entry cannot share a target, so validating it lists no
+    // directory: the mocks expect no listing, and one fails the test.
+    #[tokio::test]
+    async fn a_spec_with_no_entries_collects_nothing() {
+        use crate::{
+            config::SelfieConfigBuilder,
+            package::{
+                GetPackage, PackageBuilder,
+                event::{OperationContext, metadata::OperationType},
+                port::MockPackageRepository,
+            },
+        };
+        let package = PackageBuilder::default()
+            .name("alpha")
+            .environment("test", |b| b.install("true"))
+            .path("/packages/alpha.yml")
+            .build();
+        let mut repo = MockPackageRepository::new();
+        let found = GetPackage::from_existing(package, "/packages/alpha.yml".into());
+        repo.expect_get_package().return_once(move |_| Ok(found));
+        repo.expect_list_packages().times(0);
+        let mut dotfiles_repo = MockPackageRepository::new();
+        dotfiles_repo.expect_list_packages().times(0);
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/packages")
+            .build();
+        let (tx, _rx) = tokio::sync::mpsc::channel(32);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageValidate,
+            "alpha".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+        let mut progress = ProgressTracker::new(3);
+
+        let result = handle_validate(
+            "alpha",
+            &repo,
+            &dotfiles_repo,
+            &config,
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
     }
 }

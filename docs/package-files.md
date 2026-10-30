@@ -234,9 +234,13 @@ several files claiming one name, takes no part either, because its targets are u
 `selfie spec validate --all` reports such a pair as an error on each spec, for every environment
 where they meet, comparing targets without your home directory as validation always does, so a
 shared entry that an environment entry may override on some home takes no part.
-`selfie spec validate <name>` checks one spec alone; only `--all` checks across specs.
-`selfie sync push` refuses a push that changes one of the pair, and lets through one that changes
-neither.
+`selfie spec validate <name>` checks the spec against the others the same way and reports its own
+entries only, so a pair is an error on the spec you named. A spec selfie could not read takes no
+part there either. When the spec you named has a dotfile entry in any environment it declares, the
+run names each place it could not check, and why, and warns about a dotfiles directory that is not
+there; a spec with no dotfile entry cannot share a target and hears neither. None of that changes
+the result for the spec you named. `selfie sync push` refuses a push that changes one of the pair,
+and lets through one that changes neither.
 
 `selfie spec validate` reports each override as an informational note, which never fails validation
 or `selfie sync push`. A shared and an environment entry that are one file only for a particular
@@ -309,14 +313,15 @@ A command that shows every environment refuses a file with an unrecognized key i
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
 
-`selfie spec create` and the MCP server's `selfie_spec_create` check a new spec as
-`selfie spec validate` would before writing it. A spec with an error, such as no environment at all,
-is not written: the run exits 1 and lists every issue on stderr (the MCP result carries them under
-`issues`). A spec with only warnings, such as one that configures an environment other than the
-current one, a command that does not parse as POSIX sh, or a blank install command such as the
-template's `# TODO`, is written, and the warnings are listed on stderr; the run still exits 0. An
-install command given to the MCP tools `selfie_spec_create` or `selfie_spec_update` is refused when
-it is blank, since it would put a command that runs nothing where one was meant.
+`selfie spec create` and the MCP server's `selfie_spec_create` check a new spec on its own, as
+`selfie spec validate` checks a spec alone, before writing it; neither compares it with other specs
+for a shared target. A spec with an error, such as no environment at all, is not written: the run
+exits 1 and lists every issue on stderr (the MCP result carries them under `issues`). A spec with
+only warnings, such as one that configures an environment other than the current one, a command that
+does not parse as POSIX sh, or a blank install command such as the template's `# TODO`, is written,
+and the warnings are listed on stderr; the run still exits 0. An install command given to the MCP
+tools `selfie_spec_create` or `selfie_spec_update` is refused when it is blank, since it would put a
+command that runs nothing where one was meant.
 
 The MCP tools `selfie_spec_update` and `selfie_spec_update_batch` validate the whole updated spec
 the same way. An error on a field the update wrote writes nothing and returns every issue under

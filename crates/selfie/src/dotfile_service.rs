@@ -50,4 +50,3 @@ pub mod state;
 pub(crate) mod state_file;
 pub(crate) mod template;
 pub mod track;
-mod unchecked;

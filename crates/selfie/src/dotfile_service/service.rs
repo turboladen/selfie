@@ -28,7 +28,7 @@ use super::drift::handle_check_drift;
 use super::orphan::Catalog;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
-use super::unchecked::Unchecked;
+use crate::package::collect::unchecked::collect_others;
 use crate::package::collect::warning::{CollectionRefusal, Finding, no_such_package};
 use crate::package::collect::{Collected, collect_all_packages};
 
@@ -40,73 +40,6 @@ fn is_named(package: &Package, folded_name: &str) -> bool {
     package
         .spec_name()
         .is_some_and(|spec_name| spec_name == folded_name)
-}
-
-/// Every collected spec, for track to check for an entry already deploying its
-/// file, with what the check cannot see worded.
-fn other_specs<R: PackageRepository>(
-    package_repo: &R,
-    dotfiles_repo: &R,
-    config: &SelfieConfig,
-) -> super::track::OtherSpecs {
-    match collect_all_packages(
-        package_repo,
-        dotfiles_repo,
-        config.dotfiles_directory_is_expected(),
-        config.environment(),
-    ) {
-        Ok(collected) => {
-            let unrefused = collected
-                .unrefused_ambiguities
-                .iter()
-                .map(|(name, paths, base)| CollectionRefusal::AmbiguousName {
-                    name: name.clone(),
-                    paths: paths.clone(),
-                    base: *base,
-                })
-                .collect::<Vec<_>>();
-            let unchecked: Vec<Unchecked> = collected
-                .refusals()
-                .chain(&unrefused)
-                .map(Unchecked::from)
-                .collect();
-            super::track::OtherSpecs {
-                packages: collected.packages,
-                unchecked,
-            }
-        }
-        // The package directory would not list, so collection stopped there. The
-        // standalone specs are still checked: they are read through a repository of
-        // their own. A package directory with nothing at its path holds no specs and
-        // is worth no word.
-        Err(error) => {
-            let mut unchecked = Vec::new();
-            if !error.is_absent() {
-                unchecked.push(Unchecked::PackageDirectory(error));
-            }
-            let packages = match dotfiles_repo.list_packages() {
-                Ok(output) => {
-                    unchecked.extend(output.invalid_packages().map(|invalid| {
-                        Unchecked::Unloadable {
-                            path: invalid.package_path().to_path_buf(),
-                            base: crate::package::event::BaseKind::DotfilesDirectory,
-                        }
-                    }));
-                    output.valid_packages().cloned().collect()
-                }
-                Err(error) => {
-                    if !error.is_absent() {
-                        unchecked.push(Unchecked::DotfilesDirectory(error));
-                    }
-                    Vec::new()
-                }
-            };
-            super::track::OtherSpecs {
-                packages,
-                unchecked,
-            }
-        }
-    }
 }
 
 /// Concrete implementation of the [`DotfileService`] trait
@@ -286,17 +219,10 @@ where
                     // `handle_apply` names what it could not check for a shared
                     // target, once it is known to be deploying something.
                     for finding in &findings {
-                        let sent = match filter.as_deref() {
-                            None => true,
-                            Some(name) => {
-                                !finding.is_about_another_name(name)
-                                    && !matches!(
-                                        finding,
-                                        Finding::Refusal(CollectionRefusal::AmbiguousName { .. })
-                                    )
-                            }
-                        };
-                        if sent {
+                        if filter
+                            .as_deref()
+                            .is_none_or(|name| finding.reported_for(name))
+                        {
                             finding.send(&sender).await;
                         }
                     }
@@ -593,7 +519,7 @@ where
                     handle_track_standalone(
                         &name,
                         &target_path,
-                        || other_specs(&package_repo, &dotfiles_repo, &config),
+                        || collect_others(&package_repo, &dotfiles_repo, &config),
                         &dotfiles_repo,
                         &fs,
                         &sender,
@@ -632,7 +558,7 @@ where
                     handle_track_for_package(
                         &package_name,
                         &target_path,
-                        || other_specs(&repo, &dotfiles_repo, &config),
+                        || collect_others(&repo, &dotfiles_repo, &config),
                         &repo,
                         &fs,
                         &sender,
