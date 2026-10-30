@@ -361,7 +361,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update",
-        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved. An update that would leave the spec with validation errors writes nothing: the call fails, and the result carries every issue under `issues`, each with `level`, `category`, `field`, `message`, `suggestion`, `line` and `column`, as selfie_spec_create's does; `line` and `column` are null for an issue on a field the update changed, which has no place in the file yet."
+        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved. The whole updated spec is validated as selfie_spec_validate validates it. An error on a field the update wrote, or one the save would refuse whatever the update wrote (an unknown key in the file), writes nothing: the call fails, and the result carries every issue under `issues`, each with `level`, `category`, `field`, `message`, `suggestion`, `line` and `column`, as selfie_spec_create's does; `line` and `column` are null for an issue on a field the update changed, which has no place in the file yet. An error on any other field was already in the spec and does not stop the update. Every other issue the updated spec has, warnings, notices, and such an error on a field the update did not write, is reported as a validation_result entry in `data`, sent before the spec is saved, so it is there even when the save fails. The call's own `result.outcome` says how the update went; the entry's `outcome` is the spec's own, as selfie_spec_validate scores it: \"clean\" for notices alone, \"found\" for warnings, or \"failed\" for an error the update left in place."
     )]
     async fn spec_update(
         &self,
@@ -407,7 +407,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update_batch",
-        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. Prefer this over calling selfie_spec_update repeatedly."
+        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. An entry whose update reported anything about the spec carries selfie_spec_update's validation_result entry under `validation_result`, whether or not the save succeeded; an entry with nothing to report has no such key. Prefer this over calling selfie_spec_update repeatedly."
     )]
     async fn spec_update_batch(
         &self,
@@ -451,11 +451,18 @@ impl SelfieServer {
             let stream = self.service.update(&package_name, fields).await;
             let result = event_collector::collect_events(stream).await;
 
-            results.push(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "package": package_name,
                 "success": result.success,
                 "result": result.data["result"],
-            }));
+            });
+            // What validation had to say about the updated spec, which is sent before
+            // the save and so is here even when the save failed.
+            if let Some(validation) = event_collector::validation_result_rows(&result.data).first()
+            {
+                entry["validation_result"] = (*validation).clone();
+            }
+            results.push(entry);
         }
 
         let succeeded = results.iter().filter(|r| r["success"] == true).count();
@@ -1696,19 +1703,159 @@ mod tests {
         let json = tool_json(&server.spec_create(Parameters(params)).await.unwrap());
 
         assert!(packages.join("elsewhere.yml").is_file(), "got {json}");
-        let data = json["data"].as_array().cloned().unwrap_or_default();
         assert!(
-            data.iter().any(|entry| entry["type"] == "validation_result"
-                && entry["issues"]
-                    .as_array()
-                    .is_some_and(
-                        |issues| issues.iter().any(|issue| issue["level"] == "warning"
+            event_collector::validation_result_rows(&json)
+                .iter()
+                .any(|entry| entry["issues"].as_array().is_some_and(|issues| {
+                    issues.iter().any(|issue| {
+                        issue["level"] == "warning"
                             && issue["message"]
                                 .as_str()
-                                .is_some_and(|m| m.contains("Current environment 'test'")))
-                    )),
+                                .is_some_and(|m| m.contains("Current environment 'test'"))
+                    })
+                })),
             "got {json}"
         );
+    }
+
+    // Write the spec `name`, which configures `environment` only, into `packages`.
+    fn write_spec(packages: &std::path::Path, name: &str, environment: &str) {
+        std::fs::write(
+            packages.join(format!("{name}.yml")),
+            format!("name: {name}\nenvironments:\n  {environment}:\n    install: \"true\"\n"),
+        )
+        .unwrap();
+    }
+
+    fn update_description(package: &str) -> UpdateParam {
+        serde_json::from_value(serde_json::json!({
+            "package": package,
+            "description": "A new description",
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn spec_update_reports_a_warning_and_still_writes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        // The server's environment is `test`; this spec configures only `other`.
+        write_spec(&packages, "elsewhere", "other");
+        let server = server_over(&packages, None);
+
+        let json = tool_json(
+            &server
+                .spec_update(Parameters(update_description("elsewhere")))
+                .await
+                .unwrap(),
+        );
+
+        let written = std::fs::read_to_string(packages.join("elsewhere.yml")).unwrap();
+        assert!(written.contains("A new description"), "got {json}");
+        let rows = event_collector::validation_result_rows(&json);
+        assert_eq!(rows.len(), 1, "got {json}");
+        assert_eq!(rows[0]["outcome"], "found", "got {json}");
+        assert!(
+            rows[0]["issues"]
+                .as_array()
+                .is_some_and(
+                    |issues| issues.iter().any(|issue| issue["level"] == "warning"
+                        && issue["message"]
+                            .as_str()
+                            .is_some_and(|m| m.contains("Current environment 'test'")))
+                ),
+            "got {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_update_saves_beside_an_error_the_spec_already_had_and_reports_it() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(
+            packages.join("old.yml"),
+            "name: old\nhomepage: not a url\nenvironments:\n  test:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        let server = server_over(&packages, None);
+
+        let json = tool_json(
+            &server
+                .spec_update(Parameters(update_description("old")))
+                .await
+                .unwrap(),
+        );
+
+        let written = std::fs::read_to_string(packages.join("old.yml")).unwrap();
+        assert!(written.contains("A new description"), "got {json}");
+        assert_eq!(json["result"]["outcome"], "clean", "got {json}");
+        let rows = event_collector::validation_result_rows(&json);
+        assert_eq!(rows.len(), 1, "got {json}");
+        assert_eq!(rows[0]["outcome"], "failed", "got {json}");
+    }
+
+    #[tokio::test]
+    async fn spec_update_of_a_clean_spec_reports_no_validation_result() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        write_spec(&packages, "fine", "test");
+        let server = server_over(&packages, None);
+
+        let json = tool_json(
+            &server
+                .spec_update(Parameters(update_description("fine")))
+                .await
+                .unwrap(),
+        );
+
+        assert!(
+            event_collector::validation_result_rows(&json).is_empty(),
+            "got {json}"
+        );
+    }
+
+    // A batch entry has the keys package, success and result. One whose update
+    // reported something also has validation_result, and a clean one does not.
+    #[tokio::test]
+    async fn spec_update_batch_adds_the_validation_result_only_to_an_entry_that_has_one() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        write_spec(&packages, "elsewhere", "other");
+        write_spec(&packages, "fine", "test");
+        let server = server_over(&packages, None);
+        let params: BatchUpdateParam = serde_json::from_value(serde_json::json!({
+            "updates": [
+                { "package": "elsewhere", "description": "d" },
+                { "package": "fine", "description": "d" },
+            ],
+        }))
+        .unwrap();
+
+        let json = tool_json(&server.spec_update_batch(Parameters(params)).await.unwrap());
+
+        let keys = |entry: &serde_json::Value| -> Vec<String> {
+            let mut keys: Vec<String> = entry.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(
+            keys(&results[0]),
+            ["package", "result", "success", "validation_result"],
+            "got {json}"
+        );
+        assert_eq!(results[0]["validation_result"]["type"], "validation_result");
+        assert_eq!(results[0]["validation_result"]["outcome"], "found");
+        assert_eq!(
+            keys(&results[1]),
+            ["package", "result", "success"],
+            "got {json}"
+        );
+        assert_eq!(json["succeeded"], 2, "got {json}");
     }
 
     // The JSON a tool returned.

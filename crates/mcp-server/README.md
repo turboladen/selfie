@@ -102,6 +102,12 @@ The MCP server handles two common issues with GUI-launched processes:
 | `selfie_spec_update_batch` | Update multiple specs in a single call       |
 | `selfie_spec_remove`       | Remove a spec file                           |
 
+`selfie_spec_create`, `selfie_spec_update` and `selfie_spec_update_batch` validate the spec as
+`selfie_spec_validate` does before writing it. Warnings and notices come back as a
+`validation_result` entry in `data`. An error stops a create, and stops an update when it is on a
+field the update wrote or one the save would refuse; nothing is written then. See
+[Package files](../../docs/package-files.md).
+
 ### Package tools (runtime operations)
 
 | Tool                       | Description                            |

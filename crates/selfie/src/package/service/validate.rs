@@ -7,8 +7,8 @@ use crate::{
     package::{
         Package,
         event::{
-            EventSender, OperationResult, OperationSuccess, Outcome, ValidationIssueData,
-            ValidationResultData,
+            EventSender, OperationFailure, OperationResult, OperationSuccess, Outcome, SpecWrite,
+            ValidationIssueData, ValidationResultData,
         },
         port::PackageRepository,
         service::ProgressTracker,
@@ -73,6 +73,46 @@ pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueDat
             location: issue.location(),
         })
         .collect()
+}
+
+/// Decide whether a spec about to be written may be, and tell the caller what it
+/// has to say if so.
+///
+/// An error for which `stops` is true refuses the write: the failure carries
+/// every issue and nothing is reported. Otherwise the issues go out as a
+/// `validation_result`, for warnings, notices, and errors that do not stop this
+/// write, and nothing goes out for a spec with no issues. The result is sent
+/// before the caller saves, so it is there when the save then fails.
+///
+/// Returns the [`OperationFailure::InvalidSpec`] to fail with when an error
+/// stops the write, and `None` when the caller may save.
+pub(super) async fn refuse_or_report(
+    sender: &EventSender,
+    action: SpecWrite,
+    package_name: &str,
+    environment: &str,
+    issues: &ValidationIssues,
+    stops: impl Fn(&ValidationIssue) -> bool,
+) -> Option<OperationFailure> {
+    if issues.errors().into_iter().any(stops) {
+        return Some(OperationFailure::InvalidSpec {
+            action,
+            package_name: package_name.to_string(),
+            issues: issue_payload(issues),
+        });
+    }
+    // Any issue at all is something to say: a notice alone still reaches the user.
+    if !issues.all_issues().is_empty() {
+        sender
+            .send_validation_result(ValidationResultData {
+                package_name: package_name.to_string(),
+                environment: environment.to_string(),
+                outcome: issues.outcome(),
+                issues: issue_payload(issues),
+            })
+            .await;
+    }
+    None
 }
 
 pub(super) async fn handle_validate<PR>(

@@ -318,6 +318,16 @@ template's `# TODO`, is written, and the warnings are listed on stderr; the run 
 install command given to the MCP tools `selfie_spec_create` or `selfie_spec_update` is refused when
 it is blank, since it would put a command that runs nothing where one was meant.
 
+The MCP tools `selfie_spec_update` and `selfie_spec_update_batch` validate the whole updated spec
+the same way. An error on a field the update wrote writes nothing and returns every issue under
+`issues`, and so does an error the save would refuse whatever the update wrote, such as an unknown
+key in the file. An error on any other field was already in the spec and does not stop the update.
+Every other issue, warnings, notices, and such an error, comes back as a `validation_result` entry
+in the result's `data`, sent before the spec is saved. `selfie_spec_update_batch` puts that entry
+under `validation_result` in the matching `results` entry, which has no such key when there is
+nothing to report. The entry's `outcome` is the spec's own, as `selfie_spec_validate` scores it; the
+result's `outcome` says how the update went.
+
 A package directory that does not exist yet holds no names, so it does not stop
 `selfie spec create`, `selfie dotfiles track` or the MCP tools that check a new name: the first spec
 saved there creates it. Something other than a directory at that path, such as a regular file or a
