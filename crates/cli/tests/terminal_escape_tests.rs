@@ -586,3 +586,22 @@ fn a_parse_error_caret_lands_past_escaped_characters() {
     // Byte offsets: everything before the colon on both lines is ASCII.
     assert_eq!(caret.find('^'), line.find(": c"), "{stderr}");
 }
+
+// A sentence `spec remove` composes names the spec as a name, so an invisible
+// character in the name it was given shows as an escape.
+#[test]
+fn spec_remove_names_the_spec_escaped() {
+    let temp = setup_default_test_config();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "spec", "remove", "zw\u{200B}x", "--yes"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains(r"Package 'zw\u{200b}x' not found."),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}

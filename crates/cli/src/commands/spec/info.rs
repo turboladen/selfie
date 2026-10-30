@@ -163,8 +163,8 @@ pub(crate) fn create_environment_table(
     env_table.set_header([Cell::from(env_header), "".into()]);
 
     let format_env_key = |key: Literal| Cell::from(format_key(key, use_colors));
-    // Commands and package names, as prose: a block-scalar command keeps its
-    // line breaks inside the cell.
+    // Commands, as prose: a block-scalar command keeps its line breaks inside
+    // the cell.
     let format_env_value = Cell::prose;
 
     // Add installation status if this is the current environment and we have status
@@ -196,7 +196,7 @@ pub(crate) fn create_environment_table(
     } else if !env_status.dependencies.is_empty() {
         env_table.add_row([
             format_env_key(lit!("Dependencies")),
-            format_env_value(&env_status.dependencies.join(", ")),
+            crate::formatters::name_list(&env_status.dependencies).into(),
         ]);
     }
 
@@ -212,7 +212,7 @@ pub(crate) fn create_environment_table(
     } else if !env_status.recommends.is_empty() {
         env_table.add_row([
             format_env_key(lit!("Recommends")),
-            format_env_value(&env_status.recommends.join(", ")),
+            crate::formatters::name_list(&env_status.recommends).into(),
         ]);
     }
 
@@ -244,6 +244,30 @@ mod tests {
     use super::*;
     use selfie::package::event::EnvironmentStatus;
     use test_common::TEST_ENV;
+
+    // Dependencies and recommends whose statuses were not checked are listed
+    // by name, so an invisible character in one shows as an escape.
+    #[test]
+    fn unchecked_dependencies_are_listed_as_names() {
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let env_status = EnvironmentStatusData {
+            environment_name: TEST_ENV.to_string(),
+            is_current: false,
+            install_command: None,
+            check_command: None,
+            dependencies: vec!["z\u{200B}w".to_string(), "git".to_string()],
+            dependency_statuses: Vec::new(),
+            recommends: vec!["r\u{200B}s".to_string()],
+            recommend_statuses: Vec::new(),
+            status: EnvironmentStatus::NotInstalled,
+        };
+
+        let table = create_environment_table(&env_status, &config).to_string();
+
+        assert!(table.contains(r"z\u{200b}w, git"), "{table}");
+        assert!(table.contains(r"r\u{200b}s"), "{table}");
+        assert!(!table.contains('\u{200B}'), "{table:?}");
+    }
 
     #[test]
     fn test_format_status_functions() {
