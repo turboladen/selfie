@@ -6,7 +6,10 @@ use crate::{
     config::SelfieConfig,
     package::{
         Package,
-        collect::unchecked::{Checking, collect_others, send_unchecked_warnings},
+        collect::{
+            UnplacedSpec,
+            unchecked::{Checking, Others, OthersListing, send_unchecked_warnings},
+        },
         event::{
             EventSender, OperationFailure, OperationResult, OperationSuccess, Outcome, SpecWrite,
             ValidationIssueData, ValidationResultData,
@@ -79,10 +82,20 @@ pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueDat
         .collect()
 }
 
-/// Decide whether a spec about to be written may be, and tell the caller what it
-/// has to say if so.
+/// What an issue found on a spec about to be written does to the write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OnWrite {
+    /// An error with this effect refuses the write. A warning or notice is
+    /// reported whatever its effect.
+    Refuses,
+    /// The issue is reported, and the write goes ahead.
+    Reports,
+}
+
+/// Decides whether a spec about to be written may be, and tells the caller what
+/// it has to say if so.
 ///
-/// An error for which `stops` is true refuses the write: the failure carries
+/// An error tagged [`OnWrite::Refuses`] refuses the write: the failure carries
 /// every issue and nothing is reported. Otherwise the issues go out as a
 /// `validation_result`, for warnings, notices, and errors that do not stop this
 /// write, and nothing goes out for a spec with no issues. The result is sent
@@ -95,14 +108,21 @@ pub(super) async fn refuse_or_report(
     action: SpecWrite,
     package_name: &str,
     environment: &str,
-    issues: &ValidationIssues,
-    stops: impl Fn(&ValidationIssue) -> bool,
+    judged: Vec<(ValidationIssue, OnWrite)>,
 ) -> Option<OperationFailure> {
-    if issues.errors().into_iter().any(stops) {
+    let refused = judged.iter().any(|(issue, on_write)| {
+        issue.level() == crate::validation::ValidationLevel::Error && *on_write == OnWrite::Refuses
+    });
+    let issues: ValidationIssues = judged
+        .into_iter()
+        .map(|(issue, _)| issue)
+        .collect::<Vec<_>>()
+        .into();
+    if refused {
         return Some(OperationFailure::InvalidSpec {
             action,
             package_name: package_name.to_string(),
-            issues: issue_payload(issues),
+            issues: issue_payload(&issues),
         });
     }
     // Any issue at all is something to say: a notice alone still reaches the user.
@@ -112,33 +132,60 @@ pub(super) async fn refuse_or_report(
                 package_name: package_name.to_string(),
                 environment: environment.to_string(),
                 outcome: issues.outcome(),
-                issues: issue_payload(issues),
+                issues: issue_payload(&issues),
             })
             .await;
     }
     None
 }
 
-/// Holds a spec's errors for entries that deploy to a target another spec deploys.
+/// Whether a spec's file already had a collision with another spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Standing {
+    /// The spec as its file holds it did not have the collision.
+    Introduced,
+    /// The spec as its file holds it had the collision already.
+    Preexisting,
+}
+
+impl Standing {
+    /// Returns what a collision of this standing does to a write: one the write
+    /// brings in refuses it, and one already there is reported.
+    pub(super) fn on_write(self) -> OnWrite {
+        match self {
+            Self::Introduced => OnWrite::Refuses,
+            Self::Preexisting => OnWrite::Reports,
+        }
+    }
+}
+
+/// Holds a spec's errors for entries that deploy to a target another spec deploys,
+/// each with its standing.
 #[derive(Debug, Default)]
 pub(super) struct AcrossSpecs {
-    /// Holds the collisions that the spec as its file holds it did not have.
-    pub(super) introduced: Vec<ValidationIssue>,
-    /// Holds the collisions that the spec as its file holds it had already.
-    pub(super) preexisting: Vec<ValidationIssue>,
+    pub(super) issues: Vec<(ValidationIssue, Standing)>,
 }
 
 /// Returns the errors for `candidate`'s entries that deploy to a target another
-/// spec deploys. The specs are collected as `--all` collects them, and `candidate`
-/// takes the place of the collected spec at its path.
+/// spec deploys. The specs are collected as `--all` collects them, with
+/// `candidate`'s file written: it takes the place of the listed spec at its path,
+/// or is listed where its file would be.
 ///
 /// `on_disk` is the spec as its file holds it, for a write that replaces one: a
-/// collision it has already is preexisting. With `None`, every collision is
-/// introduced.
+/// collision it has already is [`Standing::Preexisting`]. With `None`, every
+/// collision is [`Standing::Introduced`]. An introduced collision's error names
+/// only the environments where it is new.
 ///
 /// Sends, as a run for one name does, the warnings collecting found and a warning
-/// for each place it could not use. A spec with no dotfile entry in any
-/// environment it declares gets neither, and no collection is done for it.
+/// for each place it could not use, including when the spec cannot be placed. A
+/// spec with no dotfile entry in any environment it declares gets neither, and no
+/// collection is done for it.
+///
+/// # Errors
+///
+/// Returns [`UnplacedSpec`] when `candidate` or `on_disk` cannot be placed in the
+/// listing, so the spec was compared with nothing. A write must then be refused.
+/// A validation can still report the spec's own issues.
 pub(super) async fn collisions_with_other_specs<PR>(
     on_disk: Option<&Package>,
     candidate: &Package,
@@ -147,16 +194,79 @@ pub(super) async fn collisions_with_other_specs<PR>(
     dotfiles_repo: &PR,
     config: &SelfieConfig,
     sender: &EventSender,
-) -> AcrossSpecs
+) -> Result<AcrossSpecs, UnplacedSpec>
 where
     PR: PackageRepository,
 {
     // Such a spec cannot share a target, so nothing collection found is about it.
     if !candidate.has_dotfiles_in_any_environment() {
-        return AcrossSpecs::default();
+        return Ok(AcrossSpecs::default());
     }
-    let others = collect_others(repo, dotfiles_repo, config);
+    // Listed once and settled twice. The names are settled by collection itself
+    // with the file written, so an unparsable file still claims its name. Only an
+    // update clones the listing, for the spec as its file holds it.
+    let mut listing = OthersListing::of(repo, dotfiles_repo);
+    let mut before = on_disk.map(|on_disk| (listing.clone(), on_disk));
+    let placed = listing.place(candidate).and_then(|()| {
+        before
+            .as_mut()
+            .map_or(Ok(()), |(before, on_disk)| before.place(on_disk))
+    });
+    let after = listing.collect(config);
+    report_collection(&after, candidate, package_name, config, sender).await;
+    placed?;
 
+    let path = candidate.path();
+    // One set for both scans. A spec's shared entries are scanned in every asked
+    // environment, declared or not, so a collision the spec had already is found in
+    // an environment only the candidate declares, and is not taken for a new one.
+    let environments = asked_environments(&after.packages, config.environment());
+    let involving = |set: &[Package]| -> Vec<CrossSpecCollision> {
+        cross_spec_collisions(set, &environments)
+            .into_iter()
+            .filter(|collision| collision.involves(path))
+            .collect()
+    };
+    let before = before.map_or_else(Vec::new, |(before, _)| {
+        involving(&before.collect(config).packages)
+    });
+
+    // Judged per environment, not per field: an update that removes the environment
+    // an unknown key had the spec refused in brings its shared entries into that
+    // environment's scan, a collision on a field that already collided elsewhere.
+    // The entries' fields are stable because no update edits a dotfile list; one
+    // that did would shift the indices this key holds.
+    let mut across = AcrossSpecs::default();
+    for collision in involving(&after.packages) {
+        let new = collision.new_against(&before);
+        if new.is_empty() {
+            let issues = collision.into_issues_at(path);
+            across.issues.extend(
+                issues
+                    .into_iter()
+                    .map(|issue| (issue, Standing::Preexisting)),
+            );
+        } else {
+            let issues = collision.issues_at(path, &new);
+            across.issues.extend(
+                issues
+                    .into_iter()
+                    .map(|issue| (issue, Standing::Introduced)),
+            );
+        }
+    }
+    Ok(across)
+}
+
+// Sends the warnings collecting found for `package_name`, and a warning for each
+// place it could not use.
+async fn report_collection(
+    others: &Others,
+    candidate: &Package,
+    package_name: &str,
+    config: &SelfieConfig,
+    sender: &EventSender,
+) {
     // A refusal is told once, as the place it left unchecked, so only the warnings
     // are sent here. A neighbor's fault does not change the named spec's own result.
     for finding in &others.findings {
@@ -172,49 +282,6 @@ where
         Checking::Validate,
     )
     .await;
-
-    let path = candidate.path();
-    // Only an update compares against the file, so only it pays for a second set.
-    let before_set = on_disk.map(|on_disk| place(others.packages.clone(), on_disk));
-    let after_set = place(others.packages, candidate);
-    // One set for both scans. A spec's shared entries are scanned in every asked
-    // environment, declared or not, so a collision the spec had already is found in
-    // an environment only the candidate declares, and is not taken for a new one.
-    let environments = asked_environments(&after_set, config.environment());
-    let involving = |set: &[Package]| -> Vec<CrossSpecCollision> {
-        cross_spec_collisions(set, &environments)
-            .into_iter()
-            .filter(|collision| collision.involves(path))
-            .collect()
-    };
-    let after = involving(&after_set);
-    let before = before_set.map_or_else(Vec::new, |set| involving(&set));
-
-    // Judged per environment, not per field: an update that removes the environment
-    // an unknown key had the spec refused in brings its shared entries into that
-    // environment's scan, a collision on a field that already collided elsewhere.
-    // The entries' fields are stable because no update edits a dotfile list; one
-    // that did would shift the indices this key holds.
-    let mut across = AcrossSpecs::default();
-    for collision in after {
-        let introduced = collision.is_new_against(&before);
-        let issues = collision.into_issues_at(path);
-        if introduced {
-            across.introduced.extend(issues);
-        } else {
-            across.preexisting.extend(issues);
-        }
-    }
-    across
-}
-
-/// Returns `packages` with `spec` in place of the collected spec at its path.
-fn place(mut packages: Vec<Package>, spec: &Package) -> Vec<Package> {
-    // In place, since a collision names its members in collection order.
-    if let Some(at) = packages.iter().position(|p| p.path() == spec.path()) {
-        packages[at] = spec.clone();
-    }
-    packages
 }
 
 pub(super) async fn handle_validate<PR>(
@@ -264,6 +331,8 @@ where
     let mut issues = all_issues(&package_blob.package, source, environment);
     // The spec is judged against the others as `--all` judges every spec, and
     // only its own collisions are attached.
+    // A spec that cannot be placed is compared with nothing, and still has its own
+    // result: the warnings already sent say what could not be checked.
     let across = collisions_with_other_specs(
         None,
         &package_blob.package,
@@ -273,8 +342,9 @@ where
         config,
         sender,
     )
-    .await;
-    issues.extend(across.introduced);
+    .await
+    .unwrap_or_default();
+    issues.extend(across.issues.into_iter().map(|(issue, _)| issue));
     let issues = &issues;
 
     // Step 3: Process validation results
@@ -337,7 +407,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::validation::{ValidationErrorCategory, ValidationIssue};
 
@@ -413,5 +483,210 @@ mod tests {
         .await;
 
         assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
+    }
+
+    // A repository listing no spec, for a run that compares against the others and
+    // has none to compare.
+    pub(in crate::package::service) fn listing_nothing()
+    -> crate::package::port::MockPackageRepository {
+        let mut repo = crate::package::port::MockPackageRepository::new();
+        repo.expect_list_packages()
+            .returning(|| Ok(crate::package::port::ListPackagesOutput(Vec::new())));
+        repo.expect_directory_identity().return_const(None);
+        repo
+    }
+
+    // A package directory that would not list but still answered for `alpha`, which
+    // shares `~/.gemrc` with the standalone `gem`: collection leaves alpha out and
+    // compares the standalone specs alone.
+    pub(in crate::package::service) fn alpha_beside_gem_with_packages_unlisted(
+        saves: usize,
+    ) -> (
+        crate::config::SelfieConfig,
+        crate::package::port::MockPackageRepository,
+        crate::package::port::MockPackageRepository,
+    ) {
+        use crate::package::{
+            DotfileEntry, GetPackage, PackageBuilder, SpecOrigin,
+            port::{ListPackagesOutput, MockPackageRepository, PackageListError},
+        };
+        let alpha = PackageBuilder::default()
+            .name("alpha")
+            .environment("test", |b| b.install("true"))
+            .dotfiles(vec![DotfileEntry::new("alpha/rc", "~/.gemrc")])
+            .path("/packages/alpha.yml")
+            .origin(SpecOrigin::PackageDirectory)
+            .build();
+        let gem = PackageBuilder::default()
+            .name("gem")
+            .dotfiles(vec![DotfileEntry::new("gem/rc", "~/.gemrc")])
+            .path("/dotfiles/gem.yml")
+            .origin(SpecOrigin::DotfilesDirectory)
+            .build();
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().returning(move |_| {
+            Ok(GetPackage::from_existing(
+                alpha.clone(),
+                "/packages/alpha.yml".into(),
+            ))
+        });
+        repo.expect_list_packages().returning(|| {
+            Err(PackageListError::new(
+                "/packages".into(),
+                crate::fs::DirectoryState::Unlistable(std::sync::Arc::new(std::io::Error::other(
+                    "denied",
+                ))),
+            ))
+        });
+        repo.expect_directory_identity().return_const(None);
+        repo.expect_save_package()
+            .times(saves)
+            .returning(|_, _| Ok(()));
+        let mut dotfiles_repo = MockPackageRepository::new();
+        dotfiles_repo
+            .expect_list_packages()
+            .returning(move || Ok(ListPackagesOutput(vec![Ok(gem.clone())])));
+        dotfiles_repo.expect_directory_identity().return_const(None);
+        let config = crate::config::SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/packages")
+            .dotfiles_directory("/dotfiles".into())
+            .build();
+        (config, repo, dotfiles_repo)
+    }
+
+    // Every cross-spec issue in the validation results the run sent.
+    pub(in crate::package::service) fn reported_collisions(
+        rx: &mut tokio::sync::mpsc::Receiver<crate::package::event::PackageEvent>,
+    ) -> Vec<String> {
+        let mut found = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::package::event::PackageEvent::ValidationResultCompleted {
+                validation_result,
+                ..
+            } = event
+            {
+                found.extend(
+                    validation_result
+                        .issues
+                        .into_iter()
+                        .filter(|issue| issue.message.contains("so apply deploys none"))
+                        .map(|issue| issue.field),
+                );
+            }
+        }
+        found
+    }
+
+    // A standalone spec found by name, in a dotfiles directory that then will not
+    // list, cannot be placed among the others. The validation still answers with
+    // the spec's own result, and says the dotfiles directory went unchecked.
+    #[tokio::test]
+    async fn a_validated_spec_that_cannot_be_placed_still_answers() {
+        use crate::package::{
+            DotfileEntry, GetPackage, PackageBuilder, SpecOrigin,
+            event::{OperationContext, PackageEvent, metadata::OperationType},
+            port::{ListPackagesOutput, MockPackageRepository, PackageError, PackageListError},
+        };
+        let gem = PackageBuilder::default()
+            .name("gem")
+            .dotfiles(vec![DotfileEntry::new("gem/rc", "~/.gemrc")])
+            .path("/dotfiles/gem.yml")
+            .origin(SpecOrigin::DotfilesDirectory)
+            .build();
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages()
+            .returning(|| Ok(ListPackagesOutput(Vec::new())));
+        repo.expect_directory_identity().return_const(None);
+        repo.expect_get_package().returning(|name| {
+            Err(PackageError::PackageNotFound {
+                name: name.to_string(),
+                packages_path: "/packages".into(),
+                files_examined: 0,
+                search_patterns: vec![],
+                declared_by: Vec::new(),
+            }
+            .into())
+        });
+        let mut dotfiles_repo = MockPackageRepository::new();
+        dotfiles_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(GetPackage::from_existing(gem, "/dotfiles/gem.yml".into())));
+        dotfiles_repo.expect_list_packages().returning(|| {
+            Err(PackageListError::new(
+                "/dotfiles".into(),
+                crate::fs::DirectoryState::Unlistable(std::sync::Arc::new(std::io::Error::other(
+                    "denied",
+                ))),
+            ))
+        });
+        dotfiles_repo.expect_directory_identity().return_const(None);
+        let config = crate::config::SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/packages")
+            .dotfiles_directory("/dotfiles".into())
+            .build();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageValidate,
+            "gem".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+
+        let result = handle_validate(
+            "gem",
+            &repo,
+            &dotfiles_repo,
+            &config,
+            &sender,
+            &mut ProgressTracker::new(3),
+        )
+        .await;
+        drop(sender);
+
+        assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
+        let mut warnings = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let PackageEvent::Warning { message, .. } = event {
+                warnings.push(message);
+            }
+        }
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.starts_with("Could not check")
+                    && message.contains("dotfiles")),
+            "{warnings:?}"
+        );
+    }
+
+    // Collection left alpha out, so a validate of it judges the loaded spec in its
+    // place and still finds its collision with the standalone spec.
+    #[tokio::test]
+    async fn a_validated_spec_collection_left_out_is_still_compared() {
+        use crate::package::event::{OperationContext, metadata::OperationType};
+        let (config, repo, dotfiles_repo) = alpha_beside_gem_with_packages_unlisted(0);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageValidate,
+            "alpha".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+
+        let _ = handle_validate(
+            "alpha",
+            &repo,
+            &dotfiles_repo,
+            &config,
+            &sender,
+            &mut ProgressTracker::new(3),
+        )
+        .await;
+
+        assert_eq!(reported_collisions(&mut rx), ["dotfiles[0].target"]);
     }
 }

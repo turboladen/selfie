@@ -6,11 +6,14 @@ use crate::{
     config::SelfieConfig,
     package::{
         EnvironmentConfig,
-        event::{EventSender, OperationResult, OperationSuccess, PackageUpdateFields, SpecWrite},
+        event::{
+            EventSender, OperationFailure, OperationResult, OperationSuccess, PackageUpdateFields,
+            SpecWrite,
+        },
         port::PackageRepository,
         service::{
             ProgressTracker,
-            validate::{all_issues, refuse_or_report},
+            validate::{OnWrite, all_issues, collisions_with_other_specs, refuse_or_report},
         },
         unspanned,
     },
@@ -80,6 +83,7 @@ pub(super) async fn handle_update<PR>(
     package_name: &str,
     fields: PackageUpdateFields,
     repo: &PR,
+    dotfiles_repo: &PR,
     config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
@@ -101,6 +105,12 @@ where
 
     let file_path = get_package.file_path().to_path_buf();
     let mut package = get_package.into_package();
+    // The spec as its file holds it, to tell the collisions with other specs the
+    // update brings in from those it already had. A spec with no dotfile entry has
+    // none either way, and an update adds no entry.
+    let on_disk = package
+        .has_dotfiles_in_any_environment()
+        .then(|| package.clone());
 
     // Step 2: Apply changes
     progress.next(sender, "Applying updates").await;
@@ -233,23 +243,62 @@ where
     // the file is touched. An error on any other field was there before the update,
     // so it is reported and does not hold up a fix to a different field.
     let issues = all_issues(&package, repo, config.environment());
+    // A collision with another spec stops the update when the update brought it in,
+    // and is reported when the file had it already, whichever field it is on.
+    let across = match collisions_with_other_specs(
+        on_disk.as_ref(),
+        &package,
+        package_name,
+        repo,
+        dotfiles_repo,
+        config,
+        sender,
+    )
+    .await
+    {
+        Ok(across) => across,
+        // Unplaced, the spec was compared with nothing, so it is not written.
+        Err(_) => {
+            return OperationResult::Failure(OperationFailure::UnplacedSpec {
+                action: SpecWrite::Update,
+                package_name: package_name.to_string(),
+                path: file_path,
+            });
+        }
+    };
     let refused_on_save: Vec<String> = package
         .save_refusal_issues()
         .iter()
         .map(|issue| issue.field().to_string())
+        .collect();
+    let environments = || package.environments.value.keys().map(String::as_str);
+    let judged = issues
+        .all_issues()
+        .iter()
+        .cloned()
+        .map(|issue| {
+            let refuses = written.contains(issue.field(), environments())
+                || refused_on_save.iter().any(|field| field == issue.field());
+            let on_write = if refuses {
+                OnWrite::Refuses
+            } else {
+                OnWrite::Reports
+            };
+            (issue, on_write)
+        })
+        .chain(
+            across
+                .issues
+                .into_iter()
+                .map(|(issue, standing)| (issue, standing.on_write())),
+        )
         .collect();
     if let Some(refusal) = refuse_or_report(
         sender,
         SpecWrite::Update,
         package_name,
         config.environment(),
-        &issues,
-        |issue| {
-            written.contains(
-                issue.field(),
-                package.environments.value.keys().map(String::as_str),
-            ) || refused_on_save.iter().any(|field| field == issue.field())
-        },
+        judged,
     )
     .await
     {
@@ -354,6 +403,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -411,6 +461,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -455,6 +506,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -503,6 +555,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -548,6 +601,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -595,6 +649,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -630,6 +685,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -664,6 +720,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -712,6 +769,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &config,
             &sender,
             &mut progress,
@@ -776,6 +834,7 @@ mod tests {
                 "test-pkg",
                 fields,
                 &mock_repo,
+                &MockPackageRepository::new(),
                 &test_config(),
                 &sender,
                 &mut progress,
@@ -810,7 +869,7 @@ mod tests {
         saves: usize,
         save: Result<(), PackageRepoError>,
     ) -> (OperationResult, Vec<ValidationResultData>) {
-        let mut mock_repo = MockPackageRepository::new();
+        let mut mock_repo = super::super::validate::tests::listing_nothing();
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
         let get_package =
@@ -831,6 +890,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &super::super::validate::tests::listing_nothing(),
             &test_config(),
             &sender,
             &mut progress,
@@ -926,6 +986,7 @@ mod tests {
             .environment("test-env", |b| b.install("true"))
             .dotfiles(vec![entry])
             .path("/test/packages/test-pkg.yml")
+            .origin(crate::package::SpecOrigin::PackageDirectory)
             .build();
 
         let (_, results) = update_description_of(package, 1, Ok(())).await;
@@ -1012,6 +1073,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &MockPackageRepository::new(),
             &test_config(),
             &sender,
             &mut progress,
@@ -1036,7 +1098,7 @@ mod tests {
         package: crate::package::Package,
         fields: PackageUpdateFields,
     ) -> (OperationFailure, Vec<ValidationResultData>) {
-        let mut mock_repo = MockPackageRepository::new();
+        let mut mock_repo = super::super::validate::tests::listing_nothing();
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
         let get_package =
@@ -1050,6 +1112,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &super::super::validate::tests::listing_nothing(),
             &test_config(),
             &sender,
             &mut progress,
@@ -1136,9 +1199,14 @@ mod tests {
     async fn an_install_update_is_saved_beside_an_error_in_a_dotfile_of_that_environment() {
         let yaml = "name: test-pkg\nenvironments:\n  test-env:\n    install: \"true\"\n    dotfiles:\n      \
                     - source: a\n        target: ~/.same\n      - source: b\n        target: ~/.same\n";
-        let package: crate::package::Package =
+        let mut package: crate::package::Package =
             crate::yaml::parse(yaml).expect("fixture must parse");
-        let mut mock_repo = MockPackageRepository::new();
+        package.set_source(
+            PathBuf::from("/test/packages/test-pkg.yml"),
+            yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
+        );
+        let mut mock_repo = super::super::validate::tests::listing_nothing();
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
         let get_package =
@@ -1160,6 +1228,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
+            &super::super::validate::tests::listing_nothing(),
             &test_config(),
             &sender,
             &mut progress,
@@ -1245,5 +1314,128 @@ mod tests {
         written.environment_field("a.b", "install");
         assert!(written.contains("environments.a.b.install", environments()));
         assert!(!written.contains("environments.a.install", environments()));
+    }
+
+    // Collection left alpha out, so the file's own collisions come from the spec
+    // loaded for the update, not from the listing, and are reported, not refused.
+    #[tokio::test]
+    async fn an_update_whose_spec_collection_left_out_reports_rather_than_refuses() {
+        let (config, repo, dotfiles_repo) =
+            super::super::validate::tests::alpha_beside_gem_with_packages_unlisted(1);
+        let (tx, mut rx) = mpsc::channel(64);
+        let sender = EventSender::new_with_context(
+            tx,
+            crate::package::event::metadata::OperationType::PackageUpdate,
+            "alpha".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+        let fields = PackageUpdateFields {
+            description: Some("renamed".to_string()),
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "alpha",
+            fields,
+            &repo,
+            &dotfiles_repo,
+            &config,
+            &sender,
+            &mut ProgressTracker::new(3),
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
+        assert_eq!(
+            super::super::validate::tests::reported_collisions(&mut rx),
+            ["dotfiles[0].target"]
+        );
+    }
+
+    // A spec whose origin names no spec directory cannot be placed among the others,
+    // so it is compared with nothing and must not be written.
+    #[tokio::test]
+    async fn an_update_of_a_spec_that_cannot_be_placed_is_refused() {
+        let entry: crate::package::DotfileEntry =
+            crate::yaml::parse("source: rc\ntarget: ~/.rc\n").expect("fixture must parse");
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test-env", |b| b.install("true"))
+            .dotfiles(vec![entry])
+            .path("/test/packages/test-pkg.yml")
+            .origin(crate::package::SpecOrigin::Memory)
+            .build();
+        let mut repo = super::super::validate::tests::listing_nothing();
+        repo.expect_get_package().return_once(move |_| {
+            Ok(GetPackage::from_existing(
+                package,
+                PathBuf::from("/test/packages/test-pkg.yml"),
+            ))
+        });
+        repo.expect_save_package().times(0);
+        let (sender, _rx) = test_sender();
+        let fields = PackageUpdateFields {
+            description: Some("renamed".to_string()),
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &repo,
+            &super::super::validate::tests::listing_nothing(),
+            &test_config(),
+            &sender,
+            &mut ProgressTracker::new(3),
+        )
+        .await;
+
+        let OperationResult::Failure(OperationFailure::UnplacedSpec {
+            action: crate::package::event::SpecWrite::Update,
+            package_name,
+            path,
+        }) = result
+        else {
+            panic!("expected the update to be refused as unplaced, got: {result:?}");
+        };
+        assert_eq!(package_name, "test-pkg");
+        assert_eq!(path, PathBuf::from("/test/packages/test-pkg.yml"));
+    }
+
+    // A spec with no dotfile entry cannot share a target, so an update lists no
+    // directory: the mocks expect no listing, and one fails the test.
+    #[tokio::test]
+    async fn update_of_a_spec_with_no_entries_collects_nothing() {
+        let mut repo = MockPackageRepository::new();
+        let package = create_test_package("test-pkg");
+        repo.expect_get_package().return_once(move |_| {
+            Ok(GetPackage::from_existing(
+                package,
+                PathBuf::from("/test/packages/test-pkg.yml"),
+            ))
+        });
+        repo.expect_save_package().times(1).returning(|_, _| Ok(()));
+        repo.expect_list_packages().times(0);
+        let mut dotfiles_repo = MockPackageRepository::new();
+        dotfiles_repo.expect_list_packages().times(0);
+        let (sender, _rx) = test_sender();
+        let fields = PackageUpdateFields {
+            description: Some("renamed".to_string()),
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &repo,
+            &dotfiles_repo,
+            &test_config(),
+            &sender,
+            &mut ProgressTracker::new(3),
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
     }
 }

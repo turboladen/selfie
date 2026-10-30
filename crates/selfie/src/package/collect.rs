@@ -75,31 +75,153 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
     dotfiles_directory_is_expected: bool,
     environment: &str,
 ) -> Result<Collected, crate::package::port::PackageListError> {
-    let mut findings = Vec::new();
+    Ok(Listed::of(package_repo, dotfiles_repo)?
+        .collect(dotfiles_directory_is_expected, environment))
+}
 
-    // The failure travels typed. Rendering it here hands the caller a bare
-    // sentence, leaving it able to say only that loading failed -- not which of
-    // the three fixes for a missing package directory applies.
-    let output = package_repo.list_packages()?;
-    let invalid_in_packages: Vec<_> = output.invalid_packages().cloned().collect();
-    let unparsable_in_packages = unparsable_paths(&output);
-    let mut packages = output.valid_packages().cloned().collect::<Vec<_>>();
+/// Records the spec files both directories hold, as listed, before any name is
+/// settled.
+#[derive(Clone)]
+pub(crate) struct Listed {
+    packages: Vec<Package>,
+    invalid_in_packages: Vec<crate::package::port::PackageParseError>,
+    // Empty when one directory serves as both, which is listed once.
+    dotfiles: Result<
+        (Vec<Package>, Vec<crate::package::port::PackageParseError>),
+        crate::package::port::PackageListError,
+    >,
+}
 
-    let mut dotfiles_packages = Vec::new();
-    let mut invalid_in_dotfiles = Vec::new();
-    let mut unparsable_in_dotfiles = Vec::new();
+// Lists the dotfiles directory: the specs that parsed and the files that did not.
+fn list_dotfiles<R: PackageRepository>(
+    dotfiles_repo: &R,
+) -> Result<
+    (Vec<Package>, Vec<crate::package::port::PackageParseError>),
+    crate::package::port::PackageListError,
+> {
+    dotfiles_repo.list_packages().map(|output| {
+        (
+            output.valid_packages().cloned().collect(),
+            output.invalid_packages().cloned().collect(),
+        )
+    })
+}
 
-    // One directory configured as both settings is read once, through the
-    // package repository, so its files load as package specs. Reading it twice
-    // lists every entry twice and makes every name collide with itself.
-    let same_directory = same_directory(package_repo, dotfiles_repo);
+// The paths of the spec files that failed to parse.
+fn unparsable_paths(invalid: &[crate::package::port::PackageParseError]) -> Vec<PathBuf> {
+    invalid
+        .iter()
+        .map(|error| error.package_path().to_path_buf())
+        .collect()
+}
 
-    if !same_directory {
-        match dotfiles_repo.list_packages() {
-            Ok(output) => {
-                invalid_in_dotfiles = output.invalid_packages().cloned().collect();
-                unparsable_in_dotfiles = unparsable_paths(&output);
-                dotfiles_packages = output.valid_packages().cloned().collect();
+/// Reports that [`Listed::place`] could not place a spec.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error(
+    "selfie could not tell which spec directory {} belongs in, so it could not compare it with \
+     the other specs",
+    .0.display()
+)]
+pub(crate) struct UnplacedSpec(PathBuf);
+
+impl Listed {
+    /// Lists both directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`PackageListError`](crate::package::port::PackageListError)
+    /// when the package directory could not be listed.
+    pub(crate) fn of<R: PackageRepository>(
+        package_repo: &R,
+        dotfiles_repo: &R,
+    ) -> Result<Self, crate::package::port::PackageListError> {
+        // The failure travels typed. Rendering it here hands the caller a bare
+        // sentence, leaving it able to say only that loading failed -- not which of
+        // the three fixes for a missing package directory applies.
+        let output = package_repo.list_packages()?;
+        // One directory configured as both settings is read once, through the
+        // package repository, so its files load as package specs. Reading it twice
+        // lists every entry twice and makes every name collide with itself.
+        let dotfiles = if same_directory(package_repo, dotfiles_repo) {
+            Ok((Vec::new(), Vec::new()))
+        } else {
+            list_dotfiles(dotfiles_repo)
+        };
+        Ok(Self {
+            packages: output.valid_packages().cloned().collect(),
+            invalid_in_packages: output.invalid_packages().cloned().collect(),
+            dotfiles,
+        })
+    }
+
+    /// Lists the dotfiles directory alone, for a package directory that could not
+    /// be listed.
+    pub(crate) fn of_dotfiles_only<R: PackageRepository>(dotfiles_repo: &R) -> Self {
+        Self {
+            packages: Vec::new(),
+            invalid_in_packages: Vec::new(),
+            dotfiles: list_dotfiles(dotfiles_repo),
+        }
+    }
+
+    /// Changes the listing to what it would be with `spec`'s file written: `spec`
+    /// replaces the listed spec at its path, or is added in path order among the
+    /// specs of the directory its origin names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnplacedSpec`], and leaves the listing as it was, in either of
+    /// these cases:
+    ///
+    /// - `spec`'s origin names no spec directory.
+    /// - `spec`'s origin names the dotfiles directory, and that directory could not
+    ///   be listed.
+    pub(crate) fn place(&mut self, spec: &Package) -> Result<(), UnplacedSpec> {
+        let unplaced = || UnplacedSpec(spec.path().clone());
+        let (specs, invalid) = match spec.origin() {
+            SpecOrigin::PackageDirectory => (&mut self.packages, &mut self.invalid_in_packages),
+            SpecOrigin::DotfilesDirectory => match &mut self.dotfiles {
+                Ok((specs, invalid)) => (specs, invalid),
+                Err(_) => return Err(unplaced()),
+            },
+            SpecOrigin::Memory => return Err(unplaced()),
+        };
+        // The file holds `spec` now, whatever failed to parse there before.
+        invalid.retain(|error| error.package_path() != spec.path().as_path());
+        // Matched by a scan, since a repository need not list its specs in order.
+        // A new file goes before the first listed path that sorts after it, which
+        // is where a sorted listing has it.
+        match specs.iter().position(|listed| listed.path() == spec.path()) {
+            Some(at) => specs[at] = spec.clone(),
+            None => {
+                let at = specs
+                    .iter()
+                    .position(|listed| listed.path() > spec.path())
+                    .unwrap_or(specs.len());
+                specs.insert(at, spec.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Settles every name and returns what collecting the listed specs found, as
+    /// [`collect_all_packages`] does.
+    pub(crate) fn collect(
+        self,
+        dotfiles_directory_is_expected: bool,
+        environment: &str,
+    ) -> Collected {
+        let mut findings = Vec::new();
+        let mut packages = self.packages;
+        let invalid_in_packages = self.invalid_in_packages;
+        let unparsable_in_packages = unparsable_paths(&invalid_in_packages);
+
+        let mut dotfiles_packages = Vec::new();
+        let mut invalid_in_dotfiles = Vec::new();
+        match self.dotfiles {
+            Ok((specs, invalid)) => {
+                dotfiles_packages = specs;
+                invalid_in_dotfiles = invalid;
             }
             Err(error) => {
                 use directory::UnlistedDotfilesDirectory as Unlisted;
@@ -126,138 +248,139 @@ pub(crate) fn collect_all_packages<R: PackageRepository>(
                 }
             }
         }
-    }
+        let unparsable_in_dotfiles = unparsable_paths(&invalid_in_dotfiles);
 
-    // Refusals are found in this order: the dotfiles directory above, then
-    // packages/ ambiguities, packages/ unparsable specs, dotfiles/ ambiguities and
-    // dotfiles/ unparsable specs. Two consumers read the first refusal, the
-    // orphan check's notice and `stop_on_error`, so the order names the cause.
-    //
-    // Several files in one directory claiming one name are refused as install
-    // refuses them, whether each parses or not: deploying any of them picks one by
-    // enumeration order, and deploying all of them lets the last overwrite the rest.
-    let table = NameTable::of(
-        packages
-            .iter()
-            .map(|pkg| pkg.path().clone())
-            .chain(unparsable_in_packages.iter().cloned()),
-        dotfiles_packages
-            .iter()
-            .map(|pkg| pkg.path().clone())
-            .chain(unparsable_in_dotfiles.iter().cloned()),
-        |path: &PathBuf| path.file_name().and_then(|name| name.to_str()),
-    );
-    let loaded_in_packages: HashSet<String> =
-        packages.iter().filter_map(Package::spec_name).collect();
-    let mut unrefused_ambiguities = Vec::new();
-    for (name, _, claim) in table.package_claims() {
-        if let Claim::Ambiguous(paths) = claim {
-            let ambiguity = (name.to_string(), paths.to_vec(), BaseKind::PackageDirectory);
-            if ambiguity_matters(paths, &packages.iter().collect::<Vec<_>>(), environment) {
-                findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
-                    name: ambiguity.0,
-                    paths: ambiguity.1,
-                    base: ambiguity.2,
-                }));
-            } else {
-                unrefused_ambiguities.push(ambiguity);
+        // Refusals are found in this order: the dotfiles directory above, then
+        // packages/ ambiguities, packages/ unparsable specs, dotfiles/ ambiguities and
+        // dotfiles/ unparsable specs. Two consumers read the first refusal, the
+        // orphan check's notice and `stop_on_error`, so the order names the cause.
+        //
+        // Several files in one directory claiming one name are refused as install
+        // refuses them, whether each parses or not: deploying any of them picks one by
+        // enumeration order, and deploying all of them lets the last overwrite the rest.
+        let table = NameTable::of(
+            packages
+                .iter()
+                .map(|pkg| pkg.path().clone())
+                .chain(unparsable_in_packages.iter().cloned()),
+            dotfiles_packages
+                .iter()
+                .map(|pkg| pkg.path().clone())
+                .chain(unparsable_in_dotfiles.iter().cloned()),
+            |path: &PathBuf| path.file_name().and_then(|name| name.to_str()),
+        );
+        let loaded_in_packages: HashSet<String> =
+            packages.iter().filter_map(Package::spec_name).collect();
+        let mut unrefused_ambiguities = Vec::new();
+        for (name, _, claim) in table.package_claims() {
+            if let Claim::Ambiguous(paths) = claim {
+                let ambiguity = (name.to_string(), paths.to_vec(), BaseKind::PackageDirectory);
+                if ambiguity_matters(paths, &packages.iter().collect::<Vec<_>>(), environment) {
+                    findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
+                        name: ambiguity.0,
+                        paths: ambiguity.1,
+                        base: ambiguity.2,
+                    }));
+                } else {
+                    unrefused_ambiguities.push(ambiguity);
+                }
             }
         }
-    }
-    packages.retain(|pkg| pkg.spec_name().is_none_or(|name| table.uses_package(&name)));
-    // A package file that does not parse is dropped by `valid_packages`, and
-    // silence there is dangerous: a dotfile that quietly stops deploying surfaces
-    // much later as an authentication failure nobody traces back to a typo. Every
-    // packages/ file that failed to parse could have been used, so each is a
-    // refusal, one within an ambiguous name too: it needs its own fix.
-    findings.extend(invalid_in_packages.into_iter().map(|error| {
-        Finding::Refusal(CollectionRefusal::UnloadableSpec {
-            error,
-            base: BaseKind::PackageDirectory,
-        })
-    }));
-
-    // A name packages/ claims is settled in packages/: every dotfiles/ file of that
-    // name is set aside with a warning and is never a refusal, whether it parsed,
-    // and however many there are. Names are spec file names with case folded, as
-    // package lookup resolves them. A packages/ spec that failed to parse, or whose
-    // name several packages/ files claim, still claims it: deploying the dotfiles/
-    // copy in its place would apply a file the user did not mean. The reason names
-    // the first thing to fix in packages/: an ambiguity before a failed parse.
-    let mut set_aside = Vec::new();
-    for (name, _, claim) in table.dotfiles_claims() {
-        if let Claim::SetAside(in_packages) = claim {
-            // The packages/ spec may deploy nothing this one does, so nothing
-            // collected stands in for this file's entries.
-            set_aside.push(name.to_string());
-            let why = if in_packages.len() > 1 {
-                format!(
-                    "Not using '{name}' from dotfiles/: packages/ has more than one spec by that \
-                     name"
-                )
-            } else if !loaded_in_packages.contains(name) {
-                format!(
-                    "Not using '{name}' from dotfiles/: packages/ has a spec by that name that \
-                     could not be loaded"
-                )
-            } else {
-                format!(
-                    "Duplicate name '{name}' found in both packages/ and dotfiles/ — using the \
-                     packages/ version"
-                )
-            };
-            findings.push(Finding::Warning(ApplyWarning::Named {
-                name: name.to_string(),
-                message: why,
-            }));
-        } else if let Claim::Ambiguous(paths) = claim {
-            let ambiguity = (
-                name.to_string(),
-                paths.to_vec(),
-                BaseKind::DotfilesDirectory,
-            );
-            if ambiguity_matters(
-                paths,
-                &dotfiles_packages.iter().collect::<Vec<_>>(),
-                environment,
-            ) {
-                findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
-                    name: ambiguity.0,
-                    paths: ambiguity.1,
-                    base: ambiguity.2,
-                }));
-            } else {
-                unrefused_ambiguities.push(ambiguity);
-            }
-        }
-    }
-    // A dotfiles/ file that failed to parse could have been used only where
-    // packages/ does not claim its name; under a claimed name nothing would have
-    // used it, so it is only worth a word.
-    for invalid in invalid_in_dotfiles {
-        let claimed = crate::package::spec_name_of(invalid.package_path())
-            .is_some_and(|name| table.is_set_aside(&name));
-        findings.push(if claimed {
-            Finding::Warning(ApplyWarning::SkippedSpec(invalid))
-        } else {
+        packages.retain(|pkg| pkg.spec_name().is_none_or(|name| table.uses_package(&name)));
+        // A package file that does not parse is dropped by `valid_packages`, and
+        // silence there is dangerous: a dotfile that quietly stops deploying surfaces
+        // much later as an authentication failure nobody traces back to a typo. Every
+        // packages/ file that failed to parse could have been used, so each is a
+        // refusal, one within an ambiguous name too: it needs its own fix.
+        findings.extend(invalid_in_packages.into_iter().map(|error| {
             Finding::Refusal(CollectionRefusal::UnloadableSpec {
-                error: invalid,
-                base: BaseKind::DotfilesDirectory,
+                error,
+                base: BaseKind::PackageDirectory,
             })
-        });
-    }
-    dotfiles_packages.retain(|pkg| {
-        pkg.spec_name()
-            .is_none_or(|name| table.uses_dotfiles(&name))
-    });
-    packages.extend(dotfiles_packages);
+        }));
 
-    Ok(Collected {
-        packages,
-        findings,
-        unrefused_ambiguities,
-        set_aside,
-    })
+        // A name packages/ claims is settled in packages/: every dotfiles/ file of that
+        // name is set aside with a warning and is never a refusal, whether it parsed,
+        // and however many there are. Names are spec file names with case folded, as
+        // package lookup resolves them. A packages/ spec that failed to parse, or whose
+        // name several packages/ files claim, still claims it: deploying the dotfiles/
+        // copy in its place would apply a file the user did not mean. The reason names
+        // the first thing to fix in packages/: an ambiguity before a failed parse.
+        let mut set_aside = Vec::new();
+        for (name, _, claim) in table.dotfiles_claims() {
+            if let Claim::SetAside(in_packages) = claim {
+                // The packages/ spec may deploy nothing this one does, so nothing
+                // collected stands in for this file's entries.
+                set_aside.push(name.to_string());
+                let why = if in_packages.len() > 1 {
+                    format!(
+                        "Not using '{name}' from dotfiles/: packages/ has more than one spec by that \
+                         name"
+                    )
+                } else if !loaded_in_packages.contains(name) {
+                    format!(
+                        "Not using '{name}' from dotfiles/: packages/ has a spec by that name that \
+                         could not be loaded"
+                    )
+                } else {
+                    format!(
+                        "Duplicate name '{name}' found in both packages/ and dotfiles/ — using the \
+                         packages/ version"
+                    )
+                };
+                findings.push(Finding::Warning(ApplyWarning::Named {
+                    name: name.to_string(),
+                    message: why,
+                }));
+            } else if let Claim::Ambiguous(paths) = claim {
+                let ambiguity = (
+                    name.to_string(),
+                    paths.to_vec(),
+                    BaseKind::DotfilesDirectory,
+                );
+                if ambiguity_matters(
+                    paths,
+                    &dotfiles_packages.iter().collect::<Vec<_>>(),
+                    environment,
+                ) {
+                    findings.push(Finding::Refusal(CollectionRefusal::AmbiguousName {
+                        name: ambiguity.0,
+                        paths: ambiguity.1,
+                        base: ambiguity.2,
+                    }));
+                } else {
+                    unrefused_ambiguities.push(ambiguity);
+                }
+            }
+        }
+        // A dotfiles/ file that failed to parse could have been used only where
+        // packages/ does not claim its name; under a claimed name nothing would have
+        // used it, so it is only worth a word.
+        for invalid in invalid_in_dotfiles {
+            let claimed = crate::package::spec_name_of(invalid.package_path())
+                .is_some_and(|name| table.is_set_aside(&name));
+            findings.push(if claimed {
+                Finding::Warning(ApplyWarning::SkippedSpec(invalid))
+            } else {
+                Finding::Refusal(CollectionRefusal::UnloadableSpec {
+                    error: invalid,
+                    base: BaseKind::DotfilesDirectory,
+                })
+            });
+        }
+        dotfiles_packages.retain(|pkg| {
+            pkg.spec_name()
+                .is_none_or(|name| table.uses_dotfiles(&name))
+        });
+        packages.extend(dotfiles_packages);
+
+        Collected {
+            packages,
+            findings,
+            unrefused_ambiguities,
+            set_aside,
+        }
+    }
 }
 
 /// Whether `packages` and `dotfiles` read one directory.
@@ -269,14 +392,6 @@ pub(crate) fn same_directory<R: PackageRepository>(packages: &R, dotfiles: &R) -
         (packages.directory_identity(), dotfiles.directory_identity()),
         (Some(packages), Some(dotfiles)) if packages == dotfiles
     )
-}
-
-/// The spec files in `output` that failed to parse.
-fn unparsable_paths(output: &crate::package::port::ListPackagesOutput) -> Vec<PathBuf> {
-    output
-        .invalid_packages()
-        .map(|error| error.package_path().to_path_buf())
-        .collect()
 }
 
 /// What each folded name means across the two spec directories, from the files'
@@ -555,6 +670,123 @@ mod tests {
         PackageBuilder,
         port::{ListPackagesOutput, MockPackageRepository},
     };
+
+    // A file listed as unparsable that now holds the written spec no longer claims
+    // its name twice, so the spec is used.
+    #[test]
+    fn a_file_written_over_one_listed_as_unparsable_is_used() {
+        use crate::package::port::{PackageParseError, PackageParseKind};
+        let cause = crate::yaml::parse::<Package>("name: [unclosed")
+            .expect_err("fixture must fail to parse");
+        let broken = PackageParseError::new(
+            PathBuf::from("/packages/a.yml"),
+            PackageParseKind::Yaml { cause },
+        );
+        let mut packages = MockPackageRepository::new();
+        packages
+            .expect_list_packages()
+            .return_once(move || Ok(ListPackagesOutput(vec![Err(broken)])));
+        packages.expect_directory_identity().return_const(None);
+        let mut dotfiles = MockPackageRepository::new();
+        dotfiles
+            .expect_list_packages()
+            .returning(|| Ok(ListPackagesOutput(Vec::new())));
+        dotfiles.expect_directory_identity().return_const(None);
+        let written = PackageBuilder::default()
+            .name("a")
+            .environment("test", |b| b.install("true"))
+            .path("/packages/a.yml")
+            .origin(SpecOrigin::PackageDirectory)
+            .build();
+
+        let mut listed = Listed::of(&packages, &dotfiles).unwrap();
+        listed.place(&written).unwrap();
+        let collected = listed.collect(false, "test");
+
+        let paths: Vec<&PathBuf> = collected.packages.iter().map(Package::path).collect();
+        assert_eq!(paths, [&PathBuf::from("/packages/a.yml")]);
+        assert!(collected.unusable().is_empty(), "nothing is refused");
+    }
+
+    // A repository need not list its specs in order, so the spec at the written
+    // file's path is found however they are listed, and replaced rather than
+    // listed twice.
+    #[test]
+    fn a_file_written_over_one_listed_out_of_order_replaces_it() {
+        let spec = |name: &str| {
+            PackageBuilder::default()
+                .name(name)
+                .environment("test", |b| b.install("true"))
+                .path(format!("/packages/{name}.yml"))
+                .origin(SpecOrigin::PackageDirectory)
+                .build()
+        };
+        let listed = vec![Ok(spec("m")), Ok(spec("z")), Ok(spec("a"))];
+        let mut packages = MockPackageRepository::new();
+        packages
+            .expect_list_packages()
+            .return_once(move || Ok(ListPackagesOutput(listed)));
+        packages.expect_directory_identity().return_const(None);
+        let mut dotfiles = MockPackageRepository::new();
+        dotfiles
+            .expect_list_packages()
+            .returning(|| Ok(ListPackagesOutput(Vec::new())));
+        dotfiles.expect_directory_identity().return_const(None);
+
+        let mut listed = Listed::of(&packages, &dotfiles).unwrap();
+        listed.place(&spec("a")).unwrap();
+        let collected = listed.collect(false, "test");
+
+        let paths: Vec<&PathBuf> = collected.packages.iter().map(Package::path).collect();
+        assert_eq!(
+            paths.iter().filter(|path| path.ends_with("a.yml")).count(),
+            1,
+            "{paths:?}"
+        );
+        assert_eq!(paths.len(), 3, "{paths:?}");
+    }
+
+    // A file written beside an unparsable file of the same name makes the name
+    // ambiguous, as collection settles it, so neither file is used.
+    #[test]
+    fn a_file_written_beside_an_unparsable_one_of_its_name_is_not_used() {
+        use crate::package::port::{PackageParseError, PackageParseKind};
+        let cause = crate::yaml::parse::<Package>("name: [unclosed")
+            .expect_err("fixture must fail to parse");
+        let broken = PackageParseError::new(
+            PathBuf::from("/packages/alpha.yaml"),
+            PackageParseKind::Yaml { cause },
+        );
+        let mut packages = MockPackageRepository::new();
+        packages
+            .expect_list_packages()
+            .return_once(move || Ok(ListPackagesOutput(vec![Err(broken)])));
+        packages.expect_directory_identity().return_const(None);
+        let mut dotfiles = MockPackageRepository::new();
+        dotfiles
+            .expect_list_packages()
+            .returning(|| Ok(ListPackagesOutput(Vec::new())));
+        dotfiles.expect_directory_identity().return_const(None);
+        let alpha = PackageBuilder::default()
+            .name("alpha")
+            .environment("test", |b| b.install("true"))
+            .path("/packages/alpha.yml")
+            .origin(SpecOrigin::PackageDirectory)
+            .build();
+
+        let mut listed = Listed::of(&packages, &dotfiles).unwrap();
+        listed.place(&alpha).unwrap();
+        let collected = listed.collect(false, "test");
+
+        assert!(collected.packages.is_empty(), "{:?}", collected.packages);
+        assert!(
+            collected.unusable().iter().any(|refusal| matches!(
+                refusal,
+                CollectionRefusal::AmbiguousName { name, .. } if name == "alpha"
+            )),
+            "the name is refused as ambiguous"
+        );
+    }
 
     // A name used from each directory is listed once; an ambiguous name and a
     // set-aside dotfiles name are not used, so they are not listed.

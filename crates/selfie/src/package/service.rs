@@ -435,14 +435,23 @@ where
         let package_name = identity
             .clone()
             .unwrap_or_else(|_| package.name().to_string());
+        let dotfiles_repo = self.dotfiles_repository.clone();
         self.execute_operation_with_deps(
             OperationType::PackageCreate,
             &package_name,
             OperationContext::default(),
             2, // Check existence + save
             move |repo, _, config, sender, mut progress, _token| async move {
-                create::handle_create(package, identity, &repo, &config, &sender, &mut progress)
-                    .await
+                create::handle_create(
+                    package,
+                    identity,
+                    &repo,
+                    &dotfiles_repo,
+                    &config,
+                    &sender,
+                    &mut progress,
+                )
+                .await
             },
         )
     }
@@ -481,6 +490,7 @@ where
         fields: super::event::PackageUpdateFields,
     ) -> EventStream {
         let package_name_owned = package_name.to_string();
+        let dotfiles_repo = self.dotfiles_repository.clone();
         self.execute_operation_with_deps(
             OperationType::PackageUpdate,
             package_name,
@@ -491,6 +501,7 @@ where
                     &package_name_owned,
                     fields,
                     &repo,
+                    &dotfiles_repo,
                     &config,
                     &sender,
                     &mut progress,

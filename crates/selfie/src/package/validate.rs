@@ -46,8 +46,17 @@ pub(crate) fn cross_spec_issues(
 ) -> BTreeMap<PathBuf, Vec<ValidationIssue>> {
     let mut issues: BTreeMap<PathBuf, Vec<ValidationIssue>> = BTreeMap::new();
     for collision in cross_spec_collisions(packages, &asked_environments(packages, environment)) {
-        for (path, issue) in collision.issues {
-            issues.entry(path).or_default().push(issue);
+        let mut paths: Vec<&PathBuf> = Vec::new();
+        for (path, _, _) in &collision.members {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        for path in paths {
+            issues
+                .entry(path.clone())
+                .or_default()
+                .extend(collision.issues_at(path, &collision.environments));
         }
     }
     issues
@@ -76,8 +85,10 @@ pub(crate) struct CrossSpecCollision {
     // The target's state key and every member as (spec file, entry field), sorted.
     entries: (String, Vec<(PathBuf, String)>),
     environments: Vec<String>,
-    // One error per member entry, with the spec file it belongs to.
-    issues: Vec<(PathBuf, ValidationIssue)>,
+    // The clause naming every member and the target, as `describe` words it.
+    clause: String,
+    // Each member entry as (spec file, issue field, place of its target).
+    members: Vec<(PathBuf, String, Option<SourceLocation>)>,
 }
 
 impl CrossSpecCollision {
@@ -86,22 +97,49 @@ impl CrossSpecCollision {
         self.entries.1.iter().any(|(member, _)| member == path)
     }
 
-    /// Returns whether this collision meets in an environment where none of `before` has
-    /// the same entries meeting at the same target.
-    pub(crate) fn is_new_against(&self, before: &[Self]) -> bool {
-        self.environments.iter().any(|environment| {
-            !before.iter().any(|earlier| {
-                earlier.entries == self.entries && earlier.environments.contains(environment)
+    /// Returns the environments this collision meets in where none of `before`
+    /// has the same entries meeting at the same target, in the order found.
+    pub(crate) fn new_against(&self, before: &[Self]) -> Vec<String> {
+        self.environments
+            .iter()
+            .filter(|environment| {
+                !before.iter().any(|earlier| {
+                    earlier.entries == self.entries && earlier.environments.contains(environment)
+                })
             })
-        })
+            .cloned()
+            .collect()
     }
 
-    /// Returns the errors for the entries of the spec file at `path`.
-    pub(crate) fn into_issues_at(self, path: &Path) -> impl Iterator<Item = ValidationIssue> {
-        self.issues
-            .into_iter()
-            .filter(move |(member, _)| member == path)
-            .map(|(_, issue)| issue)
+    /// Returns the errors for the entries of the spec file at `path`, each naming
+    /// every environment the members meet in.
+    pub(crate) fn into_issues_at(self, path: &Path) -> Vec<ValidationIssue> {
+        let environments = self.environments.clone();
+        self.issues_at(path, &environments)
+    }
+
+    /// Returns the errors for the entries of the spec file at `path`, each naming
+    /// `environments` as where the members meet.
+    pub(crate) fn issues_at(&self, path: &Path, environments: &[String]) -> Vec<ValidationIssue> {
+        let quoted: Vec<String> = environments.iter().map(|e| format!("'{e}'")).collect();
+        let message = format!(
+            "Dotfile entries {} in environment {}, so apply deploys none of them there",
+            self.clause,
+            quoted.join(", ")
+        );
+        self.members
+            .iter()
+            .filter(|(member, _, _)| member == path)
+            .map(|(_, field, location)| {
+                ValidationIssue::error_at(
+                    ValidationErrorCategory::InvalidValue,
+                    field,
+                    &message,
+                    Some(super::KEEP_ONE_ENTRY_ACROSS_SPECS),
+                    *location,
+                )
+            })
+            .collect()
     }
 }
 
@@ -139,32 +177,21 @@ pub(crate) fn cross_spec_collisions(
     // through a map keyed by the entries: that would reorder them.
     seen_in(keyed, |(entries, _)| entries.clone())
         .into_iter()
-        .map(|((entries, group), environments)| {
-            let quoted: Vec<String> = environments.iter().map(|e| format!("'{e}'")).collect();
-            let message = format!(
-                "Dotfile entries {} in environment {}, so apply deploys none of them there",
-                group.describe(),
-                quoted.join(", ")
-            );
-            let issues = group
+        .map(|((entries, group), environments)| CrossSpecCollision {
+            entries,
+            environments: environments.iter().map(ToString::to_string).collect(),
+            clause: group.describe(),
+            members: group
                 .members()
                 .iter()
                 .map(|(package, scoped)| {
-                    let issue = ValidationIssue::error_at(
-                        ValidationErrorCategory::InvalidValue,
-                        &format!("{}.target", scoped.field()),
-                        &message,
-                        Some(super::KEEP_ONE_ENTRY_ACROSS_SPECS),
+                    (
+                        package.path().clone(),
+                        format!("{}.target", scoped.field()),
                         SourceLocation::from_location(scoped.entry.target_location()),
-                    );
-                    (package.path().clone(), issue)
+                    )
                 })
-                .collect();
-            CrossSpecCollision {
-                entries,
-                environments: environments.iter().map(ToString::to_string).collect(),
-                issues,
-            }
+                .collect(),
         })
         .collect()
 }

@@ -13,7 +13,7 @@ use crate::{
         port::{PackageRepoError, PackageRepository},
         service::{
             ProgressTracker,
-            validate::{all_issues, refuse_or_report},
+            validate::{OnWrite, all_issues, collisions_with_other_specs, refuse_or_report},
         },
     },
 };
@@ -23,6 +23,7 @@ pub(super) async fn handle_create<PR>(
     package: Package,
     identity: Result<String, Uncreatable>,
     repo: &PR,
+    dotfiles_repo: &PR,
     config: &SelfieConfig,
     sender: &EventSender,
     progress: &mut ProgressTracker,
@@ -124,13 +125,48 @@ where
     // The rule `spec validate` applies, so create never writes a spec that every
     // later command reports as broken or apply refuses.
     let issues = all_issues(&package, repo, config.environment());
+    // Nothing is at the path yet, so every collision with another spec is one
+    // the create would bring in.
+    let across = match collisions_with_other_specs(
+        None,
+        &package,
+        &package_name,
+        repo,
+        dotfiles_repo,
+        config,
+        sender,
+    )
+    .await
+    {
+        Ok(across) => across,
+        // Unplaced, the spec was compared with nothing, so it is not written.
+        Err(_) => {
+            return OperationResult::Failure(OperationFailure::UnplacedSpec {
+                action: SpecWrite::Create,
+                package_name,
+                path: package.path().clone(),
+            });
+        }
+    };
+    // Every error refuses a create.
+    let judged = issues
+        .all_issues()
+        .iter()
+        .cloned()
+        .map(|issue| (issue, OnWrite::Refuses))
+        .chain(
+            across
+                .issues
+                .into_iter()
+                .map(|(issue, standing)| (issue, standing.on_write())),
+        )
+        .collect();
     if let Some(refusal) = refuse_or_report(
         sender,
         SpecWrite::Create,
         &package_name,
         config.environment(),
-        &issues,
-        |_| true,
+        judged,
     )
     .await
     {
@@ -281,7 +317,16 @@ mod tests {
         progress: &mut ProgressTracker,
     ) -> OperationResult {
         let identity = creatable_identity(&package, config);
-        handle_create(package, identity, repo, config, sender, progress).await
+        handle_create(
+            package,
+            identity,
+            repo,
+            &super::super::validate::tests::listing_nothing(),
+            config,
+            sender,
+            progress,
+        )
+        .await
     }
 
     // A repository where the name is free and the path is not taken, ready to
@@ -317,6 +362,32 @@ mod tests {
             }
         }
         results
+    }
+
+    // A spec with no dotfile entry cannot share a target, so a create lists no
+    // directory: the mocks expect no listing, and one fails the test.
+    #[tokio::test]
+    async fn create_of_a_spec_with_no_entries_collects_nothing() {
+        let (_temp, config, package) = fixture();
+        let (sender, _rx) = test_sender();
+        let mut repo = a_free_name(1);
+        repo.expect_list_packages().times(0);
+        let mut dotfiles_repo = MockPackageRepository::new();
+        dotfiles_repo.expect_list_packages().times(0);
+        let identity = creatable_identity(&package, &config);
+
+        let result = handle_create(
+            package,
+            identity,
+            &repo,
+            &dotfiles_repo,
+            &config,
+            &sender,
+            &mut ProgressTracker::new(2),
+        )
+        .await;
+
+        assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
     }
 
     // A spec `spec validate` would report an error for is refused before anything is
@@ -494,7 +565,10 @@ mod tests {
             .path(temp.path().join("myapp.yml"))
             .build();
 
-        let repo = a_free_name(1);
+        let mut repo = a_free_name(1);
+        repo.expect_list_packages()
+            .returning(|| Ok(crate::package::port::ListPackagesOutput(Vec::new())));
+        repo.expect_directory_identity().return_const(None);
         let result = create(package, &repo, &config, &sender, &mut progress).await;
 
         assert!(
