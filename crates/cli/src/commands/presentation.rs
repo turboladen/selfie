@@ -56,7 +56,11 @@ fn row_color(result: &RowResult) -> Paint {
 
 /// `text` in the color of a row that turned out as `result`, or plain when
 /// `use_colors` is off.
-pub(crate) fn paint_row_text(text: &str, result: &RowResult, use_colors: bool) -> Shown {
+pub(crate) fn paint_row_text(
+    text: impl Into<Shown>,
+    result: &RowResult,
+    use_colors: bool,
+) -> Shown {
     crate::status_style::styled_text(text, use_colors, row_color(result))
 }
 
@@ -82,13 +86,12 @@ pub(crate) fn format_environment_names(
 ) -> Shown {
     let names = environments.iter().map(|env_name| {
         if env_name == current_environment {
-            Shown::from(Name::new(&format!("*{env_name}")))
-                .paint(config.use_colors(), |s| s.bold().green())
+            shown!("*{}", Name::new(env_name)).paint(config.use_colors(), |s| s.bold().green())
         } else {
             Shown::from(Name::new(env_name)).paint(config.use_colors(), |s| s.dim().green())
         }
     });
-    Shown::join(names, lit!(", "))
+    crate::formatters::comma_joined(names)
 }
 
 /// Display environment error with available environments for a specific package
@@ -109,25 +112,27 @@ pub(crate) fn display_environment_summary(
             command,
         );
     } else {
-        display.print_error(format!(
-            "Package '{package_name}' doesn't support environment '{current_environment}'."
+        display.print_error(shown!(
+            "Package '{}' doesn't support environment '{}'.",
+            Name::new(package_name),
+            Name::new(current_environment)
         ));
         display.print_note(shown!("{}Available environments for this package:", INDENT));
 
         let mut table = SafeTable::new();
         // Printed on stderr, so sized to the terminal stderr is on.
         table.use_stderr();
-        table.set_header(vec!["Environment"]);
+        table.set_header([lit!("Environment")]);
 
         // The spec file's order, which every other surface lists them in. The
         // current environment is never among them: its absence is the error.
         for env in available_environments {
-            table.add_row([env]);
+            table.add_row([Name::new(env)]);
         }
 
         display.print_note(shown!("{}", table));
 
-        display.print_styled_suggestion(shown!(
+        display.print_suggestion(shown!(
             "{} with one of the environments above",
             shown!(
                 "selfie package {} --environment <env> <package>",
@@ -147,9 +152,11 @@ pub(crate) fn display_missing_command(
     environment: &str,
     others: &[String],
 ) {
-    display.print_error(format!(
-        "No {} command defined for '{package_name}' in environment '{environment}'.",
-        command.word()
+    display.print_error(shown!(
+        "No {} command defined for '{}' in environment '{}'.",
+        command.word(),
+        Name::new(package_name),
+        Name::new(environment)
     ));
     if !others.is_empty() {
         // Sorted, so the line reads the same on every run.
@@ -158,7 +165,7 @@ pub(crate) fn display_missing_command(
         display.print_note(shown!(
             "Environments with {} commands: {}",
             command.word(),
-            crate::formatters::name_list(&others)
+            crate::formatters::comma_joined(others.iter().map(|other| Name::new(other)))
         ));
     }
 }
@@ -171,8 +178,10 @@ pub(crate) fn display_generic_environment_suggestion(
     display: &DisplayManager,
     command: PackageCommand,
 ) {
-    display.print_error(format!(
-        "Package '{package_name}' doesn't support environment '{current_environment}'."
+    display.print_error(shown!(
+        "Package '{}' doesn't support environment '{}'.",
+        Name::new(package_name),
+        Name::new(current_environment)
     ));
     display.print_note(shown!("{}Try one of these options:", INDENT));
     let use_colors = config.use_colors();

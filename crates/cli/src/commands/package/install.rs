@@ -1,4 +1,4 @@
-use crate::terminal_text::{Name, lit};
+use crate::terminal_text::{Name, lit, shown};
 use selfie::package::{
     event::{OperationFailure, OperationResult, PackageEvent},
     port::PackageError,
@@ -106,7 +106,7 @@ fn display_environment_error(
 /// or a recommend.
 fn display_required_by(display: &DisplayManager, required_by: Option<&str>) {
     if let Some(required_by) = required_by {
-        display.print_note(crate::terminal_text::shown!(
+        display.print_note(shown!(
             "{}'{}' requires it.",
             crate::display_manager::INDENT,
             crate::terminal_text::Shown::from(Name::new(required_by))
@@ -145,14 +145,14 @@ mod tests {
         let display = create_display();
 
         // Test that DisplayManager output methods don't panic
-        display.print_progress("test progress");
+        display.print_progress(crate::terminal_text::lit!("test progress"));
         display.println(lit!("test output line"));
-        display.print_info("test info");
-        display.print_success("test success");
-        display.print_error("test error");
+        display.print_info(crate::terminal_text::lit!("test info"));
+        display.print_success(crate::terminal_text::lit!("test success"));
+        display.print_error(crate::terminal_text::lit!("test error"));
 
         // Test that clone shares state
         let display2 = display.clone();
-        display2.print_progress("cloned display output");
+        display2.print_progress(crate::terminal_text::lit!("cloned display output"));
     }
 }

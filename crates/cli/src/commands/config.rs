@@ -23,7 +23,10 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
     let loaded = match YamlLoader::new(fs).load_config() {
         Ok(c) => c,
         Err(e) => {
-            display.print_error(format!("Failed to load configuration: {e}"));
+            display.print_error(shown!(
+                "Failed to load configuration: {}",
+                crate::received::sentence(e)
+            ));
             return Exit::Failed;
         }
     };
@@ -41,7 +44,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
     // Notes need nothing done, so they neither fail validation nor stop it
     // reporting the file as valid.
     for note in result.issues().infos() {
-        display.print_info(note.message());
+        display.print_info(crate::received::Issue::from(note).message);
     }
 
     // A `cli:` notice is an ignored key like any other, so it counts as a warning.
@@ -54,11 +57,16 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
     // so all of them go to stdout. Only a file that would not load, above, is an
     // error about the run.
     if outcome == Outcome::Failed {
-        display.print_result(outcome, "Validation failed.");
+        display.print_result(outcome, lit!("Validation failed."));
 
         let mut table_reporter = ValidationTableReporter::new(display.use_colors());
         table_reporter
-            .setup(vec!["Category", "Field", "Message", "Suggestion"])
+            .setup([
+                lit!("Category"),
+                lit!("Field"),
+                lit!("Message"),
+                lit!("Suggestion"),
+            ])
             .add_validation_errors(&result.issues().errors())
             .add_validation_warnings(&result.issues().warnings())
             .print(display);
@@ -68,16 +76,21 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         if result.issues().has_warnings() {
             let mut table_reporter = ValidationTableReporter::new(display.use_colors());
             table_reporter
-                .setup(vec!["Category", "Field", "Message", "Suggestion"])
+                .setup([
+                    lit!("Category"),
+                    lit!("Field"),
+                    lit!("Message"),
+                    lit!("Suggestion"),
+                ])
                 .add_validation_warnings(&result.issues().warnings())
                 .print(display);
         }
         crate::config::print_config_notices(&cli_notices, display);
 
         if outcome == Outcome::Clean {
-            display.print_result(outcome, "Configuration is valid.");
+            display.print_result(outcome, lit!("Configuration is valid."));
         } else {
-            display.print_result(outcome, "Configuration is usable, with warnings.");
+            display.print_result(outcome, lit!("Configuration is usable, with warnings."));
         }
 
         // Each value as a run would take it from the file: `~` expanded and
@@ -103,7 +116,10 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
             lit!("state_directory:"),
             match selfie::fs::state_directory(fs, raw_config.state_directory(fs).as_deref()) {
                 Ok(directory) => Shown::from(DisplayPath::of(&directory)),
-                Err(error) => Shown::from(Name::new(&format!("(unresolved: {error})"))),
+                // The library's sentence names the path, so it keeps the name
+                // escape until that sentence is composed from its parts
+                // (selfie-36md).
+                Err(error) => shown!("(unresolved: {})", Name::new(&error.to_string())),
             },
         );
         display.print_field(

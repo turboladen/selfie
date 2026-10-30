@@ -1,20 +1,20 @@
-use crate::terminal_text::{DisplayPath, lit};
+use crate::formatters::comma_joined;
+use crate::received;
+use crate::terminal_text::{DisplayPath, Literal, Name, Shown, lit, shown};
 use selfie::package::{
     event::{
         CollectionRefusal, OperationResult, OperationSuccess, Outcome, PackageEvent,
         RefusedPackage, SpecStatus, ValidationResultData,
     },
     port::PackageParseError,
-    service::{SpecService, skipped_spec_warning},
+    service::SpecService,
 };
 use selfie::validation::ValidationLevel;
 
 use crate::display_manager::Channel;
 use crate::{
     commands::presentation::{RowResult, paint_row_text, row_marker},
-    commands::validation_display::{
-        ValidationGroup, ValidationRow, display_validation_groups, level_counts,
-    },
+    commands::validation_display::{ValidationGroup, display_validation_groups, level_counts},
     config::CliConfig,
     display_manager::DisplayManager,
     event_processor::{EventProcessor, Exit, refused_packages_lines},
@@ -30,7 +30,7 @@ pub(crate) async fn handle_validate(
 ) -> Exit {
     tracing::debug!("Running validate command for package: {}", package_name);
 
-    display.print_status(format!("Validating {package_name}..."));
+    display.print_status(shown!("Validating {}...", Name::new(package_name)));
 
     let event_stream = service.validate(package_name, None).await;
 
@@ -50,7 +50,7 @@ pub(crate) async fn handle_validate_all(
 ) -> Exit {
     tracing::debug!("Running validate --all command");
 
-    display.print_status("Validating all packages...");
+    display.print_status(lit!("Validating all packages..."));
 
     let event_stream = service.validate_all().await;
 
@@ -150,7 +150,7 @@ fn print_unlisted_warnings(
     for warning in warnings {
         match warning {
             PackageEvent::SpecSkipped { error, .. } if !listed(&|r| names_file(r, error)) => {
-                display.print_warning(skipped_spec_warning(error));
+                display.print_warning(received::skipped_spec(error));
             }
             PackageEvent::PackagesRefused {
                 reason, packages, ..
@@ -167,7 +167,7 @@ fn print_unlisted_warnings(
             // A directory refusal arrives as a plain warning carrying its
             // sentence, so that sentence is what identifies it.
             PackageEvent::Warning { message, .. } if !listed(&|r| names_directory(r, message)) => {
-                display.print_warning(message);
+                display.print_warning(received::sentence(message));
             }
             _ => {}
         }
@@ -195,11 +195,11 @@ fn names_name(refusal: &CollectionRefusal, package: &RefusedPackage) -> bool {
 }
 
 /// What a table cell shows when it has nothing to say.
-const NO_VALUE: &str = "-";
+const NO_VALUE: Literal = lit!("-");
 
 /// A validated spec's Issues cell: its count at each level present, or `None`
 /// when it has no issue.
-fn issue_counts(result: &ValidationResultData) -> Option<String> {
+fn issue_counts(result: &ValidationResultData) -> Option<Shown> {
     let count = |level| {
         result
             .issues
@@ -212,57 +212,57 @@ fn issue_counts(result: &ValidationResultData) -> Option<String> {
         count(ValidationLevel::Warning),
         count(ValidationLevel::Info),
     );
-    (!counted.is_empty()).then(|| counted.join(", "))
+    (!counted.is_empty()).then(|| comma_joined(counted))
 }
 
 /// Something the run could not validate, as its table row and its entry in the
 /// issues section show it.
 struct Unvalidated {
     /// The Spec cell: the spec's name, or the directory.
-    spec: String,
+    spec: Shown,
     /// The Status cell, also the entry's category.
     status: SpecStatus,
     /// The Issues cell, if it has anything to say.
-    issues: Option<String>,
+    issues: Option<Shown>,
     /// The entry's label: the file, the name or the directory.
-    label: String,
+    label: Shown,
     /// The entry's Field cell, if it has one.
-    field: Option<&'static str>,
-    message: String,
-    location: Option<selfie::yaml::SourceLocation>,
+    field: Option<Name>,
+    message: Shown,
+    location: Option<Name>,
 }
 
 impl Unvalidated {
     fn of(refusal: &CollectionRefusal) -> Self {
         match refusal {
             CollectionRefusal::UnloadableSpec { error, .. } => Self {
-                spec: error.display_name(),
+                spec: Name::new(&error.display_name()).into(),
                 status: refusal.status(),
-                issues: error.location().map(|at| at.to_string()),
-                label: DisplayPath::of(error.package_path()).to_string(),
-                field: Some(error.kind().label()),
-                message: error.reason(),
-                location: error.location(),
+                issues: received::location(error.location()).map(Shown::from),
+                label: DisplayPath::of(error.package_path()).into(),
+                field: Some(Name::new(error.kind().label())),
+                message: received::parse_reason(error),
+                location: received::location(error.location()),
             },
             CollectionRefusal::AmbiguousName { name, paths, .. } => Self {
-                spec: name.clone(),
+                spec: Name::new(name).into(),
                 status: refusal.status(),
-                issues: Some(format!("{} files", paths.len())),
-                label: name.clone(),
+                issues: Some(shown!("{} files", paths.len())),
+                label: Name::new(name).into(),
                 field: None,
-                message: refusal.sentence(),
+                message: received::sentence(refusal.sentence()).into(),
                 location: None,
             },
             // One class for both, as the summary counts them; the message says
             // which.
             CollectionRefusal::UnlistableDotfilesDirectory(error)
             | CollectionRefusal::UncheckableDotfilesDirectory(error) => Self {
-                spec: DisplayPath::of(error.path()).to_string(),
+                spec: DisplayPath::of(error.path()).into(),
                 status: refusal.status(),
                 issues: None,
-                label: DisplayPath::of(error.path()).to_string(),
+                label: DisplayPath::of(error.path()).into(),
                 field: None,
-                message: refusal.sentence(),
+                message: received::sentence(refusal.sentence()).into(),
                 location: None,
             },
         }
@@ -285,53 +285,53 @@ fn display_results(
     }
 
     let mut table = SafeTable::new();
-    table.set_header(["", "Spec", "Status", "Issues"]);
-    let mut add = |result: RowResult, spec: &str, status: SpecStatus, issues: Option<&str>| {
+    table.set_header([lit!(""), lit!("Spec"), lit!("Status"), lit!("Issues")]);
+    let mut add = |result: RowResult, spec: Shown, status: SpecStatus, issues: Option<Shown>| {
         table.add_row([
             Cell::from(row_marker(&result, use_colors)),
             spec.into(),
-            paint_row_text(&status.to_string(), &result, use_colors).into(),
-            issues.unwrap_or(NO_VALUE).into(),
+            paint_row_text(received::sentence(status), &result, use_colors).into(),
+            issues.unwrap_or_else(|| NO_VALUE.into()).into(),
         ]);
     };
     for result in &results {
         add(
             result.outcome.into(),
-            &result.package_name,
+            received::Validation::from(*result).package.into(),
             SpecStatus::from(result.outcome),
-            issue_counts(result).as_deref(),
+            issue_counts(result),
         );
     }
     for entry in &unvalidated {
         add(
             RowResult::Failure,
-            &entry.spec,
+            entry.spec.clone(),
             entry.status,
-            entry.issues.as_deref(),
+            entry.issues.clone(),
         );
     }
-    display.println(crate::terminal_text::shown!("{}", table));
+    display.println(shown!("{}", table));
 
-    let mut groups: Vec<ValidationGroup<'_>> = results
+    let mut groups: Vec<ValidationGroup> = results
         .iter()
         .filter(|result| result.outcome != Outcome::Clean)
         .map(|result| ValidationGroup {
-            label: &result.package_name,
+            label: received::Validation::from(*result).package.into(),
             rows: issue_rows(result),
         })
         .collect();
     groups.extend(unvalidated.iter().map(|entry| ValidationGroup {
-        label: &entry.label,
-        rows: vec![ValidationRow {
+        label: entry.label.clone(),
+        rows: vec![received::Issue {
             level: ValidationLevel::Error,
-            category: entry.status.to_string(),
-            field: entry.field.unwrap_or(NO_VALUE),
-            message: &entry.message,
-            location: entry.location,
+            category: received::sentence(entry.status).into(),
+            field: entry.field.clone().map_or_else(|| NO_VALUE.into(), Shown::from),
+            message: entry.message.clone(),
+            location: entry.location.clone(),
             suggestion: None,
         }],
     }));
-    display_validation_groups(&groups, use_colors, display, Channel::Stdout);
+    display_validation_groups(groups, use_colors, display, Channel::Stdout);
 }
 
 fn handle_validate_event(
@@ -378,11 +378,12 @@ fn display_validation_success_card(
     config: &CliConfig,
     display: &DisplayManager,
 ) {
+    let validation = received::Validation::from(validation_result);
     display
-        .result_card("Validation Results")
-        .field(lit!("Package"), &validation_result.package_name)
-        .field(lit!("Environment"), &validation_result.environment)
-        .styled_field(
+        .result_card(lit!("Validation Results"))
+        .field(lit!("Package"), validation.package)
+        .field(lit!("Environment"), validation.environment)
+        .field(
             lit!("Status"),
             status_style::format_valid(config.use_colors()),
         )
@@ -399,26 +400,19 @@ fn display_validation_issues_table(
     }
 
     let groups = vec![ValidationGroup {
-        label: &validation_result.package_name,
+        label: received::Validation::from(validation_result).package.into(),
         rows: issue_rows(validation_result),
     }];
 
-    display_validation_groups(&groups, config.use_colors(), display, Channel::Stdout);
+    display_validation_groups(groups, config.use_colors(), display, Channel::Stdout);
 }
 
 /// One table row per issue `validation_result` found.
-fn issue_rows(validation_result: &ValidationResultData) -> Vec<ValidationRow<'_>> {
+fn issue_rows(validation_result: &ValidationResultData) -> Vec<received::Issue> {
     validation_result
         .issues
         .iter()
-        .map(|issue| ValidationRow {
-            level: issue.level,
-            category: issue.category.to_string(),
-            field: &issue.field,
-            message: &issue.message,
-            location: issue.location,
-            suggestion: issue.suggestion.as_deref(),
-        })
+        .map(received::Issue::from)
         .collect()
 }
 

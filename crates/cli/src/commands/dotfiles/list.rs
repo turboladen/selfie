@@ -4,6 +4,7 @@
 //! all dotfile mappings defined across packages and the standalone dotfiles
 //! directory. This is a fast, file-only operation — no commands are executed.
 
+use crate::terminal_text::shown;
 use selfie::dotfile_service::port::DotfileService;
 use selfie::package::{
     ContentSource, Package, SpecOrigin,
@@ -18,7 +19,8 @@ use crate::{
     display_manager::{DisplayManager, DisplayPath, shorten_path},
     event_processor::{EventProcessor, Exit},
     source_paths::base_directory_line,
-    tables::SafeTable,
+    tables::{Cell, SafeTable},
+    terminal_text::{Name, Shown, lit},
 };
 
 /// Handle the `selfie dotfiles list` command
@@ -68,17 +70,17 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
     // be the only reason the table is short, and saying "no dotfiles found" over
     // one is the answer this reporting exists to stop.
     for refused in &data.refused {
-        display.print_warning(format!(
+        display.print_warning(shown!(
             "Cannot read the dotfiles in '{}' ({}): {}",
-            refused.package_name,
+            Name::new(&refused.package_name),
             DisplayPath::of(&refused.path),
-            refused.reason
+            crate::received::sentence(&refused.reason)
         ));
     }
 
     if data.packages.is_empty() {
         if data.refused.is_empty() {
-            display.print_info("No dotfiles found in any packages.");
+            display.print_info(lit!("No dotfiles found in any packages."));
         }
         return;
     }
@@ -86,33 +88,39 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
     print_base_directories(config, display, &data.packages);
 
     let mut table = SafeTable::new();
-    table.set_header(["Package", "Environment", "Content", "Target"]);
+    table.set_header([
+        lit!("Package"),
+        lit!("Environment"),
+        lit!("Content"),
+        lit!("Target"),
+    ]);
 
     let mut total = 0;
     for pkg in &data.packages {
         for (scope, entry) in pkg.dotfiles_with_scope() {
             table.add_row([
-                pkg.name().to_string(),
-                scope.unwrap_or("(shared)").to_string(),
-                source_cell(entry),
-                shorten_path(entry.target()).to_string(),
+                Cell::from(Name::new(pkg.name())),
+                scope.map_or_else(|| lit!("(shared)").into(), |scope| Name::new(scope).into()),
+                source_cell(entry).into(),
+                shorten_path(entry.target()).into(),
             ]);
             total += 1;
         }
     }
 
-    display.println(crate::terminal_text::shown!("{}", table));
-    display.print_info(format!(
-        "{total} {} across {} {}",
-        selfie::pluralize(total, "dotfile", "dotfiles"),
+    display.println(shown!("{}", table));
+    display.print_info(shown!(
+        "{} {} across {} {}",
+        total,
+        crate::formatters::plural(total, lit!("dotfile"), lit!("dotfiles")),
         data.packages.len(),
-        selfie::pluralize(data.packages.len(), "package", "packages"),
+        crate::formatters::plural(data.packages.len(), lit!("package"), lit!("packages"))
     ));
 }
 
 /// Where `entry`'s content comes from, as a table cell: var names and command
 /// strings, never a resolved value.
-pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> String {
+pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> Shown {
     // A refused entry is shown as the reason it was refused rather than omitted:
     // it is in the package file, `selfie apply` will report skipping it, and a
     // listing that hid it would leave the user looking for a dotfile the table
@@ -120,10 +128,10 @@ pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> String {
     // advice.
     match entry.content_source() {
         Ok(source @ ContentSource::Provider(_)) => {
-            crate::terminal_text::interim_one_line(&source.to_string()).to_string()
+            crate::terminal_text::interim_one_line(&source.to_string())
         }
-        Ok(source) => DisplayPath::new(&source.to_string()).to_string(),
-        Err(invalid) => DisplayPath::new(&invalid.brief()).to_string(),
+        Ok(source) => DisplayPath::new(&source.to_string()).into(),
+        Err(invalid) => DisplayPath::new(&invalid.brief()).into(),
     }
 }
 

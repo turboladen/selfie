@@ -76,10 +76,10 @@ enum Policy {
     // The guard set, a newline and a tab kept, with selfie's own SGR sequences
     // handled as the `Sgr` says.
     Guard(Sgr),
-    // The base set, a newline and a tab included: how a command and a step's
-    // description are escaped until a kind for each exists. It escapes what
-    // `Strict` does until the strict set widens; it stays apart because a
-    // command must keep those blanks to paste as it runs.
+    // The base set, a newline and a tab included: how a command is escaped
+    // until the Command kind exists. It escapes what `Strict` does until the
+    // strict set widens; it stays apart because a command must keep those
+    // blanks to paste as it runs.
     Interim,
 }
 
@@ -96,12 +96,11 @@ fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
     }
 }
 
-/// Shows `text`, a command or a step's description, on one line, with every
-/// control, format or invisible character written as an escape. A blank such
-/// as U+00A0 shows as written, so a command quoting French or CJK text still
-/// pastes as it runs.
-// Neither is a name, so neither takes the strict set; the Command kind and a
-// one-line prose kind replace this.
+/// Shows `text`, a command, on one line, with every control, format or
+/// invisible character written as an escape. A blank such as U+00A0 shows as
+/// written, so a command quoting French or CJK text still pastes as it runs.
+// A command is not a name, so it does not take the strict set; the Command
+// kind replaces this.
 pub(crate) fn interim_one_line(text: &str) -> Shown {
     Shown(escape(text, Policy::Interim).into_owned())
 }
@@ -195,7 +194,7 @@ fn painted(text: String, paint: Paint) -> String {
 /// reaches them only as one of the kinds, such as a [`Name`] or [`Prose`], or
 /// through [`shown!`], whose arguments must each be [`Trusted`]; selfie's own
 /// text reaches them as a [`Literal`].
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub(crate) struct Shown(String);
 
 impl Shown {
@@ -534,6 +533,11 @@ impl Output {
     /// trimming it. A line break inside it is removed.
     pub(crate) fn line(line: &str) -> Self {
         Self(escape(line, Policy::Output).into_owned())
+    }
+
+    /// Returns the cleaned text.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

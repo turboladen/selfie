@@ -11,12 +11,11 @@
 //! open it, and it is why the text stops here: the same failure reaching the MCP
 //! server carries a class, a line and a column and no file content at all.
 
-use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::terminal_text::Content;
+use crate::terminal_text::{Content, Shown, lit, shown};
 
 /// Lines either side of the failing one.
 const CONTEXT: u64 = 2;
@@ -32,7 +31,7 @@ const MAX_LINE: usize = 200;
 /// Answers `None` when `path` is not a regular file, cannot be opened, is not
 /// valid UTF-8, or ends before `line` — each a case where the caller prints its
 /// sentence alone.
-pub(crate) fn window(path: &Path, line: u64, column: u64) -> Option<String> {
+pub(crate) fn window(path: &Path, line: u64, column: u64) -> Option<Shown> {
     // Both bounds saturate. `line` arrives as an unvalidated `u64` from the
     // parser, and a failure on line 1 or 2 makes `line - CONTEXT` underflow --
     // the same defect as `column - 1`, in the other axis. A stray bracket on the
@@ -40,21 +39,16 @@ pub(crate) fn window(path: &Path, line: u64, column: u64) -> Option<String> {
     let first = line.saturating_sub(CONTEXT).max(1);
     let last = line.saturating_add(CONTEXT);
 
-    // A second read of a file selfie does not control: the repository read it,
-    // the parser rejected it, and the failure arrives here carrying the path.
-    // Opening a fifo to read blocks until a writer arrives and a device node never
-    // reaches an end, so ask what the path holds first. `metadata` stats rather
-    // than opens, so asking cannot itself block, and it resolves symlinks, so a
-    // link to a fifo answers as a fifo. Only a swap between the two reads reaches
-    // this, which is why no test constructs it.
-    //
-    // Not `FileSystem::irregular_target_refusal`, which is the guard the library
-    // uses for the same hazard: it takes a `TargetPath`, and the constructor for a
-    // path already resolved -- `repository_path` -- is crate-private. The two
-    // public ones expand a dotfile *target* against a home directory, which would
-    // reinterpret a spec path rather than describe it. Reaching the port from here
-    // means widening that constructor, and this answers the same question without
-    // a library change.
+    // A second read of a file selfie does not control: the parser rejected it
+    // and the failure carries the path. A fifo blocks the read until a writer
+    // arrives and a device node never ends, so ask what the path holds first;
+    // `metadata` stats without opening and resolves symlinks, so a link to a
+    // fifo answers as a fifo. Only a swap between the two reads reaches this,
+    // which is why no test constructs it. Not the library's
+    // `FileSystem::irregular_target_refusal`: it takes a `TargetPath`, whose
+    // constructor for a resolved path is crate-private, and its public ones
+    // expand a dotfile target against the home directory, which would
+    // reinterpret a spec path rather than describe it.
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;
     }
@@ -99,15 +93,23 @@ pub(crate) fn window(path: &Path, line: u64, column: u64) -> Option<String> {
     let gutter = kept
         .last()
         .map_or(1, |(number, _)| number.to_string().len());
-    let mut out = String::new();
+    // Spaces pad each number so it right-aligns in the gutter.
+    let indent = |width: usize| Content::new(&" ".repeat(width));
+    let mut rows = Vec::new();
     for (number, text) in &kept {
-        let _ = writeln!(out, "{number:>gutter$} | {}", clamp(text));
+        let digits = number.to_string().len();
+        rows.push(shown!(
+            "{}{} | {}",
+            indent(gutter.saturating_sub(digits)),
+            *number,
+            clamp(text)
+        ));
         if *number == line {
-            let _ = writeln!(out, "{:>gutter$} | {}^", "", pad(target, column));
+            rows.push(shown!("{} | {}^", indent(gutter), pad(target, column)));
         }
     }
 
-    Some(out)
+    Some(Shown::join(rows, lit!("\n")))
 }
 
 // Each character of `line` as the row shows it: itself, or the escape it is
@@ -122,19 +124,20 @@ fn shown_chars(line: &str) -> Vec<(char, String)> {
 
 /// `text` escaped, and cut short if it is longer than a terminal wants. The
 /// cut falls between characters, so an escape is shown whole or not at all.
-fn clamp(text: &str) -> String {
-    let mut shown = String::new();
+fn clamp(text: &str) -> Shown {
+    // Each character escapes on its own, so escaping the characters kept gives
+    // the pieces measured here.
+    let mut kept = String::new();
     let mut width = 0;
-    for (_, piece) in shown_chars(text) {
+    for (c, piece) in shown_chars(text) {
         let cells = piece.chars().count();
         if width + cells > MAX_LINE {
-            shown.push('…');
-            return shown;
+            return shown!("{}…", Content::new(&kept));
         }
         width += cells;
-        shown.push_str(&piece);
+        kept.push(c);
     }
-    shown
+    Content::new(&kept).into()
 }
 
 /// Spaces to place a caret under `column`, replaying the prefix's own tabs.
@@ -147,7 +150,7 @@ fn clamp(text: &str) -> String {
 // caret lands a cell left of the mark; a combining mark is a second character
 // with no cell of its own, so it lands one right. Both are accepted: counting
 // cells needs a width table, and the failing line sits directly above.
-fn pad(text: &str, column: u64) -> String {
+fn pad(text: &str, column: u64) -> Content {
     let take = usize::try_from(column.saturating_sub(1)).unwrap_or(usize::MAX);
     // Bounded by what `clamp` leaves on screen as well as by the line's own
     // length, measured as `clamp` measures it: a character shown as an escape
@@ -166,7 +169,7 @@ fn pad(text: &str, column: u64) -> String {
             caret.extend(std::iter::repeat_n(' ', cells));
         }
     }
-    caret
+    Content::new(&caret)
 }
 
 #[cfg(test)]
@@ -186,7 +189,7 @@ mod tests {
     #[test]
     fn a_caret_pad_counts_characters_not_bytes() {
         // Three characters, six bytes. A byte count would put the caret at 6.
-        assert_eq!(pad("héllo", 4).chars().count(), 3);
+        assert_eq!(pad("héllo", 4).to_string().chars().count(), 3);
     }
 
     #[test]
@@ -194,7 +197,7 @@ mod tests {
         // The parser counts a tab as one column; a terminal advances it to a stop.
         // Emitting a space here would land the caret wherever the tab width is not
         // one, which is every terminal.
-        assert_eq!(pad("\t\tkey: value", 3), "\t\t");
+        assert_eq!(pad("\t\tkey: value", 3).to_string(), "\t\t");
     }
 
     // A character the row shows as an escape takes the escape's cells, so the
@@ -205,7 +208,7 @@ mod tests {
         // the raw character as one cell lands on a different letter.
         let line = "a\u{1b}[2Jx: {oops";
         let shown = Content::new(line);
-        let caret = pad(line, 6);
+        let caret = pad(line, 6).to_string();
 
         assert_eq!(
             &shown.to_string()[caret.len()..caret.len() + 1],
@@ -222,19 +225,19 @@ mod tests {
 
         let shown = clamp(&line);
 
-        assert_eq!(shown, format!("{}…", "a".repeat(MAX_LINE - 5)));
+        assert_eq!(shown.as_str(), format!("{}…", "a".repeat(MAX_LINE - 5)));
     }
 
     #[test]
     fn a_caret_pad_stops_at_the_end_of_a_short_line() {
-        assert_eq!(pad("ab", 99), "  ");
+        assert_eq!(pad("ab", 99).to_string(), "  ");
     }
 
     #[test]
     fn a_caret_pad_survives_column_zero() {
         // `located` filters only line 0, so column 0 crosses the boundary as an
         // ordinary `u64`. `column - 1` would underflow here.
-        assert_eq!(pad("abc", 0), "");
+        assert_eq!(pad("abc", 0).to_string(), "");
     }
 
     // Both directions of the accepted width drift, together. Fixture only the wide
@@ -243,9 +246,9 @@ mod tests {
     #[test]
     fn the_caret_drifts_in_both_directions_on_characters_that_are_not_one_cell() {
         // Two cells, one character: the caret lands one cell left of the mark.
-        assert_eq!(pad("世界: x", 3).chars().count(), 2);
+        assert_eq!(pad("世界: x", 3).to_string().chars().count(), 2);
         // Two characters, one cell: `e` then U+0301. The caret lands one right.
-        assert_eq!(pad("e\u{301}x: y", 3).chars().count(), 2);
+        assert_eq!(pad("e\u{301}x: y", 3).to_string().chars().count(), 2);
     }
 
     #[test]

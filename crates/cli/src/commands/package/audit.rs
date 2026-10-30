@@ -1,11 +1,12 @@
 use selfie::package::{
-    event::{AuditResult, AuditResultData, OperationFailure, OperationResult, PackageEvent},
+    event::{AuditResultData, OperationFailure, OperationResult, PackageEvent},
     port::PackageError,
     service::PackageService,
 };
 
-use crate::formatters::name_list;
-use crate::terminal_text::{Literal, Name, Output, Paint, Shown, lit, shown};
+use crate::formatters::comma_joined;
+use crate::received::{Audit, AuditFinding};
+use crate::terminal_text::{Literal, Paint, Shown, lit, shown};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -107,30 +108,27 @@ fn display_environment_error(
 }
 
 fn display_audit_output_only(audit_result: &AuditResultData, display: &DisplayManager) {
-    let name = Name::new(&audit_result.package_name);
-    match &audit_result.result {
-        AuditResult::Clean { sources } => {
-            display.print_success(format!("{name} — clean ({})", name_list(sources)));
+    let audit = Audit::from(audit_result);
+    let name = audit.package;
+    match audit.finding {
+        AuditFinding::Clean { sources } => {
+            display.print_success(shown!("{} — clean ({})", name, comma_joined(sources)));
         }
-        AuditResult::Conflicts {
-            sources, expected, ..
-        } => {
-            display.print_warning(format!(
-                "{name} — conflicts detected: unexpected source(s): {}",
-                name_list(unexpected(sources, expected))
+        AuditFinding::Conflicts { unexpected, .. } => {
+            display.print_warning(shown!(
+                "{} — conflicts detected: unexpected source(s): {}",
+                name,
+                comma_joined(unexpected)
             ));
         }
-        AuditResult::NotInstalled => {
-            display.print_info(format!("{name} — not installed"));
+        AuditFinding::NotInstalled => {
+            display.print_info(shown!("{} — not installed", name));
         }
-        AuditResult::NoAuditCommand => {
-            display.print_info(format!("{name} — no audit command defined"));
+        AuditFinding::NoAuditCommand => {
+            display.print_info(shown!("{} — no audit command defined", name));
         }
-        AuditResult::Error(err) => {
-            display.print_error(format!("{name} — error: {}", Output::new(err)));
-        }
-        AuditResult::CouldNotRun(failure) => {
-            display.print_error(format!("{name} — error: {failure}"));
+        AuditFinding::Error(error) => {
+            display.print_error(shown!("{} — error: {}", name, error));
         }
     }
 }
@@ -142,47 +140,29 @@ fn display_audit_summary_line(
 ) {
     let use_colors = config.use_colors();
     let label = |text: Literal, paint: Paint| Shown::from(text).paint(use_colors, paint);
-    let error = |err: &str| {
-        shown!(
-            "{}: {}",
-            label(lit!("error"), |s| s.red()),
-            Output::new(err)
-        )
-    };
+    let audit = Audit::from(audit_result);
 
-    let status = match &audit_result.result {
-        AuditResult::Clean { sources } => {
+    let status = match audit.finding {
+        AuditFinding::Clean { sources } => {
             shown!(
                 "{} ({})",
                 label(lit!("clean"), |s| s.green()),
-                name_list(sources)
+                comma_joined(sources)
             )
         }
-        AuditResult::Conflicts {
-            sources, expected, ..
-        } => shown!(
+        AuditFinding::Conflicts { unexpected, .. } => shown!(
             "{} — unexpected: {}",
             label(lit!("CONFLICTS"), |s| s.red().bold()),
-            name_list(unexpected(sources, expected))
+            comma_joined(unexpected)
         ),
-        AuditResult::NotInstalled => label(lit!("not installed"), |s| s.dim()),
-        AuditResult::NoAuditCommand => label(lit!("no audit command"), |s| s.dim()),
-        AuditResult::Error(err) => error(err),
-        AuditResult::CouldNotRun(failure) => error(&failure.to_string()),
+        AuditFinding::NotInstalled => label(lit!("not installed"), |s| s.dim()),
+        AuditFinding::NoAuditCommand => label(lit!("no audit command"), |s| s.dim()),
+        AuditFinding::Error(error) => {
+            shown!("{}: {}", label(lit!("error"), |s| s.red()), error)
+        }
     };
 
-    display.println_after(
-        shown!("  {}: ", Name::new(&audit_result.package_name)),
-        status,
-    );
-}
-
-// The sources an audit found that the spec does not expect.
-fn unexpected<'a>(sources: &'a [String], expected: &[String]) -> Vec<&'a String> {
-    sources
-        .iter()
-        .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
-        .collect()
+    display.println_after(shown!("  {}: ", audit.package), status);
 }
 
 fn display_audit_result_card(
@@ -191,49 +171,48 @@ fn display_audit_result_card(
     display: &DisplayManager,
 ) {
     let use_colors = config.use_colors();
+    let audit = Audit::from(audit_result);
 
     // The status and what the audit found, as fields after the common ones.
-    let error = |err: &str| {
-        vec![
-            (
-                lit!("Status"),
-                status_style::format_status_error(use_colors),
-            ),
-            (lit!("Details"), Shown::from(Output::new(err))),
-        ]
-    };
-    let status: Vec<(Literal, Shown)> = match &audit_result.result {
-        AuditResult::Clean { sources } => vec![
+    let status: Vec<(Literal, Shown)> = match audit.finding {
+        AuditFinding::Clean { sources } => vec![
             (lit!("Status"), status_style::format_audit_clean(use_colors)),
-            (lit!("Sources"), name_list(sources)),
+            (lit!("Sources"), comma_joined(sources)),
         ],
-        AuditResult::Conflicts {
-            sources, expected, ..
+        AuditFinding::Conflicts {
+            sources,
+            expected,
+            unexpected,
         } => vec![
             (
                 lit!("Status"),
                 status_style::format_audit_conflicts(use_colors),
             ),
-            (lit!("All sources"), name_list(sources)),
-            (lit!("Expected"), name_list(expected)),
-            (lit!("Unexpected"), name_list(unexpected(sources, expected))),
+            (lit!("All sources"), comma_joined(sources)),
+            (lit!("Expected"), comma_joined(expected)),
+            (lit!("Unexpected"), comma_joined(unexpected)),
         ],
-        AuditResult::NotInstalled => vec![(
+        AuditFinding::NotInstalled => vec![(
             lit!("Status"),
             status_style::format_not_installed(use_colors),
         )],
-        AuditResult::NoAuditCommand => {
+        AuditFinding::NoAuditCommand => {
             vec![(lit!("Status"), status_style::format_no_audit(use_colors))]
         }
-        AuditResult::Error(err) => error(err),
-        AuditResult::CouldNotRun(failure) => error(&failure.to_string()),
+        AuditFinding::Error(error) => vec![
+            (
+                lit!("Status"),
+                status_style::format_status_error(use_colors),
+            ),
+            (lit!("Details"), error),
+        ],
     };
 
     display
-        .result_card("Audit Results")
-        .field(lit!("Package"), &audit_result.package_name)
-        .field(lit!("Environment"), &audit_result.environment)
-        .command_if(lit!("Command"), audit_result.audit_command.as_deref())
+        .result_card(lit!("Audit Results"))
+        .field(lit!("Package"), audit.package)
+        .field(lit!("Environment"), audit.environment)
+        .command_if(lit!("Command"), audit.command)
         .styled_fields(status)
         .print();
 }
@@ -242,6 +221,7 @@ fn display_audit_result_card(
 mod tests {
     use super::*;
     use crate::display_manager::column;
+    use selfie::package::event::AuditResult;
     use selfie::package::event::CheckFailure;
 
     // Every view of an audit shows the package's name and its sources as names,
@@ -301,6 +281,39 @@ mod tests {
                 assert!(!text.contains('\u{200B}'), "{text:?}");
             }
         }
+    }
+
+    // An audit that could not run shows its command as prose in each of the
+    // three places an audit result is shown.
+    #[test]
+    fn an_audit_that_could_not_run_shows_its_command_escaped_in_every_view() {
+        // A command holding a carriage return and an escape sequence: as prose
+        // both show as escapes, where a tool's output would keep only the text
+        // after the return and drop the sequence.
+        let failure = CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
+            "sleep 9 # A\rB\u{1b}[2Jtail",
+            std::time::Duration::from_secs(1),
+        ));
+        let audit = AuditResultData {
+            package_name: "p".to_string(),
+            environment: "test".to_string(),
+            audit_command: Some("sleep 9".to_string()),
+            result: AuditResult::CouldNotRun(failure),
+        };
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(
+            std::path::Path::new("/packages"),
+        ));
+        let display = DisplayManager::new(false);
+        display_audit_output_only(&audit, &display);
+        display_audit_summary_line(&audit, &config, &display);
+        display_audit_result_card(&audit, &config, &display);
+
+        let printed = display.printed();
+        let shown = printed
+            .iter()
+            .filter(|(_, line)| line.contains(r"# A\rB\u{1b}[2Jtail"))
+            .count();
+        assert_eq!(shown, 3, "{printed:?}");
     }
 
     // An audit that could not run prints, in each of the three places an audit

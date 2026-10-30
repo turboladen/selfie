@@ -4,7 +4,7 @@
 //! representations of git file status, following the pattern in `status_style.rs`.
 
 use crate::status_style::styled_text;
-use crate::terminal_text::Shown;
+use crate::terminal_text::{Shown, lit};
 use selfie::package::git::GitFileStatus;
 
 /// Format git status as a short indicator for list table columns.
@@ -18,12 +18,12 @@ use selfie::package::git::GitFileStatus;
 /// - NotInRepo → `--`
 pub(crate) fn format_git_status_short(status: &GitFileStatus, use_colors: bool) -> Shown {
     match status {
-        GitFileStatus::Clean => styled_text("✓", use_colors, |s| s.dim().green()),
-        GitFileStatus::Modified => styled_text("M", use_colors, |s| s.yellow()),
-        GitFileStatus::Staged => styled_text("S", use_colors, |s| s.green()),
-        GitFileStatus::StagedAndModified => styled_text("SM", use_colors, |s| s.yellow()),
-        GitFileStatus::Untracked => styled_text("?", use_colors, |s| s.red()),
-        GitFileStatus::NotInRepo => styled_text("--", use_colors, |s| s.dim()),
+        GitFileStatus::Clean => styled_text(lit!("✓"), use_colors, |s| s.dim().green()),
+        GitFileStatus::Modified => styled_text(lit!("M"), use_colors, |s| s.yellow()),
+        GitFileStatus::Staged => styled_text(lit!("S"), use_colors, |s| s.green()),
+        GitFileStatus::StagedAndModified => styled_text(lit!("SM"), use_colors, |s| s.yellow()),
+        GitFileStatus::Untracked => styled_text(lit!("?"), use_colors, |s| s.red()),
+        GitFileStatus::NotInRepo => styled_text(lit!("--"), use_colors, |s| s.dim()),
     }
 }
 
@@ -32,14 +32,16 @@ pub(crate) fn format_git_status_short(status: &GitFileStatus, use_colors: bool) 
 /// Returns full descriptions like "Modified (unstaged)", "Staged", etc.
 pub(crate) fn format_git_status_long(status: &GitFileStatus, use_colors: bool) -> Shown {
     match status {
-        GitFileStatus::Clean => styled_text("Clean", use_colors, |s| s.dim().green()),
-        GitFileStatus::Modified => styled_text("Modified (unstaged)", use_colors, |s| s.yellow()),
-        GitFileStatus::Staged => styled_text("Staged", use_colors, |s| s.green()),
-        GitFileStatus::StagedAndModified => {
-            styled_text("Staged + Modified", use_colors, |s| s.yellow())
+        GitFileStatus::Clean => styled_text(lit!("Clean"), use_colors, |s| s.dim().green()),
+        GitFileStatus::Modified => {
+            styled_text(lit!("Modified (unstaged)"), use_colors, |s| s.yellow())
         }
-        GitFileStatus::Untracked => styled_text("Untracked", use_colors, |s| s.red()),
-        GitFileStatus::NotInRepo => styled_text("Not in repo", use_colors, |s| s.dim()),
+        GitFileStatus::Staged => styled_text(lit!("Staged"), use_colors, |s| s.green()),
+        GitFileStatus::StagedAndModified => {
+            styled_text(lit!("Staged + Modified"), use_colors, |s| s.yellow())
+        }
+        GitFileStatus::Untracked => styled_text(lit!("Untracked"), use_colors, |s| s.red()),
+        GitFileStatus::NotInRepo => styled_text(lit!("Not in repo"), use_colors, |s| s.dim()),
     }
 }
 

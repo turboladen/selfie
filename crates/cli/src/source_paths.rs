@@ -36,7 +36,10 @@ pub(crate) fn relative_text(source: &DotfileSource) -> Shown {
         // No base is known, so the line says so: under a heading printed for an
         // earlier line, a bare spelling would read as relative to it.
         DotfileSource::Recorded(spelling) => {
-            DisplayPath::new(&format!("{spelling} (as recorded, directory unknown)")).into()
+            shown!(
+                "{} (as recorded, directory unknown)",
+                DisplayPath::new(spelling)
+            )
         }
     }
 }

@@ -1,6 +1,6 @@
 use crate::tables::{Cell, SafeTable};
 use crate::terminal_text::DisplayPath;
-use crate::terminal_text::{Name, Prose, Shown, lit, shown};
+use crate::terminal_text::{Name, Shown, lit, shown};
 use selfie::package::{
     event::{PackageEvent, SpecListData},
     service::SpecService,
@@ -22,7 +22,7 @@ pub(crate) async fn handle_list(
 ) -> Exit {
     tracing::debug!("Running spec list command (show_all={show_all})");
 
-    display.print_status("Loading specs...");
+    display.print_status(lit!("Loading specs..."));
 
     let event_stream = service.list(show_all).await;
 
@@ -56,13 +56,18 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
     let use_colors = config.use_colors();
 
     if data.specs.is_empty() && data.invalid_packages.is_empty() && data.refused.is_empty() {
-        display.print_info("No specs found.");
+        display.print_info(lit!("No specs found."));
         return;
     }
 
     if !data.specs.is_empty() {
         let mut table = SafeTable::new();
-        table.set_header(["Name", "Description", "Environments", "Git"]);
+        table.set_header([
+            lit!("Name"),
+            lit!("Description"),
+            lit!("Environments"),
+            lit!("Git"),
+        ]);
 
         for spec in &data.specs {
             let git_col = spec
@@ -70,9 +75,10 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
                 .as_ref()
                 .map(|s| git_style::format_git_status_short(s, use_colors))
                 .unwrap_or_default();
+            let item = crate::received::SpecItem::from(spec);
             table.add_row([
-                Cell::painted(&spec.name, use_colors, |s| s.bold()),
-                Cell::prose(spec.description.as_deref().unwrap_or_default()),
+                Cell::painted(item.name, use_colors, |s| s.bold()),
+                item.description.into(),
                 format_environment_names(&spec.environments, &data.current_environment, config)
                     .into(),
                 git_col.into(),
@@ -87,7 +93,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
         let text = shown!(
             "Invalid: {} — {}",
             DisplayPath::of(invalid.package_path()),
-            Prose::new(&invalid.to_string())
+            crate::received::parse_error(invalid)
         );
         print_issue_line(display, text, use_colors);
     }
@@ -97,7 +103,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
             "Refused: {} ({}) — {}",
             Name::new(&refused.package_name),
             DisplayPath::of(&refused.path),
-            Prose::new(&refused.reason.to_string())
+            crate::received::sentence(&refused.reason)
         );
         print_issue_line(display, text, use_colors);
     }
@@ -131,6 +137,7 @@ fn print_issue_line(display: &DisplayManager, text: Shown, use_colors: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal_text::Prose;
 
     // A refusal's continuation lines start under its text, past the mark, and
     // are indented once.

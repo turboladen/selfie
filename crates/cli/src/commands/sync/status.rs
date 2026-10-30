@@ -1,6 +1,6 @@
 //! Handler for `selfie sync status`.
 
-use crate::terminal_text::{Shown, lit, shown};
+use crate::terminal_text::{Name, Shown, lit, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -50,22 +50,25 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             ..
         } => {
             let short_root = shorten_path(&repo_root.to_string_lossy());
-            let branch_str = branch.as_deref().unwrap_or("(detached)");
+            let branch_str = branch.as_deref().map_or_else(
+                || lit!("(detached)").into(),
+                |branch| Shown::from(Name::new(branch)),
+            );
 
             let total_changes = modified_count + staged_count + untracked_count + deleted_count;
             let is_clean = total_changes == 0;
 
             if is_clean && *ahead == 0 && *behind == 0 {
-                display.print_success(format!("Repository: {short_root} ({branch_str})"));
+                display.print_success(shown!("Repository: {} ({})", short_root, branch_str));
                 display.println(shown!(
                     "{}No uncommitted changes, up to date with remote",
                     INDENT
                 ));
             } else {
                 if is_clean {
-                    display.print_success(format!("Repository: {short_root} ({branch_str})"));
+                    display.print_success(shown!("Repository: {} ({})", short_root, branch_str));
                 } else {
-                    display.print_info(format!("Repository: {short_root} ({branch_str})"));
+                    display.print_info(shown!("Repository: {} ({})", short_root, branch_str));
                 }
 
                 // File changes summary
@@ -79,7 +82,11 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                     .into_iter()
                     .filter(|(count, _)| *count > 0)
                     .map(|(count, word)| shown!("{} {}", count, word));
-                    display.println(shown!("{}{}", INDENT, Shown::join(parts, lit!(", "))));
+                    display.println(shown!(
+                        "{}{}",
+                        INDENT,
+                        crate::formatters::comma_joined(parts)
+                    ));
                 }
 
                 // Remote tracking
@@ -131,8 +138,9 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             // It counts specs that could not be loaded, packages and unlistable
             // directories alike, so the line names none of them.
             if *refused_count > 0 {
-                display.print_warning(format!(
-                    "{refused_count} refusal(s) left dotfiles unchecked -- see the warnings above"
+                display.print_warning(shown!(
+                    "{} refusal(s) left dotfiles unchecked -- see the warnings above",
+                    refused_count
                 ));
             }
             // The drift line is part of this command's answer, so it is on
@@ -148,15 +156,20 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                 // Drift depends on the environment, so the line names it.
                 display.print_result(
                     outcome,
-                    format!("{line} in environment '{}'", operation_info.environment),
+                    shown!(
+                        "{} in environment '{}'",
+                        line,
+                        crate::received::Operation::from(operation_info).environment
+                    ),
                 );
             } else {
                 let count = drifted_targets.len();
                 display.print_result(
                     Outcome::Found,
-                    format!(
-                        "Dotfile drift in environment '{}': {count} drifted out of {}",
-                        operation_info.environment,
+                    shown!(
+                        "Dotfile drift in environment '{}': {} drifted out of {}",
+                        crate::received::Operation::from(operation_info).environment,
+                        count,
                         deployed_phrase(*total_deployed, *unverified)
                     ),
                 );
@@ -165,21 +178,23 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                     let short = Shown::from(shorten_path(target)).paint(use_colors, |s| s.yellow());
                     display.println(shown!("{}{}", INDENT, short));
                 }
-                display.print_suggestion(
-                    "Run 'selfie apply' to redeploy or 'selfie dotfiles drift' for details",
-                );
+                display.print_suggestion(lit!(
+                    "Run 'selfie apply' to redeploy or 'selfie dotfiles drift' for details"
+                ));
             }
             // Their own line: an orphan is neither drift nor a gap in the check.
             if *orphan_count > 0 {
-                display.print_warning(format!(
-                    "{orphan_count} orphaned target(s): no entry deploys to them now -- run \
-                     'selfie dotfiles drift' for details"
+                display.print_warning(shown!(
+                    "{} orphaned target(s): no entry deploys to them now -- run \
+                     'selfie dotfiles drift' for details",
+                    orphan_count
                 ));
             }
             if *unjudged_count > 0 {
-                display.print_warning(format!(
-                    "{unjudged_count} deployed target(s) not checked for orphans -- see the \
-                     warnings above"
+                display.print_warning(shown!(
+                    "{} deployed target(s) not checked for orphans -- see the \
+                     warnings above",
+                    unjudged_count
                 ));
             }
             true
@@ -210,25 +225,25 @@ fn no_drift_line(
     drift_outcome: Outcome,
     warned: usize,
     unverified: usize,
-) -> (String, bool) {
+) -> (Shown, bool) {
     let deployed = deployed_phrase(total_deployed, unverified);
     if drift_outcome == Outcome::Failed || warned > 0 {
         (
-            format!("No drift among what could be checked ({deployed})"),
+            shown!("No drift among what could be checked ({})", deployed),
             false,
         )
     } else {
-        (format!("No dotfile drift ({deployed})"), true)
+        (shown!("No dotfile drift ({})", deployed), true)
     }
 }
 
 // The deployed total, and beside it the entries drift could not verify, which
 // the total leaves out.
-fn deployed_phrase(total_deployed: usize, unverified: usize) -> String {
+fn deployed_phrase(total_deployed: usize, unverified: usize) -> Shown {
     if unverified > 0 {
-        format!("{total_deployed} deployed, {unverified} not verifiable")
+        shown!("{} deployed, {} not verifiable", total_deployed, unverified)
     } else {
-        format!("{total_deployed} deployed")
+        shown!("{} deployed", total_deployed)
     }
 }
 

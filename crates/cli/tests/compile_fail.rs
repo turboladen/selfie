@@ -1,9 +1,10 @@
 // What `terminal_text.rs` refuses at compile time: text from outside selfie
 // formatted by `shown!` without being escaped, a `shown!` placeholder other
 // than `{}`, a type outside the module marked as Trusted, a `Literal` made from
-// anything but a string literal, and a kind built around text its constructor
-// never escaped. Each case includes the module by path, since selfie-cli has no
-// library target to depend on, and the stand-in tables module it names.
+// anything but a string literal, a kind built around text its constructor
+// never escaped, and a String handed to the bound the printers take. Each case
+// includes the module by path, since selfie-cli has no library target to
+// depend on, and the stand-in tables module it names.
 //
 // The `.stderr` files hold rustc's wording, which a new toolchain can change.
 // After `rustup update stable`, regenerate them with `TRYBUILD=overwrite`.

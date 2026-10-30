@@ -3,7 +3,7 @@
 //! Pure formatting functions that produce styled text strings for use in
 //! table cells and status displays. No spinner or progress bar dependency.
 
-use crate::terminal_text::{Literal, Paint, Prose, Shown, lit, shown};
+use crate::terminal_text::{Literal, Paint, Shown, lit, shown};
 
 /// Format a status indicator with a marker prefix and optional color styling
 fn format_status_indicator(
@@ -62,30 +62,34 @@ pub(crate) fn format_list_status(
 ) -> Shown {
     use selfie::package::event::{CheckFailure, EnvironmentStatus, UnknownStatus};
     match status {
-        EnvironmentStatus::Installed => styled_text("Installed", use_colors, |s| s.green()),
-        EnvironmentStatus::NotInstalled => styled_text("Not installed", use_colors, |s| s.cyan()),
+        EnvironmentStatus::Installed => styled_text(lit!("Installed"), use_colors, |s| s.green()),
+        EnvironmentStatus::NotInstalled => {
+            styled_text(lit!("Not installed"), use_colors, |s| s.cyan())
+        }
         EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand) => {
-            styled_text("No check", use_colors, |s| s.yellow())
+            styled_text(lit!("No check"), use_colors, |s| s.yellow())
         }
         EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment) => {
-            styled_text("N/A", use_colors, |s| s.dim())
+            styled_text(lit!("N/A"), use_colors, |s| s.dim())
         }
         EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::Canceled {
             ..
-        })) => styled_text("Canceled", use_colors, |s| s.yellow()),
+        })) => styled_text(lit!("Canceled"), use_colors, |s| s.yellow()),
         EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(
             timed_out,
-        ))) => styled_text(&timed_out.to_string(), use_colors, |s| s.red()),
+        ))) => styled_text(crate::received::sentence(timed_out), use_colors, |s| {
+            s.red()
+        }),
         EnvironmentStatus::Unknown(reason) => {
-            let msg = format!("Error: {reason}");
-            styled_text(&msg, use_colors, |s| s.red())
+            let msg = shown!("Error: {}", crate::received::sentence(reason));
+            styled_text(msg, use_colors, |s| s.red())
         }
     }
 }
 
-/// `text`, prose, escaped and then styled by `paint` when `use_colors`.
-pub(crate) fn styled_text(text: &str, use_colors: bool, paint: Paint) -> Shown {
-    Shown::from(Prose::new(text)).paint(use_colors, paint)
+/// `text` styled by `paint` when `use_colors`.
+pub(crate) fn styled_text(text: impl Into<Shown>, use_colors: bool, paint: Paint) -> Shown {
+    text.into().paint(use_colors, paint)
 }
 
 #[cfg(test)]

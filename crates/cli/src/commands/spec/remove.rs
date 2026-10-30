@@ -1,4 +1,4 @@
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, Name, lit, shown};
 use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::package::{
     event::{OperationResult, OperationSuccess, PackageEvent},
@@ -35,16 +35,20 @@ pub(crate) async fn handle_remove(
         // own sentence; one with nothing to suggest keeps the short line.
         Err(e) if e.means_no_such_package() => {
             if names_a_declaring_spec(&e) {
-                display.print_error(e.to_string());
+                display.print_error(crate::received::sentence(e));
             } else {
-                display.print_error(format!("Package '{shown_name}' not found."));
+                display.print_error(shown!("Package '{}' not found.", shown_name));
             }
             return Exit::Failed;
         }
         // Not about a file at this name, so "could not load that spec" would be false:
         // there may be no spec at all. The error names the directory and what is at it.
         Err(e @ selfie::package::port::PackageRepoError::PackageListError(_)) => {
-            display.print_error(format!("Cannot remove '{shown_name}': {e}"));
+            display.print_error(shown!(
+                "Cannot remove '{}': {}",
+                shown_name,
+                crate::received::sentence(e)
+            ));
             return Exit::Failed;
         }
         // Everything else the repository can answer here: a file that will not
@@ -53,24 +57,29 @@ pub(crate) async fn handle_remove(
         // it says what selfie could not do and leaves the cause to `e`, which
         // already names the files and says what to do about them.
         Err(e) => {
-            display.print_error(format!(
-                "Cannot remove '{shown_name}': selfie could not load that spec, so it cannot \
-                 tell what depends on it. Resolve what is reported below, then try again. {e}"
+            display.print_error(shown!(
+                "Cannot remove '{}': selfie could not load that spec, so it cannot \
+                 tell what depends on it. Resolve what is reported below, then try again. {}",
+                shown_name,
+                crate::received::sentence(e)
             ));
             return Exit::Failed;
         }
     };
 
     let package_blob = plan.shown();
-    display.print_run_note(format!("Package '{shown_name}' found at:"));
-    display.print_run_note(format!("  {}", DisplayPath::of(package_blob.file_path())));
+    display.print_run_note(shown!("Package '{}' found at:", shown_name));
+    display.print_run_note(shown!("  {}", DisplayPath::of(package_blob.file_path())));
 
     // `checked` is what separates "nothing depends on this" from "selfie does not
     // know". An empty dependents list means the first only when the scan ran.
     let checked = match plan.scan_failure() {
         None => true,
         Some(e) => {
-            display.print_warning(format!("Could not check for dependent packages: {e}"));
+            display.print_warning(shown!(
+                "Could not check for dependent packages: {}",
+                crate::received::sentence(e)
+            ));
             false
         }
     };
@@ -78,7 +87,7 @@ pub(crate) async fn handle_remove(
     let unreadable = plan.unreadable();
 
     for invalid in unreadable {
-        display.print_warning(selfie::package::service::skipped_spec_warning(invalid));
+        display.print_warning(crate::received::skipped_spec(invalid));
     }
 
     // A spec selfie could not read may name this package, so neither an
@@ -86,22 +95,25 @@ pub(crate) async fn handle_remove(
     let complete = checked && unreadable.is_empty();
 
     let (prompt, default_answer) = if dependent_packages.is_empty() && complete {
-        display.print_run_note(format!(
-            "Package '{shown_name}' is not a dependency of any other packages."
+        display.print_run_note(shown!(
+            "Package '{}' is not a dependency of any other packages.",
+            shown_name
         ));
         (format!("Remove package '{shown_name}'?"), false)
     } else if dependent_packages.is_empty() {
-        display.print_warning(format!(
-            "Nothing selfie could read depends on '{shown_name}', but it could not read \
-             everything, so this is not a clearance."
+        display.print_warning(shown!(
+            "Nothing selfie could read depends on '{}', but it could not read \
+             everything, so this is not a clearance.",
+            shown_name
         ));
         (format!("Remove package '{shown_name}' anyway?"), false)
     } else {
-        display.print_warning(format!(
-            "Package '{shown_name}' is a dependency of the following packages:"
+        display.print_warning(shown!(
+            "Package '{}' is a dependency of the following packages:",
+            shown_name
         ));
         for dep in dependent_packages {
-            display.print_warning(format!(
+            display.print_warning(shown!(
                 "  - {}",
                 crate::terminal_text::Name::new(dep.name())
             ));
@@ -123,14 +135,14 @@ pub(crate) async fn handle_remove(
             Ok(true) => {}
             // A remove that removed nothing did not do what it was asked.
             Ok(false) => {
-                display.print_run_note("Package removal canceled.");
+                display.print_run_note(lit!("Package removal canceled."));
                 return Exit::Failed;
             }
             Err(failure) => {
                 return display.refuse_prompt(
                     &failure,
-                    "Confirming the removal",
-                    format!("Pass --yes to remove '{shown_name}' without asking.").as_str(),
+                    lit!("Confirming the removal"),
+                    shown!("Pass --yes to remove '{}' without asking.", shown_name),
                 );
             }
         }
@@ -155,22 +167,22 @@ pub(crate) async fn handle_remove(
                     }),
                 ..
             } => {
-                display.print_success(format!(
+                display.print_success(shown!(
                     "Package '{}' removed successfully from {}",
                     shown_name,
                     DisplayPath::of(file_path)
                 ));
 
                 if !dependent_packages.is_empty() {
-                    display.print_warning(
-                        "Note: The following packages may have broken dependencies:",
-                    );
+                    display.print_warning(lit!(
+                        "Note: The following packages may have broken dependencies:"
+                    ));
                     for dep in dependent_packages {
-                        display.print_warning(format!("  - {dep}"));
+                        display.print_warning(shown!("  - {}", Name::new(dep)));
                     }
-                    display.print_suggestion(
-                        "You may need to update these packages to remove the dependency.",
-                    );
+                    display.print_suggestion(lit!(
+                        "You may need to update these packages to remove the dependency."
+                    ));
                 }
                 true
             }

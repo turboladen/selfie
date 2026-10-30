@@ -1,4 +1,4 @@
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
 use selfie::{
     namespace::{self, NamespaceValidationError},
@@ -50,7 +50,7 @@ pub(crate) async fn handle_create(
     // under: the check never sees a name the prompts change afterwards.
     let asked_name;
     let package_name = if interactive {
-        display.print_run_note("Creating package interactively...");
+        display.print_run_note(lit!("Creating package interactively..."));
         asked_name = match prompt_package_name(package_name, display) {
             Ok(name) => name,
             Err(exit) => return exit,
@@ -64,18 +64,17 @@ pub(crate) async fn handle_create(
     let package_name = match get_valid_package_name(package_name, &repo, config, display) {
         Ok(PackageNameResult::CreateNew(name)) => name,
         Ok(PackageNameResult::EditExisting(path)) => {
-            display.print_run_note(format!(
+            display.print_run_note(shown!(
                 "Opening existing package for editing at {}",
                 DisplayPath::of(&path)
             ));
-            let success_message =
-                format!("Package editing completed at {}", DisplayPath::of(&path));
+            let success_message = shown!("Package editing completed at {}", DisplayPath::of(&path));
             return common::open_editor(&path, display, Some(success_message));
         }
         // A create that wrote nothing did not do what it was asked, so a script
         // must not read it as success.
         Ok(PackageNameResult::Canceled) => {
-            display.print_run_note("Package creation canceled.");
+            display.print_run_note(lit!("Package creation canceled."));
             return Exit::Failed;
         }
         Err(exit) => return exit,
@@ -98,7 +97,9 @@ pub(crate) async fn handle_create(
     };
 
     if !interactive {
-        display.print_info("Package created. Use 'selfie spec edit' to customize it.");
+        display.print_info(lit!(
+            "Package created. Use 'selfie spec edit' to customize it."
+        ));
         return created_exit;
     }
 
@@ -109,7 +110,7 @@ pub(crate) async fn handle_create(
     );
 
     let edit_later = || {
-        display.print_info(format!(
+        display.print_info(shown!(
             "Package created. You can edit it later with `selfie spec edit {}`.",
             name_argument(&created_name)
         ));
@@ -118,8 +119,9 @@ pub(crate) async fn handle_create(
         // Asked for, so the editor's failure is the run's; a create's own score
         // survives a successful edit.
         Ok(true) => {
-            let success_message = format!(
-                "Package '{created_name}' created and saved at {}",
+            let success_message = shown!(
+                "Package '{}' created and saved at {}",
+                Name::new(&created_name),
                 DisplayPath::of(&file_path)
             );
             created_exit.max(common::open_editor(
@@ -129,7 +131,9 @@ pub(crate) async fn handle_create(
             ))
         }
         Ok(false) => {
-            display.print_info("Package created. You can edit it later with 'selfie spec edit'.");
+            display.print_info(lit!(
+                "Package created. You can edit it later with 'selfie spec edit'."
+            ));
             created_exit
         }
         // The spec is already written, so only Ctrl+C changes how the run ends: a
@@ -207,16 +211,21 @@ pub(super) async fn write_spec(
 
 /// Why a spec cannot be created under `name`, given the namespace check's
 /// refusal.
-pub(super) fn name_check_refusal(name: &str, error: &NamespaceValidationError) -> String {
+pub(super) fn name_check_refusal(name: &str, error: &NamespaceValidationError) -> Shown {
     match error {
         NamespaceValidationError::Conflict(conflict) => {
-            format!("{conflict} Choose a different name.")
+            shown!(
+                "{} Choose a different name.",
+                crate::received::sentence(conflict)
+            )
         }
         // The directory is the problem, not the name.
         NamespaceValidationError::PackageDirectoryUnreadable(_)
-        | NamespaceValidationError::DotfilesDirectoryUnreadable(_) => {
-            format!("Cannot create '{name}': {error}")
-        }
+        | NamespaceValidationError::DotfilesDirectoryUnreadable(_) => shown!(
+            "Cannot create '{}': {}",
+            Name::new(name),
+            crate::received::sentence(error)
+        ),
     }
 }
 
@@ -225,8 +234,8 @@ pub(super) fn name_check_refusal(name: &str, error: &NamespaceValidationError) -
 fn refuse_interactive(display: &DisplayManager, failure: &PromptFailure) -> Exit {
     display.refuse_prompt(
         failure,
-        "spec create --interactive",
-        "Leave off --interactive to write a template, then edit it with 'selfie spec edit'.",
+        lit!("spec create --interactive"),
+        lit!("Leave off --interactive to write a template, then edit it with 'selfie spec edit'."),
     )
 }
 
@@ -266,8 +275,10 @@ fn get_valid_package_name(
                     namespace::NameLocation::Dotfiles => None,
                 };
                 if let Some(existing_package) = editable {
-                    display
-                        .print_warning(format!("{conflict} Edit it, or choose a different name."));
+                    display.print_warning(shown!(
+                        "{} Edit it, or choose a different name.",
+                        crate::received::sentence(&conflict)
+                    ));
 
                     let action = display.prompt(
                         Select::with_theme(&SimpleTheme)
@@ -293,13 +304,12 @@ fn get_valid_package_name(
                         Err(failure) => {
                             return Err(display.refuse_prompt(
                                 &failure,
-                                "Choosing what to do about an existing package",
-                                format!(
+                                lit!("Choosing what to do about an existing package"),
+                                shown!(
                                     "Edit it with `selfie spec edit {}`, or run `selfie spec \
                                          create` with a different name.",
                                     name_argument(&current_name)
-                                )
-                                .as_str(),
+                                ),
                             ));
                         }
                     }
@@ -308,18 +318,23 @@ fn get_valid_package_name(
                     // the way out.
                     let why = match conflict.found_in {
                         namespace::NameLocation::Packages => {
-                            " It could not be loaded, so it cannot be edited here."
+                            lit!(" It could not be loaded, so it cannot be edited here.")
                         }
-                        namespace::NameLocation::Dotfiles => "",
+                        namespace::NameLocation::Dotfiles => lit!(""),
                     };
-                    display.print_warning(format!("{conflict}{why} Choose a different name."));
+                    display.print_warning(shown!(
+                        "{}{} Choose a different name.",
+                        crate::received::sentence(&conflict),
+                        why
+                    ));
                 }
 
                 // Prompt for a new name
                 retry_count += 1;
                 if retry_count > MAX_NAME_RETRIES {
-                    display.print_error(format!(
-                        "Too many retry attempts ({MAX_NAME_RETRIES}). Please try again later."
+                    display.print_error(shown!(
+                        "Too many retry attempts ({}). Please try again later.",
+                        MAX_NAME_RETRIES
                     ));
                     return Err(Exit::Failed);
                 }
@@ -333,8 +348,8 @@ fn get_valid_package_name(
                             Err(failure) => {
                                 return Err(display.refuse_prompt(
                                     &failure,
-                                    "Choosing a different name",
-                                    "Run 'selfie spec create' again with a different name.",
+                                    lit!("Choosing a different name"),
+                                    lit!("Run 'selfie spec create' again with a different name."),
                                 ));
                             }
                         };
@@ -342,7 +357,7 @@ fn get_valid_package_name(
                     // be refused only when the spec is written.
                     match selfie::package::spec_name_refusal(&name) {
                         None => break name,
-                        Some(refusal) => display.print_warning(refusal),
+                        Some(refusal) => display.print_warning(crate::received::sentence(refusal)),
                     }
                 };
                 continue;
@@ -427,7 +442,7 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
         // would be thrown away with it.
         match selfie::package::spec_name_refusal(&name) {
             None => return Ok(name),
-            Some(refusal) => display.print_warning(refusal),
+            Some(refusal) => display.print_warning(crate::received::sentence(refusal)),
         }
     }
 }
@@ -472,7 +487,7 @@ fn prompt_environments(
     let mut environments = Environments::new();
 
     loop {
-        display.print_run_note("Adding environment configuration...");
+        display.print_run_note(lit!("Adding environment configuration..."));
 
         let env_name = prompt_environment_name(&environments, config, display)?;
         let install_cmd = prompt_install_command(display)?;
@@ -523,8 +538,9 @@ fn prompt_environment_name(
         if !existing_environments.contains_key(&name) {
             return Ok(name);
         }
-        display.print_warning(format!(
-            "Environment '{name}' is already in this spec. Choose a different name."
+        display.print_warning(shown!(
+            "Environment '{}' is already in this spec. Choose a different name.",
+            Name::new(&name)
         ));
     }
 }
@@ -539,7 +555,7 @@ fn prompt_install_command(display: &DisplayManager) -> Result<String, Exit> {
             break Ok(cmd);
         }
 
-        display.print_error("Install command cannot be empty.");
+        display.print_error(lit!("Install command cannot be empty."));
     }
 }
 
@@ -579,7 +595,7 @@ fn prompt_check_command(
 // dropped-silently case is the whole reason this reports anything at all.
 fn available_dependency_names(
     repo: &impl PackageRepository,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> Result<(Vec<String>, Vec<Shown>), Shown> {
     match common::package_names_and_skipped(repo) {
         Ok(loaded) => Ok(loaded),
         // The first package anyone writes has no directory to list yet, and
@@ -587,7 +603,10 @@ fn available_dependency_names(
         // failure is selfie unable to look, or a path the spec cannot be written
         // under, and neither may be offered as "there is nothing there".
         Err(listing) if listing.may_be_created() => Ok((Vec::new(), Vec::new())),
-        Err(e) => Err(format!("Failed to list packages: {e}")),
+        Err(e) => Err(shown!(
+            "Failed to list packages: {}",
+            crate::received::sentence(e)
+        )),
     }
 }
 

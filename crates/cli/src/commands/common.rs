@@ -3,7 +3,7 @@
 //! helpers, and opening the user's editor. How a command lays out its output is
 //! in [`presentation`](super::presentation).
 
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit, shown};
 use selfie::{
     commands::ShellCommandRunner,
     dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
@@ -67,7 +67,7 @@ pub(crate) fn create_package_repository_with_fs<F: FileSystem>(
 // asserted: `print_warning` goes to stderr, which a unit test cannot observe.
 pub(crate) fn package_names_and_skipped(
     repo: &impl PackageRepository,
-) -> Result<(Vec<String>, Vec<String>), PackageListError> {
+) -> Result<(Vec<String>, Vec<Shown>), PackageListError> {
     let output = repo.list_packages()?;
 
     // A name several files claim is offered by neither picker, since every
@@ -75,13 +75,8 @@ pub(crate) fn package_names_and_skipped(
     let listing = output.names();
     let skipped = output
         .invalid_packages()
-        .map(selfie::package::service::skipped_spec_warning)
-        .chain(
-            listing
-                .rows
-                .iter()
-                .map(selfie::package::service::ambiguous_spec_warning),
-        )
+        .map(crate::received::skipped_spec)
+        .chain(listing.rows.iter().map(crate::received::ambiguous_spec))
         .collect();
 
     // Not the `name:` field: a dependency or a track destination is resolved by
@@ -203,8 +198,8 @@ fn sudo_policy(config: &CliConfig) -> SudoPolicy<RealPrivilege> {
 /// whose answers a refusal afterward would discard.
 pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<Exit> {
     let refusal = sudo_policy(config).refusal(WriteScope::Dotfiles)?;
-    display.print_error(refusal.message());
-    display.print_suggestion(refusal.suggestion());
+    display.print_error(crate::received::sentence(refusal.message()));
+    display.print_suggestion(crate::received::sentence(refusal.suggestion()));
     Some(Exit::Failed)
 }
 
@@ -213,25 +208,30 @@ pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) ->
 pub(crate) fn name_check_message(
     name: &str,
     error: &selfie::namespace::NamespaceValidationError,
-) -> String {
+) -> Shown {
     use selfie::namespace::NamespaceValidationError as Invalid;
 
     match error {
         // The fact, then what a track can do about it.
         Invalid::Conflict(conflict) => match conflict.found_in {
-            selfie::namespace::NameLocation::Dotfiles => {
-                format!("{conflict} Remove it first or choose a different name.")
-            }
-            selfie::namespace::NameLocation::Packages => format!(
-                "{conflict} To track a file for that package, use 'selfie package track-dotfile \
-                 {name} <file>', or choose a different name."
+            selfie::namespace::NameLocation::Dotfiles => shown!(
+                "{} Remove it first or choose a different name.",
+                crate::received::sentence(conflict)
+            ),
+            // The name is an argument of a command, escaped as prose until
+            // slice 5's Command kind takes it.
+            selfie::namespace::NameLocation::Packages => shown!(
+                "{} To track a file for that package, use 'selfie package track-dotfile {} \
+                 <file>', or choose a different name.",
+                crate::received::sentence(conflict),
+                Prose::new(name)
             ),
         },
         // A package or dotfiles directory that would not read says nothing about the
         // name, and telling the user they cannot use it sends them off to pick another
         // one, which fails in exactly the same way.
         Invalid::PackageDirectoryUnreadable(_) | Invalid::DotfilesDirectoryUnreadable(_) => {
-            error.to_string()
+            crate::received::sentence(error).into()
         }
     }
 }
@@ -311,7 +311,7 @@ fn handle_already_tracked(event: &PackageEvent, display: &DisplayManager) -> boo
                 ),
             ..
         } => {
-            display.print_info(success.to_string());
+            display.print_info(crate::received::sentence(success));
             true
         }
         _ => false,
@@ -328,7 +328,7 @@ fn handle_already_tracked(event: &PackageEvent, display: &DisplayManager) -> boo
 pub(crate) fn open_editor(
     file_path: &Path,
     display: &DisplayManager,
-    success_message: Option<String>,
+    success_message: Option<Shown>,
 ) -> Exit {
     let Ok(editor) = std::env::var("EDITOR") else {
         report_missing_editor(display);
@@ -351,11 +351,15 @@ pub(crate) fn open_editor(
             Exit::Clean
         }
         Ok(_) => {
-            display.print_warning("Editor exited with non-zero status.");
+            display.print_warning(lit!("Editor exited with non-zero status."));
             Exit::Failed
         }
         Err(e) => {
-            display.print_error(format!("Failed to start editor '{editor}': {e}"));
+            display.print_error(shown!(
+                "Failed to start editor '{}': {}",
+                Prose::new(&editor),
+                crate::received::sentence(e)
+            ));
             Exit::Failed
         }
     }
@@ -363,8 +367,8 @@ pub(crate) fn open_editor(
 
 // The error and its remedy, both on stderr.
 fn report_missing_editor(display: &DisplayManager) {
-    display.print_error("EDITOR environment variable is not set.");
-    display.print_suggestion("Please set EDITOR and try again.");
+    display.print_error(lit!("EDITOR environment variable is not set."));
+    display.print_suggestion(lit!("Please set EDITOR and try again."));
 }
 
 /// Check if EDITOR environment variable is set and provide helpful error messages
@@ -380,23 +384,25 @@ pub(crate) fn check_editor_available(
     if let Ok(editor) = std::env::var("EDITOR") {
         Some(editor)
     } else {
-        display.print_error("EDITOR environment variable is not set.");
+        display.print_error(lit!("EDITOR environment variable is not set."));
 
         if package_exists {
             if let Some(path) = package_path {
-                display.print_suggestion(format!(
+                display.print_suggestion(shown!(
                     "Package '{}' exists at {}. Go ahead and open it in your editor of choice!",
-                    package_name,
+                    Name::new(package_name),
                     DisplayPath::of(path)
                 ));
             } else {
-                display.print_suggestion(format!(
-                    "Package '{package_name}' exists. Set EDITOR to edit it automatically."
+                display.print_suggestion(shown!(
+                    "Package '{}' exists. Set EDITOR to edit it automatically.",
+                    Name::new(package_name)
                 ));
             }
         } else {
-            display.print_suggestion(format!(
-                "Package '{package_name}' doesn't exist yet. Set EDITOR and try again to create it."
+            display.print_suggestion(shown!(
+                "Package '{}' doesn't exist yet. Set EDITOR and try again to create it.",
+                Name::new(package_name)
             ));
         }
         None

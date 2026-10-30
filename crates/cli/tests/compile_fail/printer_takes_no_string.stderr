@@ -1,0 +1,26 @@
+error[E0277]: the trait bound `Shown: From<String>` is not satisfied
+  --> tests/compile_fail/printer_takes_no_string.rs:17:11
+   |
+17 |     print(format!("{}", "x"));
+   |     ----- ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |     |
+   |     required by a bound introduced by this call
+   |
+help: the trait `From<String>` is not implemented for `Shown`
+  --> tests/compile_fail/../../src/terminal_text.rs
+   |
+   | pub(crate) struct Shown(String);
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = help: `Shown` implements trait `From<T>`:
+             From<Content>
+             From<DisplayPath>
+             From<Literal>
+             From<Name>
+             From<Prose>
+             From<terminal_text::Output>
+   = note: required for `String` to implement `Into<Shown>`
+note: required by a bound in `print`
+  --> tests/compile_fail/printer_takes_no_string.rs:14:18
+   |
+14 | fn print(_: impl Into<Shown>) {}
+   |                  ^^^^^^^^^^^ required by this bound in `print`

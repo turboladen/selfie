@@ -433,7 +433,7 @@ where
 
                     let has_unexpected = sources
                         .iter()
-                        .any(|source| !expected.iter().any(|exp| source.eq_ignore_ascii_case(exp)));
+                        .any(|source| !AuditResult::is_expected_source(source, &expected));
 
                     if has_unexpected {
                         AuditResultData {

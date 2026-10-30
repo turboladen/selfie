@@ -1,6 +1,8 @@
 //! Handler for `selfie sync push`.
 
-use crate::terminal_text::{Name, lit, shown};
+use crate::formatters::plural;
+use crate::received;
+use crate::terminal_text::{DisplayPath, Name, lit, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -12,7 +14,7 @@ use crate::display_manager::Channel;
 use crate::{
     commands::{
         common::create_sync_service,
-        validation_display::{ValidationGroup, ValidationRow, display_validation_groups},
+        validation_display::{ValidationGroup, display_validation_groups},
     },
     config::CliConfig,
     display_manager::{DisplayManager, PromptFailure},
@@ -51,61 +53,54 @@ pub(crate) async fn handle_push(
         Ok(result) => result,
         Err(SyncError::ValidationFailed { failures }) => {
             let count = failures.len();
-            let label = selfie::pluralize(count, "package", "packages");
-            display.print_error(format!(
-                "{count} changed {label} failed validation — fix before pushing"
+            let label = plural(count, lit!("package"), lit!("packages"));
+            display.print_error(shown!(
+                "{} changed {} failed validation — fix before pushing",
+                count,
+                label
             ));
 
-            let groups: Vec<ValidationGroup<'_>> = failures
+            let groups: Vec<ValidationGroup> = failures
                 .iter()
                 .map(|f| ValidationGroup {
-                    label: &f.path,
-                    rows: f
-                        .issues
-                        .iter()
-                        .map(|i| ValidationRow {
-                            level: i.level,
-                            category: i.category.to_string(),
-                            field: &i.field,
-                            message: &i.message,
-                            location: i.location,
-                            suggestion: i.suggestion.as_deref(),
-                        })
-                        .collect(),
+                    label: DisplayPath::new(&f.path).into(),
+                    rows: f.issues.iter().map(crate::received::Issue::from).collect(),
                 })
                 .collect();
 
-            display_validation_groups(&groups, use_colors, display, Channel::Stderr);
+            display_validation_groups(groups, use_colors, display, Channel::Stderr);
             return Exit::Failed;
         }
         // Its own arm so the suggestion lands in the suggestion channel, as it
         // does for the same refusal on the apply path. The `Display` impl joins
         // both halves for callers with nowhere separate to put one.
         Err(SyncError::Privilege(refusal)) => {
-            display.print_error(refusal.message());
-            display.print_suggestion(refusal.suggestion());
+            display.print_error(received::sentence(refusal.message()));
+            display.print_suggestion(received::sentence(refusal.suggestion()));
             return Exit::Failed;
         }
         Err(e) => {
-            display.print_error(e.to_string());
+            display.print_error(received::sentence(e));
             return Exit::Failed;
         }
     };
 
     for warning in &warnings {
-        display.print_warning(warning);
+        display.print_warning(received::sentence(warning));
     }
 
     if pending_commits.is_empty() && ahead == 0 {
-        display.print_info("Nothing to push — working tree is clean");
+        display.print_info(lit!("Nothing to push — working tree is clean"));
         return Exit::Clean;
     }
 
     // No new commits but unpushed local commits exist — push them directly
     if pending_commits.is_empty() && ahead > 0 {
-        let label = selfie::pluralize(ahead, "commit", "commits");
-        display.print_info(format!(
-            "{ahead} existing {label} not yet pushed — pushing now"
+        let label = plural(ahead, lit!("commit"), lit!("commits"));
+        display.print_info(shown!(
+            "{} existing {} not yet pushed — pushing now",
+            ahead,
+            label
         ));
         return execute_push(&service, vec![], display).await;
     }
@@ -115,8 +110,8 @@ pub(crate) async fn handle_push(
     if !args.yes && !display.can_prompt() {
         return display.refuse_prompt(
             &PromptFailure::NoTerminal,
-            "Editing the commit messages",
-            "Pass --yes to commit with the generated messages.",
+            lit!("Editing the commit messages"),
+            lit!("Pass --yes to commit with the generated messages."),
         );
     }
 
@@ -128,8 +123,8 @@ pub(crate) async fn handle_push(
         Err(failure) => {
             return display.refuse_prompt(
                 &failure,
-                "Editing the commit messages",
-                "Pass --yes to commit with the messages shown above.",
+                lit!("Editing the commit messages"),
+                lit!("Pass --yes to commit with the messages shown above."),
             );
         }
     };
@@ -145,9 +140,9 @@ fn show_pending_commits(
     use_colors: bool,
 ) {
     let count = commits.len();
-    let label = selfie::pluralize(count, "commit", "commits");
+    let label = plural(count, lit!("commit"), lit!("commits"));
     display.println(lit!(""));
-    display.print_info(format!("{count} {label} to push:"));
+    display.print_info(shown!("{} {} to push:", count, label));
     display.println(lit!(""));
     for (i, commit) in commits.iter().enumerate() {
         let num = i + 1;
@@ -157,7 +152,11 @@ fn show_pending_commits(
         } else {
             lit!("files")
         };
-        let message = crate::status_style::styled_text(&commit.message, use_colors, |s| s.bold());
+        let message = crate::status_style::styled_text(
+            crate::terminal_text::Prose::new(&commit.message),
+            use_colors,
+            |s| s.bold(),
+        );
         display.println_after(
             shown!("  {}. ", num),
             shown!("{} ({} {})", message, file_count, file_label),
@@ -250,7 +249,11 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager) -> bool {
             message,
             ..
         } => {
-            display.print_success(format!("{package_name}: {message}"));
+            display.print_success(shown!(
+                "{}: {}",
+                Name::new(package_name),
+                received::sentence(message)
+            ));
             true
         }
 
@@ -261,10 +264,10 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager) -> bool {
         } => {
             display.println(lit!(""));
             if *commits_pushed == 0 {
-                display.print_success("Pushed to remote");
+                display.print_success(lit!("Pushed to remote"));
             } else {
-                let label = selfie::pluralize(*commits_pushed, "commit", "commits");
-                display.print_success(format!("Pushed {commits_pushed} {label} to remote"));
+                let label = plural(*commits_pushed, lit!("commit"), lit!("commits"));
+                display.print_success(shown!("Pushed {} {} to remote", *commits_pushed, label));
             }
             true
         }
@@ -273,7 +276,7 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager) -> bool {
             result: OperationResult::Success(OperationSuccess::SyncNothingToPush { .. }),
             ..
         } => {
-            display.print_info("Nothing to push");
+            display.print_info(lit!("Nothing to push"));
             true
         }
 

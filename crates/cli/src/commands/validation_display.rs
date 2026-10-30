@@ -7,33 +7,22 @@ use selfie::package::event::ValidationIssueData;
 use selfie::validation::ValidationLevel;
 
 use crate::display_manager::{Channel, DisplayManager};
+use crate::formatters::comma_joined;
+use crate::received::Issue;
 use crate::tables::{Cell, SafeTable};
-use crate::terminal_text::{Name, Shown, lit, shown};
-
-/// A single validation issue row, used as a common representation for both
-/// event-driven validation results and sync push validation failures.
-pub(crate) struct ValidationRow<'a> {
-    pub level: ValidationLevel,
-    /// The issue's category, worded for a person.
-    pub category: String,
-    pub field: &'a str,
-    pub message: &'a str,
-    pub location: Option<selfie::yaml::SourceLocation>,
-    /// How to fix it, when the issue says.
-    pub suggestion: Option<&'a str>,
-}
+use crate::terminal_text::{Literal, Shown, lit, shown};
 
 /// A group of validation issues for a single file or package.
-pub(crate) struct ValidationGroup<'a> {
+pub(crate) struct ValidationGroup {
     /// Display label for this group (file path or package name).
-    pub label: &'a str,
-    pub rows: Vec<ValidationRow<'a>>,
+    pub label: Shown,
+    pub rows: Vec<Issue>,
 }
 
 /// Display one or more validation groups as formatted tables, on `channel`:
 /// stdout when the issues are the answer, stderr when they explain a failure.
 pub(crate) fn display_validation_groups(
-    groups: &[ValidationGroup<'_>],
+    groups: Vec<ValidationGroup>,
     use_colors: bool,
     display: &DisplayManager,
     channel: Channel,
@@ -64,10 +53,10 @@ pub(crate) fn display_validation_groups(
     // "Validation Warnings (0)".
     let counted = level_counts(total_errors, total_warnings, total_notices);
     let header = match (total_errors, total_warnings, total_notices) {
-        (e, 0, 0) if e > 0 => format!("Validation Errors ({e})"),
-        (0, w, 0) if w > 0 => format!("Validation Warnings ({w})"),
-        (0, 0, n) if n > 0 => format!("Validation Notices ({n})"),
-        _ => format!("Validation Issues ({})", counted.join(", ")),
+        (e, 0, 0) if e > 0 => shown!("Validation Errors ({})", e),
+        (0, w, 0) if w > 0 => shown!("Validation Warnings ({})", w),
+        (0, 0, n) if n > 0 => shown!("Validation Notices ({})", n),
+        _ => shown!("Validation Issues ({})", comma_joined(counted)),
     };
     display.line_to(channel, lit!(""));
     display.print_section_header_to(channel, header);
@@ -85,7 +74,7 @@ pub(crate) fn display_validation_groups(
         } else {
             Shown::from(lit!("ℹ")).paint(use_colors, |s| s.blue())
         };
-        let label = Shown::from(Name::new(group.label)).paint(use_colors, |s| s.bold());
+        let label = group.label.paint(use_colors, |s| s.bold());
         display.line_to(channel, shown!("  {} {}", marker, label));
 
         let mut table = SafeTable::new();
@@ -96,13 +85,19 @@ pub(crate) fn display_validation_groups(
         // A Suggestion column only where some issue has one, so a table without
         // any keeps its width.
         let suggested = group.rows.iter().any(|r| r.suggestion.is_some());
-        let mut header = vec!["Level", "Category", "Field", "Message", "Location"];
+        let mut header = vec![
+            lit!("Level"),
+            lit!("Category"),
+            lit!("Field"),
+            lit!("Message"),
+            lit!("Location"),
+        ];
         if suggested {
-            header.push("Suggestion");
+            header.push(lit!("Suggestion"));
         }
         table.set_header(header);
 
-        for row in &group.rows {
+        for row in group.rows {
             let level = Cell::painted(
                 level_label(&row.level),
                 use_colors,
@@ -112,18 +107,19 @@ pub(crate) fn display_validation_groups(
                     ValidationLevel::Info => |s| s,
                 },
             );
-            let location = row
-                .location
-                .map_or_else(|| "-".to_string(), |at| at.to_string());
             let mut cells = vec![
                 level,
-                Cell::painted(&row.category, use_colors, |s| s.magenta()),
+                Cell::painted(row.category, use_colors, |s| s.magenta()),
                 Cell::painted(row.field, use_colors, |s| s.cyan()),
-                Cell::prose(row.message),
-                location.into(),
+                row.message.into(),
+                row.location
+                    .map_or_else(|| Cell::from(lit!("-")), Cell::from),
             ];
             if suggested {
-                cells.push(Cell::prose(row.suggestion.unwrap_or("-")));
+                cells.push(
+                    row.suggestion
+                        .map_or_else(|| Cell::from(lit!("-")), Cell::from),
+                );
             }
             table.add_row(cells);
         }
@@ -134,41 +130,42 @@ pub(crate) fn display_validation_groups(
 
 /// The count at each level present, as "2 error(s)", "1 warning(s)" and
 /// "3 notice(s)", in that order.
-pub(crate) fn level_counts(errors: usize, warnings: usize, notices: usize) -> Vec<String> {
+pub(crate) fn level_counts(errors: usize, warnings: usize, notices: usize) -> Vec<Shown> {
     [
-        (errors, "error(s)"),
-        (warnings, "warning(s)"),
-        (notices, "notice(s)"),
+        (errors, lit!("error(s)")),
+        (warnings, lit!("warning(s)")),
+        (notices, lit!("notice(s)")),
     ]
     .into_iter()
     .filter(|(n, _)| *n > 0)
-    .map(|(n, noun)| format!("{n} {noun}"))
+    .map(|(n, noun)| shown!("{} {}", n, noun))
     .collect()
 }
 
 /// The word a validation table and an issue line both use for `level`.
-pub(crate) fn level_label(level: &ValidationLevel) -> &'static str {
+pub(crate) fn level_label(level: &ValidationLevel) -> Literal {
     match level {
-        ValidationLevel::Error => "ERROR",
-        ValidationLevel::Warning => "WARN",
-        ValidationLevel::Info => "INFO",
+        ValidationLevel::Error => lit!("ERROR"),
+        ValidationLevel::Warning => lit!("WARN"),
+        ValidationLevel::Info => lit!("INFO"),
     }
 }
 
 /// One issue as a line: `<LEVEL> <field>: <message>`, then `. <suggestion>` when
 /// there is one.
-pub(crate) fn issue_line(issue: &ValidationIssueData) -> String {
-    let mut line = format!(
-        "{} {}: {}",
-        level_label(&issue.level),
-        issue.field,
-        issue.message
-    );
-    if let Some(suggestion) = &issue.suggestion {
-        line.push_str(". ");
-        line.push_str(suggestion);
+pub(crate) fn issue_line(issue: &ValidationIssueData) -> Shown {
+    let level = level_label(&issue.level);
+    let issue = Issue::from(issue);
+    match issue.suggestion {
+        Some(suggestion) => shown!(
+            "{} {}: {}. {}",
+            level,
+            issue.field,
+            issue.message,
+            suggestion
+        ),
+        None => shown!("{} {}: {}", level, issue.field, issue.message),
     }
-    line
 }
 
 /// Print each of `issues` on stderr, one line apiece, through the display method
@@ -189,14 +186,14 @@ mod tests {
     use super::*;
     use crate::display_manager::Channel;
 
-    fn groups() -> Vec<ValidationGroup<'static>> {
+    fn groups() -> Vec<ValidationGroup> {
         vec![ValidationGroup {
-            label: "noenv",
-            rows: vec![ValidationRow {
+            label: lit!("noenv").into(),
+            rows: vec![Issue {
                 level: ValidationLevel::Error,
-                category: "required field".to_string(),
-                field: "environments",
-                message: "At least one environment must be defined",
+                category: lit!("required field").into(),
+                field: lit!("environments").into(),
+                message: lit!("At least one environment must be defined").into(),
                 location: None,
                 suggestion: None,
             }],
@@ -212,7 +209,7 @@ mod tests {
             (Channel::Stderr, Channel::Stderr),
         ] {
             let display = DisplayManager::new(false);
-            display_validation_groups(&groups(), false, &display, channel);
+            display_validation_groups(groups(), false, &display, channel);
 
             let printed = display.printed();
             assert!(printed.len() > 2, "{printed:?}");
@@ -225,10 +222,11 @@ mod tests {
     #[test]
     fn a_location_reads_line_and_column() {
         let mut located = groups();
-        located[0].rows[0].location = selfie::yaml::SourceLocation::new(2, 1);
+        located[0].rows[0].location =
+            crate::received::location(selfie::yaml::SourceLocation::new(2, 1));
         let display = DisplayManager::new(false);
 
-        display_validation_groups(&located, false, &display, Channel::Stdout);
+        display_validation_groups(located, false, &display, Channel::Stdout);
 
         let printed: String = display
             .printed()
@@ -255,7 +253,8 @@ mod tests {
             issue_line(&issue(
                 ValidationLevel::Error,
                 Some("Add a closing double quote (\") to the command.")
-            )),
+            ))
+            .as_str(),
             "ERROR environments.work.install: Unmatched double quote in command. Add a closing \
              double quote (\") to the command."
         );
@@ -264,8 +263,27 @@ mod tests {
     #[test]
     fn issue_line_without_a_suggestion_ends_at_the_message() {
         assert_eq!(
-            issue_line(&issue(ValidationLevel::Warning, None)),
+            issue_line(&issue(ValidationLevel::Warning, None)).as_str(),
             "WARN environments.work.install: Unmatched double quote in command"
+        );
+    }
+
+    // A library sentence ending in a line break, CRLF included, ends at its
+    // text: no `\r` and no blank line after it.
+    #[test]
+    fn an_issue_ending_in_a_line_break_ends_at_its_text() {
+        let display = DisplayManager::new(false);
+        let mut ending = issue(ValidationLevel::Error, Some("fix it\r\n"));
+        ending.message = "broken\r\n".to_string();
+
+        print_issues(&display, &[ending]);
+
+        assert_eq!(
+            display.printed(),
+            [(
+                Channel::Stderr,
+                "ERROR environments.work.install: broken. fix it".to_string()
+            )]
         );
     }
 
@@ -299,8 +317,8 @@ mod tests {
 
     #[test]
     fn level_label_names_each_level() {
-        assert_eq!(level_label(&ValidationLevel::Error), "ERROR");
-        assert_eq!(level_label(&ValidationLevel::Warning), "WARN");
-        assert_eq!(level_label(&ValidationLevel::Info), "INFO");
+        assert_eq!(level_label(&ValidationLevel::Error).as_str(), "ERROR");
+        assert_eq!(level_label(&ValidationLevel::Warning).as_str(), "WARN");
+        assert_eq!(level_label(&ValidationLevel::Info).as_str(), "INFO");
     }
 }

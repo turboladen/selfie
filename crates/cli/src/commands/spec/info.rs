@@ -2,8 +2,7 @@ use crate::tables::{Cell, SafeTable};
 use crate::terminal_text::{Literal, Name, Shown, lit, shown};
 use selfie::package::{
     event::{
-        DependencyStatus, EnvironmentStatus, EnvironmentStatusData, OperationResult, PackageEvent,
-        PackageInfoData,
+        EnvironmentStatus, EnvironmentStatusData, OperationResult, PackageEvent, PackageInfoData,
     },
     service::SpecService,
 };
@@ -17,6 +16,7 @@ use crate::{
 };
 
 use crate::commands::presentation;
+use crate::received;
 
 pub(crate) async fn handle_info(
     service: &impl SpecService,
@@ -27,7 +27,7 @@ pub(crate) async fn handle_info(
     tracing::debug!("Getting package definition for: {package_name}");
 
     // Status message:
-    display.print_status(format!("Getting info for {package_name}..."));
+    display.print_status(shown!("Getting info for {}...", Name::new(package_name)));
 
     // Call the service's spec_info method to get an event stream
     let event_stream = service.spec_info(package_name).await;
@@ -38,12 +38,14 @@ pub(crate) async fn handle_info(
         .process_events(event_stream, |event| {
             match event {
                 PackageEvent::PackageInfoLoaded { package_info, .. } => {
-                    let table = create_package_info_table(package_info, config);
+                    let info = received::Info::from(package_info);
+                    let table = create_package_info_table(package_info, &info, config);
                     display.println(shown!("{}", table));
-                    print_dotfiles(package_info, display);
-                    if let Some(reason) = &package_info.refusal_elsewhere {
-                        display.print_info(format!(
-                            "selfie apply would refuse this spec in another environment: {reason}"
+                    print_dotfiles(package_info, &info, display);
+                    if let Some(reason) = info.refusal_elsewhere {
+                        display.print_info(shown!(
+                            "selfie apply would refuse this spec in another environment: {}",
+                            reason
                         ));
                     }
                     true // Handled
@@ -67,17 +69,21 @@ pub(crate) async fn handle_info(
     result.exit
 }
 
-fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig) -> SafeTable {
+fn create_package_info_table(
+    package_info: &PackageInfoData,
+    info: &received::Info,
+    config: &CliConfig,
+) -> SafeTable {
     let mut table = SafeTable::new();
     let use_colors = config.use_colors();
     let key = |name: Literal| Cell::from(format_key(name, use_colors));
 
-    table.add_row([key(lit!("Name")), package_info.name.as_str().into()]);
-    if let Some(desc) = &package_info.description {
-        table.add_row([key(lit!("Description")), Cell::prose(desc)]);
+    table.add_row([key(lit!("Name")), info.name.clone().into()]);
+    if let Some(description) = &info.description {
+        table.add_row([key(lit!("Description")), description.clone().into()]);
     }
 
-    if let Some(homepage) = &package_info.homepage {
+    if let Some(homepage) = info.homepage.clone() {
         table.add_row([
             key(lit!("Homepage")),
             Cell::painted(homepage, use_colors, |s| s.underlined().blue()),
@@ -86,11 +92,11 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
 
     // A refused spec's environments cannot be trusted, so the reason stands in
     // for them rather than an empty list that reads as "declares none".
-    if let Some(refusal) = &package_info.refusal {
-        let text = format!("selfie apply would refuse this spec here: {refusal}");
+    if let Some(refusal) = &info.refusal {
+        let text = shown!("selfie apply would refuse this spec here: {}", refusal);
         table.add_row([
             key(lit!("Refused")),
-            status_style::styled_text(&text, use_colors, |s| s.red()).into(),
+            status_style::styled_text(text, use_colors, |s| s.red()).into(),
         ]);
     } else {
         let env_names = presentation::format_environment_names(
@@ -113,22 +119,23 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
 
 /// The spec's dotfile entries and where each one's content comes from, then
 /// how many commands apply would run for them here.
-fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
+fn print_dotfiles(package_info: &PackageInfoData, info: &received::Info, display: &DisplayManager) {
     if package_info.dotfiles.is_empty() {
         return;
     }
 
     let mut table = SafeTable::new();
-    table.set_header(["Environment", "Content", "Target"]);
+    table.set_header([lit!("Environment"), lit!("Content"), lit!("Target")]);
     for dotfile in &package_info.dotfiles {
         table.add_row([
             match (&dotfile.environment, dotfile.refused) {
-                (Some(environment), true) => format!("{environment} (refused)"),
-                (Some(environment), false) => environment.clone(),
-                (None, _) => "(shared)".to_string(),
-            },
-            crate::commands::dotfiles::list::source_cell(&dotfile.entry),
-            shorten_path(dotfile.entry.target()).to_string(),
+                (Some(environment), true) => shown!("{} (refused)", Name::new(environment)),
+                (Some(environment), false) => Name::new(environment).into(),
+                (None, _) => lit!("(shared)").into(),
+            }
+            .into(),
+            Cell::from(crate::commands::dotfiles::list::source_cell(&dotfile.entry)),
+            shorten_path(dotfile.entry.target()).into(),
         ]);
     }
     display.println(shown!("\n{}", table));
@@ -136,11 +143,15 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
     // A reader may take a package file for data, and applying this one runs
     // commands.
     if package_info.apply_commands > 0 {
-        display.print_warning(format!(
+        display.print_warning(shown!(
             "selfie apply runs {} {} in environment '{}' to produce this package's dotfiles",
             package_info.apply_commands,
-            selfie::pluralize(package_info.apply_commands, "command", "commands"),
-            package_info.current_environment,
+            crate::formatters::plural(
+                package_info.apply_commands,
+                lit!("command"),
+                lit!("commands")
+            ),
+            info.current_environment
         ));
     }
 }
@@ -153,19 +164,15 @@ pub(crate) fn create_environment_table(
 
     // Create a header for the environment table
     let use_colors = config.use_colors();
-    let name = &env_status.environment_name;
+    let environment = received::Environment::from(env_status);
     let env_header = if env_status.is_current {
-        Shown::from(Name::new(&format!("Environment: *{name}")))
-            .paint(use_colors, |s| s.bold().green())
+        shown!("Environment: *{}", environment.name).paint(use_colors, |s| s.bold().green())
     } else {
-        Shown::from(Name::new(&format!("Environment: {name}"))).paint(use_colors, |s| s.bold())
+        shown!("Environment: {}", environment.name).paint(use_colors, |s| s.bold())
     };
-    env_table.set_header([Cell::from(env_header), "".into()]);
+    env_table.set_header([Cell::from(env_header), lit!("").into()]);
 
     let format_env_key = |key: Literal| Cell::from(format_key(key, use_colors));
-    // Commands, as prose: a block-scalar command keeps its line breaks inside
-    // the cell.
-    let format_env_value = Cell::prose;
 
     // Add installation status if this is the current environment and we have status
     if env_status.is_current {
@@ -175,45 +182,38 @@ pub(crate) fn create_environment_table(
 
     // Add environment detail rows
     // A blank install still gets its row, so the user sees why install refuses.
-    let install = env_status.install_command.as_deref().unwrap_or(
-        "none (blank: `package install` refuses it unless the check says it is installed)",
+    let install = environment.install_command.map_or_else(
+        || {
+            Cell::from(lit!(
+                "none (blank: `package install` refuses it unless the check says it is installed)"
+            ))
+        },
+        Cell::from,
     );
-    env_table.add_row([format_env_key(lit!("Install")), format_env_value(install)]);
+    env_table.add_row([format_env_key(lit!("Install")), install]);
 
-    if let Some(check) = &env_status.check_command {
-        env_table.add_row([format_env_key(lit!("Check")), format_env_value(check)]);
+    if let Some(check) = environment.check_command {
+        env_table.add_row([format_env_key(lit!("Check")), check.into()]);
     }
 
-    if !env_status.dependency_statuses.is_empty() {
-        let dep_display = env_status
-            .dependency_statuses
-            .iter()
-            .map(|dep| format_dependency_with_status(dep, use_colors));
-        env_table.add_row([
-            format_env_key(lit!("Dependencies")),
-            Shown::join(dep_display, lit!(", ")).into(),
-        ]);
-    } else if !env_status.dependencies.is_empty() {
-        env_table.add_row([
-            format_env_key(lit!("Dependencies")),
-            crate::formatters::name_list(&env_status.dependencies).into(),
-        ]);
+    // A checked list shows each name with its status, an unchecked one the
+    // names alone.
+    let listed = |checked: &[(Name, EnvironmentStatus)], names: Vec<Name>| -> Option<Shown> {
+        if !checked.is_empty() {
+            Some(crate::formatters::comma_joined(checked.iter().map(
+                |(name, status)| format_dependency_with_status(name, status, use_colors),
+            )))
+        } else if !names.is_empty() {
+            Some(crate::formatters::comma_joined(names))
+        } else {
+            None
+        }
+    };
+    if let Some(dependencies) = listed(&environment.dependency_statuses, environment.dependencies) {
+        env_table.add_row([format_env_key(lit!("Dependencies")), dependencies.into()]);
     }
-
-    if !env_status.recommend_statuses.is_empty() {
-        let rec_display = env_status
-            .recommend_statuses
-            .iter()
-            .map(|dep| format_dependency_with_status(dep, use_colors));
-        env_table.add_row([
-            format_env_key(lit!("Recommends")),
-            Shown::join(rec_display, lit!(", ")).into(),
-        ]);
-    } else if !env_status.recommends.is_empty() {
-        env_table.add_row([
-            format_env_key(lit!("Recommends")),
-            crate::formatters::name_list(&env_status.recommends).into(),
-        ]);
+    if let Some(recommends) = listed(&environment.recommend_statuses, environment.recommends) {
+        env_table.add_row([format_env_key(lit!("Recommends")), recommends.into()]);
     }
 
     env_table
@@ -223,25 +223,26 @@ pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Sho
     match status {
         EnvironmentStatus::Installed => status_style::format_installed(use_colors),
         EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
-        EnvironmentStatus::Unknown(reason) => {
-            status_style::styled_text(&format!("Unknown ({reason})"), use_colors, |s| {
-                s.yellow().italic()
-            })
-        }
+        EnvironmentStatus::Unknown(reason) => status_style::styled_text(
+            shown!("Unknown ({})", received::sentence(reason)),
+            use_colors,
+            |s| s.yellow().italic(),
+        ),
     }
 }
 
-fn format_dependency_with_status(dep: &DependencyStatus, use_colors: bool) -> Shown {
-    shown!(
-        "{}: {}",
-        Name::new(&dep.name),
-        format_status(&dep.status, use_colors)
-    )
+fn format_dependency_with_status(
+    name: &Name,
+    status: &EnvironmentStatus,
+    use_colors: bool,
+) -> Shown {
+    shown!("{}: {}", name, format_status(status, use_colors))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use selfie::package::event::DependencyStatus;
     use selfie::package::event::EnvironmentStatus;
     use test_common::TEST_ENV;
 
@@ -296,7 +297,7 @@ mod tests {
             name: "git".to_string(),
             status: EnvironmentStatus::Installed,
         };
-        let result = format_dependency_with_status(&dep, false);
+        let result = format_dependency_with_status(&Name::new(&dep.name), &dep.status, false);
         assert!(result.starts_with("git: "));
         assert!(result.contains("Installed"));
     }
@@ -307,7 +308,7 @@ mod tests {
             name: "curl".to_string(),
             status: EnvironmentStatus::NotInstalled,
         };
-        let result = format_dependency_with_status(&dep, false);
+        let result = format_dependency_with_status(&Name::new(&dep.name), &dep.status, false);
         assert!(result.starts_with("curl: "));
         assert!(result.contains("Not installed"));
     }
@@ -333,7 +334,8 @@ mod tests {
                 .expect("a lookup returns this error"),
             )),
         };
-        let result = format_dependency_with_status(&missing, false);
+        let result =
+            format_dependency_with_status(&Name::new(&missing.name), &missing.status, false);
         assert!(result.starts_with("missing: "), "{result}");
         assert!(
             result.contains("Unknown (Package `missing` not found in path /packages)"),
@@ -358,7 +360,7 @@ mod tests {
                 .expect("a lookup returns this error"),
             )),
         };
-        let result = format_dependency_with_status(&broken, false);
+        let result = format_dependency_with_status(&Name::new(&broken.name), &broken.status, false);
         assert!(result.starts_with("broken: Unknown ("), "{result}");
         assert!(result.contains("/packages/broken.yml"), "{result}");
     }

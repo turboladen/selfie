@@ -5,7 +5,7 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit, shown};
 use selfie::dotfile_service::track::Tracker;
 use std::collections::HashSet;
 
@@ -72,7 +72,7 @@ pub(crate) async fn handle_track(
     if !trackers.is_empty() {
         // A spec selfie could not read may track the file as well, so the count
         // below may be short; say so first.
-        let mut reported: HashSet<String> = HashSet::new();
+        let mut reported: HashSet<Shown> = HashSet::new();
         for warning in unchecked {
             if reported.insert(warning.clone()) {
                 display.print_warning(warning);
@@ -101,7 +101,7 @@ pub(crate) async fn handle_track(
     //
     // Both scans read the package directory, so an unreadable spec there
     // composes the same sentence twice; the second printing is noise.
-    let mut reported: HashSet<String> = HashSet::new();
+    let mut reported: HashSet<Shown> = HashSet::new();
     for warning in unchecked.into_iter().chain(skipped) {
         if reported.insert(warning.clone()) {
             display.print_warning(warning);
@@ -113,10 +113,12 @@ pub(crate) async fn handle_track(
         Err(failure) => {
             return display.refuse_prompt(
                 &failure,
-                "Choosing where to track a file",
-                "Name the destination instead: `selfie package track-dotfile <package> <file>` \
+                lit!("Choosing where to track a file"),
+                lit!(
+                    "Name the destination instead: `selfie package track-dotfile <package> <file>` \
                      to add it to an existing package, or `selfie dotfiles track <name> <file>` to \
-                     make it a standalone dotfile.",
+                     make it a standalone dotfile."
+                ),
             );
         }
     };
@@ -135,7 +137,7 @@ pub(crate) async fn handle_track(
         }
         // Nothing was tracked, so the run did not do what it was asked.
         TrackChoice::Declined => {
-            display.print_run_note("Canceled.");
+            display.print_run_note(lit!("Canceled."));
             Exit::Failed
         }
     }
@@ -155,11 +157,12 @@ fn report_existing_trackers(trackers: &[Tracker], display: &DisplayManager) -> E
     // Two specs deploying one file overwrite each other on every apply, so the
     // file is not handled, whatever each entry says on its own.
     if let [_, _, ..] = trackers {
-        let names: Vec<&str> = trackers.iter().map(|t| t.spec_name.as_str()).collect();
-        display.print_error(format!(
+        let names =
+            crate::formatters::comma_joined(trackers.iter().map(|t| Name::new(&t.spec_name)));
+        display.print_error(shown!(
             "{} specs track this file: {}. Keep it in one of them.",
             trackers.len(),
-            names.join(", ")
+            names
         ));
         return exit.max(Exit::Failed);
     }
@@ -196,9 +199,11 @@ fn report_existing_tracker(
     let expanded = match selfie::fs::deploy_target(&fs, target) {
         Ok(expanded) => expanded,
         Err(rejection) => {
-            display.print_error(format!(
-                "'{target}' is tracked in spec '{spec_name}', but {}",
-                rejection.message()
+            display.print_error(shown!(
+                "'{}' is tracked in spec '{}', but {}",
+                DisplayPath::new(target),
+                Name::new(spec_name),
+                crate::received::sentence(rejection.message())
             ));
             // `NoHome` is the machine's state rather than the spec's: that entry
             // is correct and editing it would break a spec that works everywhere
@@ -206,9 +211,9 @@ fn report_existing_tracker(
             // in a file the user can open, and the path to open is what they
             // need rather than advice on choosing a target.
             if matches!(rejection, selfie::fs::TargetRejection::NoHome) {
-                display.print_suggestion(rejection.suggestion());
+                display.print_suggestion(crate::received::sentence(rejection.suggestion()));
             } else {
-                display.print_suggestion(format!(
+                display.print_suggestion(shown!(
                     "Edit {} to correct the target.",
                     DisplayPath::of(spec_path)
                 ));
@@ -225,10 +230,14 @@ fn report_existing_tracker(
     if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded)
         && warned.insert(warning.clone())
     {
-        display.print_warning(warning);
+        display.print_warning(crate::received::sentence(warning));
     }
 
-    display.print_info(format!("Already tracking '{target}' in spec '{spec_name}'"));
+    display.print_info(shown!(
+        "Already tracking '{}' in spec '{}'",
+        DisplayPath::new(target),
+        Name::new(spec_name)
+    ));
     Exit::Clean
 }
 
@@ -359,15 +368,17 @@ fn suggest_name(file_path: &str) -> String {
 /// entry is written into the dotfiles directory, and every state but a readable
 /// directory refuses that write. Saying it before the prompt is what keeps the user
 /// from choosing a name selfie cannot use.
-fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Option<String> {
+fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Option<Shown> {
     let path = error.path();
     Some(match error.state().clone() {
         // A directory that classified cleanly and still would not list
         // could not be *listed*, which is the same answer an unlistable
         // one gets.
-        DirectoryState::Directory => format!(
-            "The dotfiles directory at {} could not be listed, so selfie cannot tell whether a spec in it already tracks this file: {error}",
-            DisplayPath::of(path)
+        DirectoryState::Directory => shown!(
+            "The dotfiles directory at {} could not be listed, so selfie cannot tell whether a \
+             spec in it already tracks this file: {}",
+            DisplayPath::of(path),
+            crate::received::sentence(error)
         ),
         // An empty path is silent unless the user named it, which is the rule
         // `dotfiles_directory_is_expected` states: an empty default is the
@@ -386,24 +397,29 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
             // carry a colon of its own — the dangling-symlink one names a
             // destination — and two colons in one sentence read as one
             // path followed by another.
-            let mut sentence = format!(
-                "The dotfiles directory at {} {}. A standalone dotfile cannot be tracked until that is fixed.",
+            let sentence = shown!(
+                "The dotfiles directory at {} {}. A standalone dotfile cannot be tracked until \
+                 that is fixed.",
                 DisplayPath::of(path),
-                reason.clause()
+                crate::received::sentence(reason.clause())
             );
-            if let Some(command) = reason.remedy(path) {
-                sentence.push(' ');
-                sentence.push_str(&command);
+            // The remedy is a command, escaped as prose until slice 5's Command
+            // kind takes it.
+            match reason.remedy(path) {
+                Some(command) => shown!("{} {}", sentence, Prose::new(&command)),
+                None => sentence,
             }
-            sentence
         }
-        DirectoryState::Unlistable(_) => format!(
-            "The dotfiles directory could not be listed, so selfie cannot tell whether a spec in it already tracks this file: {} — {error}",
-            DisplayPath::of(path)
+        DirectoryState::Unlistable(_) => shown!(
+            "The dotfiles directory could not be listed, so selfie cannot tell whether a spec in \
+             it already tracks this file: {} — {}",
+            DisplayPath::of(path),
+            crate::received::sentence(error)
         ),
-        DirectoryState::Unknown(_) => format!(
-            "The dotfiles directory could not be checked: {} — {error}",
-            DisplayPath::of(path)
+        DirectoryState::Unknown(_) => shown!(
+            "The dotfiles directory could not be checked: {} — {}",
+            DisplayPath::of(path),
+            crate::received::sentence(error)
         ),
     })
 }
@@ -412,10 +428,12 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
 ///
 /// Unlike the dotfiles directory, the package directory is always expected, so
 /// every state earns a warning.
-fn package_listing_warning(error: &PackageListError) -> String {
+fn package_listing_warning(error: &PackageListError) -> Shown {
     // The error's own sentence starts with the path, so it is not named twice.
-    format!(
-        "The package directory {error}, so its specs were not checked for an entry that already tracks this file"
+    shown!(
+        "The package directory {}, so its specs were not checked for an entry that already \
+         tracks this file",
+        crate::received::sentence(error)
     )
 }
 
@@ -437,7 +455,7 @@ fn find_existing_trackers(
     file: &str,
     config: &CliConfig,
     dotfiles_repo: &YamlPackageRepository<RealFileSystem>,
-) -> (Vec<Tracker>, Vec<String>) {
+) -> (Vec<Tracker>, Vec<Shown>) {
     let fs = RealFileSystem;
     let expanded = selfie::fs::expand_target_path(&fs, file);
     let mut skipped = Vec::new();
@@ -479,7 +497,7 @@ fn find_existing_trackers(
         };
 
         for invalid in output.invalid_packages() {
-            skipped.push(selfie::package::service::skipped_spec_warning(invalid));
+            skipped.push(crate::received::skipped_spec(invalid));
         }
         let listing = output.names();
         // A dotfiles spec under a name the package directory claims is set aside,
@@ -489,7 +507,7 @@ fn find_existing_trackers(
         // may track this one, so each is named as unchecked.
         for row in &listing.rows {
             if !set_aside(&row.package_name) {
-                skipped.push(selfie::package::service::ambiguous_spec_warning(row));
+                skipped.push(crate::received::ambiguous_spec(row));
             }
         }
 
@@ -524,14 +542,17 @@ fn find_existing_trackers(
 ///
 /// A message to display when the package directory is there and cannot be
 /// listed, or something that is not a directory holds its path.
-fn load_package_names(repo: &impl PackageRepository) -> Result<(Vec<String>, Vec<String>), String> {
+fn load_package_names(repo: &impl PackageRepository) -> Result<(Vec<String>, Vec<Shown>), Shown> {
     match common::package_names_and_skipped(repo) {
         Ok(loaded) => Ok(loaded),
         // A package directory that does not exist yet holds no packages, and the
         // file can still go into a new standalone spec. Anything else at the path
         // is selfie unable to look, which may not be offered as "nothing there".
         Err(listing) if listing.may_be_created() => Ok((Vec::new(), Vec::new())),
-        Err(e) => Err(format!("Failed to list packages: {e}")),
+        Err(e) => Err(shown!(
+            "Failed to list packages: {}",
+            crate::received::sentence(e)
+        )),
     }
 }
 
