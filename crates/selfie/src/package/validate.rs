@@ -280,8 +280,7 @@ impl Package {
         let mut issues = Vec::new();
 
         issues.extend(self.validate_required_fields());
-        issues.extend(self.validate_unknown_fields());
-        issues.extend(self.validate_unknown_dotfile_fields());
+        issues.extend(self.save_refusal_issues());
         issues.extend(self.validate_urls());
         issues.extend(self.validate_environments_contents(current_env));
         issues.extend(self.validate_command_syntax());
@@ -293,6 +292,18 @@ impl Package {
             package_path: Some(self.path.clone()),
             issues: issues.into(),
         }
+    }
+
+    /// The issues for what `save_package` refuses whatever else is written: an
+    /// unknown key at the top level, in an environment, or in a dotfile entry.
+    ///
+    /// The writer would drop such a key and what is under it, so it refuses first.
+    /// Asking here gives a caller the field path and the expected keys before the
+    /// file is touched.
+    pub(crate) fn save_refusal_issues(&self) -> Vec<ValidationIssue> {
+        let mut issues = self.validate_unknown_fields();
+        issues.extend(self.validate_unknown_dotfile_fields());
+        issues
     }
 
     /// Validate that all required fields are present and properly formatted

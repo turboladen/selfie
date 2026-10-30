@@ -6,14 +6,75 @@ use crate::{
     config::SelfieConfig,
     package::{
         EnvironmentConfig,
-        event::{
-            EventSender, OperationFailure, OperationResult, OperationSuccess, PackageUpdateFields,
-        },
+        event::{EventSender, OperationResult, OperationSuccess, PackageUpdateFields, SpecWrite},
         port::PackageRepository,
-        service::ProgressTracker,
+        service::{
+            ProgressTracker,
+            validate::{all_issues, refuse_or_report},
+        },
         unspanned,
     },
 };
+
+// The fields of the spec an update wrote, as validation names them.
+#[derive(Default)]
+struct WrittenFields {
+    // Top-level fields, such as `homepage`.
+    top_level: Vec<String>,
+    // An environment's field the update set, as (environment, field).
+    environment_fields: Vec<(String, String)>,
+    // Environments the update added, which it wrote whole.
+    added_environments: Vec<String>,
+}
+
+impl WrittenFields {
+    fn top_level(&mut self, field: &str) {
+        self.top_level.push(field.to_string());
+    }
+
+    fn environment_field(&mut self, environment: &str, field: &str) {
+        self.environment_fields
+            .push((environment.to_string(), field.to_string()));
+    }
+
+    fn added_environment(&mut self, environment: &str) {
+        self.added_environments.push(environment.to_string());
+    }
+
+    // Whether the issue field `field` is one the update wrote. `environments` is
+    // every environment name the updated spec has, so a field is placed in the
+    // longest name it starts with: an environment `a` does not own the fields of
+    // an environment `a.b`.
+    fn contains<'a>(&self, field: &str, environments: impl Iterator<Item = &'a str>) -> bool {
+        if self.top_level.iter().any(|written| written == field) {
+            return true;
+        }
+        let owner = environments
+            .filter(|name| {
+                let owned = crate::package::environment_field(name, "");
+                field == owned.trim_end_matches('.') || field.starts_with(&owned)
+            })
+            .max_by_key(|name| name.len());
+        let Some(owner) = owner else {
+            return false;
+        };
+        if self.added_environments.iter().any(|added| added == owner) {
+            return true;
+        }
+        let rest = field
+            .strip_prefix(&crate::package::environment_field(owner, ""))
+            .unwrap_or_default();
+        // An indexed field, such as `dependencies[0]`, belongs to its list.
+        self.environment_fields
+            .iter()
+            .any(|(environment, written)| {
+                environment == owner
+                    && rest
+                        .strip_prefix(written.as_str())
+                        .is_some_and(|after| after.is_empty() || after.starts_with('['))
+            })
+    }
+}
 
 pub(super) async fn handle_update<PR>(
     package_name: &str,
@@ -44,13 +105,17 @@ where
     // Step 2: Apply changes
     progress.next(sender, "Applying updates").await;
 
+    let mut written = WrittenFields::default();
+
     // Apply top-level fields
     if let Some(description) = fields.description {
         package.description = Some(unspanned(description));
+        written.top_level("description");
     }
 
     if let Some(homepage) = fields.homepage {
         package.homepage = Some(unspanned(homepage));
+        written.top_level("homepage");
     }
 
     // Kept for the blank-install check below, since applying the fields moves them.
@@ -73,29 +138,28 @@ where
         );
     }
 
-    // Track which environments are modified so we can scope command syntax
-    // validation to only those — avoids a deadlock where pre-existing errors
-    // in untouched environments block fixes to the targeted environment.
-    let mut modified_envs: Vec<String> = Vec::new();
-
     // Apply environment-scoped fields
     if let Some(ref env_name) = fields.environment {
         if let Some(env_config) = package.environments.value.get_mut(env_name) {
-            modified_envs.push(env_name.clone());
             if let Some(install) = fields.install {
                 env_config.install = install;
+                written.environment_field(env_name, "install");
             }
             if let Some(check) = fields.check {
                 env_config.check = check;
+                written.environment_field(env_name, "check");
             }
             if let Some(audit) = fields.audit {
                 env_config.audit = audit;
+                written.environment_field(env_name, "audit");
             }
             if let Some(dependencies) = fields.dependencies {
                 env_config.dependencies = dependencies;
+                written.environment_field(env_name, "dependencies");
             }
             if let Some(recommends) = fields.recommends {
                 env_config.recommends = recommends;
+                written.environment_field(env_name, "recommends");
             }
         } else {
             return OperationResult::Failure(
@@ -116,7 +180,8 @@ where
             );
         }
 
-        modified_envs.push(add_env.name.clone());
+        written.added_environment(&add_env.name);
+        written.top_level("environments");
         package.environments.value.insert(
             add_env.name,
             EnvironmentConfig::new(
@@ -141,6 +206,9 @@ where
             format!("Environment '{remove_env}' not found in package '{package_name}'").into(),
         );
     }
+    if fields.remove_environment.is_some() {
+        written.top_level("environments");
+    }
 
     // A blank install the caller gave would be saved over a working command and
     // refused by every later install, so it is refused here, where it was given,
@@ -158,31 +226,34 @@ where
     // Step 3: Validate and save
     progress.next(sender, "Validating and saving package").await;
 
-    // Validate top-level fields (name, version, URLs, env existence) globally
-    let mut all_issues = Vec::new();
-    all_issues.extend(package.validate_required_fields());
-    all_issues.extend(package.validate_urls());
-    all_issues.extend(package.validate_environments_contents(config.environment()));
-    // `save_package` refuses a package carrying these anyway; reporting them here
-    // gives the field path and the expected key names rather than a bare save
-    // failure, and refuses before the file is touched.
-    all_issues.extend(package.validate_unknown_dotfile_fields());
-
-    // Validate command syntax only for environments we actually touched
-    if modified_envs.is_empty() {
-        // No env-scoped changes — skip command syntax validation entirely
-    } else {
-        all_issues
-            .extend(package.validate_command_syntax_for(modified_envs.iter().map(String::as_str)));
-    }
-
-    let issues: crate::validation::ValidationIssues = all_issues.into();
-    if issues.has_errors() {
-        return OperationResult::Failure(OperationFailure::InvalidSpec {
-            action: crate::package::event::SpecWrite::Update,
-            package_name: package_name.to_string(),
-            issues: super::validate::issue_payload(&issues),
-        });
+    // The whole updated spec is judged as `spec validate` and a create judge it,
+    // and everything found is reported. An error stops the update when it is on a
+    // field the update wrote, or when `save_package` would refuse the package
+    // anyway; the refusal then names the field path and the expected keys, before
+    // the file is touched. An error on any other field was there before the update,
+    // so it is reported and does not hold up a fix to a different field.
+    let issues = all_issues(&package, repo, config.environment());
+    let refused_on_save: Vec<String> = package
+        .save_refusal_issues()
+        .iter()
+        .map(|issue| issue.field().to_string())
+        .collect();
+    if let Some(refusal) = refuse_or_report(
+        sender,
+        SpecWrite::Update,
+        package_name,
+        config.environment(),
+        &issues,
+        |issue| {
+            written.contains(
+                issue.field(),
+                package.environments.value.keys().map(String::as_str),
+            ) || refused_on_save.iter().any(|field| field == issue.field())
+        },
+    )
+    .await
+    {
+        return OperationResult::Failure(refusal);
     }
 
     if let Err(err) = repo.save_package(&package, &file_path) {
@@ -211,10 +282,14 @@ mod tests {
         config::SelfieConfigBuilder,
         package::{
             GetPackage, PackageBuilder,
-            event::{AddEnvironment, OperationContext, OperationResult},
-            port::MockPackageRepository,
+            event::{
+                AddEnvironment, OperationContext, OperationFailure, OperationResult, Outcome,
+                PackageEvent, ValidationResultData,
+            },
+            port::{MockPackageRepository, PackageRepoError},
             service::ProgressTracker,
         },
+        validation::ValidationLevel,
     };
     use std::path::PathBuf;
     use tokio::sync::mpsc;
@@ -226,10 +301,7 @@ mod tests {
             .build()
     }
 
-    fn test_sender() -> (
-        EventSender,
-        mpsc::Receiver<crate::package::event::PackageEvent>,
-    ) {
+    fn test_sender() -> (EventSender, mpsc::Receiver<PackageEvent>) {
         let (tx, rx) = mpsc::channel(32);
         let sender = EventSender::new_with_context(
             tx,
@@ -715,5 +787,463 @@ mod tests {
             };
             assert!(failure.to_string().contains("blank"), "{failure}");
         }
+    }
+
+    // Every validation result the run sent.
+    fn validation_results(rx: &mut mpsc::Receiver<PackageEvent>) -> Vec<ValidationResultData> {
+        let mut results = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let PackageEvent::ValidationResultCompleted {
+                validation_result, ..
+            } = event
+            {
+                results.push(validation_result);
+            }
+        }
+        results
+    }
+
+    // Update `package`'s description against a repository whose save gives `save`
+    // and is expected `saves` times, returning how the run ended and what it sent.
+    async fn update_description_of(
+        package: crate::package::Package,
+        saves: usize,
+        save: Result<(), PackageRepoError>,
+    ) -> (OperationResult, Vec<ValidationResultData>) {
+        let mut mock_repo = MockPackageRepository::new();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/test-pkg.yml"));
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+        mock_repo
+            .expect_save_package()
+            .times(saves)
+            .return_once(move |_, _| save);
+        let fields = PackageUpdateFields {
+            description: Some("New description".to_string()),
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &mock_repo,
+            &test_config(),
+            &sender,
+            &mut progress,
+        )
+        .await;
+        (result, validation_results(&mut rx))
+    }
+
+    // The configured environment is `test-env`; this spec configures only `other`.
+    fn package_warning_about_its_environment() -> crate::package::Package {
+        PackageBuilder::default()
+            .name("test-pkg")
+            .environment("other", |b| b.install("true"))
+            .path("/test/packages/test-pkg.yml")
+            .build()
+    }
+
+    // Warnings do not stop an update. The run sends them as a validation result,
+    // as a create does, and saves.
+    #[tokio::test]
+    async fn an_update_that_warns_is_saved_and_reports_the_warning() {
+        let (result, results) =
+            update_description_of(package_warning_about_its_environment(), 1, Ok(())).await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "got: {result:?}"
+        );
+        assert_eq!(results.len(), 1, "got: {results:?}");
+        assert_eq!(results[0].package_name, "test-pkg");
+        assert_eq!(results[0].environment, "test-env");
+        assert_eq!(results[0].outcome, Outcome::Found, "got: {results:?}");
+        assert!(
+            results[0].issues.iter().any(|issue| {
+                matches!(issue.level, ValidationLevel::Warning)
+                    && issue
+                        .message
+                        .contains("Current environment 'test-env' is not configured")
+            }),
+            "got: {results:?}"
+        );
+    }
+
+    // The report is sent before the save, so a save that fails still leaves the
+    // caller with what validation said.
+    #[tokio::test]
+    async fn the_warning_is_reported_before_the_save() {
+        let failing_save = Err(PackageRepoError::IoError(std::sync::Arc::new(
+            std::io::Error::other("disk full"),
+        )));
+
+        let (result, results) =
+            update_description_of(package_warning_about_its_environment(), 1, failing_save).await;
+
+        assert!(matches!(result, OperationResult::Failure(_)), "{result:?}");
+        assert_eq!(results.len(), 1, "got: {results:?}");
+    }
+
+    // A notice alone is reported, with no warning beside it.
+    #[tokio::test]
+    async fn an_update_reports_a_notice_with_no_warning() {
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test-env", |b| b.install("true").check_some("  "))
+            .path("/test/packages/test-pkg.yml")
+            .build();
+
+        let (result, results) = update_description_of(package, 1, Ok(())).await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "got: {result:?}"
+        );
+        assert_eq!(results.len(), 1, "got: {results:?}");
+        assert_eq!(results[0].outcome, Outcome::Clean, "got: {results:?}");
+        assert!(
+            results[0].issues.iter().any(|issue| {
+                matches!(issue.level, ValidationLevel::Info)
+                    && issue.message.contains("check command is blank")
+            }),
+            "got: {results:?}"
+        );
+    }
+
+    // The whole updated spec is judged, so what `spec validate` would say about a
+    // part the update did not touch is reported too.
+    #[tokio::test]
+    async fn an_update_reports_a_notice_about_a_dotfile_it_did_not_touch() {
+        let entry: crate::package::DotfileEntry =
+            crate::yaml::parse("command: echo key\ntarget: ~/.key\n").expect("fixture must parse");
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test-env", |b| b.install("true"))
+            .dotfiles(vec![entry])
+            .path("/test/packages/test-pkg.yml")
+            .build();
+
+        let (_, results) = update_description_of(package, 1, Ok(())).await;
+
+        assert!(
+            results
+                .iter()
+                .any(|result| result.issues.iter().any(|issue| {
+                    matches!(issue.level, ValidationLevel::Info)
+                        && issue.message.contains("executes 1 command(s)")
+                })),
+            "got: {results:?}"
+        );
+    }
+
+    // A clean update reports nothing.
+    #[tokio::test]
+    async fn a_clean_update_reports_nothing() {
+        let (result, results) =
+            update_description_of(create_test_package("test-pkg"), 1, Ok(())).await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "got: {result:?}"
+        );
+        assert!(results.is_empty(), "got: {results:?}");
+    }
+
+    // A spec that already has an error does not stop an update that adds none: the
+    // error is reported as the whole spec's and the update is saved.
+    #[tokio::test]
+    async fn an_error_the_spec_already_had_is_reported_and_does_not_stop_the_update() {
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .homepage("not a url")
+            .environment("test-env", |b| b.install("true"))
+            .path("/test/packages/test-pkg.yml")
+            .build();
+
+        let (result, results) = update_description_of(package, 1, Ok(())).await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "got: {result:?}"
+        );
+        assert_eq!(results.len(), 1, "got: {results:?}");
+        assert_eq!(results[0].outcome, Outcome::Failed, "got: {results:?}");
+        assert!(
+            results[0]
+                .issues
+                .iter()
+                .any(|issue| issue.field == "homepage"
+                    && matches!(issue.level, ValidationLevel::Error)),
+            "got: {results:?}"
+        );
+    }
+
+    // An update that adds an error is refused even when the spec had another, and
+    // nothing is reported or saved.
+    #[tokio::test]
+    async fn an_error_the_update_adds_stops_it_beside_one_the_spec_had() {
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .homepage("not a url")
+            .environment("test-env", |b| b.install("true"))
+            .path("/test/packages/test-pkg.yml")
+            .build();
+        let mut mock_repo = MockPackageRepository::new();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/test-pkg.yml"));
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+        mock_repo.expect_save_package().times(0);
+        let fields = PackageUpdateFields {
+            environment: Some("test-env".to_string()),
+            dependencies: Some(vec![String::new()]),
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &mock_repo,
+            &test_config(),
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        let OperationResult::Failure(OperationFailure::InvalidSpec { issues, .. }) = &result else {
+            panic!("expected a refusal, got: {result:?}");
+        };
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.field.contains("dependencies")),
+            "{issues:?}"
+        );
+        assert!(validation_results(&mut rx).is_empty());
+    }
+
+    // Run `fields` against `package` with a repository that must not save, and
+    // return the failure the run ended in with whatever it reported first.
+    async fn refused_update(
+        package: crate::package::Package,
+        fields: PackageUpdateFields,
+    ) -> (OperationFailure, Vec<ValidationResultData>) {
+        let mut mock_repo = MockPackageRepository::new();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/test-pkg.yml"));
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+        mock_repo.expect_save_package().times(0);
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &mock_repo,
+            &test_config(),
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        let OperationResult::Failure(failure) = result else {
+            panic!("expected a refusal, got: {result:?}");
+        };
+        (failure, validation_results(&mut rx))
+    }
+
+    // An update that writes a new invalid value into a field that was already
+    // invalid is the update's own error, whatever the old value's message said.
+    #[tokio::test]
+    async fn a_new_invalid_value_in_an_already_invalid_field_is_refused() {
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .homepage("not a url")
+            .environment("test-env", |b| b.install("true").dependencies(vec![""]))
+            .path("/test/packages/test-pkg.yml")
+            .build();
+        let homepage = PackageUpdateFields {
+            homepage: Some("also bad".to_string()),
+            ..Default::default()
+        };
+        let dependencies = PackageUpdateFields {
+            environment: Some("test-env".to_string()),
+            dependencies: Some(vec![String::new(), "git".to_string()]),
+            ..Default::default()
+        };
+
+        for fields in [homepage, dependencies] {
+            let (failure, reported) = refused_update(package.clone(), fields).await;
+
+            assert!(
+                matches!(failure, OperationFailure::InvalidSpec { .. }),
+                "got: {failure:?}"
+            );
+            assert!(reported.is_empty(), "got: {reported:?}");
+        }
+    }
+
+    // An error the save would refuse anyway is refused up front with its
+    // structured issues, whichever field the update wrote.
+    #[tokio::test]
+    async fn an_unknown_key_in_the_file_is_refused_with_its_issues_before_any_save() {
+        let misspelled_dotfile_key = "name: test-pkg\nenvironments:\n  test-env:\n    install: \"true\"\n    \
+             dotfiles:\n      - source: e.tpl\n        target: ~/.e\n        vasr: 1\n";
+        let unknown_top_level_key =
+            "name: test-pkg\nextra: 1\nenvironments:\n  test-env:\n    install: \"true\"\n";
+        for (yaml, field) in [
+            (misspelled_dotfile_key, "vasr"),
+            (unknown_top_level_key, "extra"),
+        ] {
+            // Loaded from `yaml`, so the package carries the file's own keys.
+            let mut package: crate::package::Package =
+                crate::yaml::parse(yaml).expect("fixture must parse");
+            package.set_source(
+                PathBuf::from("/test/packages/test-pkg.yml"),
+                yaml.to_string(),
+                crate::package::SpecOrigin::PackageDirectory,
+            );
+            let fields = PackageUpdateFields {
+                description: Some("New description".to_string()),
+                ..Default::default()
+            };
+
+            let (failure, _) = refused_update(package, fields).await;
+
+            let OperationFailure::InvalidSpec { issues, .. } = &failure else {
+                panic!("expected a structured refusal, got: {failure:?}");
+            };
+            assert!(
+                issues.iter().any(|issue| issue.field.contains(field)),
+                "{field}: {issues:?}"
+            );
+        }
+    }
+
+    // The update of one field is not refused for an error in another part of the
+    // environment it names: the install command is the only field it wrote.
+    #[tokio::test]
+    async fn an_install_update_is_saved_beside_an_error_in_a_dotfile_of_that_environment() {
+        let yaml = "name: test-pkg\nenvironments:\n  test-env:\n    install: \"true\"\n    dotfiles:\n      \
+                    - source: a\n        target: ~/.same\n      - source: b\n        target: ~/.same\n";
+        let package: crate::package::Package =
+            crate::yaml::parse(yaml).expect("fixture must parse");
+        let mut mock_repo = MockPackageRepository::new();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(3);
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/test-pkg.yml"));
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+        mock_repo
+            .expect_save_package()
+            .times(1)
+            .returning(|_, _| Ok(()));
+        let fields = PackageUpdateFields {
+            environment: Some("test-env".to_string()),
+            install: Some("echo new".to_string()),
+            ..Default::default()
+        };
+
+        let result = handle_update(
+            "test-pkg",
+            fields,
+            &mock_repo,
+            &test_config(),
+            &sender,
+            &mut progress,
+        )
+        .await;
+
+        assert!(
+            matches!(result, OperationResult::Success(_)),
+            "got: {result:?}"
+        );
+        let results = validation_results(&mut rx);
+        assert_eq!(results.len(), 1, "got: {results:?}");
+        assert_eq!(results[0].outcome, Outcome::Failed, "got: {results:?}");
+        assert!(
+            results[0]
+                .issues
+                .iter()
+                .any(|issue| issue.field.contains("dotfiles")),
+            "got: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_the_last_environment_is_refused() {
+        let package = create_test_package("test-pkg");
+        let fields = PackageUpdateFields {
+            remove_environment: Some("test-env".to_string()),
+            ..Default::default()
+        };
+
+        let (failure, reported) = refused_update(package, fields).await;
+
+        let OperationFailure::InvalidSpec { issues, .. } = &failure else {
+            panic!("expected a refusal, got: {failure:?}");
+        };
+        assert!(
+            issues.iter().any(|issue| issue.field == "environments"),
+            "{issues:?}"
+        );
+        assert!(reported.is_empty(), "got: {reported:?}");
+    }
+
+    #[tokio::test]
+    async fn an_added_environment_with_an_empty_dependency_is_refused() {
+        let fields = PackageUpdateFields {
+            add_environment: Some(AddEnvironment {
+                name: "added".to_string(),
+                install: "true".to_string(),
+                check: None,
+                audit: None,
+                dependencies: vec![String::new()],
+                recommends: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let (failure, _) = refused_update(create_test_package("test-pkg"), fields).await;
+
+        let OperationFailure::InvalidSpec { issues, .. } = &failure else {
+            panic!("expected a refusal, got: {failure:?}");
+        };
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.field == "environments.added.dependencies[0]"),
+            "{issues:?}"
+        );
+    }
+
+    // An environment named `a` does not own the fields of one named `a.b`.
+    #[test]
+    fn a_written_environment_does_not_cover_one_whose_name_extends_it() {
+        let mut written = WrittenFields::default();
+        written.environment_field("a", "install");
+        let environments = || ["a", "a.b"].into_iter();
+
+        assert!(written.contains("environments.a.install", environments()));
+        assert!(!written.contains("environments.a.b.install", environments()));
+        assert!(!written.contains("environments.a.check", environments()));
+
+        // The field of `a.b` is placed in `a.b`, the longer name.
+        let mut written = WrittenFields::default();
+        written.environment_field("a.b", "install");
+        assert!(written.contains("environments.a.b.install", environments()));
+        assert!(!written.contains("environments.a.install", environments()));
     }
 }

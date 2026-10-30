@@ -7,13 +7,13 @@ use crate::{
     package::{
         Package, SpecOrigin,
         event::{
-            EventSender, OperationFailure, OperationResult, OperationSuccess, Outcome, Uncreatable,
-            ValidationResultData,
+            EventSender, OperationFailure, OperationResult, OperationSuccess, SpecWrite,
+            Uncreatable,
         },
         port::{PackageRepoError, PackageRepository},
         service::{
             ProgressTracker,
-            validate::{all_issues, issue_payload},
+            validate::{all_issues, refuse_or_report},
         },
     },
 };
@@ -124,30 +124,17 @@ where
     // The rule `spec validate` applies, so create never writes a spec that every
     // later command reports as broken or apply refuses.
     let issues = all_issues(&package, repo, config.environment());
-    // Scored as `spec validate` scores it; only a clean spec with nothing at all to
-    // say sends no result.
-    let outcome = issues.outcome();
-    let report = match outcome {
-        Outcome::Failed => {
-            return OperationResult::Failure(OperationFailure::InvalidSpec {
-                action: crate::package::event::SpecWrite::Create,
-                package_name,
-                issues: issue_payload(&issues),
-            });
-        }
-        Outcome::Found => true,
-        // A notice alone still reaches the user.
-        Outcome::Clean => !issues.all_issues().is_empty(),
-    };
-    if report {
-        sender
-            .send_validation_result(ValidationResultData {
-                package_name: package_name.clone(),
-                environment: config.environment().to_string(),
-                outcome,
-                issues: issue_payload(&issues),
-            })
-            .await;
+    if let Some(refusal) = refuse_or_report(
+        sender,
+        SpecWrite::Create,
+        &package_name,
+        config.environment(),
+        &issues,
+        |_| true,
+    )
+    .await
+    {
+        return OperationResult::Failure(refusal);
     }
 
     // Step 2: Save the package
@@ -229,7 +216,10 @@ mod tests {
         config::SelfieConfigBuilder,
         package::{
             PackageBuilder,
-            event::{OperationContext, OperationFailure, PackageEvent, metadata::OperationType},
+            event::{
+                OperationContext, OperationFailure, Outcome, PackageEvent, ValidationResultData,
+                metadata::OperationType,
+            },
             port::{
                 MockPackageRepository, PackageError, PackageListError, PackageParseError,
                 PackageRepoError,

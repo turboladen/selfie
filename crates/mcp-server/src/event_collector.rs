@@ -114,6 +114,16 @@ fn gap_json(gap: &Gap) -> Value {
     })
 }
 
+/// The `validation_result` entries in a collected result's `data`.
+pub(crate) fn validation_result_rows(collected: &Value) -> Vec<&Value> {
+    collected["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["type"] == "validation_result")
+        .collect()
+}
+
 pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     let mut final_result = None;
     let mut canceled = None;
