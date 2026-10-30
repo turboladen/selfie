@@ -254,12 +254,16 @@ impl ErrorCollector {
             }
             // A tool's own stderr, cleaned as command output is: its colors
             // stripped, not shown as escapes.
-            if let Some(stderr) = &error.stderr
-                && !stderr.is_empty()
-            {
+            let blank = |line: &&Output| line.as_str().trim().is_empty();
+            let stderr: Vec<&Output> = error.stderr.iter().flatten().skip_while(blank).collect();
+            let end = stderr
+                .iter()
+                .rposition(|line| !blank(line))
+                .map_or(0, |at| at + 1);
+            if end > 0 {
                 lines.push(lit!("  stderr:").into());
-                for line in stderr {
-                    lines.push(shown!("    {}", line));
+                for line in &stderr[..end] {
+                    lines.push(shown!("    {}", *line));
                 }
             }
             lines.push(lit!("").into());
@@ -303,7 +307,7 @@ struct WaitingLine {
     bar: Option<ProgressBar>,
     subject: Shown,
     started: Instant,
-    tail: VecDeque<String>,
+    tail: VecDeque<Output>,
 }
 
 // How many of a step's last output lines a failure shows.
@@ -333,7 +337,7 @@ pub struct DisplayManager {
     waiting: Arc<Mutex<BTreeMap<StepId, WaitingLine>>>,
     // The lines the last failed step showed when it ended, so the failure that
     // reports it does not show them again.
-    failed_tail: Arc<Mutex<Vec<String>>>,
+    failed_tail: Arc<Mutex<Vec<Output>>>,
     // The base directory whose heading each stream showed last, shared by every
     // clone so the conflict prompt and the event processor head against one
     // another.
@@ -599,8 +603,7 @@ impl DisplayManager {
         if ending == StepEnding::Failed && !line.tail.is_empty() {
             // Under `--verbose` the lines were printed as they came.
             if !self.is_verbose() {
-                let tail: Vec<&str> = line.tail.iter().map(String::as_str).collect();
-                self.print_error_context(content_lines(&tail.join("\n")));
+                self.print_error_context(Shown::join(line.tail.iter().cloned(), lit!("\n")));
             }
             if let Ok(mut failed) = self.failed_tail.lock() {
                 *failed = line.tail.into_iter().collect();
@@ -673,22 +676,18 @@ impl DisplayManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Print a failed command's stderr as context for its error (stderr),
-    /// leaving out the lines its step already showed when it ended.
-    pub(crate) fn print_command_stderr(&self, stderr: &selfie::commands::BoundedText) {
+    /// Print a failed command's stderr, one [`Output`] per line, as context for
+    /// its error (stderr), leaving out the lines its step already showed when
+    /// it ended.
+    pub(crate) fn print_command_stderr(&self, stderr: &[Output]) {
         let shown = self
             .failed_tail
             .lock()
             .map(|mut failed| std::mem::take(&mut *failed))
             .unwrap_or_default();
-        let rest: Vec<String> = stderr
-            .as_str()
-            .lines()
-            .map(|line| Output::line(line).to_string())
-            .filter(|line| !shown.contains(line))
-            .collect();
-        if rest.iter().any(|line| !line.trim().is_empty()) {
-            self.print_error_context(content_lines(&rest.join("\n")));
+        let rest: Vec<&Output> = stderr.iter().filter(|line| !shown.contains(line)).collect();
+        if rest.iter().any(|line| !line.as_str().trim().is_empty()) {
+            self.print_error_context(Shown::join(rest.into_iter().cloned(), lit!("\n")));
         }
     }
 
@@ -698,8 +697,8 @@ impl DisplayManager {
     /// terminal, and is not shown otherwise. Under `--verbose` every line is
     /// printed: indented and dimmed on a terminal, and prefixed with what the
     /// step waits on without one.
-    pub(crate) fn command_output(&self, step: StepId, line: Output) {
-        let line = line.as_str();
+    pub(crate) fn command_output(&self, step: StepId, output: Output) {
+        let line = output.as_str();
         if line.trim().is_empty() {
             return;
         }
@@ -723,7 +722,7 @@ impl DisplayManager {
             if current.tail.len() == TAIL_LINES {
                 current.tail.pop_front();
             }
-            current.tail.push_back(line.to_string());
+            current.tail.push_back(output.clone());
             if !self.is_verbose()
                 && let Some(bar) = &current.bar
             {
@@ -2632,14 +2631,51 @@ mod tests {
         dm.command_output(ONE, Output::line("==> Caveats"));
         dm.end_waiting(ONE, StepEnding::Failed);
 
-        dm.print_command_stderr(&selfie::commands::BoundedText::bound(
-            b"Error: checksum mismatch\nError: no bottle",
-        ));
+        dm.print_command_stderr(&[
+            Output::line("Error: checksum mismatch"),
+            Output::line("Error: no bottle"),
+        ]);
 
         let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
         let count = |needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
         assert_eq!(count("checksum mismatch"), 1, "{lines:?}");
         assert_eq!(count("no bottle"), 1, "{lines:?}");
+    }
+
+    // A failed step's last lines and a failed command's stderr are what the
+    // tool printed: a joiner or a zero-width space in them renders, as it does
+    // under `--verbose`.
+    #[test]
+    fn a_failed_steps_stderr_shows_as_the_tool_printed_it() {
+        let dm = DisplayManager::new(false);
+        dm.start_waiting(ONE, Name::new("Running the install command for foo"));
+        dm.command_output(ONE, Output::line("tail x\u{200B}y"));
+        dm.end_waiting(ONE, StepEnding::Failed);
+        dm.print_command_stderr(&[Output::line("stderr a\u{200D}b")]);
+
+        let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
+        assert!(lines.contains(&"tail x\u{200B}y".to_string()), "{lines:?}");
+        assert!(
+            lines.contains(&"stderr a\u{200D}b".to_string()),
+            "{lines:?}"
+        );
+    }
+
+    // The tool's lines are still cleaned as its output: colors removed, a
+    // line redrawn by carriage returns shown in its final state, and no
+    // control character left.
+    #[test]
+    fn a_failed_steps_stderr_is_still_cleaned() {
+        let dm = DisplayManager::new(false);
+        dm.start_waiting(ONE, Name::new("Running the install command for foo"));
+        dm.command_output(ONE, Output::line("\u{1b}[31mred\u{1b}[0m 10%\r100%"));
+        dm.end_waiting(ONE, StepEnding::Failed);
+        dm.print_command_stderr(&[Output::line("\u{1b}[2Jcleared\u{7}")]);
+
+        let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
+        assert!(lines.contains(&"100%".to_string()), "{lines:?}");
+        assert!(lines.contains(&"cleared".to_string()), "{lines:?}");
+        assert!(lines.iter().all(|l| !l.contains('\u{1b}')), "{lines:?}");
     }
 
     // Under `--verbose` the lines were shown as they came, so a failure does

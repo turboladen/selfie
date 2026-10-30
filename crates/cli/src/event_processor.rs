@@ -309,20 +309,22 @@ impl EventProcessor {
 
                     // Collect structured error detail for end-of-operation summary
                     let detail = ErrorDetail::of(&operation_info, received::sentence(&err));
+                    let stderr_lines: Vec<Output> = match &err {
+                        OperationFailure::CommandError(CommandFailure::ExecutionFailed {
+                            stderr,
+                            ..
+                        }) => stderr.as_str().lines().map(Output::line).collect(),
+                        _ => Vec::new(),
+                    };
                     let error_detail = match &err {
                         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
                             command,
                             exit_code,
-                            stderr,
+                            ..
                         }) => ErrorDetail {
                             command: Some(interim_one_line(command)),
                             exit_code: *exit_code,
-                            // The summary prints the output trimmed whole and
-                            // cleaned one line at a time.
-                            stderr: Some(
-                                stderr.as_str().trim().lines().map(Output::line).collect(),
-                            )
-                            .filter(|lines: &Vec<Output>| !lines.is_empty()),
+                            stderr: Some(stderr_lines.clone()),
                             ..detail
                         },
                         _ => detail,
@@ -442,11 +444,10 @@ impl EventProcessor {
                         // may be stdout alone. Lines the tail already showed are left
                         // out.
                         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
-                            ref stderr,
                             ..
                         }) => {
                             self.display.print_error(received::sentence(&err));
-                            self.display.print_command_stderr(stderr);
+                            self.display.print_command_stderr(&stderr_lines);
                         }
                         OperationFailure::InvalidSpec { ref issues, .. } => {
                             self.display.print_error(received::sentence(&err));
