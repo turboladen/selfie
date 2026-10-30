@@ -1925,8 +1925,8 @@ mod tests {
         assert_eq!(display.printed(), [(Channel::Stdout, "x".to_string())]);
     }
 
-    // A waiting step's subject can name a command from a spec. It shows escaped
-    // while the step runs and on the line it collapses to when it ends.
+    // A waiting step's subject shows as it was handed in while the step runs
+    // and on the line it collapses to when it ends.
     #[test]
     fn a_waiting_subject_is_escaped() {
         let shown = "Running `printf \\u{1b}[2J`";
@@ -1949,19 +1949,19 @@ mod tests {
 
     // A waiting step's description can name a path holding a line break. It
     // stays on its one line, on the spinner and on the line it collapses to,
-    // so it cannot print a line of its own such as a fake `✓`. A blank in it,
-    // as in a command quoting French text, shows as written.
+    // so it cannot print a line of its own such as a fake `✓`; and a blank in
+    // the path shows as an escape, as in the entry row under it.
     #[test]
     fn a_waiting_subject_stays_on_one_line() {
         let subject = "Running the commands that produce ~/.a\n✓ b\u{A0}c";
-        let shown = "Running the commands that produce ~/.a\\n✓ b\u{A0}c";
+        let shown = "Running the commands that produce ~/.a\\n✓ b\\u{a0}c";
 
         let plain = DisplayManager::new(false);
-        plain.start_waiting(ONE, Name::new(subject));
+        plain.start_waiting(ONE, crate::received::step(subject));
         assert_eq!(plain.printed(), [(Channel::Stderr, format!("{shown}..."))]);
 
         let drawn = DisplayManager::new(false).drawing_as_a_terminal();
-        drawn.start_waiting(ONE, Name::new(subject));
+        drawn.start_waiting(ONE, crate::received::step(subject));
         assert_eq!(drawn.waiting_messages(), [shown]);
         drawn.end_waiting(ONE, StepEnding::Succeeded);
         let ended = drawn.printed();

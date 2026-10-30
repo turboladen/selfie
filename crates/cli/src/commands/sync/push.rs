@@ -323,6 +323,33 @@ mod tests {
         );
     }
 
+    // A message holding a blank other than a space is not pre-filled, since
+    // the prompt would draw it as a space: the note above the empty prompt
+    // shows it escaped, and Enter keeps its own bytes.
+    #[test]
+    fn a_commit_message_with_a_visible_blank_is_not_prefilled() {
+        use crate::display_manager::answer;
+        let message = "feat(x): add\u{A0}y".to_string();
+        let pending = vec![selfie::sync_service::PendingCommit {
+            name: "x".to_string(),
+            message: message.clone(),
+            files: Vec::new(),
+        }];
+        let display = DisplayManager::new(false).answering(vec![answer(String::new())]);
+
+        let confirmed = confirm_commits(pending, false, &display).unwrap();
+
+        assert_eq!(confirmed[0].message, message);
+        assert!(
+            display
+                .printed()
+                .iter()
+                .any(|(_, line)| line == r"  Suggested: feat(x): add\u{a0}y (Enter keeps it)"),
+            "{:?}",
+            display.printed()
+        );
+    }
+
     // An answer the user typed is committed as typed.
     #[test]
     fn a_typed_message_is_committed_as_typed() {

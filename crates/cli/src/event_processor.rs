@@ -218,9 +218,9 @@ impl EventProcessor {
 
             PackageEvent::Progress { kind, message, .. } => match kind {
                 StepKind::Waiting(step) => {
-                    self.display.start_waiting(step, Name::new(&message));
+                    self.display.start_waiting(step, received::step(&message));
                 }
-                StepKind::Local => self.display.print_status(received::sentence(message)),
+                StepKind::Local => self.display.print_status(received::step(&message)),
             },
 
             PackageEvent::StepEnded { step, ending, .. } => {
@@ -1002,6 +1002,52 @@ mod tests {
                 "Running the check command for bat...".to_string()
             )]
         );
+    }
+
+    // A step's message is escaped as a name, on both routes: a waiting step's
+    // progress line and a local step's status line. One row per kind of
+    // source: a target path, a package name, a count, a remote's name, and the
+    // local install and commit steps.
+    #[tokio::test]
+    async fn a_progress_message_shows_on_one_line_escaped() {
+        let rows = [
+            (
+                "Running the commands that produce ~/.a\u{A0}b\nc",
+                r"Running the commands that produce ~/.a\u{a0}b\nc",
+            ),
+            (
+                "Running the install command for z\u{200B}w",
+                r"Running the install command for z\u{200b}w",
+            ),
+            ("Checking 3 packages", "Checking 3 packages"),
+            (
+                "Pushing to remote 'or\u{2800}igin'",
+                r"Pushing to remote 'or\u{2800}igin'",
+            ),
+            (
+                "Checking whether t\u{200B}x is already installed",
+                r"Checking whether t\u{200b}x is already installed",
+            ),
+            ("Committing: fix\nbody", r"Committing: fix\nbody"),
+            ("Committing: fix\r\n", "Committing: fix"),
+        ];
+        for (message, shown) in rows {
+            let waiting = printed_for(
+                verbose(),
+                vec![step(StepKind::Waiting(StepId::from_raw(1)), message)],
+            )
+            .await;
+            let local = printed_for(verbose(), vec![step(StepKind::Local, message)]).await;
+
+            let lines = |printed: &[(crate::display_manager::Channel, String)]| -> Vec<String> {
+                printed
+                    .iter()
+                    .map(|(_, line)| line.trim().to_string())
+                    .collect()
+            };
+            assert_eq!(lines(&waiting), [format!("{shown}...")], "{message:?}");
+            assert_eq!(lines(&local), [shown.to_string()], "{message:?}");
+        }
     }
 
     #[tokio::test]

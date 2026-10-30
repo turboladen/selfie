@@ -65,9 +65,11 @@ fn resolve_package_directory() -> Option<PathBuf> {
 
 /// List package names (file stems of `.yml`/`.yaml` files) in a directory.
 ///
-/// A name holding a character the terminal would act on, or one that renders
-/// as nothing, is left out: the shell inserts a candidate as written, so it
-/// cannot be shown escaped, and a newline would split it into two candidates.
+/// A name a [`Name`](crate::terminal_text::Name) would show escaped is left
+/// out: one holding a character the terminal would act on, one that renders as
+/// nothing, or a blank other than a space. The shell inserts a candidate as
+/// written, so it cannot be shown escaped, and a newline would split it into
+/// two candidates.
 fn list_package_names(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return vec![];
@@ -109,6 +111,7 @@ mod tests {
             "rlo\u{202E}txt",
             "split\nname",
             "zero\u{200B}width",
+            "no\u{A0}break",
             "vs\u{FE0F}",
         ] {
             std::fs::write(dir.path().join(format!("{name}.yml")), "").unwrap();

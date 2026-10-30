@@ -799,19 +799,25 @@ fn spec_edit_refuses_an_invalid_name_escaped() {
 fn an_invalid_spec_name_is_escaped_on_every_line_of_a_run() {
     let temp = setup_default_test_config();
     let packages = temp.path().join("packages");
-    fs::write(
-        packages.join("z\u{200B}w.yaml"),
-        format!("name: zw\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
-    )
-    .unwrap();
+    for name in ["z\u{200B}w", "a\u{A0}b"] {
+        fs::write(
+            packages.join(format!("{name}.yaml")),
+            format!("name: zw\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+        )
+        .unwrap();
+    }
 
     for args in [
         &["package", "list"][..],
         &["spec", "validate", "--all"][..],
         &["spec", "validate", "z\u{200B}w"][..],
+        &["spec", "validate", "a\u{A0}b"][..],
         &["spec", "info", "z\u{200B}w"][..],
+        &["spec", "info", "a\u{A0}b"][..],
         &["package", "check", "z\u{200B}w"][..],
+        &["package", "check", "a\u{A0}b"][..],
         &["spec", "edit", "z\u{200B}w"][..],
+        &["spec", "edit", "a\u{A0}b"][..],
     ] {
         let output = sandboxed_std_command(&temp)
             .env("EDITOR", "true")
@@ -825,9 +831,21 @@ fn an_invalid_spec_name_is_escaped_on_every_line_of_a_run() {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        assert!(both.contains(r"z\u{200b}w"), "{args:?}: {both}");
+        // A command over every spec names both; one asked about a spec names
+        // that one.
+        let named: Vec<&str> = match args.last() {
+            Some(&"z\u{200B}w") => vec![r"z\u{200b}w"],
+            Some(&"a\u{A0}b") => vec![r"a\u{a0}b"],
+            _ => vec![r"z\u{200b}w", r"a\u{a0}b"],
+        };
+        for name in named {
+            assert!(both.contains(name), "{args:?} names {name}: {both}");
+        }
         for line in both.lines() {
-            assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
+            assert!(
+                !line.contains('\u{200B}') && !line.contains('\u{A0}'),
+                "{args:?}: {line:?}"
+            );
         }
     }
 }
@@ -887,5 +905,94 @@ fn a_dependency_and_an_unchecked_file_are_escaped_on_every_line() {
         for line in both.lines() {
             assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
         }
+    }
+}
+
+// A blank that is not a space, such as U+00A0 or U+2800, makes one name or path
+// read as another, so a listing naming a spec file shows it as an escape.
+#[test]
+fn a_spec_file_named_with_a_visible_blank_shows_it_escaped() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("a\u{A0}b.yaml"),
+        format!("name: \"a\\u00A0b\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "spec", "list"])
+        .output()
+        .unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The library's sentence after the path names the spec unescaped, as prose
+    // does, so only the path is checked here.
+    assert!(both.contains(r"a\u{a0}b.yaml"), "{both}");
+    assert!(!both.contains("a\u{A0}b.yaml"), "{both:?}");
+}
+
+// A dotfile target holding U+2800 or U+3000 shows each as an escape in the
+// plan apply prints.
+#[test]
+fn a_target_holding_a_visible_blank_shows_it_escaped() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::write(packages.join("blank.conf"), "x\n").unwrap();
+    fs::write(
+        packages.join("blank.yaml"),
+        format!(
+            "name: blank\ndotfiles:\n  - source: blank.conf\n    target: \"~/.br\\u2800aille\"\n\
+             \x20 - source: blank.conf\n    target: \"~/.ideo\\u3000space\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "apply", "--dry-run"])
+        .output()
+        .unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        both.contains(r".br\u{2800}aille") && both.contains(r".ideo\u{3000}space"),
+        "{both}"
+    );
+    assert!(!both.contains(['\u{2800}', '\u{3000}']), "{both:?}");
+}
+
+// A `command:` dotfile source is a command, so its blanks show as written in
+// `dotfiles list` and `spec info`, where a name's escape would change what
+// pasting it runs.
+#[test]
+fn a_command_source_keeps_its_blanks_in_the_dotfiles_list() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("cmd.yml"),
+        format!(
+            "name: cmd\ndotfiles:\n  - command: \"printf 'a\\u00A0b'\"\n    target: \"~/.cmdrc\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+
+    for args in [&["dotfiles", "list"][..], &["spec", "info", "cmd"][..]] {
+        let output = sandboxed_std_command(&temp)
+            .arg("--no-color")
+            .args(args)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert!(stdout.contains("printf 'a\u{A0}b'"), "{args:?}: {stdout}");
+        assert!(!stdout.contains(r"\u{a0}"), "{args:?}: {stdout}");
     }
 }

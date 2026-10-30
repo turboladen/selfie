@@ -623,6 +623,18 @@ pub(crate) fn config_load_error(error: &ConfigLoadError) -> Option<Shown> {
     })
 }
 
+/// What a step of a run is doing, on one line, as a spinner, a progress line
+/// or a status line shows it.
+// The library sends the step's sentence whole, with any name or path already
+// inside, so the sentence is escaped as a name. Its sources are selfie's ASCII
+// words around names, paths, counts and a remote's name, and one around a
+// commit message the user wrote, which `sync push` previews as a name too. None
+// holds a command, whose blanks a name's escape would not keep. A step that
+// quotes a command needs the subject sent as its parts first (selfie-hkjy).
+pub(crate) fn step(message: &str) -> Name {
+    Name::new(message.trim_end_matches(['\r', '\n']))
+}
+
 /// Why an entry was skipped, as an entry row's detail shows it. A secret dry
 /// run names the link it would replace as a path.
 pub(crate) fn skip_reason(reason: &SkipReason) -> Shown {
@@ -1063,6 +1075,19 @@ mod tests {
             link: LinkAtTarget::To("/etc/real".into()),
         };
         assert_eq!(skip_reason(&link).as_str(), link.to_string());
+    }
+
+    // A name in a composed sentence escapes a blank other than a space, as it
+    // does in a listing.
+    #[test]
+    fn a_composed_sentence_escapes_a_visible_blank() {
+        assert_eq!(
+            uncreatable("a\u{A0}b", &Uncreatable::InvalidName)
+                .as_str()
+                .split(':')
+                .next(),
+            Some(r"Refusing to create 'a\u{a0}b'")
+        );
     }
 
     // A description is prose: its line breaks are kept and a joiner renders.
