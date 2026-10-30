@@ -107,49 +107,35 @@ fn display_environment_error(
 }
 
 fn display_audit_output_only(audit_result: &AuditResultData, display: &DisplayManager) {
+    let name = Name::new(&audit_result.package_name);
+    let names =
+        |sources: Vec<&String>| Shown::join(sources.into_iter().map(|s| Name::new(s)), lit!(", "));
     match &audit_result.result {
         AuditResult::Clean { sources } => {
             display.print_success(format!(
-                "{} — clean ({})",
-                audit_result.package_name,
-                sources.join(", ")
+                "{name} — clean ({})",
+                names(sources.iter().collect())
             ));
         }
         AuditResult::Conflicts {
             sources, expected, ..
         } => {
-            let unexpected: Vec<&String> = sources
-                .iter()
-                .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
-                .collect();
             display.print_warning(format!(
-                "{} — conflicts detected: unexpected source(s): {}",
-                audit_result.package_name,
-                unexpected
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "{name} — conflicts detected: unexpected source(s): {}",
+                names(unexpected(sources, expected))
             ));
         }
         AuditResult::NotInstalled => {
-            display.print_info(format!("{} — not installed", audit_result.package_name));
+            display.print_info(format!("{name} — not installed"));
         }
         AuditResult::NoAuditCommand => {
-            display.print_info(format!(
-                "{} — no audit command defined",
-                audit_result.package_name
-            ));
+            display.print_info(format!("{name} — no audit command defined"));
         }
         AuditResult::Error(err) => {
-            display.print_error(format!(
-                "{} — error: {}",
-                audit_result.package_name,
-                Output::new(err)
-            ));
+            display.print_error(format!("{name} — error: {}", Output::new(err)));
         }
         AuditResult::CouldNotRun(failure) => {
-            display.print_error(format!("{} — error: {failure}", audit_result.package_name));
+            display.print_error(format!("{name} — error: {failure}"));
         }
     }
 }
@@ -285,6 +271,43 @@ fn display_audit_result_card(
 mod tests {
     use super::*;
     use selfie::package::event::CheckFailure;
+
+    // Every view of an audit shows the package's name and its sources as names,
+    // so an invisible character in one shows as an escape in each.
+    #[test]
+    fn each_audit_view_shows_names_and_sources_escaped() {
+        let audit = |result| AuditResultData {
+            package_name: "p\u{200B}".to_string(),
+            environment: "test".to_string(),
+            audit_command: None,
+            result,
+        };
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(
+            std::path::Path::new("/packages"),
+        ));
+        for result in [
+            AuditResult::Clean {
+                sources: vec!["brew\u{200B}".to_string()],
+            },
+            AuditResult::Conflicts {
+                sources: vec!["brew\u{200B}".to_string(), "npm".to_string()],
+                expected: vec!["npm".to_string()],
+            },
+        ] {
+            let audit = audit(result);
+            let display = DisplayManager::new(false);
+            display_audit_output_only(&audit, &display);
+            display_audit_summary_line(&audit, &config, &display);
+            let printed = display.printed();
+
+            assert_eq!(printed.len(), 2, "{printed:?}");
+            for (_, line) in &printed {
+                assert!(line.contains("p\\u{200b}"), "{line:?}");
+                assert!(line.contains("brew\\u{200b}"), "{line:?}");
+                assert!(!line.contains('\u{200B}'), "{line:?}");
+            }
+        }
+    }
 
     // An audit that could not run prints, in each of the three places an audit
     // result is shown, exactly what an audit error with the same sentence
