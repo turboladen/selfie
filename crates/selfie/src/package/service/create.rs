@@ -321,7 +321,7 @@ mod tests {
             package,
             identity,
             repo,
-            &super::super::validate::tests::listing_nothing(),
+            &MockPackageRepository::listing_nothing(),
             config,
             sender,
             progress,

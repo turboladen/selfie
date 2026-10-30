@@ -296,7 +296,7 @@ mod tests {
         package::{
             PackageBuilder,
             event::{OperationContext, PackageEvent, metadata::OperationType},
-            port::{ListPackagesOutput, MockPackageRepository},
+            port::MockPackageRepository,
         },
     };
 
@@ -306,14 +306,6 @@ mod tests {
             .package_directory("/packages")
             .dotfiles_directory(PathBuf::from("/dotfiles"))
             .build()
-    }
-
-    fn empty_packages() -> MockPackageRepository {
-        let mut repo = MockPackageRepository::new();
-        repo.expect_list_packages()
-            .returning(|| Ok(ListPackagesOutput(Vec::new())));
-        repo.expect_directory_identity().return_const(None);
-        repo
     }
 
     // A dotfiles repository whose listing failed with the directory in `state`.
@@ -375,7 +367,11 @@ mod tests {
             std::io::Error::other("Too many levels of symbolic links"),
         )));
 
-        let others = collect_others(&empty_packages(), &dotfiles, &config());
+        let others = collect_others(
+            &MockPackageRepository::listing_nothing(),
+            &dotfiles,
+            &config(),
+        );
 
         assert!(
             matches!(

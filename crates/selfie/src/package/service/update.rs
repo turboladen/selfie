@@ -869,7 +869,7 @@ mod tests {
         saves: usize,
         save: Result<(), PackageRepoError>,
     ) -> (OperationResult, Vec<ValidationResultData>) {
-        let mut mock_repo = super::super::validate::tests::listing_nothing();
+        let mut mock_repo = MockPackageRepository::listing_nothing();
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
         let get_package =
@@ -890,7 +890,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
-            &super::super::validate::tests::listing_nothing(),
+            &MockPackageRepository::listing_nothing(),
             &test_config(),
             &sender,
             &mut progress,
@@ -1098,7 +1098,7 @@ mod tests {
         package: crate::package::Package,
         fields: PackageUpdateFields,
     ) -> (OperationFailure, Vec<ValidationResultData>) {
-        let mut mock_repo = super::super::validate::tests::listing_nothing();
+        let mut mock_repo = MockPackageRepository::listing_nothing();
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
         let get_package =
@@ -1112,7 +1112,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
-            &super::super::validate::tests::listing_nothing(),
+            &MockPackageRepository::listing_nothing(),
             &test_config(),
             &sender,
             &mut progress,
@@ -1206,7 +1206,7 @@ mod tests {
             yaml.to_string(),
             crate::package::SpecOrigin::PackageDirectory,
         );
-        let mut mock_repo = super::super::validate::tests::listing_nothing();
+        let mut mock_repo = MockPackageRepository::listing_nothing();
         let (sender, mut rx) = test_sender();
         let mut progress = ProgressTracker::new(3);
         let get_package =
@@ -1228,7 +1228,7 @@ mod tests {
             "test-pkg",
             fields,
             &mock_repo,
-            &super::super::validate::tests::listing_nothing(),
+            &MockPackageRepository::listing_nothing(),
             &test_config(),
             &sender,
             &mut progress,
@@ -1366,7 +1366,7 @@ mod tests {
             .path("/test/packages/test-pkg.yml")
             .origin(crate::package::SpecOrigin::Memory)
             .build();
-        let mut repo = super::super::validate::tests::listing_nothing();
+        let mut repo = MockPackageRepository::listing_nothing();
         repo.expect_get_package().return_once(move |_| {
             Ok(GetPackage::from_existing(
                 package,
@@ -1384,7 +1384,7 @@ mod tests {
             "test-pkg",
             fields,
             &repo,
-            &super::super::validate::tests::listing_nothing(),
+            &MockPackageRepository::listing_nothing(),
             &test_config(),
             &sender,
             &mut ProgressTracker::new(3),

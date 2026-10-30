@@ -485,17 +485,6 @@ pub(super) mod tests {
         assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
     }
 
-    // A repository listing no spec, for a run that compares against the others and
-    // has none to compare.
-    pub(in crate::package::service) fn listing_nothing()
-    -> crate::package::port::MockPackageRepository {
-        let mut repo = crate::package::port::MockPackageRepository::new();
-        repo.expect_list_packages()
-            .returning(|| Ok(crate::package::port::ListPackagesOutput(Vec::new())));
-        repo.expect_directory_identity().return_const(None);
-        repo
-    }
-
     // A package directory that would not list but still answered for `alpha`, which
     // shares `~/.gemrc` with the standalone `gem`: collection leaves alpha out and
     // compares the standalone specs alone.
@@ -586,7 +575,7 @@ pub(super) mod tests {
         use crate::package::{
             DotfileEntry, GetPackage, PackageBuilder, SpecOrigin,
             event::{OperationContext, PackageEvent, metadata::OperationType},
-            port::{ListPackagesOutput, MockPackageRepository, PackageError, PackageListError},
+            port::{MockPackageRepository, PackageError, PackageListError},
         };
         let gem = PackageBuilder::default()
             .name("gem")
@@ -594,10 +583,7 @@ pub(super) mod tests {
             .path("/dotfiles/gem.yml")
             .origin(SpecOrigin::DotfilesDirectory)
             .build();
-        let mut repo = MockPackageRepository::new();
-        repo.expect_list_packages()
-            .returning(|| Ok(ListPackagesOutput(Vec::new())));
-        repo.expect_directory_identity().return_const(None);
+        let mut repo = MockPackageRepository::listing_nothing();
         repo.expect_get_package().returning(|name| {
             Err(PackageError::PackageNotFound {
                 name: name.to_string(),

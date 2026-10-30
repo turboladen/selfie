@@ -687,11 +687,7 @@ mod tests {
             .expect_list_packages()
             .return_once(move || Ok(ListPackagesOutput(vec![Err(broken)])));
         packages.expect_directory_identity().return_const(None);
-        let mut dotfiles = MockPackageRepository::new();
-        dotfiles
-            .expect_list_packages()
-            .returning(|| Ok(ListPackagesOutput(Vec::new())));
-        dotfiles.expect_directory_identity().return_const(None);
+        let dotfiles = MockPackageRepository::listing_nothing();
         let written = PackageBuilder::default()
             .name("a")
             .environment("test", |b| b.install("true"))
@@ -727,11 +723,7 @@ mod tests {
             .expect_list_packages()
             .return_once(move || Ok(ListPackagesOutput(listed)));
         packages.expect_directory_identity().return_const(None);
-        let mut dotfiles = MockPackageRepository::new();
-        dotfiles
-            .expect_list_packages()
-            .returning(|| Ok(ListPackagesOutput(Vec::new())));
-        dotfiles.expect_directory_identity().return_const(None);
+        let dotfiles = MockPackageRepository::listing_nothing();
 
         let mut listed = Listed::of(&packages, &dotfiles).unwrap();
         listed.place(&spec("a")).unwrap();
@@ -762,11 +754,7 @@ mod tests {
             .expect_list_packages()
             .return_once(move || Ok(ListPackagesOutput(vec![Err(broken)])));
         packages.expect_directory_identity().return_const(None);
-        let mut dotfiles = MockPackageRepository::new();
-        dotfiles
-            .expect_list_packages()
-            .returning(|| Ok(ListPackagesOutput(Vec::new())));
-        dotfiles.expect_directory_identity().return_const(None);
+        let dotfiles = MockPackageRepository::listing_nothing();
         let alpha = PackageBuilder::default()
             .name("alpha")
             .environment("test", |b| b.install("true"))

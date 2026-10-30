@@ -173,6 +173,19 @@ pub trait PackageRepository: Send + Sync {
     fn home_directory(&self) -> Result<PathBuf, FileSystemError>;
 }
 
+// A repository listing no spec, for a run that compares against the others and has
+// none to compare.
+#[cfg(test)]
+impl MockPackageRepository {
+    pub(crate) fn listing_nothing() -> Self {
+        let mut repo = Self::new();
+        repo.expect_list_packages()
+            .returning(|| Ok(ListPackagesOutput(Vec::new())));
+        repo.expect_directory_identity().return_const(None);
+        repo
+    }
+}
+
 /// Errors that can occur during package repository operations
 ///
 /// This enum represents all possible failures when interacting with the
