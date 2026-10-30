@@ -85,7 +85,7 @@ pub(crate) fn format_list_status(
 
 /// `text`, prose, escaped and then styled by `paint` when `use_colors`.
 pub(crate) fn styled_text(text: &str, use_colors: bool, paint: Paint) -> Shown {
-    Shown::indented(Prose::new(text), lit!("  ")).paint(use_colors, paint)
+    Shown::from(Prose::new(text)).paint(use_colors, paint)
 }
 
 #[cfg(test)]

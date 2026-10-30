@@ -267,6 +267,11 @@ impl Shown {
         &self.0
     }
 
+    /// Returns the text, escapes and styling included, without copying it.
+    pub(crate) fn into_string(self) -> String {
+        self.0
+    }
+
     // Only `shown!` calls this, once it has checked that every argument is
     // `Trusted`. A test holds every other file to that.
     #[doc(hidden)]
