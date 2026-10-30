@@ -16,6 +16,9 @@ pub(crate) async fn handle_remove(
     skip_confirm: bool,
 ) -> Exit {
     info!("Removing package: {}", package_name);
+    // Every sentence below is composed here, so the name it carries is shown
+    // as a name.
+    let shown_name = crate::terminal_text::Name::new(package_name);
 
     // The plan is what the confirmation describes, and the removal is checked
     // against it: `remove_shown` deletes the file only if it still holds the
@@ -34,14 +37,14 @@ pub(crate) async fn handle_remove(
             if names_a_declaring_spec(&e) {
                 display.print_error(e.to_string());
             } else {
-                display.print_error(format!("Package '{package_name}' not found."));
+                display.print_error(format!("Package '{shown_name}' not found."));
             }
             return Exit::Failed;
         }
         // Not about a file at this name, so "could not load that spec" would be false:
         // there may be no spec at all. The error names the directory and what is at it.
         Err(e @ selfie::package::port::PackageRepoError::PackageListError(_)) => {
-            display.print_error(format!("Cannot remove '{package_name}': {e}"));
+            display.print_error(format!("Cannot remove '{shown_name}': {e}"));
             return Exit::Failed;
         }
         // Everything else the repository can answer here: a file that will not
@@ -51,7 +54,7 @@ pub(crate) async fn handle_remove(
         // already names the files and says what to do about them.
         Err(e) => {
             display.print_error(format!(
-                "Cannot remove '{package_name}': selfie could not load that spec, so it cannot \
+                "Cannot remove '{shown_name}': selfie could not load that spec, so it cannot \
                  tell what depends on it. Resolve what is reported below, then try again. {e}"
             ));
             return Exit::Failed;
@@ -59,7 +62,7 @@ pub(crate) async fn handle_remove(
     };
 
     let package_blob = plan.shown();
-    display.print_run_note(format!("Package '{package_name}' found at:"));
+    display.print_run_note(format!("Package '{shown_name}' found at:"));
     display.print_run_note(format!("  {}", DisplayPath::of(package_blob.file_path())));
 
     // `checked` is what separates "nothing depends on this" from "selfie does not
@@ -82,24 +85,26 @@ pub(crate) async fn handle_remove(
     // unreadable spec nor a failed listing can support a clearance.
     let complete = checked && unreadable.is_empty();
 
-    let shown_name = crate::terminal_text::escape(package_name);
     let (prompt, default_answer) = if dependent_packages.is_empty() && complete {
         display.print_run_note(format!(
-            "Package '{package_name}' is not a dependency of any other packages."
+            "Package '{shown_name}' is not a dependency of any other packages."
         ));
         (format!("Remove package '{shown_name}'?"), false)
     } else if dependent_packages.is_empty() {
         display.print_warning(format!(
-            "Nothing selfie could read depends on '{package_name}', but it could not read \
+            "Nothing selfie could read depends on '{shown_name}', but it could not read \
              everything, so this is not a clearance."
         ));
         (format!("Remove package '{shown_name}' anyway?"), false)
     } else {
         display.print_warning(format!(
-            "Package '{package_name}' is a dependency of the following packages:"
+            "Package '{shown_name}' is a dependency of the following packages:"
         ));
         for dep in dependent_packages {
-            display.print_warning(format!("  - {}", dep.name()));
+            display.print_warning(format!(
+                "  - {}",
+                crate::terminal_text::Name::new(dep.name())
+            ));
         }
         (
             "Are you sure you want to remove this package?".to_string(),
@@ -125,7 +130,7 @@ pub(crate) async fn handle_remove(
                 return display.refuse_prompt(
                     &failure,
                     "Confirming the removal",
-                    format!("Pass --yes to remove '{package_name}' without asking.").as_str(),
+                    format!("Pass --yes to remove '{shown_name}' without asking.").as_str(),
                 );
             }
         }
@@ -152,7 +157,7 @@ pub(crate) async fn handle_remove(
             } => {
                 display.print_success(format!(
                     "Package '{}' removed successfully from {}",
-                    package_name,
+                    shown_name,
                     DisplayPath::of(file_path)
                 ));
 

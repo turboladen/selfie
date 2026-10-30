@@ -6,7 +6,7 @@
 
 use selfie::dotfile_service::port::DotfileService;
 use selfie::package::{
-    Package, SpecOrigin,
+    ContentSource, Package, SpecOrigin,
     event::{BaseKind, DotfileListData, OperationResult, PackageEvent},
 };
 use tokio_util::sync::CancellationToken;
@@ -118,10 +118,13 @@ pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> String {
     // listing that hid it would leave the user looking for a dotfile the table
     // says does not exist. The brief form, since a cell cannot hold the anchor
     // advice.
-    let text = entry
-        .content_source()
-        .map_or_else(|invalid| invalid.brief(), |source| source.to_string());
-    DisplayPath::new(&text).to_string()
+    match entry.content_source() {
+        Ok(source @ ContentSource::Provider(_)) => {
+            crate::terminal_text::interim_one_line(&source.to_string()).to_string()
+        }
+        Ok(source) => DisplayPath::new(&source.to_string()).to_string(),
+        Err(invalid) => DisplayPath::new(&invalid.brief()).to_string(),
+    }
 }
 
 /// Print the base directories above the table so relative source paths have context.

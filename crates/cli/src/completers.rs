@@ -81,7 +81,7 @@ fn list_package_names(dir: &Path) -> Vec<String> {
             if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") {
                 path.file_stem()?
                     .to_str()
-                    .filter(|name| !name.chars().any(crate::terminal_text::is_escaped))
+                    .filter(|name| crate::terminal_text::Name::is_plain(name))
                     .map(String::from)
             } else {
                 None
@@ -108,6 +108,7 @@ mod tests {
             "esc\u{1b}[2J",
             "rlo\u{202E}txt",
             "split\nname",
+            "zero\u{200B}width",
             "vs\u{FE0F}",
         ] {
             std::fs::write(dir.path().join(format!("{name}.yml")), "").unwrap();

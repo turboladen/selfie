@@ -1,6 +1,6 @@
 //! Shared text formatting utilities for consistent styling
 
-use crate::terminal_text::{Literal, Shown};
+use crate::terminal_text::{Literal, Name, Shown, lit};
 
 /// A spec name as the last argument of a command shown to the user: quoted
 /// where the shell would split it, and after `--` when it starts with a dash.
@@ -12,6 +12,11 @@ pub(crate) fn name_argument(name: &str) -> String {
     } else {
         quoted
     }
+}
+
+/// `names`, each shown as a [`Name`], joined by commas.
+pub(crate) fn name_list<'a>(names: impl IntoIterator<Item = &'a String>) -> Shown {
+    Shown::join(names.into_iter().map(|name| Name::new(name)), lit!(", "))
 }
 
 /// `text`, a field's name, in key styling: bold and cyan when `use_colors`.

@@ -4,7 +4,7 @@ use selfie::package::{
     service::PackageService,
 };
 
-use crate::terminal_text::{Literal, Shown, lit, shown, tool_output};
+use crate::terminal_text::{Literal, Output, Shown, lit, shown};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -113,18 +113,18 @@ fn display_check_output_only(check_result: &CheckResultData, display: &DisplayMa
         CheckResult::Success { stdout, stderr } => {
             // Show stdout output if present
             if !stdout.trim().is_empty() {
-                display.print_info(format!("Check output: {}", tool_output(stdout)));
+                display.print_info(format!("Check output: {}", Output::new(stdout)));
             } else if !stderr.trim().is_empty() {
-                display.print_info(format!("Check output: {}", tool_output(stderr)));
+                display.print_info(format!("Check output: {}", Output::new(stderr)));
             }
         }
         CheckResult::Failed { stdout, stderr, .. } => {
             // Not installed: the check's own output explains the answer, so it
             // is a warning, on stderr, beside the result line on stdout.
             if !stderr.is_empty() {
-                display.print_warning(format!("Check failed: {}", tool_output(stderr)));
+                display.print_warning(format!("Check failed: {}", Output::new(stderr)));
             } else if !stdout.is_empty() {
-                display.print_warning(format!("Check failed: {}", tool_output(stdout)));
+                display.print_warning(format!("Check failed: {}", Output::new(stdout)));
             } else {
                 display.print_warning("Check failed with no output");
             }
@@ -145,7 +145,11 @@ fn display_check_result_card(
     // Status line stays inline — complex branching with conditional sub-fields
     let key = |field: Literal| shown!("{}{}: ", INDENT, format_key(field, use_colors));
     let output = |field: Literal, text: &str| {
-        shown!("\n{}{}", key(field), Shown::tool_output(text, lit!("    ")))
+        shown!(
+            "\n{}{}",
+            key(field),
+            Shown::indented(Output::new(text), lit!("    "))
+        )
     };
 
     let status_line = match &check_result.result {
@@ -192,7 +196,7 @@ fn display_check_result_card(
         .result_card("Check Results")
         .field(lit!("Package"), &check_result.package_name)
         .field(lit!("Environment"), &check_result.environment)
-        .field_if(lit!("Command"), check_result.check_command.as_deref())
+        .command_if(lit!("Command"), check_result.check_command.as_deref())
         .print();
     display.println(status_line);
 }

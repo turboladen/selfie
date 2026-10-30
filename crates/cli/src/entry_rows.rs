@@ -5,7 +5,7 @@
 use console::measure_text_width;
 use selfie::package::event::SkipReason;
 
-use crate::terminal_text::{DisplayPath, Literal, Paint, Shown, lit, shown};
+use crate::terminal_text::{DisplayPath, Literal, Name, Paint, Shown, Trusted, lit, shown};
 
 /// The widest a source or target column grows, in terminal columns. A longer
 /// value overflows its column on its own row.
@@ -116,8 +116,8 @@ fn capped(text: &str) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EntryRow {
     pub(crate) outcome: EntryOutcome,
-    /// The source as the row shows it.
-    pub(crate) source: DisplayPath,
+    /// The source as the row shows it: a path, or a command.
+    pub(crate) source: Shown,
     /// The target as the row shows it.
     pub(crate) target: DisplayPath,
     /// What the row says after the target, such as why it was skipped.
@@ -158,13 +158,13 @@ pub(crate) fn under_row() -> Shown {
 }
 
 // `text` padded with spaces to `width` terminal columns.
-fn padded(text: &DisplayPath, width: usize) -> Shown {
-    let fill = width.saturating_sub(measure_text_width(text.as_str()));
+fn padded(text: &(impl Trusted + ?Sized), width: usize) -> Shown {
+    let fill = width.saturating_sub(measure_text_width(&text.to_string()));
     shown!("{}{}", text, spaces(fill))
 }
 
 fn spaces(count: usize) -> Shown {
-    Shown::name(&" ".repeat(count))
+    Shown::from(Name::new(&" ".repeat(count)))
 }
 
 #[cfg(test)]
@@ -174,9 +174,9 @@ mod tests {
     fn row(outcome: EntryOutcome, source: &str, target: &str, detail: Option<&str>) -> EntryRow {
         EntryRow {
             outcome,
-            source: DisplayPath::new(source),
+            source: DisplayPath::new(source).into(),
             target: DisplayPath::new(target),
-            detail: detail.map(Shown::name),
+            detail: detail.map(|detail| Shown::from(Name::new(detail))),
         }
     }
 

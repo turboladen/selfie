@@ -1,6 +1,6 @@
 //! Showing dotfile sources relative to the directory they were read from.
 
-use crate::terminal_text::{Shown, lit, shown};
+use crate::terminal_text::{Shown, interim_one_line, lit, shown};
 use std::path::Path;
 
 use selfie::package::event::{BaseKind, DotfileSource, RepoPath};
@@ -19,21 +19,24 @@ pub(crate) fn base_directory_line(kind: BaseKind, directory: &Path) -> Shown {
 
 /// A source as one line shows it once its base directory is known: the path
 /// relative to the base with any var names, or the command. A file under no
-/// known base is shown in full, and a recorded spelling is marked as one.
-pub(crate) fn relative_text(source: &DotfileSource) -> DisplayPath {
+/// known base is shown in full, and a recorded spelling is marked as one. A
+/// path is shown as a [`DisplayPath`]; a command keeps its blanks, so it still
+/// pastes as it runs.
+pub(crate) fn relative_text(source: &DotfileSource) -> Shown {
     match source {
         DotfileSource::File(RepoPath { base: None, .. })
         | DotfileSource::Template {
             file: RepoPath { base: None, .. },
             ..
-        } => shorten_path(&source.relative().to_string()),
-        DotfileSource::File(_) | DotfileSource::Template { .. } | DotfileSource::Command(_) => {
-            DisplayPath::new(&source.relative().to_string())
+        } => shorten_path(&source.relative().to_string()).into(),
+        DotfileSource::File(_) | DotfileSource::Template { .. } => {
+            DisplayPath::new(&source.relative().to_string()).into()
         }
+        DotfileSource::Command(_) => interim_one_line(&source.relative().to_string()),
         // No base is known, so the line says so: under a heading printed for an
         // earlier line, a bare spelling would read as relative to it.
         DotfileSource::Recorded(spelling) => {
-            DisplayPath::new(&format!("{spelling} (as recorded, directory unknown)"))
+            DisplayPath::new(&format!("{spelling} (as recorded, directory unknown)")).into()
         }
     }
 }
@@ -45,11 +48,7 @@ pub(crate) fn relative_text(source: &DotfileSource) -> DisplayPath {
 // never guesses. Apply and drift walk every package-directory spec before any
 // standalone one, so each heading prints once; were that order to change, a
 // heading would print again instead of a path showing under the wrong one.
-pub(crate) fn label(
-    display: &DisplayManager,
-    channel: Channel,
-    source: &DotfileSource,
-) -> DisplayPath {
+pub(crate) fn label(display: &DisplayManager, channel: Channel, source: &DotfileSource) -> Shown {
     if let Some(base) = source.base()
         && display.swap_heading(channel, base.kind)
     {
@@ -199,6 +198,18 @@ mod tests {
                 "Dotfiles: /r/d".to_string(),
                 "Packages: /r/p".to_string()
             ]
+        );
+    }
+
+    // A command source is a command, not a path: its blanks show as written, so
+    // it still pastes as it runs, and a line break in it shows as an escape.
+    #[test]
+    fn a_command_source_keeps_its_blanks_on_one_line() {
+        let source = DotfileSource::Command("printf 'a\u{A0}b'\nexit".to_string());
+
+        assert_eq!(
+            relative_text(&source).to_string(),
+            "command: printf 'a\u{A0}b'\\nexit"
         );
     }
 

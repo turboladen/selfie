@@ -269,7 +269,7 @@ fn select_items(package_names: &[String]) -> (Vec<String>, Vec<String>) {
     items.push(TYPE_A_NAME.to_string());
     let shown = items
         .iter()
-        .map(|item| crate::terminal_text::escape(item).into_owned())
+        .map(|item| crate::terminal_text::Name::new(item).to_string())
         .collect();
     (shown, items)
 }
@@ -326,7 +326,7 @@ fn prompt_for_name(
 // Accepted, an escaped default would become the spec's name, backslashes and
 // all, so a name holding such a character is typed instead.
 fn offered_name(file: &str) -> Option<String> {
-    Some(suggest_name(file)).filter(|name| crate::terminal_text::escape(name) == *name)
+    Some(suggest_name(file)).filter(|name| crate::terminal_text::Name::is_plain(name))
 }
 
 /// Derive a suggested spec name from the file path.

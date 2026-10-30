@@ -4,7 +4,8 @@ use selfie::package::{
     service::PackageService,
 };
 
-use crate::terminal_text::{Literal, Paint, Shown, lit, shown, tool_output};
+use crate::formatters::name_list;
+use crate::terminal_text::{Literal, Name, Output, Paint, Shown, lit, shown};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -107,49 +108,30 @@ fn display_environment_error(
 }
 
 fn display_audit_output_only(audit_result: &AuditResultData, display: &DisplayManager) {
+    let name = Name::new(&audit_result.package_name);
     match &audit_result.result {
         AuditResult::Clean { sources } => {
-            display.print_success(format!(
-                "{} — clean ({})",
-                audit_result.package_name,
-                sources.join(", ")
-            ));
+            display.print_success(format!("{name} — clean ({})", name_list(sources)));
         }
         AuditResult::Conflicts {
             sources, expected, ..
         } => {
-            let unexpected: Vec<&String> = sources
-                .iter()
-                .filter(|s| !expected.iter().any(|e| s.eq_ignore_ascii_case(e)))
-                .collect();
             display.print_warning(format!(
-                "{} — conflicts detected: unexpected source(s): {}",
-                audit_result.package_name,
-                unexpected
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "{name} — conflicts detected: unexpected source(s): {}",
+                name_list(unexpected(sources, expected))
             ));
         }
         AuditResult::NotInstalled => {
-            display.print_info(format!("{} — not installed", audit_result.package_name));
+            display.print_info(format!("{name} — not installed"));
         }
         AuditResult::NoAuditCommand => {
-            display.print_info(format!(
-                "{} — no audit command defined",
-                audit_result.package_name
-            ));
+            display.print_info(format!("{name} — no audit command defined"));
         }
         AuditResult::Error(err) => {
-            display.print_error(format!(
-                "{} — error: {}",
-                audit_result.package_name,
-                tool_output(err)
-            ));
+            display.print_error(format!("{name} — error: {}", Output::new(err)));
         }
         AuditResult::CouldNotRun(failure) => {
-            display.print_error(format!("{} — error: {failure}", audit_result.package_name));
+            display.print_error(format!("{name} — error: {failure}"));
         }
     }
 }
@@ -165,7 +147,7 @@ fn display_audit_summary_line(
         shown!(
             "{}: {}",
             label(lit!("error"), |s| s.red()),
-            Shown::tool_output(err, lit!("    "))
+            Shown::indented(Output::new(err), lit!("    "))
         )
     };
 
@@ -174,7 +156,7 @@ fn display_audit_summary_line(
             shown!(
                 "{} ({})",
                 label(lit!("clean"), |s| s.green()),
-                Shown::joined(sources, lit!(", "))
+                name_list(sources)
             )
         }
         AuditResult::Conflicts {
@@ -182,7 +164,7 @@ fn display_audit_summary_line(
         } => shown!(
             "{} — unexpected: {}",
             label(lit!("CONFLICTS"), |s| s.red().bold()),
-            Shown::joined(unexpected(sources, expected), lit!(", "))
+            name_list(unexpected(sources, expected))
         ),
         AuditResult::NotInstalled => label(lit!("not installed"), |s| s.dim()),
         AuditResult::NoAuditCommand => label(lit!("no audit command"), |s| s.dim()),
@@ -192,7 +174,7 @@ fn display_audit_summary_line(
 
     display.println(shown!(
         "  {}: {}",
-        Shown::name(&audit_result.package_name),
+        Name::new(&audit_result.package_name),
         status
     ));
 }
@@ -217,7 +199,7 @@ fn display_audit_result_card(
         .result_card("Audit Results")
         .field(lit!("Package"), &audit_result.package_name)
         .field(lit!("Environment"), &audit_result.environment)
-        .field_if(lit!("Command"), audit_result.audit_command.as_deref())
+        .command_if(lit!("Command"), audit_result.audit_command.as_deref())
         .print();
 
     // Status line stays inline — variant-dependent sub-fields
@@ -228,7 +210,7 @@ fn display_audit_result_card(
             key(lit!("Status")),
             status_style::format_status_error(use_colors),
             key(lit!("Details")),
-            Shown::tool_output(err, lit!("    "))
+            Shown::indented(Output::new(err), lit!("    "))
         )
     };
     let status_line = match &audit_result.result {
@@ -237,7 +219,7 @@ fn display_audit_result_card(
             key(lit!("Status")),
             status_style::format_audit_clean(use_colors),
             key(lit!("Sources")),
-            Shown::joined(sources, lit!(", "))
+            name_list(sources)
         ),
         AuditResult::Conflicts {
             sources, expected, ..
@@ -246,11 +228,11 @@ fn display_audit_result_card(
             key(lit!("Status")),
             status_style::format_audit_conflicts(use_colors),
             key(lit!("All sources")),
-            Shown::joined(sources, lit!(", ")),
+            name_list(sources),
             key(lit!("Expected")),
-            Shown::joined(expected, lit!(", ")),
+            name_list(expected),
             key(lit!("Unexpected")),
-            Shown::joined(unexpected(sources, expected), lit!(", "))
+            name_list(unexpected(sources, expected))
         ),
         AuditResult::NotInstalled => shown!(
             "{}{}",
@@ -275,6 +257,65 @@ fn display_audit_result_card(
 mod tests {
     use super::*;
     use selfie::package::event::CheckFailure;
+
+    // Every view of an audit shows the package's name and its sources as names,
+    // so an invisible character in one shows as an escape in each, whatever
+    // the audit found.
+    #[test]
+    fn each_audit_view_shows_names_and_sources_escaped() {
+        let failure = CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
+            "sleep 9",
+            std::time::Duration::from_secs(1),
+        ));
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(
+            std::path::Path::new("/packages"),
+        ));
+        let results = [
+            AuditResult::Clean {
+                sources: vec!["brew\u{200B}".to_string()],
+            },
+            AuditResult::Conflicts {
+                sources: vec!["brew\u{200B}".to_string(), "npm".to_string()],
+                expected: vec!["npm".to_string()],
+            },
+            AuditResult::NotInstalled,
+            AuditResult::NoAuditCommand,
+            AuditResult::Error("e".to_string()),
+            AuditResult::CouldNotRun(failure),
+        ];
+        for result in results {
+            let names_sources = matches!(
+                result,
+                AuditResult::Clean { .. } | AuditResult::Conflicts { .. }
+            );
+            let audit = AuditResultData {
+                package_name: "p\u{200B}".to_string(),
+                environment: "test".to_string(),
+                audit_command: None,
+                result,
+            };
+            let views: [&dyn Fn(&DisplayManager); 3] = [
+                &|display| display_audit_output_only(&audit, display),
+                &|display| display_audit_summary_line(&audit, &config, display),
+                &|display| display_audit_result_card(&audit, &config, display),
+            ];
+            for view in views {
+                let display = DisplayManager::new(false);
+                view(&display);
+                let text: String = display
+                    .printed()
+                    .into_iter()
+                    .map(|(_, line)| line + "\n")
+                    .collect();
+
+                assert!(text.contains("p\\u{200b}"), "{text:?}");
+                if names_sources {
+                    assert!(text.contains("brew\\u{200b}"), "{text:?}");
+                }
+                assert!(!text.contains('\u{200B}'), "{text:?}");
+            }
+        }
+    }
 
     // An audit that could not run prints, in each of the three places an audit
     // result is shown, exactly what an audit error with the same sentence

@@ -629,7 +629,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
 fn dependency_items(available: &[String]) -> Vec<String> {
     available
         .iter()
-        .map(|name| crate::terminal_text::escape(name).into_owned())
+        .map(|name| crate::terminal_text::Name::new(name).to_string())
         .collect()
 }
 

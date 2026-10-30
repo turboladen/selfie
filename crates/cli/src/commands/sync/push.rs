@@ -1,6 +1,6 @@
 //! Handler for `selfie sync push`.
 
-use crate::terminal_text::{Shown, lit, shown};
+use crate::terminal_text::{Name, lit, shown};
 use tokio_util::sync::CancellationToken;
 
 use selfie::{
@@ -157,7 +157,7 @@ fn show_pending_commits(
         } else {
             lit!("files")
         };
-        let message = Shown::prose(&commit.message).paint(use_colors, |s| s.bold());
+        let message = crate::status_style::styled_text(&commit.message, use_colors, |s| s.bold());
         display.println(shown!(
             "  {}. {} ({} {})",
             num,
@@ -211,12 +211,12 @@ fn confirm_commits(
         // what the user accepts is committed. So a message that would need an
         // escape is shown escaped above an empty prompt instead, and a blank
         // answer keeps its own bytes, as `--yes` does.
-        if crate::terminal_text::escape(&commit.message) == commit.message {
+        if crate::terminal_text::Name::is_plain(&commit.message) {
             input = input.with_initial_text(&commit.message);
         } else {
             display.print_note(shown!(
                 "  Suggested: {} (Enter keeps it)",
-                Shown::name(&commit.message)
+                Name::new(&commit.message)
             ));
         }
         let answer: String = display.prompt(crate::display_manager::TextLine(input))?;

@@ -1,6 +1,6 @@
 use crate::tables::{Cell, SafeTable};
 use crate::terminal_text::DisplayPath;
-use crate::terminal_text::{Shown, lit, shown};
+use crate::terminal_text::{Name, Prose, Shown, lit, shown};
 use selfie::package::{
     event::{PackageEvent, SpecListData},
     service::SpecService,
@@ -87,7 +87,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
         let text = shown!(
             "Invalid: {} — {}",
             DisplayPath::of(invalid.package_path()),
-            Shown::block(&invalid.to_string())
+            Prose::new(&invalid.to_string())
         );
         display.println(issue_line(text, use_colors));
     }
@@ -95,9 +95,9 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
     for refused in &data.refused {
         let text = shown!(
             "Refused: {} ({}) — {}",
-            Shown::name(&refused.package_name),
+            Name::new(&refused.package_name),
             DisplayPath::of(&refused.path),
-            Shown::block(&refused.reason.to_string())
+            Prose::new(&refused.reason.to_string())
         );
         display.println(issue_line(text, use_colors));
     }
@@ -109,7 +109,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
         shown!(
             "{} spec(s) in environment '{}'",
             data.specs.len(),
-            Shown::name(&data.current_environment),
+            Name::new(&data.current_environment),
         )
     };
     display.println(shown!("\n{}", summary));
@@ -135,7 +135,10 @@ mod tests {
     // are indented once.
     #[test]
     fn an_issue_line_indents_its_continuation_once() {
-        let line = issue_line(shown!("Refused: {}", Shown::block("a\nb")), false);
+        let line = issue_line(
+            shown!("Refused: {}", Shown::from(Prose::new("a\nb"))),
+            false,
+        );
 
         assert_eq!(line, "  ⚠ Refused: a\n    b");
     }
