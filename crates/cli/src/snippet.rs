@@ -39,21 +39,16 @@ pub(crate) fn window(path: &Path, line: u64, column: u64) -> Option<Shown> {
     let first = line.saturating_sub(CONTEXT).max(1);
     let last = line.saturating_add(CONTEXT);
 
-    // A second read of a file selfie does not control: the repository read it,
-    // the parser rejected it, and the failure arrives here carrying the path.
-    // Opening a fifo to read blocks until a writer arrives and a device node never
-    // reaches an end, so ask what the path holds first. `metadata` stats rather
-    // than opens, so asking cannot itself block, and it resolves symlinks, so a
-    // link to a fifo answers as a fifo. Only a swap between the two reads reaches
-    // this, which is why no test constructs it.
-    //
-    // Not `FileSystem::irregular_target_refusal`, which is the guard the library
-    // uses for the same hazard: it takes a `TargetPath`, and the constructor for a
-    // path already resolved -- `repository_path` -- is crate-private. The two
-    // public ones expand a dotfile *target* against a home directory, which would
-    // reinterpret a spec path rather than describe it. Reaching the port from here
-    // means widening that constructor, and this answers the same question without
-    // a library change.
+    // A second read of a file selfie does not control: the parser rejected it
+    // and the failure carries the path. A fifo blocks the read until a writer
+    // arrives and a device node never ends, so ask what the path holds first;
+    // `metadata` stats without opening and resolves symlinks, so a link to a
+    // fifo answers as a fifo. Only a swap between the two reads reaches this,
+    // which is why no test constructs it. Not the library's
+    // `FileSystem::irregular_target_refusal`: it takes a `TargetPath`, whose
+    // constructor for a resolved path is crate-private, and its public ones
+    // expand a dotfile target against the home directory, which would
+    // reinterpret a spec path rather than describe it.
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;
     }
