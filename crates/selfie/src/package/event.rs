@@ -1380,6 +1380,15 @@ pub enum OperationFailure {
         package_name: String,
         issues: Vec<ValidationIssueData>,
     },
+    /// A spec write refused because selfie could not tell which spec directory
+    /// the spec belongs in, so it could not compare the spec with the others.
+    /// Nothing was written.
+    UnplacedSpec {
+        /// Whether the spec was being created or updated.
+        action: SpecWrite,
+        package_name: String,
+        path: std::path::PathBuf,
+    },
     /// A spec `spec create` refuses to write for its name or its path, before
     /// anything is looked up or written.
     Uncreatable {
@@ -1602,6 +1611,23 @@ impl std::fmt::Display for OperationFailure {
                          validation ({errors}), so nothing was written"
                     ),
                 }
+            }
+            OperationFailure::UnplacedSpec {
+                action,
+                package_name,
+                path,
+            } => {
+                let verb = match action {
+                    SpecWrite::Create => "create",
+                    SpecWrite::Update => "update",
+                };
+                write!(
+                    f,
+                    "Refusing to {verb} '{package_name}': selfie could not tell which spec \
+                     directory {} belongs in, so it could not compare it with the other specs, \
+                     and nothing was written",
+                    path.display()
+                )
             }
             OperationFailure::Uncreatable {
                 package_name,

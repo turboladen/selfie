@@ -2034,6 +2034,38 @@ mod validate_all_covers_standalone_specs {
         }
     }
 
+    // Two package specs deploying one file, `aaa` sorting before `zeta`.
+    fn write_two_colliding_packages(dirs: &Dirs) {
+        for file in ["aaa.yml", "zeta.yml"] {
+            write_package(
+                &dirs.packages,
+                file,
+                "dotfiles:\n  - source: rc\n    target: ~/.gemrc\n",
+            );
+        }
+    }
+
+    // What a collision of `aaa`'s and `zeta`'s entries says, members in collection
+    // order, whichever of the two a run is about.
+    const AAA_AND_ZETA: &str = "Dotfile entries package 'aaa' (dotfiles[0]) and package 'zeta' \
+                                (dotfiles[0]) both deploy to '~/.gemrc' in environment 'test', so \
+                                apply deploys none of them there";
+
+    // The named spec is judged where collection lists it, so a run about the spec
+    // listed first still names it first.
+    #[tokio::test]
+    async fn a_collision_names_its_members_in_collection_order() {
+        let dirs = dirs();
+        write_two_colliding_packages(&dirs);
+
+        let events = collect_events(dirs.service().validate("aaa", None).await).await;
+
+        assert_eq!(
+            issues_of(&events, "aaa"),
+            [("dotfiles[0].target".to_string(), AAA_AND_ZETA.to_string())]
+        );
+    }
+
     #[tokio::test]
     async fn validating_a_spec_by_name_beside_specs_that_do_not_collide_is_clean() {
         let dirs = dirs();
@@ -2353,6 +2385,371 @@ mod validate_all_covers_standalone_specs {
                 .any(|event| matches!(event, PackageEvent::Warning { .. })),
             "{events:?}"
         );
+    }
+
+    // Create and update judge the spec they write against the others, as
+    // `spec validate <name>` does: a collision the write brings in is refused, and
+    // one the file already had is reported.
+    mod writes {
+        use selfie::package::{
+            DotfileEntry, PackageBuilder, SpecOrigin,
+            event::{AddEnvironment, PackageUpdateFields, SpecWrite, ValidationIssueData},
+        };
+
+        use super::*;
+
+        const COLLISION: &str = "so apply deploys none of them there";
+
+        fn add(environment: &str) -> PackageUpdateFields {
+            PackageUpdateFields {
+                add_environment: Some(AddEnvironment {
+                    name: environment.to_string(),
+                    install: "true".to_string(),
+                    check: None,
+                    audit: None,
+                    dependencies: Vec::new(),
+                    recommends: Vec::new(),
+                }),
+                ..PackageUpdateFields::default()
+            }
+        }
+
+        fn remove(environment: &str) -> PackageUpdateFields {
+            PackageUpdateFields {
+                remove_environment: Some(environment.to_string()),
+                ..PackageUpdateFields::default()
+            }
+        }
+
+        fn describe(description: &str) -> PackageUpdateFields {
+            PackageUpdateFields {
+                description: Some(description.to_string()),
+                ..PackageUpdateFields::default()
+            }
+        }
+
+        // The issues a refused write failed with, or a panic naming what it did.
+        fn refused(events: &[PackageEvent], action: SpecWrite) -> Vec<ValidationIssueData> {
+            match get_operation_result(events) {
+                Some(OperationResult::Failure(OperationFailure::InvalidSpec {
+                    action: refused_as,
+                    issues,
+                    ..
+                })) if *refused_as == action => issues.clone(),
+                other => panic!("expected the write to be refused as invalid, got {other:?}"),
+            }
+        }
+
+        // The cross-spec issues among `issues`, as (field, message).
+        fn collisions(issues: &[ValidationIssueData]) -> Vec<(String, String)> {
+            issues
+                .iter()
+                .filter(|issue| issue.message.contains(COLLISION))
+                .map(|issue| (issue.field.clone(), issue.message.clone()))
+                .collect()
+        }
+
+        // Every cross-spec issue any validation result the run sent carried.
+        fn reported(events: &[PackageEvent], name: &str) -> Vec<(String, String)> {
+            issues_of(events, name)
+                .into_iter()
+                .filter(|(_, message)| message.contains(COLLISION))
+                .collect()
+        }
+
+        // A package spec declaring no environment, with one shared `target`, which
+        // collection leaves out of every scan as a spec apply refuses whole.
+        fn write_without_environments(dirs: &Dirs, target: &str) -> std::path::PathBuf {
+            let path = dirs.packages.join("alpha.yml");
+            std::fs::write(
+                &path,
+                format!(
+                    "name: alpha\nenvironments: {{}}\ndotfiles:\n  - source: alpha/rc\n    \
+                     target: {target}\n"
+                ),
+            )
+            .unwrap();
+            path
+        }
+
+        // The alpha collision with the standalone `gem`, as validate words it.
+        fn names_alpha_and_gem(collisions: &[(String, String)]) -> bool {
+            collisions.len() == 1 && names_both_specs(collisions)
+        }
+
+        #[tokio::test]
+        async fn updating_a_spec_into_a_collision_is_refused_and_writes_nothing() {
+            let dirs = dirs();
+            // The neighbor is standalone, so the scan has to read the dotfiles
+            // directory to find it.
+            write_standalone(&dirs.dotfiles, "gem", "");
+            let path = write_without_environments(&dirs, "~/.gemrc");
+            let before = std::fs::read(&path).unwrap();
+
+            let events = collect_events(dirs.service().update("alpha", add("test")).await).await;
+
+            let issues = refused(&events, SpecWrite::Update);
+            assert!(names_alpha_and_gem(&collisions(&issues)), "{issues:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+        }
+
+        #[tokio::test]
+        async fn updating_into_a_collision_with_a_package_spec_is_refused() {
+            let dirs = dirs();
+            write_package(
+                &dirs.packages,
+                "beta.yml",
+                "dotfiles:\n  - source: beta/rc\n    target: ~/.gemrc\n",
+            );
+            let path = write_without_environments(&dirs, "~/.gemrc");
+            let before = std::fs::read(&path).unwrap();
+
+            let events = collect_events(dirs.service().update("alpha", add("test")).await).await;
+
+            let issues = refused(&events, SpecWrite::Update);
+            let found = collisions(&issues);
+            assert_eq!(found.len(), 1, "{issues:?}");
+            assert!(
+                found[0].1.contains("package 'beta' (dotfiles[0])"),
+                "{found:?}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+        }
+
+        // Validation's identity resolves `..` as text, so the two are one target.
+        #[tokio::test]
+        async fn a_target_equal_once_dot_dot_is_resolved_is_refused_as_a_collision() {
+            let dirs = dirs();
+            write_standalone(&dirs.dotfiles, "gem", "");
+            let path = write_without_environments(&dirs, "~/x/../.gemrc");
+            let before = std::fs::read(&path).unwrap();
+
+            let events = collect_events(dirs.service().update("alpha", add("test")).await).await;
+
+            let issues = refused(&events, SpecWrite::Update);
+            assert_eq!(collisions(&issues).len(), 1, "{issues:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+        }
+
+        #[tokio::test]
+        async fn updating_a_spec_that_already_collides_saves_and_reports_it() {
+            let dirs = dirs();
+            write_colliding_pair(&dirs);
+
+            let events =
+                collect_events(dirs.service().update("alpha", describe("renamed")).await).await;
+
+            assert_successful_operation(&events);
+            let written = std::fs::read_to_string(dirs.packages.join("alpha.yml")).unwrap();
+            assert!(written.contains("renamed"), "{written}");
+            assert_eq!(results(&events), [("alpha".to_string(), Outcome::Failed)]);
+            assert!(
+                names_alpha_and_gem(&reported(&events, "alpha")),
+                "{events:?}"
+            );
+        }
+
+        // The update adds an environment the collision is then also found in, which
+        // changes its message, and the collision is still the one the file had.
+        #[tokio::test]
+        async fn adding_an_environment_to_a_spec_that_already_collides_saves_and_reports_it() {
+            let dirs = dirs();
+            write_colliding_pair(&dirs);
+
+            let events = collect_events(dirs.service().update("alpha", add("b")).await).await;
+
+            assert_successful_operation(&events);
+            let written = std::fs::read_to_string(dirs.packages.join("alpha.yml")).unwrap();
+            assert!(written.contains("b:"), "{written}");
+            assert!(
+                names_alpha_and_gem(&reported(&events, "alpha")),
+                "{events:?}"
+            );
+        }
+
+        // An unknown key in `test` has apply refuse alpha there, so on this machine
+        // only gem deploys `~/.gemrc`, though alpha's shared entry collides with it
+        // in `a`. Removing `test` takes the key with it, and alpha's shared entry
+        // then takes part in `test`, where apply would refuse gem's too.
+        #[tokio::test]
+        async fn removing_the_environment_that_hid_a_collision_is_refused() {
+            let dirs = dirs();
+            write_standalone(&dirs.dotfiles, "gem", "");
+            let path = dirs.packages.join("alpha.yml");
+            std::fs::write(
+                &path,
+                "name: alpha\nenvironments:\n  a:\n    install: \"true\"\n  test:\n    \
+                 install: \"true\"\n    audt: x\ndotfiles:\n  - source: alpha/rc\n    \
+                 target: ~/.gemrc\n",
+            )
+            .unwrap();
+            let before = std::fs::read(&path).unwrap();
+
+            let events = collect_events(dirs.service().update("alpha", remove("test")).await).await;
+
+            let issues = refused(&events, SpecWrite::Update);
+            let found = collisions(&issues);
+            assert!(names_alpha_and_gem(&found), "{issues:?}");
+            // The refusal names where the update brought the collision in, not `a`,
+            // where it was already.
+            assert!(found[0].1.contains("in environment 'test',"), "{found:?}");
+            assert_eq!(std::fs::read(&path).unwrap(), before, "nothing was written");
+        }
+
+        // `keeper` declares `a`, so `a` is still asked after alpha drops it, and
+        // alpha keeps a shared entry, so the scan still runs.
+        #[tokio::test]
+        async fn removing_the_environment_that_held_a_collision_saves_with_none_reported() {
+            let dirs = dirs();
+            write_standalone(&dirs.dotfiles, "gem", "");
+            std::fs::write(
+                dirs.packages.join("keeper.yml"),
+                "name: keeper\nenvironments:\n  a:\n    install: \"true\"\n",
+            )
+            .unwrap();
+            write_package(
+                &dirs.packages,
+                "alpha.yml",
+                "  a:\n    install: \"true\"\n    dotfiles:\n      - source: alpha/rc\n        \
+                 target: ~/.gemrc\ndotfiles:\n  - source: alpha/other\n    target: ~/.otherrc\n",
+            );
+            let control = collect_events(dirs.service().validate("alpha", None).await).await;
+            assert_eq!(
+                reported(&control, "alpha").len(),
+                1,
+                "control: the collision is there before the update"
+            );
+
+            let events = collect_events(dirs.service().update("alpha", remove("a")).await).await;
+
+            assert_successful_operation(&events);
+            let written = std::fs::read_to_string(dirs.packages.join("alpha.yml")).unwrap();
+            assert!(!written.contains("~/.gemrc"), "{written}");
+            assert_eq!(reported(&events, "alpha"), Vec::new());
+        }
+
+        // `beta` declares `test` and `prod`, so both are asked before the update, and
+        // alpha's shared entry already meets beta's in each: apply refuses both entries
+        // in `prod` whether or not alpha declares it. Adding `prod` brings in nothing.
+        #[tokio::test]
+        async fn adding_an_environment_another_spec_already_collides_in_saves_and_reports_it() {
+            let dirs = dirs();
+            std::fs::write(
+                dirs.packages.join("beta.yml"),
+                "name: beta\nenvironments:\n  prod:\n    install: \"true\"\n  test:\n    \
+                 install: \"true\"\ndotfiles:\n  - source: beta/rc\n    target: ~/.gemrc\n",
+            )
+            .unwrap();
+            write_package(
+                &dirs.packages,
+                "alpha.yml",
+                "dotfiles:\n  - source: alpha/rc\n    target: ~/.gemrc\n",
+            );
+
+            let events = collect_events(dirs.service().update("alpha", add("prod")).await).await;
+
+            assert_successful_operation(&events);
+            let written = std::fs::read_to_string(dirs.packages.join("alpha.yml")).unwrap();
+            assert!(written.contains("prod:"), "{written}");
+            let found = reported(&events, "alpha");
+            assert_eq!(found.len(), 1, "{found:?}");
+            assert!(
+                found[0].1.contains("in environment 'prod', 'test',"),
+                "{found:?}"
+            );
+        }
+
+        // An entry with no collision, so the run is about what it could not check.
+        #[tokio::test]
+        async fn updating_beside_a_spec_that_does_not_parse_says_what_it_could_not_check() {
+            let dirs = dirs();
+            write_package(
+                &dirs.packages,
+                "alpha.yml",
+                "dotfiles:\n  - source: alpha/rc\n    target: ~/.alpharc\n",
+            );
+            std::fs::write(dirs.packages.join("beta.yml"), "name: [unclosed\n").unwrap();
+
+            let events =
+                collect_events(dirs.service().update("alpha", describe("renamed")).await).await;
+
+            assert_successful_operation(&events);
+            let lines = unchecked(&events);
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(
+                lines[0].contains("packages/beta.yml")
+                    && lines[0].contains("an entry deploying to a target this spec deploys"),
+                "{lines:?}"
+            );
+        }
+
+        fn a_package(dirs: &Dirs, name: &str, target: &str) -> selfie::package::Package {
+            PackageBuilder::default()
+                .name(name)
+                .environment("test", |b| b.install("true"))
+                .dotfiles(vec![DotfileEntry::new(format!("{name}/rc"), target)])
+                .path(dirs.packages.join(format!("{name}.yml")))
+                .origin(SpecOrigin::PackageDirectory)
+                .build()
+        }
+
+        #[tokio::test]
+        async fn creating_a_spec_that_collides_is_refused() {
+            let dirs = dirs();
+            write_standalone(&dirs.dotfiles, "gem", "");
+            let package = a_package(&dirs, "alpha", "~/.gemrc");
+
+            let events = collect_events(dirs.service().create(package).await).await;
+
+            let issues = refused(&events, SpecWrite::Create);
+            assert!(names_alpha_and_gem(&collisions(&issues)), "{issues:?}");
+            assert!(
+                !dirs.packages.join("alpha.yml").exists(),
+                "nothing was written"
+            );
+        }
+
+        // Once packages/gem.yml exists, collection sets the standalone `gem` aside,
+        // so the two never deploy together.
+        #[tokio::test]
+        async fn creating_a_package_named_like_a_standalone_spec_does_not_collide_with_it() {
+            let dirs = dirs();
+            write_standalone(&dirs.dotfiles, "gem", "");
+            let package = a_package(&dirs, "gem", "~/.gemrc");
+
+            let events = collect_events(dirs.service().create(package).await).await;
+
+            assert_successful_operation(&events);
+            assert!(dirs.packages.join("gem.yml").exists());
+            assert_eq!(reported(&events, "gem"), Vec::new());
+        }
+
+        // An update and a create name the members in collection order too, the
+        // created spec where its file will be listed.
+        #[tokio::test]
+        async fn writes_name_a_collision_s_members_in_collection_order() {
+            let dirs = dirs();
+            write_two_colliding_packages(&dirs);
+
+            let events = collect_events(dirs.service().update("aaa", describe("x")).await).await;
+            assert_eq!(
+                reported(&events, "aaa"),
+                [("dotfiles[0].target".to_string(), AAA_AND_ZETA.to_string())]
+            );
+
+            let package = a_package(&dirs, "mmm", "~/.gemrc");
+            let events = collect_events(dirs.service().create(package).await).await;
+            assert_eq!(
+                collisions(&refused(&events, SpecWrite::Create)),
+                [(
+                    "dotfiles[0].target".to_string(),
+                    "Dotfile entries package 'aaa' (dotfiles[0]), package 'mmm' (dotfiles[0]) \
+                     and package 'zeta' (dotfiles[0]) all deploy to '~/.gemrc' in environment \
+                     'test', so apply deploys none of them there"
+                        .to_string()
+                )]
+            );
+        }
     }
 }
 

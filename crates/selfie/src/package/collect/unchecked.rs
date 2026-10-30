@@ -7,7 +7,7 @@ use crate::config::SelfieConfig;
 use crate::package::{
     Package,
     collect::{
-        Claim, NameTable, collect_all_packages,
+        Listed, UnplacedSpec,
         warning::{CollectionRefusal, Finding},
     },
     event::{BaseKind, EventSender, UncheckedSource},
@@ -218,72 +218,71 @@ pub(crate) fn collect_others<R: PackageRepository>(
     dotfiles_repo: &R,
     config: &SelfieConfig,
 ) -> Others {
-    match collect_all_packages(
-        package_repo,
-        dotfiles_repo,
-        config.dotfiles_directory_is_expected(),
-        config.environment(),
-    ) {
-        Ok(collected) => Others {
-            unchecked: collected.unusable().iter().map(Unchecked::from).collect(),
-            findings: collected.findings,
-            packages: collected.packages,
-        },
-        Err(error) => {
-            let mut unchecked = Vec::new();
-            if !error.is_absent() {
-                unchecked.push(Unchecked::PackageDirectory(error));
-            }
-            let packages = match dotfiles_repo.list_packages() {
-                Ok(output) => {
-                    // The names are judged as collection judges the dotfiles directory
-                    // alone: a name several files claim is used by none of them, and
-                    // is named as left unchecked, since a spec apply would not use must
-                    // not be compared.
-                    let mut packages: Vec<Package> = output.valid_packages().cloned().collect();
-                    let table = NameTable::of(
-                        std::iter::empty(),
-                        packages
-                            .iter()
-                            .map(|package| package.path().clone())
-                            .chain(super::unparsable_paths(&output)),
-                        |path: &PathBuf| path.file_name().and_then(|name| name.to_str()),
-                    );
-                    unchecked.extend(table.dotfiles_claims().filter_map(|(name, _, claim)| {
-                        match claim {
-                            Claim::Ambiguous(paths) => Some(Unchecked::Ambiguous {
-                                name: name.to_string(),
-                                paths: paths.to_vec(),
-                                base: BaseKind::DotfilesDirectory,
-                            }),
-                            Claim::One | Claim::SetAside(_) => None,
-                        }
-                    }));
-                    unchecked.extend(output.invalid_packages().map(|invalid| {
-                        Unchecked::Unloadable {
-                            path: invalid.package_path().to_path_buf(),
-                            base: BaseKind::DotfilesDirectory,
-                        }
-                    }));
-                    packages.retain(|package| {
-                        package
-                            .spec_name()
-                            .is_none_or(|name| table.uses_dotfiles(&name))
-                    });
-                    packages
-                }
-                Err(error) => {
-                    if !error.is_absent() {
-                        unchecked.push(Unchecked::DotfilesDirectory(error));
-                    }
-                    Vec::new()
-                }
+    OthersListing::of(package_repo, dotfiles_repo).collect(config)
+}
+
+/// Records the spec files a command compares its targets with, as listed, and the
+/// package directory's error when it could not be listed.
+#[derive(Clone)]
+pub(crate) struct OthersListing {
+    listed: Listed,
+    unlisted_packages: Option<PackageListError>,
+}
+
+impl OthersListing {
+    /// Lists both directories, or the dotfiles directory alone when the package
+    /// directory will not list.
+    pub(crate) fn of<R: PackageRepository>(package_repo: &R, dotfiles_repo: &R) -> Self {
+        match Listed::of(package_repo, dotfiles_repo) {
+            Ok(listed) => Self {
+                listed,
+                unlisted_packages: None,
+            },
+            Err(error) => Self {
+                listed: Listed::of_dotfiles_only(dotfiles_repo),
+                unlisted_packages: Some(error),
+            },
+        }
+    }
+
+    /// Changes the listing to what it would be with `spec`'s file written, as
+    /// [`Listed::place`] places it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnplacedSpec`], and leaves the listing as it was, when `spec`
+    /// cannot be placed.
+    pub(crate) fn place(&mut self, spec: &Package) -> Result<(), UnplacedSpec> {
+        self.listed.place(spec)
+    }
+
+    /// Settles every name and returns the specs to compare with, what collecting
+    /// them found, and what could not be used.
+    pub(crate) fn collect(self, config: &SelfieConfig) -> Others {
+        let collected = self.listed.collect(
+            config.dotfiles_directory_is_expected(),
+            config.environment(),
+        );
+        let unusable = collected.unusable();
+        let Some(error) = self.unlisted_packages else {
+            return Others {
+                unchecked: unusable.iter().map(Unchecked::from).collect(),
+                findings: collected.findings,
+                packages: collected.packages,
             };
-            Others {
-                packages,
-                findings: Vec::new(),
-                unchecked,
-            }
+        };
+        // Collection's findings are about a listing that is missing the package
+        // directory, so only what it could not use is said, as the places left
+        // unchecked.
+        let mut unchecked = Vec::new();
+        if !error.is_absent() {
+            unchecked.push(Unchecked::PackageDirectory(error));
+        }
+        unchecked.extend(unusable.iter().map(Unchecked::from));
+        Others {
+            packages: collected.packages,
+            findings: Vec::new(),
+            unchecked,
         }
     }
 }
@@ -297,7 +296,7 @@ mod tests {
         package::{
             PackageBuilder,
             event::{OperationContext, PackageEvent, metadata::OperationType},
-            port::{ListPackagesOutput, MockPackageRepository},
+            port::MockPackageRepository,
         },
     };
 
@@ -307,14 +306,6 @@ mod tests {
             .package_directory("/packages")
             .dotfiles_directory(PathBuf::from("/dotfiles"))
             .build()
-    }
-
-    fn empty_packages() -> MockPackageRepository {
-        let mut repo = MockPackageRepository::new();
-        repo.expect_list_packages()
-            .returning(|| Ok(ListPackagesOutput(Vec::new())));
-        repo.expect_directory_identity().return_const(None);
-        repo
     }
 
     // A dotfiles repository whose listing failed with the directory in `state`.
@@ -376,7 +367,11 @@ mod tests {
             std::io::Error::other("Too many levels of symbolic links"),
         )));
 
-        let others = collect_others(&empty_packages(), &dotfiles, &config());
+        let others = collect_others(
+            &MockPackageRepository::listing_nothing(),
+            &dotfiles,
+            &config(),
+        );
 
         assert!(
             matches!(

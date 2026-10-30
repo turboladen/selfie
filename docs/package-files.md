@@ -313,25 +313,34 @@ A command that shows every environment refuses a file with an unrecognized key i
 `selfie spec edit` refuses the same way. A file that will not parse is not an absent package, and
 treating it as one offered to create a template over the file the user opened the editor to repair.
 
-`selfie spec create` and the MCP server's `selfie_spec_create` check a new spec on its own, as
-`selfie spec validate` checks a spec alone, before writing it; neither compares it with other specs
-for a shared target. A spec with an error, such as no environment at all, is not written: the run
-exits 1 and lists every issue on stderr (the MCP result carries them under `issues`). A spec with
-only warnings, such as one that configures an environment other than the current one, a command that
-does not parse as POSIX sh, or a blank install command such as the template's `# TODO`, is written,
-and the warnings are listed on stderr; the run still exits 0. An install command given to the MCP
-tools `selfie_spec_create` or `selfie_spec_update` is refused when it is blank, since it would put a
-command that runs nothing where one was meant.
+`selfie spec create` and the MCP server's `selfie_spec_create` check a new spec as
+`selfie spec validate` checks it, before writing it. The check against other specs for a shared
+target finds nothing for the specs they write, which have no dotfile entries; a spec created through
+the library with an entry another spec deploys is refused. A spec with an error, such as no
+environment at all, is not written: the run exits 1 and lists every issue on stderr (the MCP result
+carries them under `issues`). A spec with only warnings, such as one that configures an environment
+other than the current one, a command that does not parse as POSIX sh, or a blank install command
+such as the template's `# TODO`, is written, and the warnings are listed on stderr; the run still
+exits 0. An install command given to the MCP tools `selfie_spec_create` or `selfie_spec_update` is
+refused when it is blank, since it would put a command that runs nothing where one was meant.
 
 The MCP tools `selfie_spec_update` and `selfie_spec_update_batch` validate the whole updated spec
 the same way. An error on a field the update wrote writes nothing and returns every issue under
 `issues`, and so does an error the save would refuse whatever the update wrote, such as an unknown
 key in the file. An error on any other field was already in the spec and does not stop the update.
-Every other issue, warnings, notices, and such an error, comes back as a `validation_result` entry
-in the result's `data`, sent before the spec is saved. `selfie_spec_update_batch` puts that entry
-under `validation_result` in the matching `results` entry, which has no such key when there is
-nothing to report. The entry's `outcome` is the spec's own, as `selfie_spec_validate` scores it; the
-result's `outcome` says how the update went.
+The updated spec is compared with the other specs as `selfie spec validate` compares it. An update
+that brings in a shared target is refused, even though it wrote no dotfile entry: giving a spec with
+no environment its first one, or removing the environment where an unknown key had `selfie apply`
+refuse the spec, puts the spec's shared entries back in play. A shared target the spec already had
+is reported and does not stop the update. When the spec has a dotfile entry, each spec the
+comparison could not read comes back as a warning. Every other issue, warnings, notices, and such an
+error, comes back as a `validation_result` entry in the result's `data`, sent before the spec is
+saved. `selfie_spec_update_batch` puts that entry under `validation_result` in the matching
+`results` entry, which has no such key when there is nothing to report. It puts the update's
+warnings, such as a spec the comparison could not read, under `warnings`, as the same `warning` and
+`spec_skipped` rows `selfie_spec_update` returns, and an entry with none has no such key. The
+entry's `outcome` is the spec's own, as `selfie_spec_validate` scores it; the result's `outcome`
+says how the update went.
 
 A package directory that does not exist yet holds no names, so it does not stop
 `selfie spec create`, `selfie dotfiles track` or the MCP tools that check a new name: the first spec

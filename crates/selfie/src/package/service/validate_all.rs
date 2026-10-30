@@ -172,15 +172,6 @@ mod tests {
         (sender, rx)
     }
 
-    // A dotfiles directory holding nothing, which no test here is about.
-    fn empty_dotfiles() -> MockPackageRepository {
-        let mut repo = MockPackageRepository::new();
-        repo.expect_directory_identity().return_const(None);
-        repo.expect_list_packages()
-            .returning(|| Ok(crate::package::port::ListPackagesOutput(Vec::new())));
-        repo
-    }
-
     // A fixture value, never a real credential. High-entropy and not path-shaped:
     // the scan uses a twelve-character window, so a path-like value would match
     // ordinary output and pass for the wrong reason.
@@ -224,7 +215,7 @@ mod tests {
         repo.expect_directory_identity().return_const(None);
         let _ = handle_validate_all(
             &repo,
-            &empty_dotfiles(),
+            &MockPackageRepository::listing_nothing(),
             &config,
             &sender,
             &mut ProgressTracker::new(1),
@@ -416,7 +407,7 @@ mod tests {
         mock_repo.expect_directory_identity().return_const(None);
         let result = handle_validate_all(
             &mock_repo,
-            &empty_dotfiles(),
+            &MockPackageRepository::listing_nothing(),
             &config,
             &sender,
             &mut progress,
@@ -475,7 +466,7 @@ mod tests {
         mock_repo.expect_directory_identity().return_const(None);
         let result = handle_validate_all(
             &mock_repo,
-            &empty_dotfiles(),
+            &MockPackageRepository::listing_nothing(),
             &config,
             &sender,
             &mut progress,
