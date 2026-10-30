@@ -2,7 +2,9 @@ use std::fmt;
 
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 
-use crate::terminal_text::{Content, DisplayPath, Literal, Name, Output, Paint, Prose, Shown};
+use crate::terminal_text::{
+    Content, DisplayPath, Literal, Name, Output, Paint, Prose, Shown, lit, shown,
+};
 use selfie::validation::ValidationIssue;
 
 /// A table in the CLI's style, rounded and fitted to the terminal, whose cells
@@ -126,21 +128,20 @@ impl ValidationTableReporter {
 
     // One issue's row, its category painted with `color`.
     fn add_issue(&mut self, issue: &ValidationIssue, color: Paint) {
+        let issue = crate::received::Issue::from(issue);
         self.table.add_row([
-            Cell::painted(
-                Name::new(&issue.category().to_string()),
-                self.use_colors,
-                color,
-            ),
-            Name::new(issue.field()).into(),
-            Prose::new(issue.message()).into(),
-            Prose::new(issue.suggestion().map_or("", String::as_str)).into(),
+            Cell::painted(issue.category, self.use_colors, color),
+            issue.field.into(),
+            issue.message.into(),
+            issue
+                .suggestion
+                .map_or_else(|| Cell::from(lit!("")), Cell::from),
         ]);
     }
 
     /// Print the table on stdout: a validator's issues are its answer.
     pub(crate) fn print(&self, display: &crate::display_manager::DisplayManager) {
-        display.println(crate::terminal_text::shown!("{}", self.table));
+        display.println(shown!("{}", self.table));
     }
 }
 

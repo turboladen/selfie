@@ -10,7 +10,7 @@
 //! 2. Configuration file settings
 //! 3. Default values (lowest priority)
 
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use std::path::PathBuf;
 
 use selfie::{
@@ -50,15 +50,15 @@ impl Default for CliSection {
 /// renders library diagnostics and its own the same way.
 #[derive(Debug)]
 pub(crate) struct ConfigNotice {
-    message: String,
-    suggestion: String,
+    message: Shown,
+    suggestion: Shown,
 }
 
 impl ConfigNotice {
     fn from_ignored_key(ignored: &IgnoredKey) -> Self {
         Self {
-            message: ignored.message(),
-            suggestion: ignored.suggestion(),
+            message: crate::received::sentence(ignored.message()).into(),
+            suggestion: crate::received::sentence(ignored.suggestion()).into(),
         }
     }
 
@@ -68,9 +68,13 @@ impl ConfigNotice {
     /// this section accepts, and each frontend reports only its own keys.
     fn unknown_cli_key(key: &str) -> Self {
         Self {
-            message: format!("`cli.{key}` is not a recognized CLI setting. Selfie ignored it."),
-            suggestion: format!(
-                "Remove `{key}` from the `cli:` section, or check it against the configuration guide."
+            message: shown!(
+                "`cli.{}` is not a recognized CLI setting. Selfie ignored it.",
+                Name::new(key)
+            ),
+            suggestion: shown!(
+                "Remove `{}` from the `cli:` section, or check it against the configuration guide.",
+                Name::new(key)
             ),
         }
     }
@@ -81,12 +85,14 @@ impl ConfigNotice {
     /// CLI settings.
     fn unreadable_cli_section(error: &impl std::fmt::Display) -> Self {
         Self {
-            message: format!(
-                "The `cli:` section could not be read ({error}). Selfie used the default CLI settings."
+            message: shown!(
+                "The `cli:` section could not be read ({}). Selfie used the default CLI settings.",
+                crate::received::sentence(error)
             ),
-            suggestion:
+            suggestion: lit!(
                 "Make `cli:` a mapping, for example `cli:` followed by an indented `verbose: true`."
-                    .to_string(),
+            )
+            .into(),
         }
     }
 }
@@ -107,10 +113,7 @@ pub(crate) fn library_config_notices(ignored: &[IgnoredKey]) -> Vec<ConfigNotice
 // One warning, so the notice and its remedy print as one line, on stderr.
 pub(crate) fn report_config_notices(notices: &[ConfigNotice], display: &DisplayManager) {
     for notice in notices {
-        display.print_warning(crate::terminal_text::Prose::message(format!(
-            "{} {}",
-            notice.message, notice.suggestion
-        )));
+        display.print_warning(shown!("{} {}", notice.message, notice.suggestion));
     }
 }
 
@@ -120,10 +123,7 @@ pub(crate) fn print_config_notices(notices: &[ConfigNotice], display: &DisplayMa
     for notice in notices {
         display.print_result(
             selfie::package::event::Outcome::Found,
-            crate::terminal_text::Prose::message(format!(
-                "{} {}",
-                notice.message, notice.suggestion
-            )),
+            shown!("{} {}", notice.message, notice.suggestion),
         );
     }
 }

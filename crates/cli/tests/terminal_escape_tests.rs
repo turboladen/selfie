@@ -605,3 +605,68 @@ fn spec_remove_names_the_spec_escaped() {
     );
     assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
 }
+
+// `spec edit` names the spec it was given as a name when it cannot open an
+// editor, so an invisible character in the name shows as an escape.
+#[test]
+fn spec_edit_without_an_editor_names_the_spec_escaped() {
+    let temp = setup_default_test_config();
+
+    let output = sandboxed_std_command(&temp)
+        .env_remove("EDITOR")
+        .args(["--no-color", "spec", "edit", "zw\u{200B}x"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains(r"Package 'zw\u{200b}x' doesn't exist yet."),
+        "{stderr}"
+    );
+}
+
+// `spec edit` names the spec as a name when what answers to it cannot be used,
+// whatever the library's sentence after it says.
+#[test]
+fn spec_edit_refusing_an_unusable_spec_names_it_escaped() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("zw\u{200B}q.yml"),
+        "name: zwq\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .env_remove("EDITOR")
+        .args(["--no-color", "spec", "edit", "zw\u{200B}q"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains(r"Cannot edit 'zw\u{200b}q': selfie could not use"),
+        "{stderr}"
+    );
+}
+
+// An install names a recommend that failed as a name.
+#[test]
+fn an_install_names_a_failed_recommend_escaped() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("recs.yml"),
+        format!(
+            "name: recs\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \
+             recommends: [\"re\\u200Bc\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "package", "install", "recs"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains(r"re\u{200b}c failed:"), "{stderr}");
+}

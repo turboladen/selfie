@@ -194,7 +194,7 @@ fn painted(text: String, paint: Paint) -> String {
 /// reaches them only as one of the kinds, such as a [`Name`] or [`Prose`], or
 /// through [`shown!`], whose arguments must each be [`Trusted`]; selfie's own
 /// text reaches them as a [`Literal`].
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub(crate) struct Shown(String);
 
 impl Shown {
@@ -507,13 +507,6 @@ impl Prose {
     pub(crate) fn new(text: &str) -> Self {
         Self(escape(text, Policy::Prose).into_owned())
     }
-
-    /// Escapes `text`, a whole message, without its trailing line break.
-    // A bridge for call sites that still format a whole message, sentence and
-    // values together, into one string; each is to compose its kinds instead.
-    pub(crate) fn message(text: impl fmt::Display) -> Self {
-        Self::new(text.to_string().trim_end_matches(['\r', '\n']))
-    }
 }
 
 impl Content {
@@ -540,6 +533,11 @@ impl Output {
     /// trimming it. A line break inside it is removed.
     pub(crate) fn line(line: &str) -> Self {
         Self(escape(line, Policy::Output).into_owned())
+    }
+
+    /// Returns the cleaned text.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

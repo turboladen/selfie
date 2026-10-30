@@ -1,4 +1,4 @@
-use crate::terminal_text::DisplayPath;
+use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::{
     namespace,
@@ -36,17 +36,21 @@ pub(crate) async fn handle_edit(
         // Not about a file at this name, so "a file is already there" would be
         // false. The error names the directory and what is at it.
         Err(e @ selfie::package::port::PackageRepoError::PackageListError(_)) => {
-            display.print_error(crate::terminal_text::Prose::message(format!(
-                "Cannot edit '{package_name}': {e}"
-            )));
+            display.print_error(shown!(
+                "Cannot edit '{}': {}",
+                Name::new(package_name),
+                crate::received::sentence(e)
+            ));
             return Exit::Failed;
         }
         Err(e) => {
-            display.print_error(crate::terminal_text::Prose::message(format!(
-                "Cannot edit '{package_name}': selfie could not use what already answers to \
+            display.print_error(shown!(
+                "Cannot edit '{}': selfie could not use what already answers to \
                  that name, and opens no new package beside it. Edit the existing file directly. \
-                 {e}"
-            )));
+                 {}",
+                Name::new(package_name),
+                crate::received::sentence(e)
+            ));
             return Exit::Failed;
         }
     };
@@ -64,9 +68,10 @@ pub(crate) async fn handle_edit(
     // first: a serde round trip flattens YAML anchors, drops every comment and
     // reorders keys, and would refuse the very file a typo guard just rejected.
     let (path, created, created_exit) = if let Some(pkg) = existing_package {
-        display.print_run_note(crate::terminal_text::Prose::message(format!(
-            "Opening existing package '{package_name}' for editing"
-        )));
+        display.print_run_note(shown!(
+            "Opening existing package '{}' for editing",
+            Name::new(package_name)
+        ));
         (pkg.file_path().to_path_buf(), false, Exit::Clean)
     } else {
         match create_for_edit(service, &repo, package_name, config, display).await {
@@ -89,10 +94,11 @@ fn editor_success_message(
     package_name: &str,
     path: &std::path::Path,
     created: bool,
-) -> Option<String> {
+) -> Option<Shown> {
     (!created).then(|| {
-        format!(
-            "Package '{package_name}' updated successfully at {}",
+        shown!(
+            "Package '{}' updated successfully at {}",
+            Name::new(package_name),
             DisplayPath::of(path)
         )
     })
@@ -123,14 +129,11 @@ async fn create_for_edit(
     // Every check comes ahead of the prompt: asking someone to confirm a create
     // that is about to be refused wastes the answer.
     if let Some(refusal) = selfie::package::spec_name_refusal(package_name) {
-        display.print_error(crate::terminal_text::Prose::message(refusal));
+        display.print_error(crate::received::sentence(refusal));
         return Err(Exit::Failed);
     }
     if repo.path_is_occupied(package.path()) {
-        display.print_error(crate::terminal_text::Prose::message(occupied_path_refusal(
-            package_name,
-            package.path(),
-        )));
+        display.print_error(occupied_path_refusal(package_name, package.path()));
         return Err(Exit::Failed);
     }
 
@@ -139,39 +142,40 @@ async fn create_for_edit(
     if let Err(error) = namespace::validate_unique_name(package_name, repo, Some(&dotfiles_repo)) {
         // The user asked to edit that spec, so a different name is not the way
         // out: say which kind it is and where to edit it.
-        display.print_error(crate::terminal_text::Prose::message(match &error {
+        display.print_error(match &error {
             namespace::NamespaceValidationError::Conflict(
                 conflict @ namespace::NamespaceConflict {
                     found_in: namespace::NameLocation::Dotfiles,
                     ..
                 },
-            ) if conflict.paths().len() == 1 => format!(
-                "'{package_name}' is a standalone dotfile spec, and `spec edit` opens package \
-                 specs only. Edit {} directly.",
-                conflict.claimants()
+            ) if conflict.paths().len() == 1 => shown!(
+                "'{}' is a standalone dotfile spec, and `spec edit` opens package specs only. \
+                 Edit {} directly.",
+                Name::new(package_name),
+                crate::received::sentence(conflict.claimants())
             ),
             namespace::NamespaceValidationError::Conflict(
                 conflict @ namespace::NamespaceConflict {
                     found_in: namespace::NameLocation::Dotfiles,
                     ..
                 },
-            ) => format!(
-                "Several standalone dotfile specs claim '{package_name}', {}, and `spec edit` \
-                 opens package specs only. Remove all but one, then edit the one left directly.",
-                conflict.claimants()
+            ) => shown!(
+                "Several standalone dotfile specs claim '{}', {}, and `spec edit` opens package \
+                 specs only. Remove all but one, then edit the one left directly.",
+                Name::new(package_name),
+                crate::received::sentence(conflict.claimants())
             ),
             _ => name_check_refusal(package_name, &error),
-        }));
+        });
         return Err(Exit::Failed);
     }
 
-    display.print_run_note(crate::terminal_text::Prose::message(format!(
-        "Package '{package_name}' does not exist."
-    )));
+    display.print_run_note(shown!(
+        "Package '{}' does not exist.",
+        Name::new(package_name)
+    ));
     confirm_new_package(package_name, display)?;
-    display.print_run_note(crate::terminal_text::Prose::message(format!(
-        "Creating new package '{package_name}'"
-    )));
+    display.print_run_note(shown!("Creating new package '{}'", Name::new(package_name)));
 
     write_spec(service, package, display)
         .await
@@ -180,10 +184,11 @@ async fn create_for_edit(
 
 /// Why `spec edit` will not create `package_name` at `path`: something is already
 /// there that the name lookup did not find.
-fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> String {
-    format!(
-        "Cannot create '{package_name}': {} is already taken by something selfie did not find \
-         under that name; selfie will not write over it.",
+fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> Shown {
+    shown!(
+        "Cannot create '{}': {} is already taken by something selfie did not find under that \
+         name; selfie will not write over it.",
+        Name::new(package_name),
         DisplayPath::of(path)
     )
 }
@@ -207,16 +212,16 @@ fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(
         Ok(true) => Ok(()),
         // A create that wrote nothing did not do what it was asked.
         Ok(false) => {
-            display.print_run_note(crate::terminal_text::lit!("Package creation canceled."));
+            display.print_run_note(lit!("Package creation canceled."));
             Err(Exit::Failed)
         }
         Err(failure) => Err(display.refuse_prompt(
             &failure,
-            crate::terminal_text::lit!("Confirming a new package"),
-            crate::terminal_text::Prose::message(format!(
+            lit!("Confirming a new package"),
+            shown!(
                 "Create it with `selfie spec create {}`, then edit it.",
                 name_argument(package_name)
-            )),
+            ),
         )),
     }
 }
@@ -257,7 +262,9 @@ mod tests {
 
         assert_eq!(editor_success_message("tool", path, true), None);
         assert_eq!(
-            editor_success_message("tool", path, false).as_deref(),
+            editor_success_message("tool", path, false)
+                .as_ref()
+                .map(Shown::as_str),
             Some("Package 'tool' updated successfully at /p/tool.yml")
         );
     }

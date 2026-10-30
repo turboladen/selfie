@@ -4545,6 +4545,17 @@ pub enum AuditResult {
     CouldNotRun(CheckFailure),
 }
 
+impl AuditResult {
+    /// Whether `source` is one of `expected`, ignoring ASCII case: an audit
+    /// finding any other source has a conflict.
+    #[must_use]
+    pub fn is_expected_source(source: &str, expected: &[String]) -> bool {
+        expected
+            .iter()
+            .any(|expected| source.eq_ignore_ascii_case(expected))
+    }
+}
+
 /// Structured data for validation results
 #[derive(Debug, Clone)]
 pub struct ValidationResultData {

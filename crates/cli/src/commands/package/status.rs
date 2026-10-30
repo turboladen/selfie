@@ -1,3 +1,4 @@
+use crate::terminal_text::shown;
 use selfie::package::{
     event::{OperationResult, Outcome, PackageEvent},
     service::PackageService,
@@ -27,7 +28,7 @@ pub(crate) async fn handle_status(
                 environment_status, ..
             } => {
                 let table = create_environment_table(environment_status, config);
-                display.println(crate::terminal_text::shown!("\n{}", table));
+                display.println(shown!("\n{}", table));
                 true
             }
             // The table is the answer for a clean status. A status with gaps also

@@ -36,7 +36,10 @@ pub(crate) fn relative_text(source: &DotfileSource) -> Shown {
         // No base is known, so the line says so: under a heading printed for an
         // earlier line, a bare spelling would read as relative to it.
         DotfileSource::Recorded(spelling) => {
-            DisplayPath::new(&format!("{spelling} (as recorded, directory unknown)")).into()
+            shown!(
+                "{} (as recorded, directory unknown)",
+                DisplayPath::new(spelling)
+            )
         }
     }
 }
@@ -72,8 +75,8 @@ pub(crate) fn force_heading(
 fn print_heading(display: &DisplayManager, channel: Channel, kind: BaseKind, directory: &Path) {
     let line = base_directory_line(kind, directory);
     match channel {
-        Channel::Stdout => display.print_info(crate::terminal_text::Prose::message(line)),
-        Channel::Stderr => display.print_run_note(crate::terminal_text::Prose::message(line)),
+        Channel::Stdout => display.print_info(line),
+        Channel::Stderr => display.print_run_note(line),
     }
 }
 

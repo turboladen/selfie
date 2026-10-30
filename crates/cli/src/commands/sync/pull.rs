@@ -49,10 +49,8 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
                 }),
             ..
         } => {
-            let label = selfie::pluralize(*commits_pulled, "commit", "commits");
-            display.print_success(crate::terminal_text::Prose::message(format!(
-                "Pulled {commits_pulled} {label} from remote"
-            )));
+            let label = crate::formatters::plural(*commits_pulled, lit!("commit"), lit!("commits"));
+            display.print_success(shown!("Pulled {} {} from remote", commits_pulled, label));
 
             if !packages_updated.is_empty() {
                 let names = format_package_list(packages_updated, use_colors);
@@ -73,7 +71,7 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
             result: OperationResult::Success(OperationSuccess::SyncPullUpToDate { .. }),
             ..
         } => {
-            display.print_success(crate::terminal_text::lit!("Already up to date"));
+            display.print_success(lit!("Already up to date"));
             true
         }
 
@@ -82,11 +80,10 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
 }
 
 fn format_package_list(names: &[String], use_colors: bool) -> Shown {
-    Shown::join(
+    crate::formatters::comma_joined(
         names
             .iter()
             .map(|name| Shown::from(Name::new(name)).paint(use_colors, |s| s.bold())),
-        lit!(", "),
     )
 }
 

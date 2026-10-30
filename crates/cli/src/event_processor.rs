@@ -5,7 +5,8 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
-use crate::terminal_text::{DisplayPath, Name, Output, Prose, Shown, lit};
+use crate::received;
+use crate::terminal_text::{DisplayPath, Name, Output, Prose, Shown, interim_one_line, lit, shown};
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -16,7 +17,7 @@ use selfie::package::{
 };
 
 use crate::display_manager::Channel;
-use crate::display_manager::{Diff, DisplayManager, ErrorDetail, content_lines};
+use crate::display_manager::{Diff, DisplayManager, ErrorDetail};
 use crate::entry_rows::{EntryOutcome, EntryRow, under_row};
 use crate::source_paths;
 
@@ -181,9 +182,8 @@ impl EventProcessor {
         // A stream that ends without saying how the operation went, as one does when
         // the task running it panics, is a failure: nothing reported the work done.
         let exit = ending.unwrap_or_else(|| {
-            self.display.print_error(crate::terminal_text::lit!(
-                "The operation ended without reporting a result"
-            ));
+            self.display
+                .print_error(lit!("The operation ended without reporting a result"));
             Exit::Failed
         });
 
@@ -212,10 +212,7 @@ impl EventProcessor {
             // at every verbosity. No command changes this for itself.
             PackageEvent::Started { operation_info } => {
                 if self.display.is_verbose() {
-                    self.display
-                        .print_run_note(crate::terminal_text::Prose::message(started_line(
-                            &operation_info,
-                        )));
+                    self.display.print_run_note(started_line(&operation_info));
                 }
             }
 
@@ -223,9 +220,7 @@ impl EventProcessor {
                 StepKind::Waiting(step) => {
                     self.display.start_waiting(step, Name::new(&message));
                 }
-                StepKind::Local => self
-                    .display
-                    .print_status(crate::terminal_text::Prose::message(message)),
+                StepKind::Local => self.display.print_status(received::sentence(message)),
             },
 
             PackageEvent::StepEnded { step, ending, .. } => {
@@ -257,42 +252,36 @@ impl EventProcessor {
             // `package list` unreadable, and each is text from a file the reader
             // never asked about.
             PackageEvent::SpecSkipped { error, .. } => {
-                self.display
-                    .print_warning(crate::terminal_text::Prose::message(
-                        selfie::package::service::skipped_spec_warning(&error),
-                    ));
+                self.display.print_warning(received::skipped_spec(&error));
             }
 
             PackageEvent::CollisionsUnchecked { sources, .. } => {
-                self.display
-                    .print_warning(crate::terminal_text::Prose::message(
-                        selfie::package::service::collisions_unchecked_warning(&sources),
-                    ));
+                self.display.print_warning(received::sentence(
+                    selfie::package::service::collisions_unchecked_warning(&sources),
+                ));
             }
 
             PackageEvent::PackagesRefused {
                 reason, packages, ..
             } => {
                 for line in refused_packages_lines(&reason, &packages, self.display.is_verbose()) {
-                    self.display
-                        .print_warning(crate::terminal_text::Prose::message(line));
+                    self.display.print_warning(line);
                 }
             }
 
             PackageEvent::Warning { message, .. } => {
-                self.display
-                    .print_warning(crate::terminal_text::Prose::message(message));
+                self.display.print_warning(received::sentence(message));
                 // Warnings don't set failure exit code by default
             }
 
             // The run's result counts each, so the exit code comes from there.
             PackageEvent::DotfileRefused { refusal, .. } => {
                 self.display
-                    .print_warning(crate::terminal_text::Prose::message(refusal.message));
+                    .print_warning(received::sentence(refusal.message));
             }
             PackageEvent::DotfileFailed { failure, .. } => {
                 self.display
-                    .print_error(crate::terminal_text::Prose::message(failure.message));
+                    .print_error(received::sentence(failure.message));
             }
 
             PackageEvent::Completed {
@@ -308,46 +297,35 @@ impl EventProcessor {
                 // not an answer, and stays on stderr below.
                 OperationResult::Success(success) => {
                     let outcome = success.outcome();
+                    let line = received::sentence(&success);
                     if outcome == Outcome::Failed {
-                        self.display.collect_error(ErrorDetail {
-                            package_name: operation_info.package_name,
-                            operation: operation_info.operation_type.to_string(),
-                            command: None,
-                            exit_code: None,
-                            stderr: None,
-                            message: success.to_string(),
-                        });
+                        self.display
+                            .collect_error(ErrorDetail::of(&operation_info, line.clone()));
                     }
-                    self.display.print_result(
-                        outcome,
-                        crate::terminal_text::Prose::message(success.to_string()),
-                    );
+                    self.display.print_result(outcome, line);
                 }
                 OperationResult::Failure(err) => {
                     use selfie::package::event::{CommandFailure, OperationFailure};
 
                     // Collect structured error detail for end-of-operation summary
+                    let detail = ErrorDetail::of(&operation_info, received::sentence(&err));
                     let error_detail = match &err {
                         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
                             command,
                             exit_code,
                             stderr,
                         }) => ErrorDetail {
-                            package_name: operation_info.package_name,
-                            operation: operation_info.operation_type.to_string(),
-                            command: Some(command.clone()),
+                            command: Some(interim_one_line(command)),
                             exit_code: *exit_code,
-                            stderr: Some(stderr.as_str().to_string()),
-                            message: err.to_string(),
+                            // The summary prints the output trimmed whole and
+                            // cleaned one line at a time.
+                            stderr: Some(
+                                stderr.as_str().trim().lines().map(Output::line).collect(),
+                            )
+                            .filter(|lines: &Vec<Output>| !lines.is_empty()),
+                            ..detail
                         },
-                        _ => ErrorDetail {
-                            package_name: operation_info.package_name,
-                            operation: operation_info.operation_type.to_string(),
-                            command: None,
-                            exit_code: None,
-                            stderr: None,
-                            message: err.to_string(),
-                        },
+                        _ => detail,
                     };
                     self.display.collect_error(error_detail);
 
@@ -355,10 +333,7 @@ impl EventProcessor {
                         // The library's sentence, so its hint about a `name:` field
                         // reaches the terminal.
                         OperationFailure::Package(error @ PackageError::PackageNotFound { .. }) => {
-                            self.display
-                                .print_error(crate::terminal_text::Prose::message(
-                                    error.to_string(),
-                                ));
+                            self.display.print_error(received::sentence(error));
                         }
                         OperationFailure::PackageList(listing) => {
                             // The reason, not "not found". A plain file or a dangling
@@ -367,12 +342,11 @@ impl EventProcessor {
                             // "File exists" or "No such file or directory". The
                             // repository classified the path once and the error carries
                             // the answer, so this renders it rather than looking again.
-                            self.display
-                                .print_error(crate::terminal_text::Prose::message(format!(
-                                    "Package directory at {} {}",
-                                    DisplayPath::of(listing.path()),
-                                    listing.clause()
-                                )));
+                            self.display.print_error(shown!(
+                                "Package directory at {} {}",
+                                DisplayPath::of(listing.path()),
+                                received::sentence(listing.clause())
+                            ));
                             // `selfie config` requires a subcommand and has only
                             // one, `validate`, so it is not a way to set the
                             // directory — naming it here sends a reader whose
@@ -403,17 +377,13 @@ impl EventProcessor {
                                 suggestion.push_str(&command[1..]);
                             }
                             self.display
-                                .print_suggestion(crate::terminal_text::Prose::message(suggestion));
+                                .print_suggestion(received::sentence(suggestion));
                         }
                         OperationFailure::Privilege(refusal) => {
                             self.display
-                                .print_error(crate::terminal_text::Prose::message(
-                                    refusal.message(),
-                                ));
+                                .print_error(received::sentence(refusal.message()));
                             self.display
-                                .print_suggestion(crate::terminal_text::Prose::message(
-                                    refusal.suggestion(),
-                                ));
+                                .print_suggestion(received::sentence(refusal.suggestion()));
                         }
                         // A parse failure reaches only this arm. The three
                         // commands that render a failure themselves --
@@ -433,28 +403,25 @@ impl EventProcessor {
                             // twice.
                             match cause.kind() {
                                 PackageParseKind::Yaml { cause: failure } => {
-                                    self.display
-                                        .print_error(crate::terminal_text::Prose::message(
-                                            format!(
-                                                "Parse error in package `{name}`: {}",
-                                                failure.reason()
-                                            ),
-                                        ));
+                                    self.display.print_error(shown!(
+                                        "Parse error in package `{}`: {}",
+                                        Name::new(&name),
+                                        received::sentence(failure.reason())
+                                    ));
 
                                     if let Some(at) = failure.location() {
-                                        self.display.print_error_context(content_lines(&format!(
+                                        self.display.print_error_context(shown!(
                                             "{}:{}:{}",
                                             DisplayPath::of(&failed_file),
                                             at.line(),
                                             at.column()
-                                        )));
+                                        ));
                                         if let Some(window) = crate::snippet::window(
                                             &failed_file,
                                             at.line(),
                                             at.column(),
                                         ) {
-                                            self.display
-                                                .print_error_context(content_lines(&window));
+                                            self.display.print_error_context(window);
                                         }
                                     }
                                 }
@@ -462,10 +429,11 @@ impl EventProcessor {
                                 // another variant before it gets here, so this
                                 // is growth insurance rather than a live case.
                                 other => {
-                                    self.display
-                                        .print_error(crate::terminal_text::Prose::message(
-                                            format!("Parse error in package `{name}`: {other}"),
-                                        ));
+                                    self.display.print_error(shown!(
+                                        "Parse error in package `{}`: {}",
+                                        Name::new(&name),
+                                        received::sentence(other)
+                                    ));
                                 }
                             }
                         }
@@ -477,21 +445,18 @@ impl EventProcessor {
                             ref stderr,
                             ..
                         }) => {
-                            self.display
-                                .print_error(crate::terminal_text::Prose::message(err.to_string()));
+                            self.display.print_error(received::sentence(&err));
                             self.display.print_command_stderr(stderr);
                         }
                         OperationFailure::InvalidSpec { ref issues, .. } => {
-                            self.display
-                                .print_error(crate::terminal_text::Prose::message(err.to_string()));
+                            self.display.print_error(received::sentence(&err));
                             crate::commands::validation_display::print_issues(
                                 &self.display,
                                 issues,
                             );
                         }
                         _ => {
-                            self.display
-                                .print_error(crate::terminal_text::Prose::message(err.to_string()));
+                            self.display.print_error(received::sentence(&err));
                         }
                     }
                 }
@@ -499,25 +464,22 @@ impl EventProcessor {
 
             PackageEvent::Canceled { reason, .. } => {
                 self.display
-                    .print_warning(crate::terminal_text::Prose::message(format!(
-                        "Operation canceled: {reason}"
-                    )));
+                    .print_warning(shown!("Operation canceled: {}", received::sentence(reason)));
             }
 
             // The recommended package's install command is its own waiting step,
             // which names it; this announcement is detail.
             PackageEvent::RecommendStarted { recommend_name, .. } => {
-                self.display
-                    .print_status(crate::terminal_text::Prose::message(format!(
-                        "Installing recommended: {recommend_name}"
-                    )));
+                self.display.print_status(shown!(
+                    "Installing recommended: {}",
+                    Name::new(&recommend_name)
+                ));
             }
 
             // `print_success` and `print_warning` add the line's mark, so the
             // message carries none of its own.
             PackageEvent::RecommendSucceeded { recommend_name, .. } => {
-                self.display
-                    .print_success(crate::terminal_text::Prose::message(recommend_name));
+                self.display.print_success(Name::new(&recommend_name));
             }
 
             PackageEvent::RecommendFailed {
@@ -525,10 +487,11 @@ impl EventProcessor {
                 error,
                 ..
             } => {
-                self.display
-                    .print_warning(crate::terminal_text::Prose::message(format!(
-                        "{recommend_name} failed: {error}"
-                    )));
+                self.display.print_warning(shown!(
+                    "{} failed: {}",
+                    Name::new(&recommend_name),
+                    received::sentence(error)
+                ));
             }
 
             // Shown at every verbosity, not through `print_status`: a run that
@@ -540,18 +503,14 @@ impl EventProcessor {
                 ..
             } => {
                 self.display
-                    .print_progress(crate::terminal_text::Prose::message(settled_earlier_line(
-                        &package_name,
-                        settled,
-                    )));
+                    .print_progress(settled_earlier_line(&package_name, settled));
             }
 
             PackageEvent::RecommendsUntried { names, .. } => {
-                self.display
-                    .print_warning(crate::terminal_text::Prose::message(format!(
-                        "Canceled before installing recommended packages: {}",
-                        names.join(", ")
-                    )));
+                self.display.print_warning(shown!(
+                    "Canceled before installing recommended packages: {}",
+                    crate::formatters::comma_joined(names.iter().map(|name| Name::new(name)))
+                ));
             }
 
             // Each entry's row prints as its event arrives, in columns fixed by
@@ -570,7 +529,7 @@ impl EventProcessor {
                 // Only when something was kept. Saying so on every deploy would
                 // train the reader to skip the line that matters.
                 if let Some(backup) = backup {
-                    self.display.println(crate::terminal_text::shown!(
+                    self.display.println(shown!(
                         "{}previous content copied to {}",
                         under_row(),
                         crate::display_manager::shorten_path(&backup)
@@ -588,7 +547,7 @@ impl EventProcessor {
                     EntryOutcome::from(&reason),
                     &source,
                     &target,
-                    Some(Shown::from(Prose::new(&reason.to_string()))),
+                    Some(received::skip_reason(&reason)),
                 );
             }
 
@@ -639,18 +598,19 @@ impl EventProcessor {
                 let source = source_paths::label(&self.display, channel, &source);
                 let short_target = crate::display_manager::shorten_path(&target);
                 let by = package
-                    .map(|package| format!(" by package '{package}'"))
+                    .map(|package| shown!(" by package '{}'", Name::new(&package)))
                     .unwrap_or_default();
-                let line = format!(
-                    "  Orphaned {short_target}: deployed from {source}{by}, and no entry deploys \
-                     to it now. selfie leaves it in place; check whether you still need it"
+                let line = shown!(
+                    "  Orphaned {}: deployed from {}{}, and no entry deploys to it now. selfie \
+                     leaves it in place; check whether you still need it",
+                    short_target,
+                    source,
+                    by
                 );
                 if answer {
-                    self.display
-                        .print_result(Outcome::Found, crate::terminal_text::Prose::message(line));
+                    self.display.print_result(Outcome::Found, line);
                 } else {
-                    self.display
-                        .print_warning(crate::terminal_text::Prose::message(line));
+                    self.display.print_warning(line);
                 }
             }
 
@@ -659,7 +619,7 @@ impl EventProcessor {
             PackageEvent::PostInstallNote { note, .. } => {
                 self.display.println(lit!(""));
                 self.display
-                    .print_info(crate::terminal_text::Prose::message(format!("📋 {note}")));
+                    .print_info(shown!("📋 {}", received::sentence(note)));
             }
 
             PackageEvent::DotfileCleanupInfo {
@@ -668,18 +628,17 @@ impl EventProcessor {
                 ..
             } => {
                 self.display.println(lit!(""));
-                self.display
-                    .print_info(crate::terminal_text::Prose::message(format!(
-                        "Package '{package_name}' has deployed dotfiles:"
-                    )));
+                self.display.print_info(shown!(
+                    "Package '{}' has deployed dotfiles:",
+                    Name::new(&package_name)
+                ));
                 for target in &dotfile_targets {
-                    self.display
-                        .print_info(crate::terminal_text::Prose::message(format!(
-                            "  - {}",
-                            crate::display_manager::shorten_path(target)
-                        )));
+                    self.display.print_info(shown!(
+                        "  - {}",
+                        crate::display_manager::shorten_path(target)
+                    ));
                 }
-                self.display.print_info(crate::terminal_text::lit!(
+                self.display.print_info(lit!(
                     "  These files were NOT removed. Delete them manually if no longer needed."
                 ));
             }
@@ -730,32 +689,34 @@ impl EventProcessor {
 
 /// The line saying that `package_name` settled earlier in the install run, and
 /// how.
-fn settled_earlier_line(package_name: &str, settled: Settled) -> String {
+fn settled_earlier_line(package_name: &str, settled: Settled) -> Shown {
+    let name = Name::new(package_name);
     match settled {
-        Settled::Installed => format!("{package_name}: installed earlier in this run"),
+        Settled::Installed => shown!("{}: installed earlier in this run", name),
         Settled::AlreadyInstalled => {
-            format!("{package_name}: already installed, as found earlier in this run")
+            shown!("{}: already installed, as found earlier in this run", name)
         }
-        Settled::Unconfirmed => format!(
-            "{package_name}: installed earlier in this run, unconfirmed: its check gave no answer"
+        Settled::Unconfirmed => shown!(
+            "{}: installed earlier in this run, unconfirmed: its check gave no answer",
+            name
         ),
     }
 }
 
 /// The header line for an operation: what it is, on which package, in which
 /// environment.
-pub(crate) fn started_line(operation_info: &OperationInfo) -> String {
-    let operation = operation_info.operation_type.to_string().to_title_case();
+pub(crate) fn started_line(operation_info: &OperationInfo) -> Shown {
+    let operation = Prose::new(&operation_info.operation_type.to_string().to_title_case());
+    let names = received::Operation::from(operation_info);
     // An operation over every package has no package name to give.
     if operation_info.package_name.is_empty() {
-        format!(
-            "{operation} in environment '{}'",
-            operation_info.environment
-        )
+        shown!("{} in environment '{}'", operation, names.environment)
     } else {
-        format!(
-            "{operation} package '{}' in environment '{}'",
-            operation_info.package_name, operation_info.environment
+        shown!(
+            "{} package '{}' in environment '{}'",
+            operation,
+            names.package,
+            names.environment
         )
     }
 }
@@ -785,22 +746,25 @@ pub(crate) fn refused_packages_lines(
     reason: &str,
     packages: &[RefusedPackage],
     verbose: bool,
-) -> Vec<String> {
+) -> Vec<Shown> {
+    let reason = received::sentence(reason);
+    let one = |package: &RefusedPackage| {
+        shown!(
+            "Skipping package '{}': {}",
+            Name::new(&package.name),
+            reason
+        )
+    };
     match packages {
         [] => Vec::new(),
-        [package] => vec![format!("Skipping package '{}': {reason}", package.name)],
-        _ if verbose => packages
-            .iter()
-            .map(|package| format!("Skipping package '{}': {reason}", package.name))
-            .collect(),
-        _ => {
-            let names: Vec<&str> = packages.iter().map(|p| p.name.as_str()).collect();
-            vec![format!(
-                "Skipping {} packages ({}): {reason}",
-                packages.len(),
-                names.join(", ")
-            )]
-        }
+        [package] => vec![one(package)],
+        _ if verbose => packages.iter().map(one).collect(),
+        _ => vec![shown!(
+            "Skipping {} packages ({}): {}",
+            packages.len(),
+            crate::formatters::comma_joined(packages.iter().map(|p| Name::new(&p.name))),
+            reason
+        )],
     }
 }
 
@@ -1234,6 +1198,103 @@ mod tests {
         }
     }
 
+    // A name the CLI puts in its own sentence is escaped as a name, so an
+    // invisible character or a line break in a recommend or a settled package
+    // shows as an escape and the line stays one line.
+    #[tokio::test]
+    async fn names_in_recommend_and_settled_lines_are_escaped_as_names() {
+        use selfie::package::event::Settled;
+
+        let events = vec![
+            PackageEvent::RecommendSucceeded {
+                operation_info: make_operation_info("root"),
+                recommend_name: "r\u{200B}a\nb".to_string(),
+            },
+            PackageEvent::RecommendFailed {
+                operation_info: make_operation_info("root"),
+                recommend_name: "r\u{200B}a\nb".to_string(),
+                error: "no such formula".to_string(),
+            },
+            PackageEvent::SettledEarlier {
+                operation_info: make_operation_info("root"),
+                package_name: "d\u{200B}e\nf".to_string(),
+                recommend_name: "rec".to_string(),
+                settled: Settled::Installed,
+            },
+        ];
+        let printed = printed_for(DisplayManager::new(false), events).await;
+
+        let lines: Vec<&str> = printed.iter().map(|(_, line)| line.trim()).collect();
+        assert_eq!(
+            lines,
+            [
+                r"r\u{200b}a\nb",
+                r"r\u{200b}a\nb failed: no such formula",
+                r"d\u{200b}e\nf: installed earlier in this run",
+            ],
+            "{printed:?}"
+        );
+    }
+
+    // A parse failure's location line names the file as a path, so an
+    // invisible character in it shows as its escape.
+    #[tokio::test]
+    async fn a_parse_failures_location_names_the_file_escaped() {
+        use selfie::package::event::OperationFailure;
+        use selfie::package::port::{PackageError, PackageParseError, PackageParseKind};
+
+        let source = selfie::yaml::parse::<selfie::package::Package>("name: [\n")
+            .expect_err("the fixture must not parse");
+        let failed = PackageEvent::Completed {
+            operation_info: make_operation_info("broken"),
+            result: OperationResult::Failure(OperationFailure::Package(PackageError::ParseError {
+                name: "broken".to_string(),
+                packages_path: "/p".into(),
+                failed_file: "/p/a\u{200B}b.yml".into(),
+                cause: PackageParseError::new(
+                    "/p/a\u{200B}b.yml",
+                    PackageParseKind::Yaml { cause: source },
+                ),
+            })),
+        };
+
+        let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
+
+        let location = printed
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .find(|line| line.starts_with("/p/a"))
+            .unwrap_or_else(|| panic!("no location line in {printed:?}"));
+        assert!(location.starts_with(r"/p/a\u{200b}b.yml:"), "{location}");
+    }
+
+    // The error summary names each package as a name, so one holding an
+    // invisible character shows it as an escape.
+    #[tokio::test]
+    async fn an_error_summary_names_each_package_escaped() {
+        use selfie::package::event::{OperationFailure, OperationResult};
+
+        let events: Vec<PackageEvent> = ["a\u{200B}b", "c\nd"]
+            .into_iter()
+            .map(|name| PackageEvent::Completed {
+                operation_info: make_operation_info(name),
+                result: OperationResult::Failure(OperationFailure::Generic("failed".to_string())),
+            })
+            .collect();
+        let display = DisplayManager::new(false);
+        let display_clone = display.clone();
+        EventProcessor::new(display)
+            .process_events(Box::pin(stream::iter(events)), |_event| false)
+            .await;
+
+        let names: Vec<String> = display_clone
+            .collected_errors()
+            .iter()
+            .map(|error| error.package_name.to_string())
+            .collect();
+        assert_eq!(names, [r"a\u{200b}b", r"c\nd"]);
+    }
+
     #[test]
     fn the_header_names_the_package_only_when_there_is_one() {
         assert_eq!(
@@ -1646,7 +1707,11 @@ mod tests {
         // The collected detail carries both halves, so `--verbose` summaries and
         // the MCP server's JSON still say what to do about it.
         let collected = display_for_assert.collected_errors();
-        let message = &collected.first().expect("an error was collected").message;
+        let message = collected
+            .first()
+            .expect("an error was collected")
+            .message
+            .to_string();
         assert!(message.contains("under sudo"), "got: {message}");
         assert!(message.contains("--allow-sudo"), "got: {message}");
     }
@@ -1786,10 +1851,21 @@ mod tests {
 
         let errors = display_clone.collected_errors();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].package_name, "fail-pkg");
-        assert_eq!(errors[0].command.as_deref(), Some("brew install fail-pkg"));
+        assert_eq!(errors[0].package_name.to_string(), "fail-pkg");
+        assert_eq!(
+            errors[0].command.as_ref().map(Shown::as_str),
+            Some("brew install fail-pkg")
+        );
         assert_eq!(errors[0].exit_code, Some(1));
-        assert_eq!(errors[0].stderr.as_deref(), Some("not found"));
+        assert_eq!(
+            errors[0]
+                .stderr
+                .iter()
+                .flatten()
+                .map(Output::as_str)
+                .collect::<Vec<_>>(),
+            ["not found"]
+        );
     }
 
     // A completed apply that refused an entry exits non-zero.
@@ -1879,8 +1955,8 @@ mod tests {
 
         let errors = display_clone.collected_errors();
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].package_name, "generic-fail");
-        assert_eq!(errors[0].message, "something went wrong");
+        assert_eq!(errors[0].package_name.to_string(), "generic-fail");
+        assert_eq!(errors[0].message.to_string(), "something went wrong");
         assert!(errors[0].command.is_none());
         assert!(errors[0].exit_code.is_none());
     }

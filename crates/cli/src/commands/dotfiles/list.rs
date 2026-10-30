@@ -4,6 +4,7 @@
 //! all dotfile mappings defined across packages and the standalone dotfiles
 //! directory. This is a fast, file-only operation — no commands are executed.
 
+use crate::terminal_text::shown;
 use selfie::dotfile_service::port::DotfileService;
 use selfie::package::{
     ContentSource, Package, SpecOrigin,
@@ -69,19 +70,17 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
     // be the only reason the table is short, and saying "no dotfiles found" over
     // one is the answer this reporting exists to stop.
     for refused in &data.refused {
-        display.print_warning(crate::terminal_text::Prose::message(format!(
+        display.print_warning(shown!(
             "Cannot read the dotfiles in '{}' ({}): {}",
-            refused.package_name,
+            Name::new(&refused.package_name),
             DisplayPath::of(&refused.path),
-            refused.reason
-        )));
+            crate::received::sentence(&refused.reason)
+        ));
     }
 
     if data.packages.is_empty() {
         if data.refused.is_empty() {
-            display.print_info(crate::terminal_text::lit!(
-                "No dotfiles found in any packages."
-            ));
+            display.print_info(lit!("No dotfiles found in any packages."));
         }
         return;
     }
@@ -109,13 +108,14 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
         }
     }
 
-    display.println(crate::terminal_text::shown!("{}", table));
-    display.print_info(crate::terminal_text::Prose::message(format!(
-        "{total} {} across {} {}",
-        selfie::pluralize(total, "dotfile", "dotfiles"),
+    display.println(shown!("{}", table));
+    display.print_info(shown!(
+        "{} {} across {} {}",
+        total,
+        crate::formatters::plural(total, lit!("dotfile"), lit!("dotfiles")),
         data.packages.len(),
-        selfie::pluralize(data.packages.len(), "package", "packages"),
-    )));
+        crate::formatters::plural(data.packages.len(), lit!("package"), lit!("packages"))
+    ));
 }
 
 /// Where `entry`'s content comes from, as a table cell: var names and command
@@ -140,15 +140,15 @@ fn print_base_directories(config: &CliConfig, display: &DisplayManager, packages
     let has = |origin| packages.iter().any(|p| p.origin() == origin);
 
     if has(SpecOrigin::PackageDirectory) {
-        display.print_info(crate::terminal_text::Prose::message(base_directory_line(
+        display.print_info(base_directory_line(
             BaseKind::PackageDirectory,
             config.package_directory(),
-        )));
+        ));
     }
     if has(SpecOrigin::DotfilesDirectory) {
-        display.print_info(crate::terminal_text::Prose::message(base_directory_line(
+        display.print_info(base_directory_line(
             BaseKind::DotfilesDirectory,
             &config.selfie_config().dotfiles_directory(),
-        )));
+        ));
     }
 }

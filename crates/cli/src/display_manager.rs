@@ -5,7 +5,6 @@
 //! that handles both event-driven and static output consistently.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -19,7 +18,7 @@ use crate::event_processor::Exit;
 use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
-    Content, Literal, Name, Output, Paint, Prose, Shown, guard, interim_one_line, lit, shown,
+    Content, Literal, Name, Output, Paint, Prose, Shown, guard, lit, shown,
 };
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
@@ -145,8 +144,11 @@ pub(crate) enum PromptFailure {
 }
 
 /// What a terminal that failed while the user answered is reported as.
-fn unreadable_answer(error: &std::io::Error) -> String {
-    format!("Could not read the answer: {error}")
+fn unreadable_answer(error: &std::io::Error) -> Shown {
+    shown!(
+        "Could not read the answer: {}",
+        crate::received::sentence(error)
+    )
 }
 
 impl PromptFailure {
@@ -176,16 +178,35 @@ impl From<dialoguer::Error> for PromptFailure {
 /// Structured error detail for the end-of-operation summary
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorDetail {
-    pub package_name: String,
-    pub operation: String,
-    pub command: Option<String>,
+    pub package_name: Name,
+    pub operation: Prose,
+    pub command: Option<Shown>,
     pub exit_code: Option<i32>,
     /// Bounded by the library: the only producer copies it out of
     /// `CommandFailure::ExecutionFailed`, whose field is a `BoundedText` and so
     /// cannot hold unbounded text. There is deliberately no `stdout`
     /// counterpart: see `CommandFailure::ExecutionFailed`.
-    pub stderr: Option<String>,
-    pub message: String,
+    pub stderr: Option<Vec<Output>>,
+    pub message: Shown,
+}
+
+impl ErrorDetail {
+    /// The detail of `operation`'s failure, worded by `message`, with no
+    /// command.
+    pub(crate) fn of(
+        operation: &selfie::package::event::OperationInfo,
+        message: impl Into<Shown>,
+    ) -> Self {
+        let operation = crate::received::Operation::from(operation);
+        Self {
+            package_name: operation.package,
+            operation: operation.kind,
+            command: None,
+            exit_code: None,
+            stderr: None,
+            message: message.into(),
+        }
+    }
 }
 
 /// Collects errors during an operation for summary display at the end
@@ -206,50 +227,46 @@ impl ErrorCollector {
         !self.errors.is_empty()
     }
 
-    /// Format and return the error summary as a string.
+    /// Format and return the error summary.
     ///
     /// Returns `None` if fewer than 2 errors were collected, since single
     /// errors are already shown inline by the event processor.
-    pub(crate) fn format_summary(&self) -> Option<String> {
+    pub(crate) fn format_summary(&self) -> Option<Shown> {
         if self.errors.len() <= 1 {
             return None;
         }
 
-        let mut lines = Vec::new();
-        lines.push(String::new());
-        lines.push("── Errors ─────────────────────────────────────".to_string());
+        let mut lines: Vec<Shown> = vec![
+            lit!("").into(),
+            lit!("── Errors ─────────────────────────────────────").into(),
+        ];
 
         for error in &self.errors {
-            lines.push(format!(
-                "✗ {} ({})",
-                Name::new(&error.package_name),
-                error.operation
-            ));
+            lines.push(shown!("✗ {} ({})", error.package_name, error.operation));
             if !error.message.is_empty() {
-                lines.push(led(&Shown::from(lit!("  ")), untrusted(&error.message)).to_string());
+                lines.push(led(&Shown::from(lit!("  ")), error.message.clone()));
             }
-            if let Some(cmd) = &error.command {
-                lines.push(format!("  Command: {}", interim_one_line(cmd)));
+            if let Some(command) = &error.command {
+                lines.push(shown!("  Command: {}", command));
             }
             if let Some(code) = error.exit_code {
-                lines.push(format!("  Exit code: {code}"));
+                lines.push(shown!("  Exit code: {}", code));
             }
-            if let Some(stderr) = &error.stderr {
-                let stderr = stderr.trim();
-                if !stderr.is_empty() {
-                    lines.push("  stderr:".to_string());
-                    // A tool's own stderr, cleaned as command output is: its
-                    // colors stripped, not shown as escapes.
-                    for line in stderr.lines() {
-                        lines.push(format!("    {}", Output::line(line)));
-                    }
+            // A tool's own stderr, cleaned as command output is: its colors
+            // stripped, not shown as escapes.
+            if let Some(stderr) = &error.stderr
+                && !stderr.is_empty()
+            {
+                lines.push(lit!("  stderr:").into());
+                for line in stderr {
+                    lines.push(shown!("    {}", line));
                 }
             }
-            lines.push(String::new());
+            lines.push(lit!("").into());
         }
 
-        lines.push("───────────────────────────────────────────────".to_string());
-        Some(lines.join("\n"))
+        lines.push(lit!("───────────────────────────────────────────────").into());
+        Some(Shown::join(lines, lit!("\n")))
     }
 }
 
@@ -447,10 +464,11 @@ impl DisplayManager {
     pub(crate) fn with_cancellation(mut self, token: CancellationToken) -> Self {
         #[cfg(not(test))]
         if let Err(error) = wakeup::install() {
-            self.print_warning(crate::terminal_text::Prose::message(format!(
+            self.print_warning(shown!(
                 "A signal cannot end a prompt in this run, so it takes a second one to stop \
-                 selfie while it asks: {error}"
-            )));
+                 selfie while it asks: {}",
+                crate::received::sentence(error)
+            ));
         }
         self.cancellation = Some(token);
         self
@@ -681,7 +699,7 @@ impl DisplayManager {
     /// printed: indented and dimmed on a terminal, and prefixed with what the
     /// step waits on without one.
     pub(crate) fn command_output(&self, step: StepId, line: Output) {
-        let line = line.to_string();
+        let line = line.as_str();
         if line.trim().is_empty() {
             return;
         }
@@ -692,19 +710,24 @@ impl DisplayManager {
         // each says whose it is.
         let concurrent = waiting.len() > 1;
         let current = waiting.get_mut(&step);
-        let subject = current
-            .as_ref()
-            .map(|w| w.subject.to_string())
-            .unwrap_or_default();
+        // Only a `--verbose` line names its step.
+        let subject = if self.is_verbose() {
+            current
+                .as_ref()
+                .map(|w| w.subject.to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         if let Some(current) = current {
             if current.tail.len() == TAIL_LINES {
                 current.tail.pop_front();
             }
-            current.tail.push_back(line.clone());
+            current.tail.push_back(line.to_string());
             if !self.is_verbose()
                 && let Some(bar) = &current.bar
             {
-                bar.set_message(fit_to_terminal(&line));
+                bar.set_message(fit_to_terminal(line));
             }
         }
         drop(waiting);
@@ -715,7 +738,7 @@ impl DisplayManager {
             let text = if concurrent {
                 format!("{subject} │ {line}")
             } else {
-                line
+                line.to_string()
             };
             if self.use_colors {
                 format!("    {}", style(&text).dim())
@@ -1122,7 +1145,7 @@ impl DisplayManager {
             }
             PromptFailure::Interrupted => {}
             PromptFailure::Unreadable(error) => {
-                self.print_error(Prose::message(unreadable_answer(error)));
+                self.print_error(unreadable_answer(error));
             }
         }
         failure.exit()
@@ -1133,7 +1156,7 @@ impl DisplayManager {
     /// nothing.
     pub(crate) fn note_unanswered_prompt(&self, failure: &PromptFailure) {
         if let PromptFailure::Unreadable(error) = failure {
-            self.print_warning(Prose::message(unreadable_answer(error)));
+            self.print_warning(unreadable_answer(error));
         }
     }
 
@@ -1302,7 +1325,7 @@ impl DisplayManager {
         };
 
         if let Some(summary) = summary {
-            self.mp.suspend(|| eprintln!("{summary}"));
+            self.print_note(summary);
         }
     }
 
@@ -1439,13 +1462,6 @@ impl Diff {
 /// LF or CRLF, costs nothing.
 pub(crate) fn content_lines(block: &str) -> Shown {
     Shown::join(block.lines().map(Content::new), lit!("\n"))
-}
-
-// `text` from outside selfie, as a message printer shows it: escaped as prose,
-// its line breaks kept and its trailing one removed. The printer hangs it.
-fn untrusted(text: impl Display) -> Shown {
-    let text = text.to_string();
-    Shown::from(Prose::new(text.trim_end_matches(['\r', '\n'])))
 }
 
 // `lead`, then `text` with its continuation lines starting under its first
@@ -1694,10 +1710,11 @@ mod wakeup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal_text::interim_one_line;
 
-    // Each message printer shows what it is handed escaped as prose: a joiner
-    // renders, and a line break is kept with the line after it indented under
-    // the message, so no line of it starts at the left margin.
+    // Each message printer shows a library sentence as prose: a joiner renders,
+    // and a line break is kept with the line after it indented under the
+    // message, so no line of it starts at the left margin.
     #[test]
     fn every_message_printer_escapes_what_it_prints() {
         use selfie::package::event::Outcome;
@@ -1725,9 +1742,7 @@ mod tests {
         let display = DisplayManager::new(false);
         // Words no mark could hold, so each is found in the text.
         let (first, second) = ("¶one", "¶two");
-        display.print_suggestion(crate::terminal_text::Prose::message(format!(
-            "{first}\u{1b}[2J\n{second}"
-        )));
+        display.print_suggestion(Prose::new(&format!("{first}\u{1b}[2J\n{second}")));
         display.print_suggestion(shown!(
             "{}\n{}",
             Shown::from(lit!("¶one")).paint(true, |s| s.bold()),
@@ -1796,12 +1811,22 @@ mod tests {
         assert_eq!(printed, [(Channel::Stdout, "  ⚠ a\n    b".to_string())]);
     }
 
-    // A message written with Windows line endings ends at its text, with no
-    // carriage return shown after it.
+    // A message selfie styled itself keeps its styling: the printer writes its
+    // sequences as selfie's own, never as escapes.
+    #[test]
+    fn a_painted_message_shows_no_escapes() {
+        let display = DisplayManager::new(true);
+        display.print_info(Shown::from(lit!("blue")).paint(true, |s| s.blue()));
+
+        assert_eq!(display.printed(), [(Channel::Stdout, "blue".to_string())]);
+    }
+
+    // A library sentence written with Windows line endings ends at its text,
+    // with no carriage return shown after it.
     #[test]
     fn a_message_ending_in_a_carriage_return_shows_none() {
         let display = DisplayManager::new(false);
-        display.print_info(crate::terminal_text::Prose::message("one\r\n"));
+        display.print_info(crate::received::sentence("one\r\n"));
 
         assert_eq!(display.printed(), [(Channel::Stdout, "one".to_string())]);
     }
@@ -1968,12 +1993,12 @@ mod tests {
         let mut collector = ErrorCollector::default();
         for (name, message) in [("one", "a\nb"), ("two", "c")] {
             collector.collect(ErrorDetail {
-                package_name: name.to_string(),
-                operation: "install".to_string(),
+                package_name: Name::new(name),
+                operation: Prose::new("install"),
                 command: None,
                 exit_code: None,
                 stderr: None,
-                message: message.to_string(),
+                message: Prose::new(message).into(),
             });
         }
 
@@ -2104,12 +2129,12 @@ mod tests {
     fn test_error_collector_single_error_skips_summary() {
         let mut collector = ErrorCollector::default();
         collector.collect(ErrorDetail {
-            package_name: "test-pkg".to_string(),
-            operation: "install".to_string(),
-            command: Some("brew install test-pkg".to_string()),
+            package_name: Name::new("test-pkg"),
+            operation: Prose::new("install"),
+            command: Some(interim_one_line("brew install test-pkg")),
             exit_code: Some(1),
-            stderr: Some("Error: not found".to_string()),
-            message: "Installation failed".to_string(),
+            stderr: Some(vec![Output::line("Error: not found")]),
+            message: Prose::new("Installation failed").into(),
         });
 
         assert!(collector.has_errors());
@@ -2123,20 +2148,20 @@ mod tests {
     fn test_error_collector_multiple_errors_shows_summary() {
         let mut collector = ErrorCollector::default();
         collector.collect(ErrorDetail {
-            package_name: "test-pkg".to_string(),
-            operation: "install".to_string(),
-            command: Some("brew install test-pkg".to_string()),
+            package_name: Name::new("test-pkg"),
+            operation: Prose::new("install"),
+            command: Some(interim_one_line("brew install test-pkg")),
             exit_code: Some(1),
-            stderr: Some("Error: not found".to_string()),
-            message: "Installation failed".to_string(),
+            stderr: Some(vec![Output::line("Error: not found")]),
+            message: Prose::new("Installation failed").into(),
         });
         collector.collect(ErrorDetail {
-            package_name: "other-pkg".to_string(),
-            operation: "install".to_string(),
-            command: Some("brew install other-pkg".to_string()),
+            package_name: Name::new("other-pkg"),
+            operation: Prose::new("install"),
+            command: Some(interim_one_line("brew install other-pkg")),
             exit_code: Some(1),
             stderr: None,
-            message: "Also failed".to_string(),
+            message: Prose::new("Also failed").into(),
         });
 
         assert!(collector.has_errors());
@@ -2149,18 +2174,48 @@ mod tests {
         assert!(summary.contains("── Errors"));
     }
 
+    // The end-of-run summary is printed on stderr, through the printer's
+    // guard, once two errors are collected.
+    #[test]
+    fn finishing_prints_the_error_summary_on_stderr() {
+        let dm = DisplayManager::new(false);
+        for name in ["a\u{200B}b", "c"] {
+            dm.collect_error(ErrorDetail {
+                package_name: Name::new(name),
+                operation: Prose::new("install"),
+                command: None,
+                exit_code: None,
+                stderr: None,
+                message: lit!("failed").into(),
+            });
+        }
+
+        dm.finish();
+
+        let printed = dm.printed();
+        assert!(
+            printed
+                .iter()
+                .all(|(channel, _)| *channel == Channel::Stderr),
+            "{printed:?}"
+        );
+        let summary: String = printed.into_iter().map(|(_, text)| text).collect();
+        assert!(summary.contains("── Errors"), "{summary}");
+        assert!(summary.contains(r"✗ a\u{200b}b (install)"), "{summary}");
+    }
+
     #[test]
     fn test_display_manager_error_collection() {
         let dm = DisplayManager::new(false);
         assert!(!dm.has_errors());
 
         dm.collect_error(ErrorDetail {
-            package_name: "test".to_string(),
-            operation: "check".to_string(),
+            package_name: Name::new("test"),
+            operation: Prose::new("check"),
             command: None,
             exit_code: None,
             stderr: None,
-            message: "test error".to_string(),
+            message: Prose::new("test error").into(),
         });
 
         assert!(dm.has_errors());
@@ -2174,12 +2229,12 @@ mod tests {
         let dm2 = dm.clone();
 
         dm.collect_error(ErrorDetail {
-            package_name: "test".to_string(),
-            operation: "install".to_string(),
+            package_name: Name::new("test"),
+            operation: Prose::new("install"),
             command: None,
             exit_code: None,
             stderr: None,
-            message: "shared error".to_string(),
+            message: Prose::new("shared error").into(),
         });
 
         // Clone should see the same errors (Arc<Mutex<>>)

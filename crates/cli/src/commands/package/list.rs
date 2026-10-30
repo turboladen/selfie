@@ -144,13 +144,8 @@ fn handle_list_event(
             }
             table.set_header(header);
             let package_dir = std::path::Path::new(&package_list.package_directory);
-            let failed = |text: String| {
-                Cell::from(status_style::styled_text(
-                    crate::terminal_text::Prose::new(&text),
-                    use_colors,
-                    |s| s.red(),
-                ))
-            };
+            let failed =
+                |text: Shown| Cell::from(status_style::styled_text(text, use_colors, |s| s.red()));
             let mut add = |result: &RowResult, name: &str, status: Cell, envs: Option<Shown>| {
                 let mut row = vec![
                     row_marker(result, use_colors).into(),
@@ -181,7 +176,10 @@ fn handle_list_event(
                 add(
                     &RowResult::Failure,
                     &filename,
-                    failed(format!("unparsable: {invalid}")),
+                    failed(shown!(
+                        "unparsable: {}",
+                        crate::received::parse_error(invalid)
+                    )),
                     None,
                 );
             }
@@ -195,10 +193,10 @@ fn handle_list_event(
                 add(
                     &RowResult::Failure,
                     &refused.package_name,
-                    failed(format!(
+                    failed(shown!(
                         "refused ({}): {}",
                         DisplayPath::of(shown),
-                        refused.reason
+                        crate::received::sentence(&refused.reason)
                     )),
                     None,
                 );

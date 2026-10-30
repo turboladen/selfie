@@ -87,24 +87,24 @@ struct Unasked {
 impl Unasked {
     /// Tell the user what settles each kind left unasked.
     fn report(&self, display: &DisplayManager) {
-        use selfie::pluralize;
-
         let Self { files, secrets } = *self;
         if files > 0 {
-            display.print_suggestion(crate::terminal_text::Prose::message(format!(
-                "{files} {} left as {} with no terminal to ask on. Pass --yes to overwrite {}.",
-                pluralize(files, "conflict was", "conflicts were"),
-                pluralize(files, "it is", "they are"),
-                pluralize(files, "it", "them"),
-            )));
+            display.print_suggestion(shown!(
+                "{} {} left as {} with no terminal to ask on. Pass --yes to overwrite {}.",
+                files,
+                crate::formatters::plural(files, lit!("conflict was"), lit!("conflicts were")),
+                crate::formatters::plural(files, lit!("it is"), lit!("they are")),
+                crate::formatters::plural(files, lit!("it"), lit!("them"))
+            ));
         }
         if secrets > 0 {
-            display.print_suggestion(crate::terminal_text::Prose::message(format!(
-                "{secrets} secret-bearing {} left as {} with no terminal to ask on. Only a \
+            display.print_suggestion(shown!(
+                "{} secret-bearing {} left as {} with no terminal to ask on. Only a \
                  terminal can accept one; --yes does not.",
-                pluralize(secrets, "conflict was", "conflicts were"),
-                pluralize(secrets, "it is", "they are"),
-            )));
+                secrets,
+                crate::formatters::plural(secrets, lit!("conflict was"), lit!("conflicts were")),
+                crate::formatters::plural(secrets, lit!("it is"), lit!("they are"))
+            ));
         }
     }
 }
@@ -182,10 +182,10 @@ impl InteractiveConflictResolver {
                 None
             }
             Err(PromptFailure::Unreadable(error)) => {
-                self.display
-                    .print_error(crate::terminal_text::Prose::message(format!(
-                        "Could not read the answer, so the conflict is left as it is: {error}"
-                    )));
+                self.display.print_error(shown!(
+                    "Could not read the answer, so the conflict is left as it is: {}",
+                    crate::received::sentence(error)
+                ));
                 None
             }
         }
@@ -201,7 +201,7 @@ impl InteractiveConflictResolver {
     /// terminal. It must not be routed through `tracing`, which would put the
     /// values in the log file.
     fn reveal(&self, incoming: &[u8], current: &[u8], target: &str) {
-        self.display.print_warning(crate::terminal_text::lit!(
+        self.display.print_warning(lit!(
             "This prints secret values to your terminal. They will remain in scrollback and \
              in any session recording or shared screen."
         ));
@@ -258,10 +258,7 @@ impl InteractiveConflictResolver {
         // diff land in the file, so the prompt's own stream names the target.
         if self.display.can_prompt() && !self.display.is_tty() {
             self.display
-                .print_warning(crate::terminal_text::Prose::message(format!(
-                    "Conflict: {}",
-                    shorten_path(target)
-                )));
+                .print_warning(shown!("Conflict: {}", shorten_path(target)));
         }
     }
 }
@@ -379,8 +376,7 @@ pub(crate) async fn handle_apply(
             selfie::package::event::PackageEvent::Completed { result, .. } => {
                 match summary_to_render(result) {
                     Some(success) => {
-                        display_for_handler
-                            .print_info(crate::terminal_text::Prose::message(success.to_string()));
+                        display_for_handler.print_info(crate::received::sentence(success));
                         true
                     }
                     None => false,

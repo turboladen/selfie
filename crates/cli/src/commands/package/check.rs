@@ -4,7 +4,8 @@ use selfie::package::{
     service::PackageService,
 };
 
-use crate::terminal_text::{Literal, Name, Output, Shown, interim_one_line, lit, shown};
+use crate::received::{Check, CheckAnswer};
+use crate::terminal_text::{Literal, Shown, lit, shown};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -108,41 +109,20 @@ fn display_environment_error(
 }
 
 fn display_check_output_only(check_result: &CheckResultData, display: &DisplayManager) {
-    match &check_result.result {
-        CheckResult::Success { stdout, stderr } => {
-            // Show stdout output if present
-            if !stdout.trim().is_empty() {
-                display.print_info(crate::terminal_text::Prose::message(format!(
-                    "Check output: {}",
-                    Output::new(stdout)
-                )));
-            } else if !stderr.trim().is_empty() {
-                display.print_info(crate::terminal_text::Prose::message(format!(
-                    "Check output: {}",
-                    Output::new(stderr)
-                )));
+    match Check::from(check_result).answer {
+        CheckAnswer::Installed { output } => {
+            if let Some(output) = output {
+                display.print_info(shown!("Check output: {}", output));
             }
         }
-        CheckResult::Failed { stdout, stderr, .. } => {
-            // Not installed: the check's own output explains the answer, so it
-            // is a warning, on stderr, beside the result line on stdout.
-            if !stderr.trim().is_empty() {
-                display.print_warning(crate::terminal_text::Prose::message(format!(
-                    "Check failed: {}",
-                    Output::new(stderr)
-                )));
-            } else if !stdout.trim().is_empty() {
-                display.print_warning(crate::terminal_text::Prose::message(format!(
-                    "Check failed: {}",
-                    Output::new(stdout)
-                )));
-            } else {
-                display.print_warning(crate::terminal_text::lit!("Check failed with no output"));
-            }
-        }
-        _ => {
-            // For other cases, don't show additional output in non-verbose mode
-        }
+        // Not installed: the check's own output explains the answer, so it
+        // is a warning, on stderr, beside the result line on stdout.
+        CheckAnswer::NotInstalled { output, .. } => match output {
+            Some(output) => display.print_warning(shown!("Check failed: {}", output)),
+            None => display.print_warning(lit!("Check failed with no output")),
+        },
+        // For other cases, don't show additional output in non-verbose mode
+        CheckAnswer::None => {}
     }
 }
 
@@ -152,50 +132,38 @@ fn display_check_result_card(
     display: &DisplayManager,
 ) {
     let use_colors = config.use_colors();
-    let output = |text: &str| Shown::from(Output::new(text));
+    let check = Check::from(check_result);
 
     // The status and what the check printed, as fields after the common ones.
-    let status: Vec<(Literal, Shown)> = match &check_result.result {
-        CheckResult::Success { stdout, stderr } => {
+    let status: Vec<(Literal, Shown)> = match check.answer {
+        CheckAnswer::Installed { output } => {
             let mut fields = vec![(lit!("Status"), status_style::format_installed(use_colors))];
-            if !stdout.trim().is_empty() {
-                fields.push((lit!("Output"), output(stdout)));
-            } else if !stderr.trim().is_empty() {
-                fields.push((lit!("Output"), output(stderr)));
+            if let Some(output) = output {
+                fields.push((lit!("Output"), output.into()));
             }
             fields
         }
-        CheckResult::Failed {
-            stdout,
-            stderr,
-            exit_code,
-            ..
-        } => {
+        CheckAnswer::NotInstalled { output, exit_code } => {
             let mut fields = vec![(
                 lit!("Status"),
                 status_style::format_not_installed(use_colors),
             )];
-            if !stderr.trim().is_empty() {
-                fields.push((lit!("Details"), output(stderr)));
-            } else if !stdout.trim().is_empty() {
-                fields.push((lit!("Details"), output(stdout)));
+            if let Some(output) = output {
+                fields.push((lit!("Details"), output.into()));
             } else if let Some(code) = exit_code {
-                fields.push((lit!("Details"), shown!("Exit code {}", *code)));
+                fields.push((lit!("Details"), shown!("Exit code {}", code)));
             }
             fields
         }
         // No answer, so no card: the failure that follows says why on stderr.
-        CheckResult::NoCheckCommand | CheckResult::CouldNotRun(_) => return,
+        CheckAnswer::None => return,
     };
 
     display
         .result_card(lit!("Check Results"))
-        .field(lit!("Package"), Name::new(&check_result.package_name))
-        .field(lit!("Environment"), Name::new(&check_result.environment))
-        .command_if(
-            lit!("Command"),
-            check_result.check_command.as_deref().map(interim_one_line),
-        )
+        .field(lit!("Package"), check.package)
+        .field(lit!("Environment"), check.environment)
+        .command_if(lit!("Command"), check.command)
         .styled_fields(status)
         .print();
 }

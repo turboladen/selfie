@@ -62,41 +62,27 @@ pub(crate) fn format_list_status(
 ) -> Shown {
     use selfie::package::event::{CheckFailure, EnvironmentStatus, UnknownStatus};
     match status {
-        EnvironmentStatus::Installed => {
-            styled_text(crate::terminal_text::lit!("Installed"), use_colors, |s| {
-                s.green()
-            })
+        EnvironmentStatus::Installed => styled_text(lit!("Installed"), use_colors, |s| s.green()),
+        EnvironmentStatus::NotInstalled => {
+            styled_text(lit!("Not installed"), use_colors, |s| s.cyan())
         }
-        EnvironmentStatus::NotInstalled => styled_text(
-            crate::terminal_text::lit!("Not installed"),
-            use_colors,
-            |s| s.cyan(),
-        ),
         EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand) => {
-            styled_text(crate::terminal_text::lit!("No check"), use_colors, |s| {
-                s.yellow()
-            })
+            styled_text(lit!("No check"), use_colors, |s| s.yellow())
         }
         EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment) => {
-            styled_text(crate::terminal_text::lit!("N/A"), use_colors, |s| s.dim())
+            styled_text(lit!("N/A"), use_colors, |s| s.dim())
         }
         EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::Canceled {
             ..
-        })) => styled_text(crate::terminal_text::lit!("Canceled"), use_colors, |s| {
-            s.yellow()
-        }),
+        })) => styled_text(lit!("Canceled"), use_colors, |s| s.yellow()),
         EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(
             timed_out,
-        ))) => styled_text(
-            crate::terminal_text::Prose::new(&timed_out.to_string()),
-            use_colors,
-            |s| s.red(),
-        ),
+        ))) => styled_text(crate::received::sentence(timed_out), use_colors, |s| {
+            s.red()
+        }),
         EnvironmentStatus::Unknown(reason) => {
-            let msg = format!("Error: {reason}");
-            styled_text(crate::terminal_text::Prose::new(&msg), use_colors, |s| {
-                s.red()
-            })
+            let msg = shown!("Error: {}", crate::received::sentence(reason));
+            styled_text(msg, use_colors, |s| s.red())
         }
     }
 }

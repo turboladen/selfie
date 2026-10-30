@@ -1,4 +1,4 @@
-use crate::terminal_text::{Name, lit};
+use crate::terminal_text::{Name, lit, shown};
 use selfie::package::{
     event::{OperationFailure, OperationResult, PackageEvent},
     port::PackageError,
@@ -106,7 +106,7 @@ fn display_environment_error(
 /// or a recommend.
 fn display_required_by(display: &DisplayManager, required_by: Option<&str>) {
     if let Some(required_by) = required_by {
-        display.print_note(crate::terminal_text::shown!(
+        display.print_note(shown!(
             "{}'{}' requires it.",
             crate::display_manager::INDENT,
             crate::terminal_text::Shown::from(Name::new(required_by))
