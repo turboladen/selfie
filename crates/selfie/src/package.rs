@@ -295,15 +295,17 @@ pub(crate) fn is_valid_spec_name(name: &str) -> bool {
 }
 
 /// Why a spec cannot be created under `name`, or `None` when it can: `name`
-/// breaks the rule every spec's name follows.
+/// breaks the rule every spec's name follows. [`Uncreatable::refusal`]
+/// words it.
+///
+/// [`Uncreatable::refusal`]: crate::package::event::Uncreatable::refusal
 #[must_use]
-pub fn spec_name_refusal(name: &str) -> Option<String> {
-    (!is_valid_spec_name(name))
-        .then(|| crate::package::event::Uncreatable::InvalidName.refusal(name))
+pub fn spec_name_refusal(name: &str) -> Option<crate::package::event::Uncreatable> {
+    (!is_valid_spec_name(name)).then_some(crate::package::event::Uncreatable::InvalidName)
 }
 
-/// The rule [`is_valid_spec_name`] applies, worded as a remedy for a refusal.
-pub(crate) const SPEC_NAME_RULE: &str = "use only letters, digits, '-', '_', '.', '@' and '+', \
+/// The rule every spec's name follows, worded as a remedy for a refusal.
+pub const SPEC_NAME_RULE: &str = "use only letters, digits, '-', '_', '.', '@' and '+', \
      with no dot at the start or end and no '.yml' or '.yaml' ending";
 
 /// The package name a spec file's path claims, or `None` if it names no spec.

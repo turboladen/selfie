@@ -103,7 +103,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
             "Refused: {} ({}) — {}",
             Name::new(&refused.package_name),
             DisplayPath::of(&refused.path),
-            crate::received::sentence(&refused.reason)
+            crate::received::refusal_reason(refused)
         );
         print_issue_line(display, text, use_colors);
     }

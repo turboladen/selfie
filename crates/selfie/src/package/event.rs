@@ -3951,6 +3951,9 @@ pub struct RefusedSpec {
     pub kind: RefusalKind,
     /// What selfie objected to, as a clause for display.
     pub reason: String,
+    /// Every file that claims the package's name, when `kind` is
+    /// [`RefusalKind::AmbiguousName`]; empty otherwise.
+    pub claimants: Vec<std::path::PathBuf>,
 }
 
 impl RefusedSpec {
@@ -3966,6 +3969,7 @@ impl RefusedSpec {
             path: path.to_path_buf(),
             kind: RefusalKind::AmbiguousName,
             reason: crate::package::port::ambiguous_files_sentence(name, files),
+            claimants: files.to_vec(),
         }
     }
 
@@ -3978,6 +3982,7 @@ impl RefusedSpec {
             path: package.path().to_path_buf(),
             kind: refusal.kind(),
             reason: refusal.to_string(),
+            claimants: Vec::new(),
         }
     }
 }
@@ -5102,7 +5107,7 @@ mod tests {
             assert_eq!(failure.to_string(), reason.refusal("x y"), "{reason:?}");
         }
         assert_eq!(
-            crate::package::spec_name_refusal("x y"),
+            crate::package::spec_name_refusal("x y").map(|reason| reason.refusal("x y")),
             Some(Uncreatable::InvalidName.refusal("x y"))
         );
         assert!(

@@ -224,7 +224,7 @@ pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Sho
         EnvironmentStatus::Installed => status_style::format_installed(use_colors),
         EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
         EnvironmentStatus::Unknown(reason) => status_style::styled_text(
-            shown!("Unknown ({})", received::sentence(reason)),
+            shown!("Unknown ({})", received::unknown_status(reason)),
             use_colors,
             |s| s.yellow().italic(),
         ),

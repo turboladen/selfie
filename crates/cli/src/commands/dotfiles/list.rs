@@ -74,7 +74,7 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
             "Cannot read the dotfiles in '{}' ({}): {}",
             Name::new(&refused.package_name),
             DisplayPath::of(&refused.path),
-            crate::received::sentence(&refused.reason)
+            crate::received::refusal_reason(refused)
         ));
     }
 

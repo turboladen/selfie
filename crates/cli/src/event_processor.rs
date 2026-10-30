@@ -256,9 +256,8 @@ impl EventProcessor {
             }
 
             PackageEvent::CollisionsUnchecked { sources, .. } => {
-                self.display.print_warning(received::sentence(
-                    selfie::package::service::collisions_unchecked_warning(&sources),
-                ));
+                self.display
+                    .print_warning(received::collisions_unchecked(&sources));
             }
 
             PackageEvent::PackagesRefused {
@@ -297,7 +296,7 @@ impl EventProcessor {
                 // not an answer, and stays on stderr below.
                 OperationResult::Success(success) => {
                     let outcome = success.outcome();
-                    let line = received::sentence(&success);
+                    let line = received::success(&success);
                     if outcome == Outcome::Failed {
                         self.display
                             .collect_error(ErrorDetail::of(&operation_info, line.clone()));
@@ -308,7 +307,10 @@ impl EventProcessor {
                     use selfie::package::event::{CommandFailure, OperationFailure};
 
                     // Collect structured error detail for end-of-operation summary
-                    let detail = ErrorDetail::of(&operation_info, received::sentence(&err));
+                    // The summary collects the line printed below, so the
+                    // two name a spec alike.
+                    let message = received::failure(&err);
+                    let detail = ErrorDetail::of(&operation_info, message.clone());
                     let stderr_lines: Vec<Output> = match &err {
                         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
                             stderr,
@@ -334,8 +336,8 @@ impl EventProcessor {
                     match err {
                         // The library's sentence, so its hint about a `name:` field
                         // reaches the terminal.
-                        OperationFailure::Package(error @ PackageError::PackageNotFound { .. }) => {
-                            self.display.print_error(received::sentence(error));
+                        OperationFailure::Package(PackageError::PackageNotFound { .. }) => {
+                            self.display.print_error(message.clone());
                         }
                         OperationFailure::PackageList(listing) => {
                             // The reason, not "not found". A plain file or a dangling
@@ -380,6 +382,9 @@ impl EventProcessor {
                             }
                             self.display
                                 .print_suggestion(received::sentence(suggestion));
+                        }
+                        OperationFailure::Uncreatable { .. } => {
+                            self.display.print_error(message.clone());
                         }
                         OperationFailure::Privilege(refusal) => {
                             self.display
@@ -446,18 +451,18 @@ impl EventProcessor {
                         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
                             ..
                         }) => {
-                            self.display.print_error(received::sentence(&err));
+                            self.display.print_error(message.clone());
                             self.display.print_command_stderr(&stderr_lines);
                         }
                         OperationFailure::InvalidSpec { ref issues, .. } => {
-                            self.display.print_error(received::sentence(&err));
+                            self.display.print_error(message.clone());
                             crate::commands::validation_display::print_issues(
                                 &self.display,
                                 issues,
                             );
                         }
                         _ => {
-                            self.display.print_error(received::sentence(&err));
+                            self.display.print_error(message.clone());
                         }
                     }
                 }
@@ -1267,6 +1272,43 @@ mod tests {
             .find(|line| line.starts_with("/p/a"))
             .unwrap_or_else(|| panic!("no location line in {printed:?}"));
         assert!(location.starts_with(r"/p/a\u{200b}b.yml:"), "{location}");
+    }
+
+    // The error summary collects the line printed for a failure, so a refusal
+    // the CLI composes names its spec there as it does on the error line.
+    #[tokio::test]
+    async fn the_error_summary_collects_the_composed_refusal() {
+        use selfie::package::event::{OperationFailure, Uncreatable};
+
+        let events: Vec<PackageEvent> = ["a\u{200B}b", "c\u{200B}d"]
+            .into_iter()
+            .map(|name| PackageEvent::Completed {
+                operation_info: make_operation_info(name),
+                result: OperationResult::Failure(OperationFailure::Uncreatable {
+                    package_name: name.to_string(),
+                    reason: Uncreatable::InvalidName,
+                }),
+            })
+            .collect();
+        let display = DisplayManager::new(false);
+        let display_clone = display.clone();
+        EventProcessor::new(display)
+            .process_events(Box::pin(stream::iter(events)), |_event| false)
+            .await;
+
+        let messages: Vec<String> = display_clone
+            .collected_errors()
+            .iter()
+            .map(|error| error.message.to_string())
+            .collect();
+        assert!(
+            messages[0].starts_with(r"Refusing to create 'a\u{200b}b'"),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().all(|m| !m.contains('\u{200B}')),
+            "{messages:?}"
+        );
     }
 
     // The error summary names each package as a name, so one holding an

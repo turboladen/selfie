@@ -10,17 +10,23 @@
 
 use std::fmt::Display;
 
+use selfie::config::ConfigLoadError;
 use selfie::package::event::{
     AuditResult, AuditResultData, CheckResult, CheckResultData, DependencyStatus,
-    EnvironmentStatus, EnvironmentStatusData, OperationInfo, PackageInfoData, RefusedSpec,
-    SkipReason, SpecListItem, ValidationIssueData, ValidationResultData,
+    EnvironmentStatus, EnvironmentStatusData, LinkAtTarget, OperationInfo, PackageInfoData,
+    RefusedSpec, SkipReason, SpecListItem, Uncreatable, ValidationIssueData, ValidationResultData,
 };
-use selfie::package::port::PackageParseError;
+use selfie::package::event::{
+    Coverage, Gap, OperationFailure, OperationSuccess, RefusalKind, UncheckedSource, UnknownStatus,
+};
+use selfie::package::port::{PackageError, PackageParseError, PackageParseKind, PackageRepoError};
 use selfie::sync_service::port::PackageValidationIssue;
 use selfie::validation::{ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
 
-use crate::terminal_text::{Name, Output, Prose, Shown, interim_one_line};
+use crate::terminal_text::{
+    DisplayPath, Literal, Name, Output, Prose, Shown, interim_one_line, lit, shown,
+};
 
 /// `value`'s sentence, as the library words it, without a trailing line
 /// break.
@@ -262,25 +268,386 @@ impl From<&ValidationIssue> for Issue {
     }
 }
 
-/// Why a spec file did not load, as the library words it.
+// This is the rule a spec's name follows, worded as the remedy a refusal ends
+// with.
+fn spec_name_rule() -> Prose {
+    Prose::new(selfie::package::SPEC_NAME_RULE)
+}
+
+// Why a spec file did not load, without its path. A file whose name breaks the
+// rule names it as a name, as the listing beside it does.
+fn parse_kind(kind: &PackageParseKind) -> Shown {
+    match kind {
+        PackageParseKind::InvalidName { name } => shown!(
+            "its name '{}' is not a valid spec name. Rename the file: {}.",
+            Name::new(name),
+            spec_name_rule()
+        ),
+        other => sentence(other).into(),
+    }
+}
+
+/// Why a spec file did not load, without where in it.
 pub(crate) fn parse_reason(error: &PackageParseError) -> Shown {
-    sentence(error.reason()).into()
+    match error.kind() {
+        PackageParseKind::Yaml { .. } => sentence(error.reason()).into(),
+        other => parse_kind(other),
+    }
+}
+
+// This words "Multiple packages found ..." as the library does, with the name
+// a Name, the directory a DisplayPath and each file's name a Name.
+fn ambiguous_name(name: &str, directory: &std::path::Path, paths: &[std::path::PathBuf]) -> Shown {
+    let files = crate::formatters::comma_joined(paths.iter().map(|path| {
+        Name::new(
+            &path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy(),
+        )
+    }));
+    shown!(
+        "Multiple packages found with name `{}` in path {}: {}. Names are compared ignoring \
+         case, and `.yml` and `.yaml` name the same package, so these files all claim one name. \
+         Rename or remove all but one.",
+        Name::new(name),
+        DisplayPath::of(directory),
+        files
+    )
+}
+
+/// Why a listing could not trust a spec. An ambiguity names the spec and the
+/// files that claim it.
+pub(crate) fn refusal_reason(row: &RefusedSpec) -> Shown {
+    match (row.kind, row.claimants.first()) {
+        (RefusalKind::AmbiguousName, Some(first)) => ambiguous_name(
+            &row.package_name,
+            first.parent().unwrap_or_else(|| std::path::Path::new(".")),
+            &row.claimants,
+        ),
+        _ => sentence(&row.reason).into(),
+    }
+}
+
+/// A package error, with the spec it names as a Name and its file as a path.
+pub(crate) fn package_error(error: &PackageError) -> Shown {
+    match error {
+        PackageError::ParseError {
+            name,
+            failed_file,
+            cause,
+            ..
+        } => shown!(
+            "Parse error in package `{}` from {}: {}",
+            Name::new(name),
+            DisplayPath::of(failed_file),
+            parse_error(cause)
+        ),
+        PackageError::UnreadableFile {
+            name,
+            failed_file,
+            cause,
+            ..
+        } => shown!(
+            "Cannot read package `{}` from {}: {}",
+            Name::new(name),
+            DisplayPath::of(failed_file),
+            parse_error(cause)
+        ),
+        PackageError::UnusableName {
+            name,
+            failed_file,
+            cause,
+            ..
+        } => shown!(
+            "Cannot use package `{}` from {}: {}",
+            Name::new(name),
+            DisplayPath::of(failed_file),
+            parse_error(cause)
+        ),
+        PackageError::MultiplePackagesFound {
+            name,
+            packages_path,
+            conflicting_paths,
+            ..
+        } => ambiguous_name(name, packages_path, conflicting_paths),
+        PackageError::PackageNotFound {
+            name,
+            packages_path,
+            declared_by,
+            ..
+        } => shown!(
+            "Package `{}` not found in path {}{}",
+            Name::new(name),
+            DisplayPath::of(packages_path),
+            sentence(selfie::package::port::name_field_hint(declared_by))
+        ),
+        other => sentence(other).into(),
+    }
+}
+
+/// A repository's error, a package error composed as [`package_error`]
+/// composes it.
+pub(crate) fn repo_error(error: &PackageRepoError) -> Shown {
+    match error {
+        PackageRepoError::PackageError(error) => package_error(error),
+        other => sentence(other).into(),
+    }
+}
+
+/// Why a dependency's status is unknown, with a lookup's error composed as
+/// [`repo_error`] composes it.
+pub(crate) fn unknown_status(status: &UnknownStatus) -> Shown {
+    match status {
+        UnknownStatus::LookupFailed(failure) => repo_error(&failure.clone().into_error()),
+        UnknownStatus::Error(error) => repo_error(error),
+        other => sentence(other).into(),
+    }
+}
+
+/// An operation's failure, as the error line and the error summary both show
+/// it.
+pub(crate) fn failure(failure: &OperationFailure) -> Shown {
+    match failure {
+        OperationFailure::Uncreatable {
+            package_name,
+            reason,
+        } => uncreatable(package_name, reason),
+        OperationFailure::Package(error) => package_error(error),
+        OperationFailure::UnreadableSpec {
+            package_name,
+            reason,
+        } => shown!(
+            "Cannot use package `{}`: {}",
+            Name::new(package_name),
+            sentence(reason)
+        ),
+        other => sentence(other).into(),
+    }
+}
+
+// These are the clauses naming a run's gaps, worded as the library words them
+// with each package a Name: "; could not answer for: a (timed out)" and
+// "; selfie failed for: b (...)".
+fn gaps_named(gaps: &[Gap]) -> Shown {
+    let clause = |coverage, lead: Literal| {
+        let named: Vec<Shown> = Gap::with_coverage(gaps, coverage)
+            .map(|gap| {
+                shown!(
+                    "{} ({})",
+                    Name::new(gap.package_name()),
+                    Prose::new(gap.reason().brief())
+                )
+            })
+            .collect();
+        if named.is_empty() {
+            Shown::default()
+        } else {
+            shown!("; {}: {}", lead, crate::formatters::comma_joined(named))
+        }
+    };
+    shown!(
+        "{}{}",
+        clause(Coverage::Unanswered, lit!("could not answer for")),
+        clause(Coverage::Error, lit!("selfie failed for"))
+    )
+}
+
+/// An operation's success, as its summary line shows it. The lines that name
+/// the packages a run could not answer for name each as a Name.
+pub(crate) fn success(success: &OperationSuccess) -> Shown {
+    match success {
+        OperationSuccess::PackageInstalled {
+            package_name,
+            environment,
+            was_already_installed,
+            executable_path,
+            gaps,
+            ..
+        } => {
+            let (status, at) = match (*was_already_installed, gaps.is_empty()) {
+                (true, _) => (
+                    lit!("was already installed"),
+                    executable_path
+                        .as_deref()
+                        .map(|path| shown!(", at {}", DisplayPath::new(path))),
+                ),
+                (false, true) => (lit!("installation completed successfully"), None),
+                (false, false) => (lit!("installed"), None),
+            };
+            shown!(
+                "Package '{}' {} in environment '{}'{}{}",
+                Name::new(package_name),
+                status,
+                Name::new(environment),
+                at.unwrap_or_default(),
+                gaps_named(gaps)
+            )
+        }
+        OperationSuccess::PackageStatusChecked {
+            package_name,
+            environment,
+            gaps,
+            ..
+        } => {
+            let status = if gaps.is_empty() {
+                lit!("status checked successfully")
+            } else {
+                lit!("status checked")
+            };
+            shown!(
+                "Package '{}' {} in environment '{}'{}",
+                Name::new(package_name),
+                status,
+                Name::new(environment),
+                gaps_named(gaps)
+            )
+        }
+        OperationSuccess::PackageListGenerated {
+            valid_count,
+            invalid_count,
+            refused_specs,
+            gaps,
+            environment,
+            ..
+        } => shown!(
+            "Package listing completed with {} in environment '{}'{}",
+            Prose::new(&selfie::package::event::listing_counts(
+                *valid_count,
+                *invalid_count,
+                *refused_specs,
+                "package"
+            )),
+            Name::new(environment),
+            gaps_named(gaps)
+        ),
+        other => sentence(other).into(),
+    }
+}
+
+/// The warning for a run that could not check its targets against `sources`,
+/// with each spec file shown as a path.
+pub(crate) fn collisions_unchecked(sources: &[UncheckedSource]) -> Shown {
+    let named = crate::formatters::comma_joined(sources.iter().map(|source| -> Shown {
+        match source {
+            UncheckedSource::SpecFile { .. } => DisplayPath::new(&source.to_string()).into(),
+            UncheckedSource::DotfilesDirectory => sentence(source).into(),
+        }
+    }));
+    shown!(
+        "Collisions with these were not checked, since selfie could not use them: {}",
+        named
+    )
+}
+
+// This is the warning for a spec file a run leaves out, for `reason`.
+fn skipping(path: &std::path::Path, reason: impl Into<Shown>) -> Shown {
+    shown!(
+        "Skipping package file {}: {}",
+        DisplayPath::of(path),
+        reason.into()
+    )
 }
 
 /// The warning for a spec file a run skips because it does not parse.
 pub(crate) fn skipped_spec(error: &PackageParseError) -> Shown {
-    sentence(selfie::package::service::skipped_spec_warning(error)).into()
+    skipping(error.package_path(), parse_error(error))
 }
 
 /// The warning for a spec file a listing leaves out because several files
 /// claim its name.
 pub(crate) fn ambiguous_spec(row: &RefusedSpec) -> Shown {
-    sentence(selfie::package::service::ambiguous_spec_warning(row)).into()
+    skipping(&row.path, refusal_reason(row))
 }
 
-/// Why an entry was skipped, as an entry row's detail shows it.
+/// Why `spec create` will not create `package_name`.
+pub(crate) fn uncreatable(package_name: &str, reason: &Uncreatable) -> Shown {
+    let name = Name::new(package_name);
+    match reason {
+        Uncreatable::InvalidName => shown!(
+            "Refusing to create '{}': it is not a valid spec name. Rename it: {}.",
+            name,
+            spec_name_rule()
+        ),
+        Uncreatable::OutsidePackageDirectory { path, directory } => shown!(
+            "Refusing to create '{}': {} is not directly in the package directory {}, where \
+             every spec has to be.",
+            name,
+            DisplayPath::of(path),
+            DisplayPath::of(directory)
+        ),
+        Uncreatable::UnloadableFileName { path } => shown!(
+            "Refusing to create '{}': selfie would not load {} as a spec. Its name before the \
+             .yml or .yaml extension has to follow the rule for a package name.",
+            name,
+            DisplayPath::of(path)
+        ),
+    }
+}
+
+/// The refusal for `name` when it breaks the spec-name rule, or `None` when it
+/// follows it.
+pub(crate) fn invalid_name_refusal(name: &str) -> Option<Shown> {
+    selfie::package::spec_name_refusal(name).map(|reason| uncreatable(name, &reason))
+}
+
+/// `error`'s sentence, each path in it a [`DisplayPath`]. `None` for a
+/// file-system error, which carries causes of its own for the caller to show.
+pub(crate) fn config_load_error(error: &ConfigLoadError) -> Option<Shown> {
+    Some(match error {
+        ConfigLoadError::Parse { path, failure } => shown!(
+            "Cannot parse the configuration file {}: {}",
+            DisplayPath::of(path),
+            sentence(failure)
+        ),
+        ConfigLoadError::IrregularFile { path, kind } => shown!(
+            "{}: the configuration file is a {}, not a regular file. Replace it with a regular \
+             file or remove it.",
+            DisplayPath::of(path),
+            Prose::new(kind)
+        ),
+        ConfigLoadError::UnresolvableFile { path } => shown!(
+            "{}: the configuration file is a symbolic link that does not resolve. Restore or \
+             check out its target, or remove the link.",
+            DisplayPath::of(path)
+        ),
+        ConfigLoadError::NotFound { searched } => shown!(
+            "No configuration file found in locations: {}",
+            DisplayPath::of(searched)
+        ),
+        ConfigLoadError::MultipleFound(paths) => shown!(
+            "Multiple configuration files found: {}",
+            Shown::join(paths.iter().map(|path| DisplayPath::new(path)), lit!(", "))
+        ),
+        ConfigLoadError::FileSystemError(_) => return None,
+    })
+}
+
+/// Why an entry was skipped, as an entry row's detail shows it. A secret dry
+/// run names the link it would replace as a path.
 pub(crate) fn skip_reason(reason: &SkipReason) -> Shown {
-    sentence(reason).into()
+    // No wildcard, so a reason or a link that carries a path chooses here how
+    // it is shown.
+    match reason {
+        SkipReason::SecretDryRun { commands, link } => {
+            let destination = match link {
+                LinkAtTarget::NoLink => return sentence(reason).into(),
+                LinkAtTarget::To(path) => shown!(" to '{}'", DisplayPath::of(path)),
+                LinkAtTarget::DestinationUnknown => Shown::default(),
+            };
+            shown!(
+                "dry run: would run {} command(s), then replace the symlink{} with a regular \
+                 file readable only by you",
+                *commands,
+                destination
+            )
+        }
+        SkipReason::UpToDate
+        | SkipReason::InSync
+        | SkipReason::PermissionsTightened
+        | SkipReason::DryRun
+        | SkipReason::Unverifiable => sentence(reason).into(),
+    }
 }
 
 /// A spec's information, as `spec info` shows it.
@@ -346,7 +713,7 @@ impl From<&EnvironmentStatusData> for Environment {
 
 /// A spec file that did not load, as the library words its failure.
 pub(crate) fn parse_error(error: &PackageParseError) -> Shown {
-    sentence(error).into()
+    parse_kind(error.kind())
 }
 
 /// One spec in `spec list`.
@@ -396,6 +763,306 @@ mod tests {
             dotfiles: Vec::new(),
             apply_commands: 0,
         }
+    }
+
+    // A secret dry run names the link it would replace as a path, so an
+    // invisible character or a line break in the destination shows as an
+    // escape and the row stays one line.
+    #[test]
+    fn a_secret_dry_run_names_the_link_destination_as_a_path() {
+        let reason = SkipReason::SecretDryRun {
+            commands: 1,
+            link: LinkAtTarget::To("/x/de\u{200B}st\nz".into()),
+        };
+
+        assert_eq!(
+            skip_reason(&reason).as_str(),
+            r"dry run: would run 1 command(s), then replace the symlink to '/x/de\u{200b}st\nz' with a regular file readable only by you"
+        );
+    }
+
+    // Each configuration load error reads as the library words it for a plain
+    // path, so composing it changes only how the path is escaped.
+    #[test]
+    fn a_config_load_error_matches_the_library_wording_for_plain_paths() {
+        let failure = selfie::yaml::parse::<selfie::package::Package>("name: [\n")
+            .expect_err("the fixture must not parse");
+        for error in [
+            ConfigLoadError::Parse {
+                path: "/c/config.yaml".into(),
+                failure,
+            },
+            ConfigLoadError::IrregularFile {
+                path: "/c/config.yaml".into(),
+                kind: "fifo",
+            },
+            ConfigLoadError::UnresolvableFile {
+                path: "/c/config.yaml".into(),
+            },
+            ConfigLoadError::NotFound {
+                searched: "/c".into(),
+            },
+            ConfigLoadError::MultipleFound(vec!["/c/a.yaml".to_string(), "/c/b.yaml".to_string()]),
+        ] {
+            let composed = config_load_error(&error).expect("a configuration file's error");
+            assert_eq!(composed.as_str(), error.to_string());
+        }
+    }
+
+    // Each package error, success line and refusal the CLI composes reads as
+    // the library words it for plain values, so composing it changes only how
+    // a name or a path in it is escaped.
+    #[test]
+    fn a_composed_package_sentence_matches_the_library_wording_for_plain_values() {
+        use selfie::package::event::StepCount;
+
+        let invalid = || {
+            PackageParseError::new(
+                "/p/a b.yml",
+                PackageParseKind::InvalidName {
+                    name: "a b".to_string(),
+                },
+            )
+        };
+        let source = selfie::yaml::parse::<selfie::package::Package>("name: [\n")
+            .expect_err("the fixture must not parse");
+        let errors = [
+            PackageError::UnusableName {
+                name: "a b".to_string(),
+                packages_path: "/p".into(),
+                failed_file: "/p/a b.yml".into(),
+                cause: invalid(),
+            },
+            PackageError::UnreadableFile {
+                name: "a b".to_string(),
+                packages_path: "/p".into(),
+                failed_file: "/p/a b.yml".into(),
+                cause: invalid(),
+            },
+            PackageError::ParseError {
+                name: "tool".to_string(),
+                packages_path: "/p".into(),
+                failed_file: "/p/tool.yml".into(),
+                cause: PackageParseError::new(
+                    "/p/tool.yml",
+                    PackageParseKind::Yaml { cause: source },
+                ),
+            },
+            PackageError::MultiplePackagesFound {
+                name: "tool".to_string(),
+                packages_path: "/p".into(),
+                conflicting_paths: vec!["/p/tool.yml".into(), "/p/Tool.yaml".into()],
+                files_examined: 2,
+                search_patterns: Vec::new(),
+            },
+            not_found(Vec::new()),
+            not_found(vec![selfie::package::port::NameDeclaration {
+                path: "/p/other.yml".into(),
+                name: "Tool".to_string(),
+            }]),
+        ];
+        for error in &errors {
+            assert_eq!(package_error(error).as_str(), error.to_string());
+        }
+
+        let successes = [
+            OperationSuccess::PackageInstalled {
+                package_name: "tool".to_string(),
+                environment: "env".to_string(),
+                was_already_installed: true,
+                executable_path: Some("/bin/tool".to_string()),
+                gaps: Vec::new(),
+                steps_completed: StepCount::new(1, 1),
+            },
+            OperationSuccess::PackageInstalled {
+                package_name: "tool".to_string(),
+                environment: "env".to_string(),
+                was_already_installed: false,
+                executable_path: None,
+                gaps: Vec::new(),
+                steps_completed: StepCount::new(1, 1),
+            },
+            OperationSuccess::PackageStatusChecked {
+                package_name: "tool".to_string(),
+                environment: "env".to_string(),
+                gaps: Vec::new(),
+                steps_completed: StepCount::new(1, 1),
+            },
+            OperationSuccess::PackageListGenerated {
+                valid_count: 2,
+                invalid_count: 1,
+                refused_specs: 1,
+                gaps: Vec::new(),
+                environment: "env".to_string(),
+                steps_completed: StepCount::new(1, 1),
+            },
+        ];
+        for line in &successes {
+            assert_eq!(success(line).as_str(), line.to_string());
+        }
+
+        let ambiguous = RefusedSpec {
+            package_name: "tool".to_string(),
+            path: "/p/tool.yml".into(),
+            kind: RefusalKind::AmbiguousName,
+            reason: errors[3].to_string(),
+            claimants: vec!["/p/tool.yml".into(), "/p/Tool.yaml".into()],
+        };
+        assert_eq!(refusal_reason(&ambiguous).as_str(), ambiguous.reason);
+
+        let sources = [
+            UncheckedSource::SpecFile {
+                base: selfie::package::event::BaseKind::PackageDirectory,
+                file: "a b.yaml".to_string(),
+            },
+            UncheckedSource::DotfilesDirectory,
+        ];
+        assert_eq!(
+            collisions_unchecked(&sources).as_str(),
+            selfie::package::service::collisions_unchecked_warning(&sources)
+        );
+    }
+
+    fn not_found(declared_by: Vec<selfie::package::port::NameDeclaration>) -> PackageError {
+        PackageError::PackageNotFound {
+            name: "tool".to_string(),
+            packages_path: "/p".into(),
+            files_examined: 0,
+            search_patterns: Vec::new(),
+            declared_by,
+        }
+    }
+
+    // A spec file a run could not check for collisions is named as a path, so
+    // a line break in its name does not split the warning.
+    #[test]
+    fn an_unchecked_spec_file_is_named_escaped() {
+        let sources = [UncheckedSource::SpecFile {
+            base: selfie::package::event::BaseKind::PackageDirectory,
+            file: "l\nf\u{200B}.yaml".to_string(),
+        }];
+
+        assert_eq!(
+            collisions_unchecked(&sources).as_str(),
+            r"Collisions with these were not checked, since selfie could not use them: packages/l\nf\u{200b}.yaml"
+        );
+    }
+
+    // A dependency no spec answers to is named as a name in its status.
+    #[test]
+    fn a_missing_dependency_is_named_escaped() {
+        let status = UnknownStatus::LookupFailed(
+            PackageRepoError::from(PackageError::PackageNotFound {
+                name: "dep\u{200B}x".to_string(),
+                packages_path: "/p".into(),
+                files_examined: 0,
+                search_patterns: Vec::new(),
+                declared_by: Vec::new(),
+            })
+            .into_lookup_failure()
+            .expect("a lookup returns this error"),
+        );
+
+        assert_eq!(
+            unknown_status(&status).as_str(),
+            r"Package `dep\u{200b}x` not found in path /p"
+        );
+    }
+
+    // An ambiguity names the spec and each file that claims it as names, so an
+    // invisible character in either shows as an escape.
+    #[test]
+    fn an_ambiguity_names_the_spec_and_its_files_escaped() {
+        let row = RefusedSpec {
+            package_name: "t\u{200B}ool".to_string(),
+            path: "/p/t\u{200B}ool.yml".into(),
+            kind: RefusalKind::AmbiguousName,
+            reason: String::new(),
+            claimants: vec!["/p/t\u{200B}ool.yml".into(), "/p/T\u{200B}ool.yaml".into()],
+        };
+
+        let shown = refusal_reason(&row);
+
+        assert!(
+            shown.as_str().starts_with(r"Multiple packages found with name `t\u{200b}ool` in path /p: t\u{200b}ool.yml, T\u{200b}ool.yaml."),
+            "{shown}"
+        );
+    }
+
+    // A dry run with no link, or one whose destination is unknown, reads as
+    // the library words it.
+    #[test]
+    fn a_secret_dry_run_without_a_destination_reads_as_the_library_words_it() {
+        for link in [LinkAtTarget::NoLink, LinkAtTarget::DestinationUnknown] {
+            let reason = SkipReason::SecretDryRun { commands: 2, link };
+            assert_eq!(skip_reason(&reason).as_str(), reason.to_string());
+        }
+    }
+
+    // A refusal to create a spec names the spec as a name and its paths as
+    // paths.
+    #[test]
+    fn an_uncreatable_path_names_it_as_a_path() {
+        let shown = uncreatable(
+            "a\u{200B}b",
+            &Uncreatable::OutsidePackageDirectory {
+                path: "/p/x\u{200B}y.yml".into(),
+                directory: "/p\nq".into(),
+            },
+        );
+
+        assert_eq!(
+            shown.as_str(),
+            r"Refusing to create 'a\u{200b}b': /p/x\u{200b}y.yml is not directly in the package directory /p\nq, where every spec has to be."
+        );
+    }
+
+    // Each composed sentence reads as the library words it for a plain value,
+    // so composing it in the CLI changes only how a value in it is escaped.
+    #[test]
+    fn a_composed_sentence_matches_the_library_wording_for_plain_values() {
+        for reason in [
+            Uncreatable::InvalidName,
+            Uncreatable::OutsidePackageDirectory {
+                path: "/p/x.yml".into(),
+                directory: "/p".into(),
+            },
+            Uncreatable::UnloadableFileName {
+                path: "/p/x.yml".into(),
+            },
+        ] {
+            assert_eq!(
+                uncreatable("tool", &reason).as_str(),
+                reason.refusal("tool")
+            );
+        }
+        let invalid = PackageParseError::new(
+            "/p/a b.yml",
+            PackageParseKind::InvalidName {
+                name: "a b".to_string(),
+            },
+        );
+        assert_eq!(parse_error(&invalid).as_str(), invalid.to_string());
+        assert_eq!(
+            skipped_spec(&invalid).as_str(),
+            selfie::package::service::skipped_spec_warning(&invalid)
+        );
+        let ambiguous = RefusedSpec {
+            package_name: "tool".to_string(),
+            path: "/p/tool.yml".into(),
+            kind: selfie::package::event::RefusalKind::UnknownTopLevelKeys,
+            reason: "several files claim it".to_string(),
+            claimants: Vec::new(),
+        };
+        assert_eq!(
+            ambiguous_spec(&ambiguous).as_str(),
+            selfie::package::service::ambiguous_spec_warning(&ambiguous)
+        );
+        let link = SkipReason::SecretDryRun {
+            commands: 3,
+            link: LinkAtTarget::To("/etc/real".into()),
+        };
+        assert_eq!(skip_reason(&link).as_str(), link.to_string());
     }
 
     // A description is prose: its line breaks are kept and a joiner renders.

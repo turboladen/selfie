@@ -23,10 +23,11 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
     let loaded = match YamlLoader::new(fs).load_config() {
         Ok(c) => c,
         Err(e) => {
-            display.print_error(shown!(
-                "Failed to load configuration: {}",
-                crate::received::sentence(e)
-            ));
+            // A configuration file's error names its path as a path, as the
+            // startup error does.
+            let cause = crate::received::config_load_error(&e)
+                .unwrap_or_else(|| crate::received::sentence(&e).into());
+            display.print_error(shown!("Failed to load configuration: {}", cause));
             return Exit::Failed;
         }
     };
