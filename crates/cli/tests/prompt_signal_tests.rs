@@ -362,6 +362,75 @@ fn a_prompt_follows_stderrs_colors() {
     assert!(!plain.output.contains('›'), "{}", plain.output);
 }
 
+// An environment name the prompt can only show escaped is noted escaped above
+// an empty prompt, never drawn raw, and Enter writes its raw bytes.
+#[test]
+fn an_escaped_environment_is_noted_and_enter_keeps_it() {
+    let temp = setup_default_test_config();
+    let mut run = PtyRun::spawn(
+        &temp,
+        &[
+            "--environment",
+            "dev\u{1b}",
+            "spec",
+            "create",
+            "fresh",
+            "--interactive",
+        ],
+    );
+    for (question, keys) in [
+        ("Package name", &b"\r"[..]),
+        ("Homepage URL", b"\r"),
+        ("Description", b"\r"),
+        ("Environment name", b"\r"),
+        ("Install command", b"true\r"),
+        ("Check command", b"\r"),
+        ("Add another environment?", b"\r"),
+        ("open the package file", b"n"),
+    ] {
+        run.wait_for_text(question);
+        run.type_keys(keys);
+    }
+    let finished = run.finish();
+
+    assert_eq!(finished.code, Some(CLEAN), "{}", finished.output);
+    assert!(
+        finished
+            .output
+            .contains(r"Suggested: dev\u{1b} (Enter keeps it)"),
+        "{}",
+        finished.output
+    );
+    assert!(
+        !finished.output.contains("dev\u{1b}"),
+        "{:?}",
+        finished.output
+    );
+    let spec = std::fs::read_to_string(temp.path().join("packages/fresh.yml")).unwrap();
+    let spec: selfie::package::Package = selfie::yaml::parse(&spec).unwrap();
+    assert!(
+        spec.environments().contains_key("dev\u{1b}"),
+        "{:?}",
+        spec.environments().keys().collect::<Vec<_>>()
+    );
+}
+
+// A package name the spec-name rule refuses is not pre-filled at the name
+// prompt, where Enter would only send it back to be refused.
+#[test]
+fn a_refused_package_name_is_not_prefilled() {
+    let temp = setup_default_test_config();
+    let mut run = PtyRun::spawn(&temp, &["spec", "create", "my app", "--interactive"]);
+    run.wait_for_text("Package name");
+
+    // Raw mode starts after any pre-filled text is written.
+    run.type_keys(b"\x03");
+    let finished = run.finish();
+
+    assert_eq!(finished.code, Some(CANCELED), "{}", finished.output);
+    assert!(!finished.output.contains("my app"), "{:?}", finished.output);
+}
+
 // apply asks about a conflict on a thread of its own, which a signal never
 // reaches, so the run's cancellation has to end the prompt.
 #[test]

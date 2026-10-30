@@ -485,6 +485,13 @@ impl Name {
     pub(crate) fn is_plain(text: &str) -> bool {
         matches!(escape(text, Policy::Strict), Cow::Borrowed(_))
     }
+
+    /// Whether `text` holds nothing a reader would see as a name: each of its
+    /// characters is whitespace or one a name's escape writes out, such as a
+    /// Hangul filler. An empty `text` is blank.
+    pub(crate) fn is_blank(text: &str) -> bool {
+        text.chars().all(|c| c.is_whitespace() || in_strict_set(c))
+    }
 }
 
 impl DisplayPath {
@@ -591,6 +598,26 @@ fn push_escaped(shown: &mut String, c: char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Blank is what shows as no name at all: whitespace and the characters a
+    // name's escape writes out. One visible character makes it not blank.
+    #[test]
+    fn a_text_is_blank_when_nothing_in_it_shows() {
+        for blank in [
+            "",
+            " ",
+            "\t\n",
+            "\u{a0}",
+            "\u{3164}",
+            "\u{115f}\u{200b}",
+            " \u{ffa0} ",
+        ] {
+            assert!(Name::is_blank(blank), "{blank:?} is blank");
+        }
+        for shown in ["a", " a ", "\u{3164}a", "-"] {
+            assert!(!Name::is_blank(shown), "{shown:?} is not blank");
+        }
+    }
 
     // Each set's members, one row per class: (character, guard, base, strict).
     // The rows sit on the edges of each hand-written range, so a range one code

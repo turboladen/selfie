@@ -107,7 +107,9 @@ checked as a standalone dotfile spec, which declares no environments, unless a p
 name: `selfie apply` does not use it then, so push neither checks it nor scans its name for
 collisions.
 
-When prompting, the generated message is the default — press Enter to accept or type a new message.
+When prompting, each prompt starts with the generated message filled in: press Enter to accept it,
+or edit it. A message holding a character the terminal would not show as written is shown escaped
+above an empty prompt instead, and Enter keeps it as generated.
 
 **Flags:**
 

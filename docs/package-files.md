@@ -68,7 +68,12 @@ the file. A create judges the file it writes the way every later command finds t
 name: it refuses a file name the loader would not read or one outside the package directory, looks
 up the name the file name gives, and reports the created package under that name.
 `selfie spec create --interactive` asks for the package name before anything else, checks that name,
-and writes the spec to `<name>.yml`.
+and writes the spec to `<name>.yml`. A suggested answer, such as the configured environment or the
+check command, is filled in ready to edit: clear the check command to leave the spec without one. A
+suggestion holding a character the terminal would not show as written is shown escaped above an
+empty prompt instead: Enter there keeps the configured environment, while a package name shown that
+way can never be valid, so Enter asks for one again. The package name, environment and install
+command cannot be left empty.
 
 Names are compared ignoring case, so `neovim` and `Neovim` are one package: a spec stored as
 `Neovim.yml` answers to either. The extension folds the same way, and does not distinguish one
