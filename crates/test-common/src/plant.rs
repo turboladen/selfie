@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use selfie::fs::{
     DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent, OpenRefusal, Placed,
-    RealFileSystem, RepositoryRead, TargetPath, TargetRead,
+    RealFileSystem, Removal, RepositoryRead, TargetPath, TargetRead,
 };
 
 /// A high-entropy value standing in for another tool's own credential, written at
@@ -58,6 +58,9 @@ pub struct PlantsBeforeWrite {
     planted_inode: Arc<Mutex<Option<u64>>>,
     vanished: Arc<AtomicBool>,
     rewrite: Option<Rewrite>,
+    // Whether the rewrite waits for the first removal of the target rather than
+    // for the first write to it.
+    rewrite_before_remove: bool,
     rewrite_claimed: Arc<AtomicBool>,
     rewritten: Arc<AtomicBool>,
     stamps: Arc<Mutex<Option<(Stamp, Stamp)>>>,
@@ -83,6 +86,16 @@ impl PlantsBeforeWrite {
     pub fn rewritten_before_write(target: &Path, rewrite: Rewrite) -> Self {
         let mut fs = Self::with(target, None);
         fs.rewrite = Some(rewrite);
+        fs
+    }
+
+    /// Plant nothing, and apply `rewrite` to `target` immediately before the
+    /// first removal of it is delegated, after every load and lookup ahead of it.
+    #[must_use]
+    pub fn rewritten_before_remove(target: &Path, rewrite: Rewrite) -> Self {
+        let mut fs = Self::with(target, None);
+        fs.rewrite = Some(rewrite);
+        fs.rewrite_before_remove = true;
         fs
     }
 
@@ -143,9 +156,16 @@ impl PlantsBeforeWrite {
             planted_inode: Arc::default(),
             vanished: Arc::default(),
             rewrite: None,
+            rewrite_before_remove: false,
             rewrite_claimed: Arc::default(),
             rewritten: Arc::default(),
             stamps: Arc::default(),
+        }
+    }
+
+    fn rewrite_before_write(&self, path: &Path) {
+        if !self.rewrite_before_remove {
+            self.rewrite_if_first(path);
         }
     }
 
@@ -232,7 +252,7 @@ impl FileSystem for PlantsBeforeWrite {
         data: &[u8],
         if_present: IfPresent,
     ) -> Result<Placed, FileSystemError> {
-        self.rewrite_if_first(path.path());
+        self.rewrite_before_write(path.path());
         self.plant_if_first(path.path());
         RealFileSystem.write_file_private(path, data, if_present)
     }
@@ -242,7 +262,7 @@ impl FileSystem for PlantsBeforeWrite {
         data: &[u8],
         if_present: IfPresent,
     ) -> Result<Placed, FileSystemError> {
-        self.rewrite_if_first(path.path());
+        self.rewrite_before_write(path.path());
         self.plant_if_first(path.path());
         RealFileSystem.write_file_no_follow(path, data, if_present)
     }
@@ -263,6 +283,16 @@ impl FileSystem for PlantsBeforeWrite {
     }
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
         RealFileSystem.remove_file(path)
+    }
+    fn remove_file_if_holding(
+        &self,
+        path: &TargetPath,
+        expected: &[u8],
+    ) -> Result<Removal, FileSystemError> {
+        if self.rewrite_before_remove {
+            self.rewrite_if_first(path.path());
+        }
+        RealFileSystem.remove_file_if_holding(path, expected)
     }
     fn path_exists(&self, path: &Path) -> bool {
         RealFileSystem.path_exists(path)

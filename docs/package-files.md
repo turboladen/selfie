@@ -356,6 +356,19 @@ rename may still be replaced, and that includes another selfie run saving the sa
 instant. `selfie_spec_update_batch` saves its specs one at a time, in order, so the specs before a
 refused one are already saved; run the refused ones again.
 
+`selfie spec remove` and the MCP `selfie_spec_remove` refuse the same way: they delete the spec only
+if it still holds what selfie read. The CLI compares with the file as it loaded it, before listing
+what depends on it and asking for confirmation, so an edit saved while the question waits is kept,
+and the command fails and names the file; run it again to be asked about the file as it is now. A
+spec that is a symlink is compared by what it points at, and only the link is removed. A second file
+claiming the same name, such as a `tool.yaml` beside `tool.yml`, appearing while the question waits
+makes the name ambiguous, and the removal refuses rather than delete one of the two. If another file
+has taken the name instead, such as a `tool.yaml` that replaced `tool.yml`, the removal refuses and
+names it. The packages listed as depending on it are those found when the question was asked; one
+that comes to depend on it while the question waits is not listed. The list of dotfiles the spec
+deployed, which you may want to delete by hand, is shown only once the spec is gone. A change made
+in the instant between the last look and the deletion may still be deleted.
+
 `selfie spec edit` is not among them, because it does not rewrite. It opens an existing file exactly
 as written, so anchors, comments and key order survive editing, and a file carrying a key selfie
 would refuse to write can still be opened to fix it. Only a package that does not exist yet is
@@ -1525,12 +1538,12 @@ the track names each one it could not check and goes on.
 
 Those three steps are ordered so a failure leaves nothing half-finished. A spec that cannot be saved
 takes the copy with it: selfie removes the file it had just written, so a retry after fixing the
-cause does not trip over a file you never knowingly created. If that removal fails too, selfie says
-so and names the file to delete. The causes are ordinary ones: a permission problem, a spec carrying
-a key selfie will not rewrite, an existing spec that changed after selfie read it, or, for a new
-spec, something that appeared at the spec's path while selfie was writing it. Either change is left
-as it is. If the copy itself is refused, no spec is written, so no entry ever names a file that is
-not there.
+cause does not trip over a file you never knowingly created. If that removal fails too, or selfie
+cannot read the copy back to be sure it is its own, selfie says so and names the file to check. The
+causes are ordinary ones: a permission problem, a spec carrying a key selfie will not rewrite, an
+existing spec that changed after selfie read it, or, for a new spec, something that appeared at the
+spec's path while selfie was writing it. Either change is left as it is. If the copy itself is
+refused, no spec is written, so no entry ever names a file that is not there.
 
 The deploy state is recorded last, and a failure there is the one case that leaves work in place:
 the copy and the spec entry are both correct and only the record is missing. Selfie says so and

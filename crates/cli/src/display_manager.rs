@@ -344,7 +344,16 @@ pub struct DisplayManager {
     // What the next prompts answer, in a test.
     #[cfg(test)]
     script: Arc<Mutex<VecDeque<Scripted>>>,
+    // This holds what the next prompt does while it is open, before its answer,
+    // in a test.
+    #[cfg(test)]
+    while_asking: Arc<Mutex<Option<WhileAsking>>>,
 }
+
+// A test's action while a prompt is open, run before the scripted answer, has
+// this type.
+#[cfg(test)]
+type WhileAsking = Box<dyn FnOnce() + Send>;
 
 // One scripted prompt result: an answer, or the error dialoguer would return.
 #[cfg(test)]
@@ -408,6 +417,8 @@ impl DisplayManager {
             cancellation: None,
             #[cfg(test)]
             script: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(test)]
+            while_asking: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1136,6 +1147,14 @@ impl DisplayManager {
     // scripted error exactly as it converts a real one.
     #[cfg(test)]
     fn ask<P: Prompt>(&self, _prompt: P) -> dialoguer::Result<P::Answer> {
+        let effect = self
+            .while_asking
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(effect) = effect {
+            effect();
+        }
         let next = self
             .script
             .lock()
@@ -1147,6 +1166,16 @@ impl DisplayManager {
                 .downcast::<P::Answer>()
                 .expect("the scripted answer has the prompt's answer type")
         })
+    }
+
+    // Run `effect` while the next prompt is open, before its scripted answer, as
+    // something the user does in another window while selfie waits.
+    #[cfg(test)]
+    pub(crate) fn on_next_prompt(self, effect: impl FnOnce() + Send + 'static) -> Self {
+        if let Ok(mut slot) = self.while_asking.lock() {
+            *slot = Some(Box::new(effect));
+        }
+        self
     }
 
     // Answer the next prompts from `answers`, in order. A prompt asked after the

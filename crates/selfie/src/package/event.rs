@@ -3109,6 +3109,7 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             | crate::package::port::PackageRepoError::UnwritablePath { .. }
             | crate::package::port::PackageRepoError::Occupied { .. }
             | crate::package::port::PackageRepoError::ChangedSinceLoad { .. }
+            | crate::package::port::PackageRepoError::AnotherFileAnswers { .. }
             | crate::package::port::PackageRepoError::NotLoaded { .. }) => {
                 OperationFailure::Generic(err.to_string())
             }

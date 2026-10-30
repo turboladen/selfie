@@ -11,7 +11,7 @@ use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
 use super::filesystem::{
     AbsentReason, DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent,
-    OpenRefusal, Placed, RepositoryRead, TargetRead, parent_dir,
+    OpenRefusal, Placed, Removal, RepositoryRead, TargetRead, parent_dir,
 };
 use super::target::TargetPath;
 
@@ -301,40 +301,109 @@ fn write_by_rename_with(
 ///
 /// A failure to look or to read that says nothing about whether the file
 /// changed, such as a file selfie may not read, worded to name `path`.
-// Anything but a regular file is not what was expected, and neither is nothing at
-// all. The non-following stat comes first and opens nothing: opening a fifo
-// releases a writer blocked on it, and opening a device node can act on the
-// device. Only a regular file is opened, through the no-follow read, which checks
-// the descriptor's type again in case something else took its place in between.
 fn still_holds(path: &Path, expected: &[u8]) -> Result<bool, FileSystemError> {
-    still_holds_with(path, expected, |path| {
-        RealFileSystem.read_file_no_follow(&crate::fs::target::repository_path(path))
-    })
+    still_holds_with(path, expected, read_target)
 }
 
-// `still_holds`, opening the file through `read`. Production passes the no-follow
-// read; a test passes one that records whether it was asked, which no file system
-// effect can show reliably.
+// This is `still_holds`, reading through `read`. Production passes `read_target`; a test
+// passes one that records whether it was asked, which no file system effect can
+// show reliably.
 fn still_holds_with(
     path: &Path,
     expected: &[u8],
-    read: impl FnOnce(&Path) -> Result<TargetRead, FileSystemError>,
+    read: impl FnOnce(&Path, Links) -> Result<TargetRead, FileSystemError>,
 ) -> Result<bool, FileSystemError> {
-    let tagged_error = |e: &io::Error| FileSystemError::IoError(tagged(path, e));
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => return Ok(false),
+    holds(path, expected, Links::NotFollowed, read)
+}
+
+// This is `remove_file_if_holding`, reading through `read` and unlinking through `unlink`,
+// so a test can reach the two moments no file system effect shows.
+fn remove_if_holding_with(
+    path: &Path,
+    expected: &[u8],
+    read: impl FnOnce(&Path, Links) -> Result<TargetRead, FileSystemError>,
+    unlink: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<Removal, FileSystemError> {
+    if !holds(path, expected, Links::Followed, read)? {
+        return Ok(Removal::Kept);
+    }
+    // This unlinks the name, never what a link there points at. Gone by now, or
+    // turned into something a file cannot be unlinked as, means someone else
+    // changed it, which is a change like any other.
+    match unlink(path) {
+        Ok(()) => Ok(Removal::Removed),
         Err(e)
             if matches!(
                 e.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::IsADirectory
+                    | io::ErrorKind::NotADirectory
             ) =>
         {
-            return Ok(false);
+            Ok(Removal::Kept)
         }
-        Err(e) => return Err(tagged_error(&e)),
+        // macOS refuses to unlink a directory with `EPERM`, which also means a
+        // file selfie may not remove, so what is there decides.
+        Err(e) => match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() => Ok(Removal::Kept),
+            Err(stat) if gone(&stat) => Ok(Removal::Kept),
+            _ => Err(FileSystemError::IoError(tagged(path, &e))),
+        },
     }
-    match read(path) {
+}
+
+/// Whether a failed stat or open means nothing regular is at the path: nothing
+/// there, a component that is not a directory, or a link loop.
+fn gone(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) || e.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32)
+}
+
+/// Whether a symlink at the final component is followed to what it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Links {
+    NotFollowed,
+    Followed,
+}
+
+/// Whether `path` names a regular file holding exactly `expected`, judging a
+/// final symlink by what it names only under [`Links::Followed`].
+///
+/// # Errors
+///
+/// A failure to look or to read that says nothing about whether the file
+/// changed, worded to name `path`.
+// A stat comes first and opens nothing: opening a fifo releases a writer blocked
+// on it, and opening a device node can act on the device. Only a regular file of
+// the expected length is then read, through `read`, which opens it without
+// waiting on a fifo and checks the descriptor's own type in case something else
+// took its place in between. Nothing there, a component that is not a directory,
+// and a link loop all mean nothing regular is there.
+fn holds(
+    path: &Path,
+    expected: &[u8],
+    links: Links,
+    read: impl FnOnce(&Path, Links) -> Result<TargetRead, FileSystemError>,
+) -> Result<bool, FileSystemError> {
+    let tagged_error = |e: &io::Error| FileSystemError::IoError(tagged(path, e));
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() && links == Links::Followed => {
+            match fs::metadata(path) {
+                Ok(followed) => followed,
+                Err(e) if gone(&e) => return Ok(false),
+                Err(e) => return Err(tagged_error(&e)),
+            }
+        }
+        Ok(metadata) => metadata,
+        Err(e) if gone(&e) => return Ok(false),
+        Err(e) => return Err(tagged_error(&e)),
+    };
+    if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+        return Ok(false);
+    }
+    match read(path, links) {
         Ok(TargetRead::Bytes(found)) => Ok(found == expected),
         Ok(
             TargetRead::Absent
@@ -621,16 +690,64 @@ fn regular_file_failure(error: io::Error) -> io::Result<TargetRead> {
     }
 }
 
+/// What `path` holds, read without waiting on a fifo, and without following a
+/// final symlink unless `links` says to: its bytes, or what is there instead.
+///
+/// # Errors
+///
+/// [`FileSystemError::IoError`] when what is there cannot be told, or a regular
+/// file failed for a reason other than permission.
+// The descriptor's own type, not the path's, decides what was opened: a fifo,
+// socket or device planted after the caller's stat is refused before anything is
+// read from it.
+fn read_target(path: &Path, links: Links) -> Result<TargetRead, FileSystemError> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    use std::io::Read as _;
+
+    let io_error = |e: io::Error| FileSystemError::IoError(Arc::new(e));
+
+    let mut file = match open_for_reading(path, links).map_err(io_error)? {
+        Ok(file) => file,
+        Err(found) => return Ok(found),
+    };
+    // From here a file is open, so a failure is of a file that is there.
+    let failure = |e: io::Error| regular_file_failure(e).map_err(io_error);
+
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
+        Err(e) => return failure(e),
+    };
+    if let Some(found) = not_regular(path, &metadata) {
+        return Ok(found);
+    }
+
+    // A regular file: clear `O_NONBLOCK`, which is there only for the open, so
+    // a filesystem that honors it on reads cannot fail one with `EAGAIN`.
+    let cleared = fcntl(&file, FcntlArg::F_GETFL).and_then(|flags| {
+        let flags = OFlag::from_bits_truncate(flags) - OFlag::O_NONBLOCK;
+        fcntl(&file, FcntlArg::F_SETFL(flags))
+    });
+    if let Err(e) = cleared {
+        return failure(e.into());
+    }
+
+    let mut bytes = Vec::new();
+    match file.read_to_end(&mut bytes) {
+        Ok(_) => Ok(TargetRead::Bytes(bytes)),
+        Err(e) => failure(e),
+    }
+}
+
 /// The first component above `path` that is not a directory: a file, or a symlink
 /// whose destination is not there. `None` when neither walk finds one.
 fn non_directory_ancestor(path: &Path) -> Option<PathBuf> {
     first_non_directory_ancestor(path).or_else(|| dangling_ancestor(path))
 }
 
-/// Open `path` for reading without following a symlink at its final component or
-/// waiting on a fifo. Returns the file, or what is there instead when the open
-/// finds a state of its own: nothing, a link, a directory, a fifo, socket or device
-/// node.
+/// Open `path` for reading without waiting on a fifo, and without following a
+/// symlink at its final component unless `links` says to. Returns the file, or
+/// what is there instead when the open finds a state of its own: nothing, a
+/// link, a directory, a fifo, socket or device node.
 ///
 /// # Errors
 ///
@@ -644,16 +761,30 @@ fn non_directory_ancestor(path: &Path) -> Option<PathBuf> {
 // fifo return at once instead of waiting for a writer. `O_NOCTTY` stops a terminal
 // device becoming the controlling terminal on Linux. Opening a device can still
 // have side effects, which is why callers ask `irregular_target_refusal` first.
-fn open_no_follow(path: &Path) -> io::Result<Result<fs::File, TargetRead>> {
+fn open_for_reading(path: &Path, links: Links) -> io::Result<Result<fs::File, TargetRead>> {
     use nix::fcntl::OFlag;
     use std::os::unix::fs::OpenOptionsExt as _;
 
+    let mut flags = OFlag::O_NONBLOCK | OFlag::O_NOCTTY;
+    if links == Links::NotFollowed {
+        flags |= OFlag::O_NOFOLLOW;
+    }
     match fs::OpenOptions::new()
         .read(true)
-        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_NOCTTY).bits())
+        .custom_flags(flags.bits())
         .open(path)
     {
         Ok(file) => Ok(Ok(file)),
+        // When links are followed, a loop is not a file to open: a link is there,
+        // and the caller is told so.
+        Err(e)
+            if links == Links::Followed
+                && e.raw_os_error() == Some(nix::errno::Errno::ELOOP as i32) =>
+        {
+            Ok(Err(TargetRead::Link {
+                points_to: fs::read_link(path).ok(),
+            }))
+        }
         // `ENOENT` is also what a path below a dangling link gets, and only the
         // ancestors tell the two apart.
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Err(match dangling_ancestor(path) {
@@ -673,7 +804,10 @@ fn open_no_follow(path: &Path) -> io::Result<Result<fs::File, TargetRead>> {
         // open, a socket, which cannot be opened at all. A regular file that will not
         // open is judged by `regular_file_failure`. A path the stat cannot reach
         // either -- a loop above it -- is the open's own error.
-        Err(e) => match fs::symlink_metadata(path) {
+        Err(e) => match match links {
+            Links::NotFollowed => fs::symlink_metadata(path),
+            Links::Followed => fs::metadata(path),
+        } {
             Ok(metadata) => match not_regular(path, &metadata) {
                 Some(found) => Ok(Err(found)),
                 None => regular_file_failure(e).map(Err),
@@ -711,42 +845,7 @@ impl FileSystem for RealFileSystem {
     // socket or device planted after the caller's stat is refused before anything is
     // read from it.
     fn read_file_no_follow(&self, path: &TargetPath) -> Result<TargetRead, FileSystemError> {
-        use nix::fcntl::{FcntlArg, OFlag, fcntl};
-        use std::io::Read as _;
-
-        let path = path.path();
-        let io_error = |e: io::Error| FileSystemError::IoError(Arc::new(e));
-
-        let mut file = match open_no_follow(path).map_err(io_error)? {
-            Ok(file) => file,
-            Err(found) => return Ok(found),
-        };
-        // From here a file is open, so a failure is of a file that is there.
-        let failure = |e: io::Error| regular_file_failure(e).map_err(io_error);
-
-        let metadata = match file.metadata() {
-            Ok(metadata) => metadata,
-            Err(e) => return failure(e),
-        };
-        if let Some(found) = not_regular(path, &metadata) {
-            return Ok(found);
-        }
-
-        // A regular file: clear `O_NONBLOCK`, which is there only for the open, so
-        // a filesystem that honors it on reads cannot fail one with `EAGAIN`.
-        let cleared = fcntl(&file, FcntlArg::F_GETFL).and_then(|flags| {
-            let flags = OFlag::from_bits_truncate(flags) - OFlag::O_NONBLOCK;
-            fcntl(&file, FcntlArg::F_SETFL(flags))
-        });
-        if let Err(e) = cleared {
-            return failure(e.into());
-        }
-
-        let mut bytes = Vec::new();
-        match file.read_to_end(&mut bytes) {
-            Ok(_) => Ok(TargetRead::Bytes(bytes)),
-            Err(e) => failure(e),
-        }
+        read_target(path.path(), Links::NotFollowed)
     }
 
     fn write_file_private(
@@ -788,10 +887,10 @@ impl FileSystem for RealFileSystem {
         irregular_refusal(path.path())
     }
 
-    // Everything `open_no_follow` names as a state of its own is left to the question
+    // Everything `open_for_reading` names as a state of its own is left to the question
     // that owns it, so only a file that will not open, or cannot be told, refuses.
     fn open_for_read_refusal(&self, path: &TargetPath) -> Option<OpenRefusal> {
-        match open_no_follow(path.path()) {
+        match open_for_reading(path.path(), Links::NotFollowed) {
             Ok(Err(TargetRead::Unreadable(e))) => Some(OpenRefusal::Unreadable(e)),
             Ok(Ok(_))
             | Ok(Err(
@@ -837,6 +936,22 @@ impl FileSystem for RealFileSystem {
 
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
         fs::remove_file(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
+    }
+
+    // A stat comes first and opens nothing, so a fifo is never waited on and
+    // nothing it finds to be other than a regular file is opened. A file of the
+    // expected length is then opened without waiting on a fifo, its descriptor's
+    // type is checked, and only then is it read and compared. Something swapped in
+    // after the stat may be opened, but is never read or removed. The unlink is a
+    // separate call, so a change landing between the read and it is removed.
+    fn remove_file_if_holding(
+        &self,
+        path: &TargetPath,
+        expected: &[u8],
+    ) -> Result<Removal, FileSystemError> {
+        remove_if_holding_with(path.path(), expected, read_target, |path| {
+            fs::remove_file(path)
+        })
     }
 
     fn directory_state(&self, path: &Path) -> DirectoryState {
@@ -2315,6 +2430,51 @@ mod no_follow_read_tests {
         RealFileSystem.read_file_no_follow(&tp(path))
     }
 
+    // Followed, a link is read as what it names: a link to a socket, which cannot
+    // be opened, is named from a following stat, and a link loop is a link. The
+    // removal's look depends on both, since either is a change.
+    #[test]
+    fn a_followed_link_is_named_by_what_it_points_at() {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().join("socket");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let to_socket = dir.path().join("to-socket");
+        std::os::unix::fs::symlink(&socket, &to_socket).unwrap();
+        let looped = dir.path().join("loop");
+        std::os::unix::fs::symlink(&looped, &looped).unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, b"bytes").unwrap();
+        let to_file = dir.path().join("to-file");
+        std::os::unix::fs::symlink(&file, &to_file).unwrap();
+
+        assert!(
+            matches!(
+                read_target(&to_socket, Links::Followed),
+                Ok(TargetRead::Irregular { kind: "socket" })
+            ),
+            "{:?}",
+            read_target(&to_socket, Links::Followed)
+        );
+        assert!(
+            matches!(
+                read_target(&looped, Links::Followed),
+                Ok(TargetRead::Link { .. })
+            ),
+            "{:?}",
+            read_target(&looped, Links::Followed)
+        );
+        assert!(
+            matches!(read_target(&to_file, Links::Followed), Ok(TargetRead::Bytes(ref b)) if b == b"bytes"),
+            "{:?}",
+            read_target(&to_file, Links::Followed)
+        );
+        // Control: not followed, the same link is a link.
+        assert!(matches!(
+            read_target(&to_file, Links::NotFollowed),
+            Ok(TargetRead::Link { .. })
+        ));
+    }
+
     #[test]
     fn a_regular_file_is_read() {
         let dir = tempdir().unwrap();
@@ -3621,9 +3781,9 @@ mod replace_if_holding_tests {
 
         for target in [&fifo, &directory, &link, &absent] {
             let mut opened = false;
-            let held = still_holds_with(target, b"as loaded", |_| {
+            let held = still_holds_with(target, b"as loaded", |path, links| {
                 opened = true;
-                Ok(TargetRead::Bytes(b"as loaded".to_vec()))
+                read_target(path, links)
             });
             assert!(matches!(held, Ok(false)), "{target:?}: {held:?}");
             assert!(!opened, "{target:?} was opened");
@@ -3631,12 +3791,51 @@ mod replace_if_holding_tests {
 
         // Control: a regular file is opened, and its bytes decide.
         let mut opened = false;
-        let held = still_holds_with(&file, b"as loaded", |_| {
+        let held = still_holds_with(&file, b"as loaded", |path, links| {
             opened = true;
-            Ok(TargetRead::Bytes(b"as loaded".to_vec()))
+            read_target(path, links)
         });
         assert!(matches!(held, Ok(true)), "{held:?}");
         assert!(opened, "the regular file was not read");
+    }
+
+    // A file of another length has changed whatever its mode, so one selfie may
+    // not read is kept as a change rather than refused as unreadable: the length
+    // settles it before any read.
+    #[test]
+    fn an_unreadable_file_of_another_length_is_kept_as_changed() {
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("spec.yml");
+        fs::write(&target, b"as loaded, then edited").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = write_by_rename(
+            &target,
+            b"rewritten",
+            Replacement::KeepingMode,
+            holding(b"as loaded"),
+        );
+
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(result, Ok(Placed::Kept)), "{result:?}");
+        assert_eq!(fs::read(&target).unwrap(), b"as loaded, then edited");
+    }
+
+    // A link loop above the file means the path no longer leads to the file that
+    // was read, so the last look answers that it changed.
+    #[test]
+    fn a_link_loop_above_the_file_is_a_change() {
+        let dir = tempdir().unwrap();
+        let looped = dir.path().join("loop");
+        symlink(&looped, &looped).unwrap();
+
+        assert!(matches!(
+            still_holds(&looped.join("spec.yml"), b"as loaded"),
+            Ok(false)
+        ));
     }
 
     #[test]
@@ -3645,5 +3844,259 @@ mod replace_if_holding_tests {
             format!("{:?}", holding(b"pl4nted-t0ken")),
             "ReplaceIfHolding(13 bytes)"
         );
+    }
+}
+
+// These tests cover a removal that deletes only the bytes it read, and the look
+// it takes first.
+#[cfg(test)]
+mod remove_if_holding_tests {
+    use std::os::unix::fs::{FileTypeExt as _, symlink};
+
+    use super::*;
+    use tempfile::tempdir;
+
+    fn remove(path: &Path, expected: &[u8]) -> Result<Removal, FileSystemError> {
+        RealFileSystem.remove_file_if_holding(&crate::fs::target::repository_path(path), expected)
+    }
+
+    #[test]
+    fn a_file_holding_the_expected_bytes_is_removed() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("spec.yml");
+        fs::write(&file, b"as loaded").unwrap();
+
+        assert!(matches!(remove(&file, b"as loaded"), Ok(Removal::Removed)));
+        assert!(fs::symlink_metadata(&file).is_err(), "the file remains");
+    }
+
+    // Other bytes, nothing, a directory, a fifo, a dangling link and a link loop:
+    // none is the expected file, so each is left as it is.
+    #[test]
+    fn anything_but_the_expected_file_is_kept() {
+        let dir = tempdir().unwrap();
+        let edited = dir.path().join("edited.yml");
+        fs::write(&edited, b"edited by hand").unwrap();
+        let absent = dir.path().join("absent.yml");
+        let directory = dir.path().join("dir.yml");
+        fs::create_dir(&directory).unwrap();
+        let fifo = dir.path().join("fifo.yml");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let dangling = dir.path().join("dangling.yml");
+        symlink(dir.path().join("nowhere"), &dangling).unwrap();
+        let looped = dir.path().join("loop.yml");
+        symlink(&looped, &looped).unwrap();
+
+        for target in [&edited, &absent, &directory, &fifo, &dangling, &looped] {
+            let result = remove(target, b"as loaded");
+            assert!(
+                matches!(result, Ok(Removal::Kept)),
+                "{target:?}: {result:?}"
+            );
+        }
+        assert_eq!(fs::read(&edited).unwrap(), b"edited by hand");
+        assert!(directory.is_dir());
+        assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+        assert!(fs::symlink_metadata(&dangling).unwrap().is_symlink());
+        assert!(fs::symlink_metadata(&looped).unwrap().is_symlink());
+    }
+
+    // A link is judged by the file it names, and only the link is removed.
+    #[test]
+    fn a_link_is_compared_through_and_only_the_link_is_removed() {
+        let dir = tempdir().unwrap();
+        let destination = dir.path().join("elsewhere.yml");
+        fs::write(&destination, b"as loaded").unwrap();
+        let link = dir.path().join("spec.yml");
+        symlink(&destination, &link).unwrap();
+
+        assert!(matches!(remove(&link, b"as loaded"), Ok(Removal::Removed)));
+        assert!(fs::symlink_metadata(&link).is_err(), "the link remains");
+        assert_eq!(fs::read(&destination).unwrap(), b"as loaded");
+    }
+
+    // Nothing but a regular file, or a link to one, is opened: opening a fifo
+    // would release a writer blocked on it, and opening a device node can act on
+    // the device. The opener is replaced by one that records the call.
+    #[test]
+    fn the_look_opens_only_a_regular_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file.yml");
+        fs::write(&file, b"as loaded").unwrap();
+        let fifo = dir.path().join("fifo.yml");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let directory = dir.path().join("dir.yml");
+        fs::create_dir(&directory).unwrap();
+        let fifo_link = dir.path().join("fifo-link.yml");
+        symlink(&fifo, &fifo_link).unwrap();
+        let file_link = dir.path().join("file-link.yml");
+        symlink(&file, &file_link).unwrap();
+
+        for target in [&fifo, &directory, &fifo_link] {
+            let mut opened = false;
+            let result = remove_if_holding_with(
+                target,
+                b"as loaded",
+                |path, links| {
+                    opened = true;
+                    read_target(path, links)
+                },
+                |_| panic!("{target:?} was removed"),
+            );
+            assert!(
+                matches!(result, Ok(Removal::Kept)),
+                "{target:?}: {result:?}"
+            );
+            assert!(!opened, "{target:?} was opened");
+        }
+
+        // Control: a regular file, and a link to one, are opened, following a link,
+        // since the removal judges a link by the file it names.
+        for (target, expected_links) in [(&file, Links::Followed), (&file_link, Links::Followed)] {
+            let mut opened_with = None;
+            let result = remove_if_holding_with(
+                target,
+                b"as loaded",
+                |path, links| {
+                    opened_with = Some(links);
+                    read_target(path, links)
+                },
+                |_| Ok(()),
+            );
+            assert!(
+                matches!(result, Ok(Removal::Removed)),
+                "{target:?}: {result:?}"
+            );
+            assert_eq!(opened_with, Some(expected_links), "{target:?}");
+        }
+    }
+
+    // A file gone by the time it is unlinked was changed by someone else, and is
+    // reported as kept, not as an error.
+    #[test]
+    fn a_file_gone_at_the_unlink_is_kept() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("spec.yml");
+        fs::write(&file, b"as loaded").unwrap();
+
+        // A directory, or a component above that is no longer one, took its
+        // place: that is a change as well.
+        for kind in [
+            io::ErrorKind::NotFound,
+            io::ErrorKind::IsADirectory,
+            io::ErrorKind::NotADirectory,
+        ] {
+            let result = remove_if_holding_with(&file, b"as loaded", read_target, |_| {
+                Err(io::Error::from(kind))
+            });
+
+            assert!(matches!(result, Ok(Removal::Kept)), "{kind:?}: {result:?}");
+        }
+    }
+
+    // A directory that took the file's place before the unlink is a change, even
+    // where the unlink refuses it with `EPERM`, as macOS does.
+    #[test]
+    fn a_directory_at_the_unlink_is_kept_whatever_the_errno() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("spec.yml");
+        fs::write(&file, b"as loaded").unwrap();
+
+        let result = remove_if_holding_with(&file, b"as loaded", read_target, |path| {
+            fs::remove_file(path).unwrap();
+            fs::create_dir(path).unwrap();
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+
+        assert!(matches!(result, Ok(Removal::Kept)), "{result:?}");
+        assert!(file.is_dir(), "the directory was removed");
+    }
+
+    // A path that no longer leads anywhere when the unlink fails, here because a
+    // file took its parent directory's place, is gone like a missing file.
+    #[test]
+    fn a_path_gone_when_the_unlink_fails_is_kept() {
+        let dir = tempdir().unwrap();
+        let parent = dir.path().join("packages");
+        fs::create_dir(&parent).unwrap();
+        let file = parent.join("spec.yml");
+        fs::write(&file, b"as loaded").unwrap();
+
+        let result = remove_if_holding_with(&file, b"as loaded", read_target, |_| {
+            fs::remove_dir_all(&parent).unwrap();
+            fs::write(&parent, b"not a directory").unwrap();
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+
+        assert!(matches!(result, Ok(Removal::Kept)), "{result:?}");
+    }
+
+    // A file whose length is not the expected one is not read: the stat already
+    // says it changed.
+    #[test]
+    fn a_file_of_another_length_is_kept_without_reading_it() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("spec.yml");
+        fs::write(&file, b"as loaded, then edited").unwrap();
+
+        let result = remove_if_holding_with(
+            &file,
+            b"as loaded",
+            |_, _| panic!("a file of another length was read"),
+            |_| panic!("a file of another length was removed"),
+        );
+
+        assert!(matches!(result, Ok(Removal::Kept)), "{result:?}");
+    }
+
+    // A link that takes the file's place between the stat and the open is found by
+    // the read: something else is there, so it is kept.
+    #[test]
+    fn a_link_swapped_in_before_the_open_is_kept() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("spec.yml");
+        fs::write(&file, b"as loaded").unwrap();
+
+        let result = remove_if_holding_with(
+            &file,
+            b"as loaded",
+            |_, _| Ok(TargetRead::Link { points_to: None }),
+            |_| panic!("the swapped-in link was removed"),
+        );
+
+        assert!(matches!(result, Ok(Removal::Kept)), "{result:?}");
+    }
+
+    // Any other failure to unlink, and a file selfie may not read, is refused as
+    // itself, naming the file.
+    #[test]
+    fn a_failure_to_read_or_unlink_names_the_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("spec.yml");
+        fs::write(&file, b"as loaded").unwrap();
+
+        let unlink_refused = remove_if_holding_with(&file, b"as loaded", read_target, |_| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        match unlink_refused {
+            Err(FileSystemError::IoError(e)) => {
+                assert!(e.to_string().contains(file.to_str().unwrap()), "{e}");
+            }
+            other => panic!("expected the unlink failure, got {other:?}"),
+        }
+
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = remove(&file, b"as loaded");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        match unreadable {
+            Err(FileSystemError::IoError(e)) => {
+                assert!(e.to_string().contains(file.to_str().unwrap()), "{e}");
+            }
+            other => panic!("expected the read failure, got {other:?}"),
+        }
+        assert!(file.exists(), "the unreadable file was removed");
     }
 }

@@ -1202,8 +1202,8 @@ mod recommends_after_the_root_stops_loading {
             self.inner.create_package(package, path)
         }
 
-        fn remove_package(&self, name: &str) -> Result<(), PackageRepoError> {
-            self.inner.remove_package(name)
+        fn remove_package(&self, package: &Package) -> Result<(), PackageRepoError> {
+            self.inner.remove_package(package)
         }
 
         fn find_dependent_packages(
@@ -3297,14 +3297,13 @@ mod a_spec_path_taken_during_create {
 // spec in between is the user's, and the save refuses rather than writing over
 // it. The MCP update tools reach the same code.
 mod a_spec_changed_after_it_was_loaded {
-    use std::os::unix::fs::OpenOptionsExt as _;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use selfie::package::event::PackageUpdateFields;
     use test_common::{
-        FakeCommandRunner, PlantsBeforeWrite, Rewrite, config::service_test_config_with_dir,
-        create_service_with_fs_and_runner, within_deadline,
+        FakeCommandRunner, PlantsBeforeWrite, ReleaseFifo, Rewrite,
+        config::service_test_config_with_dir, create_service_with_fs_and_runner, within_deadline,
     };
 
     use super::*;
@@ -3383,20 +3382,6 @@ mod a_spec_changed_after_it_was_loaded {
         assert_refused_as_changed(&path, &events);
     }
 
-    // Opens the fifo for writing without blocking, which releases a read blocked on
-    // it, then removes it, so a failing run does not leave a thread stuck.
-    struct ReleaseFifo(PathBuf);
-
-    impl Drop for ReleaseFifo {
-        fn drop(&mut self) {
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
-                .open(&self.0);
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
     // A fifo in the spec's place is a change, and the save refuses it as one
     // without opening it: a read of a fifo blocks until a writer arrives.
     #[test]
@@ -3451,6 +3436,319 @@ mod a_spec_changed_after_it_was_loaded {
                 .unwrap()
                 .contains("set by selfie"),
             "the update was not saved"
+        );
+    }
+}
+
+// A remove loads a spec, lists what depends on it, and deletes the file. An edit
+// that lands on the spec in between is the user's, and the removal refuses rather
+// than deleting it. The MCP remove tool reaches the same code.
+mod a_spec_changed_before_removal {
+    use std::os::unix::fs::{FileTypeExt as _, symlink};
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use test_common::{
+        FakeCommandRunner, PlantsBeforeWrite, ReleaseFifo, Rewrite,
+        config::service_test_config_with_dir, create_service_with_fs_and_runner, within_deadline,
+    };
+
+    use super::*;
+
+    const LOADED: &str = "name: myapp\nenvironments:\n  test:\n    install: \"true\"\n";
+    const EDITED: &str =
+        "name: myapp\ndescription: edited by hand\nenvironments:\n  test:\n    install: \"true\"\n";
+
+    // Returns the path at which `remove_with` puts the spec in `dir`.
+    fn spec_path(dir: &Path) -> PathBuf {
+        dir.join("myapp.yml")
+    }
+
+    // Writes a spec holding `LOADED` at `spec_path(dir)` and removes it through a
+    // file system that applies `rewrite` just before the removal reaches it, after
+    // the load, the dependents scan and the name's second lookup.
+    async fn remove_with(dir: &Path, rewrite: Rewrite) -> (PlantsBeforeWrite, Vec<PackageEvent>) {
+        let path = spec_path(dir);
+        std::fs::write(&path, LOADED).unwrap();
+        let fs = PlantsBeforeWrite::rewritten_before_remove(&path, rewrite);
+        let service = create_service_with_fs_and_runner(
+            service_test_config_with_dir(dir),
+            fs.clone(),
+            FakeCommandRunner::new(),
+        );
+        let events = collect_events(service.remove("myapp").await).await;
+        assert!(
+            fs.rewritten(),
+            "control: the spec was changed just before the removal"
+        );
+        (fs, events)
+    }
+
+    fn assert_refused_as_changed(path: &Path, events: &[PackageEvent]) {
+        let expected = format!(
+            "{} changed after selfie read it, so it was not removed. Run the command again, \
+             which reads the file as it is now.",
+            path.display()
+        );
+        match get_operation_result(events) {
+            Some(OperationResult::Failure(failure @ OperationFailure::Generic(_))) => {
+                assert_eq!(failure.to_string(), expected);
+            }
+            other => panic!("a changed spec must refuse the removal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_remove_does_not_delete_a_spec_edited_after_it_was_loaded() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        let (_, events) = remove_with(dir.path(), Rewrite::File(EDITED)).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&path).ok().as_deref(),
+            Some(EDITED),
+            "the edit made after the load was removed"
+        );
+        assert_refused_as_changed(&path, &events);
+    }
+
+    // The file the user asked to remove is gone, but the package may not be: a
+    // checkout can have renamed it. So this is a change, and a rerun says what is
+    // there now.
+    #[tokio::test]
+    async fn a_remove_of_a_spec_already_gone_is_refused_as_changed() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        let (_, events) = remove_with(dir.path(), Rewrite::Removed).await;
+
+        assert!(std::fs::symlink_metadata(&path).is_err());
+        assert_refused_as_changed(&path, &events);
+    }
+
+    // A fifo in the spec's place is a change, refused without opening it: a read
+    // of a fifo blocks until a writer arrives.
+    #[test]
+    fn a_remove_refuses_a_fifo_at_the_spec() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        let _release = ReleaseFifo(path.clone());
+        let root = dir.path().to_path_buf();
+        let (_, events) = within_deadline(Duration::from_secs(10), move || async move {
+            remove_with(&root, Rewrite::Fifo).await
+        })
+        .expect("the removal must not block on the fifo");
+
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_fifo(),
+            "the fifo was removed"
+        );
+        assert_refused_as_changed(&path, &events);
+    }
+
+    // Replaced by rename with the bytes that were loaded: a new inode and a later
+    // modification time, and nothing a removal would lose. The removal goes ahead.
+    #[tokio::test]
+    async fn a_remove_deletes_a_spec_rewritten_with_the_bytes_it_loaded() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        let (fs, events) = remove_with(dir.path(), Rewrite::File(LOADED)).await;
+
+        let ((inode_before, mtime_before), (inode_after, mtime_after)) = fs
+            .stamps()
+            .expect("control: the rewrite recorded its stamps");
+        assert_ne!(inode_before, inode_after, "control: the inode moved");
+        assert_ne!(
+            mtime_before, mtime_after,
+            "control: the modification time moved"
+        );
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        assert!(!path.exists(), "the unchanged spec was not removed");
+    }
+
+    // Cleanup advice is about a spec that is gone. A refused removal sends none:
+    // following it would delete dotfiles the spec, kept, still deploys.
+    #[tokio::test]
+    async fn a_refused_removal_sends_no_cleanup_advice() {
+        const WITH_DOTFILES: &str = "name: myapp\ndotfiles:\n- source: myapp/rc\n  \
+                                     target: ~/.myapprc\nenvironments:\n  test:\n    \
+                                     install: \"true\"\n";
+        let advice = |events: &[PackageEvent]| {
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        PackageEvent::DotfileCleanupInfo { .. }
+                            | PackageEvent::RemovalDependencyInfo { .. }
+                    )
+                })
+                .count()
+        };
+        let run = |rewrite: Option<Rewrite>| async move {
+            let dir = TempDir::new().unwrap();
+            let path = spec_path(dir.path());
+            std::fs::write(&path, WITH_DOTFILES).unwrap();
+            std::fs::write(
+                dir.path().join("user.yml"),
+                "name: user\nenvironments:\n  test:\n    install: \"true\"\n    \
+                 dependencies: [myapp]\n",
+            )
+            .unwrap();
+            let fs = match rewrite {
+                Some(rewrite) => PlantsBeforeWrite::rewritten_before_remove(&path, rewrite),
+                // A double aimed at a path nothing removes, so nothing changes.
+                None => PlantsBeforeWrite::rewritten_before_remove(
+                    &path.with_extension("x"),
+                    Rewrite::Removed,
+                ),
+            };
+            let service = create_service_with_fs_and_runner(
+                service_test_config_with_dir(dir.path()),
+                fs,
+                FakeCommandRunner::new(),
+            );
+            collect_events(service.remove("myapp").await).await
+        };
+
+        let removed = run(None).await;
+        assert!(
+            matches!(
+                get_operation_result(&removed),
+                Some(OperationResult::Success(_))
+            ),
+            "{removed:?}"
+        );
+        assert_eq!(
+            advice(&removed),
+            2,
+            "control: a removal sends both: {removed:?}"
+        );
+
+        let refused = run(Some(Rewrite::File(EDITED))).await;
+        assert!(
+            matches!(
+                get_operation_result(&refused),
+                Some(OperationResult::Failure(_))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            advice(&refused),
+            0,
+            "a refused removal sent advice: {refused:?}"
+        );
+    }
+
+    // Another file answering to the name when the removal comes means removing the
+    // loaded one would not remove the package. The refusal names that file, and
+    // neither file is touched.
+    #[tokio::test]
+    async fn a_remove_refuses_when_another_file_now_answers_to_the_name() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        std::fs::write(&path, LOADED).unwrap();
+        let service = create_service_with_fs_and_runner(
+            service_test_config_with_dir(dir.path()),
+            selfie::fs::RealFileSystem,
+            FakeCommandRunner::new(),
+        );
+        let plan = service.prepare_removal("myapp").await.unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let answering = path.with_extension("yaml");
+        std::fs::write(&answering, LOADED).unwrap();
+
+        let events = collect_events(service.remove_shown(plan).await).await;
+
+        match get_operation_result(&events) {
+            Some(OperationResult::Failure(failure)) => {
+                let message = failure.to_string();
+                assert!(
+                    message.starts_with(&format!("{} now answers", answering.display())),
+                    "{message}"
+                );
+            }
+            other => panic!("another file answering must refuse the removal, got {other:?}"),
+        }
+        assert!(answering.exists(), "the file now answering was removed");
+    }
+
+    // On a volume that ignores case, a spec renamed only in case is the same file
+    // under another spelling, and is removed as itself.
+    #[tokio::test]
+    async fn a_spec_renamed_only_in_case_is_still_removed() {
+        let dir = TempDir::new().unwrap();
+        let path = spec_path(dir.path());
+        std::fs::write(&path, LOADED).unwrap();
+        let renamed = dir.path().join("MyApp.yml");
+        if !renamed.exists() {
+            // A case-sensitive volume: the two spellings are two files.
+            return;
+        }
+        let service = create_service_with_fs_and_runner(
+            service_test_config_with_dir(dir.path()),
+            selfie::fs::RealFileSystem,
+            FakeCommandRunner::new(),
+        );
+        let plan = service.prepare_removal("myapp").await.unwrap();
+        std::fs::rename(&path, &renamed).unwrap();
+
+        let events = collect_events(service.remove_shown(plan).await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "the renamed spec was not removed"
+        );
+    }
+
+    // A spec that is a symlink is read through the link, so the link is compared
+    // by what it points at, and only the link is removed.
+    #[tokio::test]
+    async fn removing_a_symlinked_spec_removes_the_link_only() {
+        let dir = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let destination = elsewhere.path().join("myapp.yml");
+        std::fs::write(&destination, LOADED).unwrap();
+        let link = spec_path(dir.path());
+        symlink(&destination, &link).unwrap();
+        let service = create_service_with_fs_and_runner(
+            service_test_config_with_dir(dir.path()),
+            selfie::fs::RealFileSystem,
+            FakeCommandRunner::new(),
+        );
+
+        let events = collect_events(service.remove("myapp").await).await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(_))
+            ),
+            "{events:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link).is_err(),
+            "the link remains"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&destination).unwrap(),
+            LOADED,
+            "the link's destination was touched"
         );
     }
 }

@@ -116,14 +116,25 @@ pub trait PackageRepository: Send + Sync {
     /// words, which speak of a rewrite. Otherwise as [`Self::save_package`].
     fn create_package(&self, package: &Package, path: &Path) -> Result<(), PackageRepoError>;
 
-    /// Delete a package's definition file. Irreversible, so confirm with the user
-    /// before calling it.
+    /// Delete the definition file `package` was loaded from, if it still holds
+    /// what was loaded. Irreversible, so confirm with the user first, and pass
+    /// the package the confirmation described.
+    ///
+    /// A change made to the file since the load is left as it is, and nothing is
+    /// removed. A change made at the same instant as the removal may still be
+    /// deleted. A symlink is judged by the file it names, and only the link is
+    /// removed.
     ///
     /// # Errors
     ///
-    /// [`PackageRepoError`] if the package does not exist, permission is denied,
-    /// or the deletion otherwise fails.
-    fn remove_package(&self, name: &str) -> Result<(), PackageRepoError>;
+    /// Returns [`PackageRepoError::ChangedSinceLoad`] if the file no longer holds
+    /// what the package was loaded from, including when it is gone or something
+    /// other than a regular file has taken its place. Returns
+    /// [`PackageRepoError::NotLoaded`] if this repository did not load the
+    /// package from a file in its own directory. Returns another
+    /// [`PackageRepoError`], naming the file, if it cannot be read back or the
+    /// deletion fails.
+    fn remove_package(&self, package: &Package) -> Result<(), PackageRepoError>;
 
     /// Every package listing `target_package` as a dependency in any of its
     /// environments, so a caller can say what a removal would break, paired with
@@ -311,30 +322,63 @@ pub enum PackageRepoError {
         path: PathBuf,
     },
 
-    /// Refused to rewrite a spec because the file at its path no longer holds
-    /// what it was loaded from. Nothing was written.
+    /// Refused to rewrite or remove a spec because the file at its path no
+    /// longer holds what it was loaded from. Nothing was written or removed.
     // Covers a removed file, and anything other than a regular file that takes
-    // its place after the writer's own refusals: none is what was loaded. The
-    // remedy is worded for all of them, since a run that reads the file again
-    // either makes the change to what is there or reports why it cannot. A read
-    // failure that says nothing about the file is passed through as itself
-    // rather than called a change.
+    // its place: none is what was loaded. The remedy is worded for all of them,
+    // since a run that reads the file again either acts on what is there or
+    // reports why it cannot. A read failure that says nothing about the file is
+    // passed through as itself rather than called a change.
     #[error(
-        "{path} changed after selfie read it, so nothing was written to it. \
+        "{path} changed after selfie read it, so {refused}. \
          Run the command again, which reads the file as it is now."
     )]
     ChangedSinceLoad {
-        /// The spec selfie declined to rewrite.
+        /// The spec selfie declined to change.
+        path: PathBuf,
+        /// What selfie declined to do to it.
+        refused: RefusedChange,
+    },
+
+    /// Refused to rewrite or remove a spec this repository did not load from the
+    /// path it would change, so there is nothing to tell a change by. Nothing was
+    /// written or removed.
+    #[error("refusing to change {path}: this repository did not load the spec from it")]
+    NotLoaded {
+        /// The path selfie declined to change.
         path: PathBuf,
     },
 
-    /// Refused to rewrite a spec that was not loaded from the path it would be
-    /// written to, so there is nothing to tell a change by. Nothing was written.
-    #[error("refusing to rewrite {path}: the spec was not read from it first")]
-    NotLoaded {
-        /// The path selfie declined to write.
+    /// Refused to remove a spec because another file now answers to its name, so
+    /// removing the loaded one would not remove the package. Nothing was removed.
+    #[error(
+        "{answering} now answers to the name of {path}, which selfie read, so nothing was \
+         removed. Run the command again, which reads the spec as it is now."
+    )]
+    AnotherFileAnswers {
+        /// The spec selfie loaded and declined to remove.
         path: PathBuf,
+        /// The file the name resolves to now.
+        answering: PathBuf,
     },
+}
+
+/// What [`PackageRepoError::ChangedSinceLoad`] declined to do to a spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedChange {
+    /// Rewrite it.
+    Write,
+    /// Remove it.
+    Removal,
+}
+
+impl std::fmt::Display for RefusedChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Write => "nothing was written to it",
+            Self::Removal => "it was not removed",
+        })
+    }
 }
 
 impl From<Arc<std::io::Error>> for PackageRepoError {
@@ -462,7 +506,8 @@ impl PackageRepoError {
             // `create_dir_all` fails against it, so it is not "no such package".
             Self::PackageListError(listing) if listing.may_be_created() => Some(Lookup::NotFound),
             Self::PackageListError(_) => Some(Lookup::PackageDirectoryUnreadable),
-            // Raised by `save_package` or `create_package`, never by a lookup.
+            // Raised by `save_package`, `create_package` or `remove_package`, never by
+            // a lookup.
             Self::IoError(_)
             | Self::Unserializable(_)
             | Self::UnknownDotfileFields { .. }
@@ -472,6 +517,7 @@ impl PackageRepoError {
             | Self::UnwritablePath { .. }
             | Self::Occupied { .. }
             | Self::ChangedSinceLoad { .. }
+            | Self::AnotherFileAnswers { .. }
             | Self::NotLoaded { .. }
             // Raised by `dotfiles track`, never by a lookup.
             | Self::FileSystemError(_) => None,

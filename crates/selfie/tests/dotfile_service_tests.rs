@@ -692,6 +692,13 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
     fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
         self.0.remove_file(path)
     }
+    fn remove_file_if_holding(
+        &self,
+        path: &selfie::fs::TargetPath,
+        expected: &[u8],
+    ) -> Result<selfie::fs::Removal, selfie::fs::FileSystemError> {
+        self.0.remove_file_if_holding(path, expected)
+    }
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.0.path_exists(path)
@@ -1014,6 +1021,13 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
     fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
         self.inner.remove_file(path)
     }
+    fn remove_file_if_holding(
+        &self,
+        path: &selfie::fs::TargetPath,
+        expected: &[u8],
+    ) -> Result<selfie::fs::Removal, selfie::fs::FileSystemError> {
+        self.inner.remove_file_if_holding(path, expected)
+    }
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
@@ -1129,6 +1143,13 @@ impl selfie::fs::FileSystem for HomeAt {
     }
     fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
         self.0.remove_file(path)
+    }
+    fn remove_file_if_holding(
+        &self,
+        path: &selfie::fs::TargetPath,
+        expected: &[u8],
+    ) -> Result<selfie::fs::Removal, selfie::fs::FileSystemError> {
+        self.0.remove_file_if_holding(path, expected)
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.0.path_exists(path)
@@ -1248,6 +1269,13 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
 
     fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
         self.inner.remove_file(path)
+    }
+    fn remove_file_if_holding(
+        &self,
+        path: &selfie::fs::TargetPath,
+        expected: &[u8],
+    ) -> Result<selfie::fs::Removal, selfie::fs::FileSystemError> {
+        self.inner.remove_file_if_holding(path, expected)
     }
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
@@ -1373,6 +1401,13 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
 
     fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
         self.inner.remove_file(path)
+    }
+    fn remove_file_if_holding(
+        &self,
+        path: &selfie::fs::TargetPath,
+        expected: &[u8],
+    ) -> Result<selfie::fs::Removal, selfie::fs::FileSystemError> {
+        self.inner.remove_file_if_holding(path, expected)
     }
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
@@ -1500,6 +1535,13 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
     fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
         self.inner.remove_file(path)
     }
+    fn remove_file_if_holding(
+        &self,
+        path: &selfie::fs::TargetPath,
+        expected: &[u8],
+    ) -> Result<selfie::fs::Removal, selfie::fs::FileSystemError> {
+        self.inner.remove_file_if_holding(path, expected)
+    }
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
@@ -1626,6 +1668,13 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
     }
     fn remove_file(&self, path: &std::path::Path) -> Result<(), selfie::fs::FileSystemError> {
         self.inner.remove_file(path)
+    }
+    fn remove_file_if_holding(
+        &self,
+        path: &selfie::fs::TargetPath,
+        expected: &[u8],
+    ) -> Result<selfie::fs::Removal, selfie::fs::FileSystemError> {
+        self.inner.remove_file_if_holding(path, expected)
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
@@ -8043,6 +8092,13 @@ mod symlinked_targets {
             }
             fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
                 self.0.remove_file(path)
+            }
+            fn remove_file_if_holding(
+                &self,
+                path: &TargetPath,
+                expected: &[u8],
+            ) -> Result<selfie::fs::Removal, FileSystemError> {
+                self.0.remove_file_if_holding(path, expected)
             }
             fn path_exists(&self, path: &Path) -> bool {
                 self.0.path_exists(path)
