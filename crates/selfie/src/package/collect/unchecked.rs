@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use crate::config::SelfieConfig;
 use crate::package::{
     Package,
-    collect::warning::CollectionRefusal,
+    collect::{collect_all_packages, warning::CollectionRefusal},
     event::{BaseKind, EventSender, UncheckedSource},
-    port::PackageListError,
+    port::{PackageListError, PackageRepository},
 };
 
 /// A place a command could not check for an entry sharing a target with its own.
-pub(super) enum Unchecked {
+pub(crate) enum Unchecked {
     /// A spec file that could not be loaded, and the directory it is in.
     Unloadable { path: PathBuf, base: BaseKind },
     /// Files in one directory that all claim one name, so none of them is used.
@@ -29,7 +29,7 @@ pub(super) enum Unchecked {
 
 /// Which command is asking, which decides how it names what it could not check.
 #[derive(Clone, Copy)]
-pub(super) enum Checking {
+pub(crate) enum Checking {
     /// Track, about the one file it tracks. Names spec files by full path.
     Track,
     /// Apply, about the targets it deploys. Names spec files as `packages/<file>`
@@ -86,7 +86,7 @@ impl Unchecked {
     }
 
     /// The warning `checking` sends about this place.
-    pub(super) fn sentence(&self, checking: Checking) -> String {
+    pub(crate) fn sentence(&self, checking: Checking) -> String {
         let subject = checking.subject();
         match self {
             Self::Unloadable { path, base } => format!(
@@ -117,7 +117,7 @@ impl Unchecked {
 /// Name, in one line, what `refusals` leave unchecked, when any of `packages` has
 /// an entry in play here. Each source is named once.
 // A run over every package sends it after the refusals' own warnings.
-pub(super) async fn send_unchecked_line(
+pub(crate) async fn send_unchecked_line(
     sender: &EventSender,
     refusals: &[CollectionRefusal],
     packages: &[Package],
@@ -144,7 +144,7 @@ pub(super) async fn send_unchecked_line(
 /// `packages` has an entry in play here.
 // A run asked for one package sends it, since it sent no finding of its own
 // about a spec of another name.
-pub(super) async fn send_unchecked_sentences(
+pub(crate) async fn send_unchecked_sentences(
     sender: &EventSender,
     refusals: &[CollectionRefusal],
     packages: &[Package],
@@ -177,4 +177,63 @@ fn has_entries(packages: &[Package], environment: &str) -> bool {
     packages
         .iter()
         .any(|package| !package.is_refused(environment) && package.has_dotfiles_in(environment))
+}
+
+/// The other specs a command compares its targets with, and what kept it from
+/// seeing all of them, already worded.
+pub(crate) struct Others {
+    pub(crate) packages: Vec<Package>,
+    /// What could not be used.
+    pub(crate) unchecked: Vec<Unchecked>,
+}
+
+/// Collect every spec for a command that compares its targets with them.
+///
+/// When the package directory will not list, collection stops there, but the
+/// standalone specs are read through a repository of their own and are still
+/// compared. A directory with nothing at its path holds no specs and is worth no
+/// word.
+pub(crate) fn collect_others<R: PackageRepository>(
+    package_repo: &R,
+    dotfiles_repo: &R,
+    config: &SelfieConfig,
+) -> Others {
+    match collect_all_packages(
+        package_repo,
+        dotfiles_repo,
+        config.dotfiles_directory_is_expected(),
+        config.environment(),
+    ) {
+        Ok(collected) => Others {
+            unchecked: collected.unusable().iter().map(Unchecked::from).collect(),
+            packages: collected.packages,
+        },
+        Err(error) => {
+            let mut unchecked = Vec::new();
+            if !error.is_absent() {
+                unchecked.push(Unchecked::PackageDirectory(error));
+            }
+            let packages = match dotfiles_repo.list_packages() {
+                Ok(output) => {
+                    unchecked.extend(output.invalid_packages().map(|invalid| {
+                        Unchecked::Unloadable {
+                            path: invalid.package_path().to_path_buf(),
+                            base: BaseKind::DotfilesDirectory,
+                        }
+                    }));
+                    output.valid_packages().cloned().collect()
+                }
+                Err(error) => {
+                    if !error.is_absent() {
+                        unchecked.push(Unchecked::DotfilesDirectory(error));
+                    }
+                    Vec::new()
+                }
+            };
+            Others {
+                packages,
+                unchecked,
+            }
+        }
+    }
 }

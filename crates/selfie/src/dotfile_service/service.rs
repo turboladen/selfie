@@ -28,7 +28,7 @@ use super::drift::handle_check_drift;
 use super::orphan::Catalog;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
-use super::unchecked::Unchecked;
+use crate::package::collect::unchecked::collect_others;
 use crate::package::collect::warning::{CollectionRefusal, Finding, no_such_package};
 use crate::package::collect::{Collected, collect_all_packages};
 
@@ -49,63 +49,10 @@ fn other_specs<R: PackageRepository>(
     dotfiles_repo: &R,
     config: &SelfieConfig,
 ) -> super::track::OtherSpecs {
-    match collect_all_packages(
-        package_repo,
-        dotfiles_repo,
-        config.dotfiles_directory_is_expected(),
-        config.environment(),
-    ) {
-        Ok(collected) => {
-            let unrefused = collected
-                .unrefused_ambiguities
-                .iter()
-                .map(|(name, paths, base)| CollectionRefusal::AmbiguousName {
-                    name: name.clone(),
-                    paths: paths.clone(),
-                    base: *base,
-                })
-                .collect::<Vec<_>>();
-            let unchecked: Vec<Unchecked> = collected
-                .refusals()
-                .chain(&unrefused)
-                .map(Unchecked::from)
-                .collect();
-            super::track::OtherSpecs {
-                packages: collected.packages,
-                unchecked,
-            }
-        }
-        // The package directory would not list, so collection stopped there. The
-        // standalone specs are still checked: they are read through a repository of
-        // their own. A package directory with nothing at its path holds no specs and
-        // is worth no word.
-        Err(error) => {
-            let mut unchecked = Vec::new();
-            if !error.is_absent() {
-                unchecked.push(Unchecked::PackageDirectory(error));
-            }
-            let packages = match dotfiles_repo.list_packages() {
-                Ok(output) => {
-                    unchecked.extend(output.invalid_packages().map(|invalid| {
-                        Unchecked::Unloadable {
-                            path: invalid.package_path().to_path_buf(),
-                            base: crate::package::event::BaseKind::DotfilesDirectory,
-                        }
-                    }));
-                    output.valid_packages().cloned().collect()
-                }
-                Err(error) => {
-                    if !error.is_absent() {
-                        unchecked.push(Unchecked::DotfilesDirectory(error));
-                    }
-                    Vec::new()
-                }
-            };
-            super::track::OtherSpecs {
-                packages,
-                unchecked,
-            }
-        }
+    let others = collect_others(package_repo, dotfiles_repo, config);
+    super::track::OtherSpecs {
+        packages: others.packages,
+        unchecked: others.unchecked,
     }
 }
 

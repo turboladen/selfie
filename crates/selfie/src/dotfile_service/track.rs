@@ -28,7 +28,7 @@ use super::refusal::{TargetState, directory_at_target, guard_refusal, read_targe
 use super::state_file::{
     Recorder, StateLoad, StateSaveError, load_deploy_state, save_deploy_state,
 };
-use super::unchecked::{Checking, Unchecked};
+use crate::package::collect::unchecked::{Checking, Unchecked};
 
 /// A spec that already has an entry for a target.
 #[derive(Debug, Clone, PartialEq, Eq)]

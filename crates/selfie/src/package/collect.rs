@@ -8,6 +8,7 @@ use crate::fs::target::{HomeDir, TargetPath, expand_target_path};
 use crate::package::{Package, ScopedEntry, SpecOrigin, event::BaseKind, port::PackageRepository};
 
 pub(crate) mod directory;
+pub(crate) mod unchecked;
 pub(crate) mod warning;
 
 use warning::{ApplyWarning, CollectionRefusal, Finding};
@@ -31,6 +32,22 @@ impl Collected {
     /// What collection refused, in the order it found them.
     pub(crate) fn refusals(&self) -> impl Iterator<Item = &CollectionRefusal> {
         self.findings.iter().filter_map(Finding::refusal)
+    }
+
+    /// Everything that left a spec unused, in the order found: what collection
+    /// refused, then the names several files claim that matter to no operation
+    /// over every package. A run that compares targets cannot compare with any of
+    /// them.
+    pub(crate) fn unusable(&self) -> Vec<CollectionRefusal> {
+        let unrefused = self
+            .unrefused_ambiguities
+            .iter()
+            .map(|(name, paths, base)| CollectionRefusal::AmbiguousName {
+                name: name.clone(),
+                paths: paths.clone(),
+                base: *base,
+            });
+        self.refusals().cloned().chain(unrefused).collect()
     }
 
     /// What collection found worth saying and refused nothing, in order.
