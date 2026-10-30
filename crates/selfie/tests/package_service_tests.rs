@@ -2034,6 +2034,38 @@ mod validate_all_covers_standalone_specs {
         }
     }
 
+    // Two package specs deploying one file, `aaa` sorting before `zeta`.
+    fn write_two_colliding_packages(dirs: &Dirs) {
+        for file in ["aaa.yml", "zeta.yml"] {
+            write_package(
+                &dirs.packages,
+                file,
+                "dotfiles:\n  - source: rc\n    target: ~/.gemrc\n",
+            );
+        }
+    }
+
+    // What a collision of `aaa`'s and `zeta`'s entries says, members in collection
+    // order, whichever of the two a run is about.
+    const AAA_AND_ZETA: &str = "Dotfile entries package 'aaa' (dotfiles[0]) and package 'zeta' \
+                                (dotfiles[0]) both deploy to '~/.gemrc' in environment 'test', so \
+                                apply deploys none of them there";
+
+    // The named spec is judged where collection lists it, so a run about the spec
+    // listed first still names it first.
+    #[tokio::test]
+    async fn a_collision_names_its_members_in_collection_order() {
+        let dirs = dirs();
+        write_two_colliding_packages(&dirs);
+
+        let events = collect_events(dirs.service().validate("aaa", None).await).await;
+
+        assert_eq!(
+            issues_of(&events, "aaa"),
+            [("dotfiles[0].target".to_string(), AAA_AND_ZETA.to_string())]
+        );
+    }
+
     #[tokio::test]
     async fn validating_a_spec_by_name_beside_specs_that_do_not_collide_is_clean() {
         let dirs = dirs();

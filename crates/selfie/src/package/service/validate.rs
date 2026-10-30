@@ -13,7 +13,10 @@ use crate::{
         },
         port::PackageRepository,
         service::ProgressTracker,
-        validate::{cross_spec_issues, unreadable_template_issue, validate_template_vars},
+        validate::{
+            CrossSpecCollision, asked_environments, cross_spec_collisions,
+            unreadable_template_issue, validate_template_vars,
+        },
     },
     validation::{ValidationIssue, ValidationIssues},
 };
@@ -116,26 +119,41 @@ pub(super) async fn refuse_or_report(
     None
 }
 
-/// The errors for `package`'s entries that deploy to a target another spec
-/// deploys, found by collecting the specs as `--all` does.
+/// Holds a spec's errors for entries that deploy to a target another spec deploys.
+#[derive(Debug, Default)]
+pub(super) struct AcrossSpecs {
+    /// Holds the collisions that the spec as its file holds it did not have.
+    pub(super) introduced: Vec<ValidationIssue>,
+    /// Holds the collisions that the spec as its file holds it had already.
+    pub(super) preexisting: Vec<ValidationIssue>,
+}
+
+/// Returns the errors for `candidate`'s entries that deploy to a target another
+/// spec deploys. The specs are collected as `--all` collects them, and `candidate`
+/// takes the place of the collected spec at its path.
+///
+/// `on_disk` is the spec as its file holds it, for a write that replaces one: a
+/// collision it has already is preexisting. With `None`, every collision is
+/// introduced.
 ///
 /// Sends, as a run for one name does, the warnings collecting found and a warning
 /// for each place it could not use. A spec with no dotfile entry in any
 /// environment it declares gets neither, and no collection is done for it.
-async fn collisions_with_other_specs<PR>(
-    package: &Package,
+pub(super) async fn collisions_with_other_specs<PR>(
+    on_disk: Option<&Package>,
+    candidate: &Package,
     package_name: &str,
     repo: &PR,
     dotfiles_repo: &PR,
     config: &SelfieConfig,
     sender: &EventSender,
-) -> Vec<ValidationIssue>
+) -> AcrossSpecs
 where
     PR: PackageRepository,
 {
     // Such a spec cannot share a target, so nothing collection found is about it.
-    if !package.has_dotfiles_in_any_environment() {
-        return Vec::new();
+    if !candidate.has_dotfiles_in_any_environment() {
+        return AcrossSpecs::default();
     }
     let others = collect_others(repo, dotfiles_repo, config);
 
@@ -149,15 +167,54 @@ where
     send_unchecked_warnings(
         sender,
         &others.unchecked,
-        std::slice::from_ref(package),
+        std::slice::from_ref(candidate),
         config,
         Checking::Validate,
     )
     .await;
 
-    cross_spec_issues(&others.packages, config.environment())
-        .remove(package.path())
-        .unwrap_or_default()
+    let path = candidate.path();
+    // Only an update compares against the file, so only it pays for a second set.
+    let before_set = on_disk.map(|on_disk| place(others.packages.clone(), on_disk));
+    let after_set = place(others.packages, candidate);
+    // One set for both scans. A spec's shared entries are scanned in every asked
+    // environment, declared or not, so a collision the spec had already is found in
+    // an environment only the candidate declares, and is not taken for a new one.
+    let environments = asked_environments(&after_set, config.environment());
+    let involving = |set: &[Package]| -> Vec<CrossSpecCollision> {
+        cross_spec_collisions(set, &environments)
+            .into_iter()
+            .filter(|collision| collision.involves(path))
+            .collect()
+    };
+    let after = involving(&after_set);
+    let before = before_set.map_or_else(Vec::new, |set| involving(&set));
+
+    // Judged per environment, not per field: an update that removes the environment
+    // an unknown key had the spec refused in brings its shared entries into that
+    // environment's scan, a collision on a field that already collided elsewhere.
+    // The entries' fields are stable because no update edits a dotfile list; one
+    // that did would shift the indices this key holds.
+    let mut across = AcrossSpecs::default();
+    for collision in after {
+        let introduced = collision.is_new_against(&before);
+        let issues = collision.into_issues_at(path);
+        if introduced {
+            across.introduced.extend(issues);
+        } else {
+            across.preexisting.extend(issues);
+        }
+    }
+    across
+}
+
+/// Returns `packages` with `spec` in place of the collected spec at its path.
+fn place(mut packages: Vec<Package>, spec: &Package) -> Vec<Package> {
+    // In place, since a collision names its members in collection order.
+    if let Some(at) = packages.iter().position(|p| p.path() == spec.path()) {
+        packages[at] = spec.clone();
+    }
+    packages
 }
 
 pub(super) async fn handle_validate<PR>(
@@ -207,17 +264,17 @@ where
     let mut issues = all_issues(&package_blob.package, source, environment);
     // The spec is judged against the others as `--all` judges every spec, and
     // only its own collisions are attached.
-    issues.extend(
-        collisions_with_other_specs(
-            &package_blob.package,
-            package_name,
-            repo,
-            dotfiles_repo,
-            config,
-            sender,
-        )
-        .await,
-    );
+    let across = collisions_with_other_specs(
+        None,
+        &package_blob.package,
+        package_name,
+        repo,
+        dotfiles_repo,
+        config,
+        sender,
+    )
+    .await;
+    issues.extend(across.introduced);
     let issues = &issues;
 
     // Step 3: Process validation results
