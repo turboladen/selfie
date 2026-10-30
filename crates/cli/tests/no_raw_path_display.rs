@@ -137,11 +137,82 @@ fn the_hidden_constructor_scan_sees_a_direct_call() {
 
 // The lines of `text`, numbered from 1, that name a hidden constructor.
 fn hidden_calls(text: &str) -> Vec<(usize, &str)> {
+    lines_naming(text, HIDDEN)
+}
+
+// The lines of `text`, numbered from 1, that hold any of `names`.
+fn lines_naming<'a>(text: &'a str, names: &[&str]) -> Vec<(usize, &'a str)> {
     text.lines()
         .enumerate()
-        .filter(|(_, line)| HIDDEN.iter().any(|name| line.contains(name)))
+        .filter(|(_, line)| names.iter().any(|name| line.contains(name)))
         .map(|(index, line)| (index + 1, line.trim()))
         .collect()
+}
+
+// A text's continuation lines are indented by the layout that places it, at
+// the column where it starts: the message printers, a table and the entry
+// rows. `Shown::hang` is how they indent, so only their modules, and the one
+// that defines it, may call it.
+//
+// This guards that one method, matched as text like the hidden constructors.
+// It does not see a command that writes its own indent after a line break into
+// a `lit!` or `shown!` literal.
+const HANG: &[&str] = &[".hang("];
+const LAYOUT_MODULES: &[&str] = &[
+    "terminal_text.rs",
+    "display_manager.rs",
+    "tables.rs",
+    "entry_rows.rs",
+];
+
+#[test]
+fn hang_is_called_only_in_the_layout_modules() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rust_files(&src, &mut files);
+    assert!(
+        LAYOUT_MODULES
+            .iter()
+            .all(|module| files.contains(&src.join(module))),
+        "a layout module moved: {files:?}"
+    );
+
+    let found: Vec<String> = files
+        .iter()
+        .filter(|file| {
+            !LAYOUT_MODULES
+                .iter()
+                .any(|module| **file == src.join(module))
+        })
+        .flat_map(|file| {
+            let text = std::fs::read_to_string(file).unwrap();
+            lines_naming(&text, HANG)
+                .into_iter()
+                .map(|(number, line)| format!("{}:{number}: {}", file.to_string_lossy(), line))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    assert!(
+        found.is_empty(),
+        "print these through a layout, such as DisplayManager::println_after:\n{}",
+        found.join("\n")
+    );
+}
+
+// The scan must see a call, chained or not.
+#[test]
+fn the_hang_scan_sees_a_call() {
+    let text = "fn a(s: Shown) -> Shown { s.hang(2) }\n\
+                fn b(s: Shown) -> Shown { s.paint(true, red)\n    .hang(4) }\n\
+                fn c(s: Shown) -> Shown { s.change(2) }\n";
+
+    let lines: Vec<usize> = lines_naming(text, HANG)
+        .into_iter()
+        .map(|(number, _)| number)
+        .collect();
+
+    assert_eq!(lines, [1, 3]);
 }
 
 // The gate must see what it is meant to forbid: a `.display()` outside a test
