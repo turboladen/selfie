@@ -89,7 +89,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
             DisplayPath::of(invalid.package_path()),
             Prose::new(&invalid.to_string())
         );
-        display.println(issue_line(text, use_colors));
+        print_issue_line(display, text, use_colors);
     }
 
     for refused in &data.refused {
@@ -99,7 +99,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
             DisplayPath::of(&refused.path),
             Prose::new(&refused.reason.to_string())
         );
-        display.println(issue_line(text, use_colors));
+        print_issue_line(display, text, use_colors);
     }
 
     // Summary
@@ -118,13 +118,14 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
 // An invalid or refused spec's line under the table. One sentence, styled or
 // not, so the two cases cannot drift apart. The lines after its first start
 // under its text, past the mark.
-fn issue_line(text: Shown, use_colors: bool) -> Shown {
-    let text = Shown::indented(text, lit!("    "));
-    shown!(
-        "  {} {}",
-        Shown::from(lit!("⚠")).paint(use_colors, |s| s.yellow()),
-        text.paint(use_colors, |s| s.dim())
-    )
+fn print_issue_line(display: &DisplayManager, text: Shown, use_colors: bool) {
+    display.println_after(
+        shown!(
+            "  {} ",
+            Shown::from(lit!("⚠")).paint(use_colors, |s| s.yellow())
+        ),
+        text.paint(use_colors, |s| s.dim()),
+    );
 }
 
 #[cfg(test)]
@@ -135,12 +136,14 @@ mod tests {
     // are indented once.
     #[test]
     fn an_issue_line_indents_its_continuation_once() {
-        let line = issue_line(
+        let display = DisplayManager::new(false);
+        print_issue_line(
+            &display,
             shown!("Refused: {}", Shown::from(Prose::new("a\nb"))),
             false,
         );
 
-        assert_eq!(line, "  ⚠ Refused: a\n    b");
+        assert_eq!(display.written(), ["  ⚠ Refused: a\n    b"]);
     }
     use crate::config::CliConfig;
     use selfie::{

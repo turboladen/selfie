@@ -331,6 +331,10 @@ pub struct DisplayManager {
     // which a test in this process cannot read back.
     #[cfg(test)]
     printed: Arc<Mutex<Vec<(Channel, String)>>>,
+    // Each line a lead and its text were written as, styling removed, so a test
+    // can compare the columns of two lines as the terminal shows them.
+    #[cfg(test)]
+    written: Arc<Mutex<Vec<String>>>,
     // How many times `draw` wrote, so a test can see a block written as one.
     #[cfg(test)]
     draws: Arc<std::sync::atomic::AtomicUsize>,
@@ -412,6 +416,8 @@ impl DisplayManager {
             #[cfg(test)]
             printed: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
+            written: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
             draws: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             can_prompt: draws_spinner,
             cancellation: None,
@@ -489,6 +495,15 @@ impl DisplayManager {
     #[cfg(test)]
     fn record_stderr(&self, line: &str) {
         self.record(Channel::Stderr, line);
+    }
+
+    // Every line a lead and its text were written as, styling removed, in order.
+    #[cfg(test)]
+    pub(crate) fn written(&self) -> Vec<String> {
+        self.written
+            .lock()
+            .map(|written| written.clone())
+            .unwrap_or_default()
     }
 
     // Every line the printing methods printed, with its stream, in order.
@@ -850,6 +865,7 @@ impl DisplayManager {
         let text = untrusted(message).paint(self.use_colors, |s| s.dim());
         self.print_led(
             Channel::Stderr,
+            self.stdout_colors(),
             Shown::from(lit!("  ")),
             Shown::default(),
             text,
@@ -892,62 +908,84 @@ impl DisplayManager {
         // The space stays outside the mark's styling.
         let mark = shown!("{} ", Shown::from(mark).paint(self.use_colors, mark_paint));
         let text = untrusted(message).paint(self.use_colors, paint);
-        self.print_led(channel, mark, Shown::default(), text);
+        self.print_led(channel, self.stdout_colors(), mark, Shown::default(), text);
     }
 
-    // Print `lead` and then `text` on `channel`, the text's continuation lines
-    // under its first character, after `mark`. What a test reads back is the
-    // line without `mark`, as the stream gets it with its styling removed.
-    fn print_led(&self, channel: Channel, mark: Shown, lead: Shown, text: impl Into<Shown>) {
+    /// Print `lead` and then `text` (stdout), the lines after the first of
+    /// `text` starting under its first character.
+    pub(crate) fn println_after(&self, lead: Shown, text: impl Into<Shown>) {
+        self.print_led(
+            Channel::Stdout,
+            self.stdout_colors(),
+            Shown::default(),
+            lead,
+            text,
+        );
+    }
+
+    // Print `mark`, `lead` and then `text` on `channel`, the text's
+    // continuation lines under its first character, with selfie's styling kept
+    // when `colors`. What a test reads back is the line without `mark`, as the
+    // stream gets it with its styling removed.
+    //
+    // Every message printer passes stdout's color decision as `colors`, on
+    // stderr as well, which is the decision console's own styling makes; a
+    // suggestion settles its parts itself and passes `true`. Deciding per
+    // stream belongs to ADR 0014's slice 6 (selfie-gr8z.75).
+    fn print_led(
+        &self,
+        channel: Channel,
+        colors: bool,
+        mark: Shown,
+        lead: Shown,
+        text: impl Into<Shown>,
+    ) {
         let line = led(&shown!("{}{}", mark, lead), text);
+        #[cfg(test)]
+        self.record_led(channel, &mark, &line);
+        let rendered = guard(line.as_str(), colors);
+        match channel {
+            Channel::Stdout => self.mp.suspend(|| println!("{rendered}")),
+            Channel::Stderr => self.mp.suspend(|| eprintln!("{rendered}")),
+        }
+    }
+
+    // Record `line` as `print_led` wrote it, styling removed: whole in
+    // `written`, and without `mark` in `printed`.
+    #[cfg(test)]
+    fn record_led(&self, channel: Channel, mark: &Shown, line: &Shown) {
         let plain = guard(line.as_str(), false);
         let plain_mark = guard(mark.as_str(), false);
         let recorded = plain.strip_prefix(plain_mark.as_ref()).unwrap_or(&plain);
-        // Every printer takes stdout's color decision, stderr's included, as
-        // console's own styling does; ADR 0014's slice 6 decides per stream.
-        let rendered = guard(line.as_str(), self.stdout_colors()).into_owned();
-        match channel {
-            Channel::Stdout => {
-                self.record_stdout(recorded);
-                self.mp.suspend(|| println!("{rendered}"));
-            }
-            Channel::Stderr => {
-                self.record_stderr(recorded);
-                self.mp.suspend(|| eprintln!("{rendered}"));
-            }
+        self.record(channel, recorded);
+        if let Ok(mut written) = self.written.lock() {
+            written.push(plain.to_string());
         }
     }
 
     /// Print a suggestion (stderr): advice about the run, never the answer.
     pub(crate) fn print_suggestion(&self, message: impl Display) {
-        let message = untrusted(message).hang(2);
-        self.suggest(&message, &message);
+        self.suggest(untrusted(message));
     }
 
     /// Print a suggestion selfie styled itself, such as one naming a command
     /// to run in a highlight (stderr).
     pub(crate) fn print_styled_suggestion(&self, suggestion: Shown) {
-        let plain = guard(suggestion.as_str(), false).into_owned();
-        self.suggest(&plain, suggestion.as_str());
+        self.suggest(suggestion);
     }
 
-    // `plain` is what a test reads back, `shown` what the terminal gets; both
-    // are already escaped.
-    fn suggest(&self, plain: &str, shown: &str) {
-        self.record_stderr(plain);
-        let shown = guard(shown, self.stderr_colors());
-        if self.use_colors {
-            self.mp.suspend(|| {
-                eprintln!(
-                    "{} {}: {}",
-                    style("✨").bold(),
-                    style("Suggestion").yellow().bold(),
-                    shown
-                )
-            });
-        } else {
-            self.mp.suspend(|| eprintln!("✨ Suggestion: {shown}"));
-        }
+    fn suggest(&self, text: Shown) {
+        let mark = shown!(
+            "{} {}: ",
+            Shown::from(lit!("✨")).paint(self.use_colors, |s| s.bold()),
+            Shown::from(lit!("Suggestion")).paint(self.use_colors, |s| s.yellow().bold())
+        );
+        // The mark follows stdout's color decision, as the other printers'
+        // marks do, and the text stderr's. Each is settled before they are
+        // joined, so `print_led` keeps what is left of both.
+        let mark = mark.guarded(self.stdout_colors());
+        let text = text.guarded(self.stderr_colors());
+        self.print_led(Channel::Stderr, true, mark, Shown::default(), text);
     }
 
     /// Print a section header (stdout)
@@ -1243,17 +1281,18 @@ impl DisplayManager {
         self.use_colors && console::colors_enabled_stderr()
     }
 
-    /// Print a styled key-value pair (stdout, for config display, etc.)
+    /// Print a styled key-value pair (stdout, for config display, etc.), the
+    /// value's lines after the first starting under its first character.
     pub(crate) fn print_field(&self, key: Literal, value: impl Into<Shown>) {
         // The printer styles the value itself, so any styling in it is removed.
-        let value = guard(value.into().as_str(), false).into_owned();
-        self.record_stdout(&format!("{key} {value}"));
-        if self.use_colors {
-            self.mp
-                .suspend(|| println!("  {} {}", style(key).italic().dim(), style(value).bold()));
-        } else {
-            self.mp.suspend(|| println!("  {key} {value}"));
-        }
+        let value = value.into().guarded(false);
+        self.println_after(
+            shown!(
+                "  {} ",
+                Shown::from(key).paint(self.use_colors, |s| s.italic().dim())
+            ),
+            value.paint(self.use_colors, |s| s.bold()),
+        );
     }
 
     /// Whether stdout and stderr are both terminals.
@@ -1366,6 +1405,15 @@ impl<'a> ResultCard<'a> {
         self
     }
 
+    /// Add fields whose values selfie styled itself, in order.
+    pub(crate) fn styled_fields(
+        mut self,
+        fields: impl IntoIterator<Item = (Literal, Shown)>,
+    ) -> Self {
+        self.fields.extend(fields);
+        self
+    }
+
     /// Render the card to the display
     pub(crate) fn print(self) {
         use crate::formatters::format_key;
@@ -1375,14 +1423,21 @@ impl<'a> ResultCard<'a> {
 
         let use_colors = self.display.use_colors();
         for (key, value) in self.fields {
-            self.display.println(shown!(
-                "{}{}: {}",
-                INDENT,
-                format_key(key, use_colors),
-                value
-            ));
+            self.display
+                .println_after(shown!("{}{}: ", INDENT, format_key(key, use_colors)), value);
         }
     }
+}
+
+// The terminal column at which `needle` starts in `text`, counted from the
+// start of the line it is on (test-only).
+#[cfg(test)]
+pub(crate) fn column(text: &str, needle: &str) -> usize {
+    let at = text
+        .find(needle)
+        .unwrap_or_else(|| panic!("{needle:?} not in {text:?}"));
+    let start = text[..at].rfind('\n').map_or(0, |n| n + 1);
+    console::measure_text_width(&text[start..at])
 }
 
 // `text` from outside selfie, as a message printer shows it: escaped as prose,
@@ -1656,11 +1711,86 @@ mod tests {
         display.print_warning(text);
         display.print_progress(text);
         display.print_run_note(text);
-        display.print_suggestion(text);
 
         let printed = display.printed();
-        assert_eq!(printed.len(), 8, "{printed:?}");
+        assert_eq!(printed.len(), 7, "{printed:?}");
         assert!(printed.iter().all(|(_, line)| line == shown), "{printed:?}");
+    }
+
+    // A suggestion's text continues under its first character, past the mark
+    // and the word that introduce it, whether selfie styled it or not.
+    #[test]
+    fn a_suggestion_continues_under_its_text() {
+        let display = DisplayManager::new(false);
+        // Words no mark could hold, so each is found in the text.
+        let (first, second) = ("¶one", "¶two");
+        display.print_suggestion(format!("{first}\u{1b}[2J\n{second}"));
+        display.print_styled_suggestion(shown!(
+            "{}\n{}",
+            Shown::from(lit!("¶one")).paint(true, |s| s.bold()),
+            lit!("¶two")
+        ));
+
+        let written = display.written();
+        assert_eq!(written.len(), 2, "{written:?}");
+        for line in &written {
+            assert!(
+                column(line, first) > 2,
+                "control: the text is past the mark"
+            );
+            assert_eq!(column(line, second), column(line, first), "{line:?}");
+        }
+        assert!(written[0].contains("¶one\\u{1b}[2J"), "{written:?}");
+        let printed = display.printed();
+        let text_start = written[1].find(first).expect("the text was written");
+        assert_eq!(printed[1].1, written[1][text_start..], "{printed:?}");
+    }
+
+    // A field's value continues under its first line.
+    #[test]
+    fn a_field_value_continues_under_its_first_line() {
+        let display = DisplayManager::new(false);
+
+        display.print_field(lit!("key:"), Prose::new("a\nb"));
+
+        let printed = display.printed();
+        assert_eq!(
+            printed,
+            [(Channel::Stdout, "  key: a\n       b".to_string())]
+        );
+        assert_eq!(column(&printed[0].1, "b"), column(&printed[0].1, "a"));
+    }
+
+    // A card's value continues under its first line, past its key.
+    #[test]
+    fn a_card_value_continues_under_its_first_line() {
+        let display = DisplayManager::new(false);
+
+        display
+            .result_card("Results")
+            .styled_field(lit!("Output"), Shown::from(Prose::new("a\nb")))
+            .print();
+
+        let line = display
+            .written()
+            .into_iter()
+            .find(|line| line.contains("Output"))
+            .expect("the field was written");
+        assert!(line.starts_with("   Output: a"), "{line:?}");
+        assert_eq!(column(&line, "b"), column(&line, "a"), "{line:?}");
+    }
+
+    // A text after a lead continues under its first character, the whole
+    // line recorded. This reads the record, which has its styling removed; that
+    // a styled lead's escapes take no room is `led`'s, tested above.
+    #[test]
+    fn println_after_hangs_under_the_text() {
+        let display = DisplayManager::new(false);
+
+        display.println_after(shown!("  {} ", lit!("⚠")), Prose::new("a\nb"));
+
+        let printed = display.printed();
+        assert_eq!(printed, [(Channel::Stdout, "  ⚠ a\n    b".to_string())]);
     }
 
     // A message written with Windows line endings ends at its text, with no

@@ -9,9 +9,8 @@ use crate::terminal_text::{Literal, Name, Output, Paint, Shown, lit, shown};
 use crate::{
     commands::presentation,
     config::CliConfig,
-    display_manager::{DisplayManager, INDENT},
+    display_manager::DisplayManager,
     event_processor::{EventProcessor, Exit},
-    formatters::format_key,
     status_style,
 };
 
@@ -147,7 +146,7 @@ fn display_audit_summary_line(
         shown!(
             "{}: {}",
             label(lit!("error"), |s| s.red()),
-            Shown::indented(Output::new(err), lit!("    "))
+            Output::new(err)
         )
     };
 
@@ -172,11 +171,10 @@ fn display_audit_summary_line(
         AuditResult::CouldNotRun(failure) => error(&failure.to_string()),
     };
 
-    display.println(shown!(
-        "  {}: {}",
-        Name::new(&audit_result.package_name),
-        status
-    ));
+    display.println_after(
+        shown!("  {}: ", Name::new(&audit_result.package_name)),
+        status,
+    );
 }
 
 // The sources an audit found that the spec does not expect.
@@ -194,68 +192,56 @@ fn display_audit_result_card(
 ) {
     let use_colors = config.use_colors();
 
-    // Common fields via ResultCard
-    display
-        .result_card("Audit Results")
-        .field(lit!("Package"), &audit_result.package_name)
-        .field(lit!("Environment"), &audit_result.environment)
-        .command_if(lit!("Command"), audit_result.audit_command.as_deref())
-        .print();
-
-    // Status line stays inline — variant-dependent sub-fields
-    let key = |field: Literal| shown!("{}{}: ", INDENT, format_key(field, use_colors));
+    // The status and what the audit found, as fields after the common ones.
     let error = |err: &str| {
-        shown!(
-            "{}{}\n{}{}",
-            key(lit!("Status")),
-            status_style::format_status_error(use_colors),
-            key(lit!("Details")),
-            Shown::indented(Output::new(err), lit!("    "))
-        )
+        vec![
+            (
+                lit!("Status"),
+                status_style::format_status_error(use_colors),
+            ),
+            (lit!("Details"), Shown::from(Output::new(err))),
+        ]
     };
-    let status_line = match &audit_result.result {
-        AuditResult::Clean { sources } => shown!(
-            "{}{}\n{}{}",
-            key(lit!("Status")),
-            status_style::format_audit_clean(use_colors),
-            key(lit!("Sources")),
-            name_list(sources)
-        ),
+    let status: Vec<(Literal, Shown)> = match &audit_result.result {
+        AuditResult::Clean { sources } => vec![
+            (lit!("Status"), status_style::format_audit_clean(use_colors)),
+            (lit!("Sources"), name_list(sources)),
+        ],
         AuditResult::Conflicts {
             sources, expected, ..
-        } => shown!(
-            "{}{}\n{}{}\n{}{}\n{}{}",
-            key(lit!("Status")),
-            status_style::format_audit_conflicts(use_colors),
-            key(lit!("All sources")),
-            name_list(sources),
-            key(lit!("Expected")),
-            name_list(expected),
-            key(lit!("Unexpected")),
-            name_list(unexpected(sources, expected))
-        ),
-        AuditResult::NotInstalled => shown!(
-            "{}{}",
-            key(lit!("Status")),
-            status_style::format_not_installed(use_colors)
-        ),
+        } => vec![
+            (
+                lit!("Status"),
+                status_style::format_audit_conflicts(use_colors),
+            ),
+            (lit!("All sources"), name_list(sources)),
+            (lit!("Expected"), name_list(expected)),
+            (lit!("Unexpected"), name_list(unexpected(sources, expected))),
+        ],
+        AuditResult::NotInstalled => vec![(
+            lit!("Status"),
+            status_style::format_not_installed(use_colors),
+        )],
         AuditResult::NoAuditCommand => {
-            shown!(
-                "{}{}",
-                key(lit!("Status")),
-                status_style::format_no_audit(use_colors)
-            )
+            vec![(lit!("Status"), status_style::format_no_audit(use_colors))]
         }
         AuditResult::Error(err) => error(err),
         AuditResult::CouldNotRun(failure) => error(&failure.to_string()),
     };
 
-    display.println(status_line);
+    display
+        .result_card("Audit Results")
+        .field(lit!("Package"), &audit_result.package_name)
+        .field(lit!("Environment"), &audit_result.environment)
+        .command_if(lit!("Command"), audit_result.audit_command.as_deref())
+        .styled_fields(status)
+        .print();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::display_manager::column;
     use selfie::package::event::CheckFailure;
 
     // Every view of an audit shows the package's name and its sources as names,
@@ -355,6 +341,45 @@ mod tests {
                 .count(),
             3,
             "{could_not_run:?}"
+        );
+    }
+
+    // An audit error's lines after the first continue under its first: in the
+    // summary line under `error`, past the package's name, and in the card
+    // under the Details value.
+    #[test]
+    fn an_audit_error_continues_under_its_text() {
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(
+            std::path::Path::new("/packages"),
+        ));
+        let audit = AuditResultData {
+            package_name: "pkg".to_string(),
+            environment: "test".to_string(),
+            audit_command: None,
+            result: AuditResult::Error("e1\ne2".to_string()),
+        };
+
+        let display = DisplayManager::new(false);
+        display_audit_summary_line(&audit, &config, &display);
+        let summary = display.written().join("\n");
+        assert!(summary.starts_with("  pkg: error: e1"), "{summary:?}");
+        assert_eq!(
+            column(&summary, "e2"),
+            column(&summary, "error"),
+            "{summary:?}"
+        );
+
+        let display = DisplayManager::new(false);
+        display_audit_result_card(&audit, &config, &display);
+        let details = display
+            .written()
+            .into_iter()
+            .find(|line| line.contains("Details"))
+            .expect("the card has details");
+        assert_eq!(
+            column(&details, "e2"),
+            column(&details, "e1"),
+            "{details:?}"
         );
     }
 }

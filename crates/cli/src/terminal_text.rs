@@ -219,6 +219,13 @@ impl Shown {
         Self(text.into().0.replace('\n', &format!("\n{indent}")))
     }
 
+    /// `self` as [`guard`] leaves it: selfie's own styling kept when `colors`
+    /// and removed otherwise.
+    #[must_use]
+    pub(crate) fn guarded(self, colors: bool) -> Self {
+        Self(guard(&self.0, colors).into_owned())
+    }
+
     /// `self` with `column` spaces after each line break, so its continuation
     /// lines start `column` columns in.
     // Only the layout that places a text calls this, with the column where the
