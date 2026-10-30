@@ -57,7 +57,8 @@ pub(crate) const INDENT: Literal = lit!("   ");
 /// Implemented for each dialoguer prompt the CLI uses. The call that reads the
 /// answer happens inside `prompt`, so nothing else can draw on the terminal
 /// while the user answers.
-pub(crate) trait Prompt {
+// Private, with `prompt`, so a widget built anywhere else cannot be asked.
+trait Prompt {
     /// What the user's answer is.
     type Answer: Send + 'static;
 
@@ -157,12 +158,12 @@ enum PromptTheme {
     Simple,
 }
 
-// The one place dialoguer's reading calls are allowed; crates/cli/clippy.toml
-// forbids them everywhere else, so a prompt that bypasses `DisplayManager::prompt`
-// does not build.
+// The one place dialoguer's widgets are built and asked; crates/cli/clippy.toml
+// forbids their constructors and reading calls everywhere else, so a prompt
+// that bypasses these methods does not build.
 #[expect(
     clippy::disallowed_methods,
-    reason = "every prompt is asked here, inside DisplayManager::prompt"
+    reason = "every prompt is built here and asked inside DisplayManager::prompt"
 )]
 mod prompts {
     use dialoguer::theme::{ColorfulTheme, SimpleTheme, Theme};
@@ -1325,7 +1326,7 @@ impl DisplayManager {
     ///
     /// [`PromptFailure`] when there is no terminal, the user pressed Ctrl+C, or
     /// the terminal failed. [`PromptFailure::exit`] says how the command ends.
-    pub(crate) fn prompt<P: Prompt>(&self, prompt: P) -> Result<P::Answer, PromptFailure> {
+    fn prompt<P: Prompt>(&self, prompt: P) -> Result<P::Answer, PromptFailure> {
         self.prompt_under(None, prompt)
     }
 
