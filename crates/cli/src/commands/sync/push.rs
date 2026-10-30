@@ -152,11 +152,13 @@ fn show_pending_commits(
         } else {
             lit!("files")
         };
-        let message = crate::status_style::styled_text(
-            crate::terminal_text::Prose::new(&commit.message),
-            use_colors,
-            |s| s.bold(),
-        );
+        // The message takes a name's escape, as the note under the prompt
+        // does, so the two read alike and what Enter keeps is what was
+        // previewed.
+        let message =
+            crate::status_style::styled_text(commit_message(&commit.message), use_colors, |s| {
+                s.bold()
+            });
         display.println_after(
             shown!("  {}. ", num),
             shown!("{} ({} {})", message, file_count, file_label),
@@ -173,6 +175,12 @@ fn chosen_message(answer: String, suggested: String) -> String {
     } else {
         answer
     }
+}
+
+/// `message` on one line, as a listed or reported commit shows it: a name's
+/// escape, without a trailing line break.
+fn commit_message(message: &str) -> Name {
+    Name::new(message.trim_end_matches(['\r', '\n']))
 }
 
 /// Prompt the user to confirm or edit each commit message.
@@ -249,10 +257,12 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager) -> bool {
             message,
             ..
         } => {
+            // The line names the commit and escapes its message as the preview
+            // did, so the two lines of one run read alike.
             display.print_success(shown!(
                 "{}: {}",
                 Name::new(package_name),
-                received::sentence(message)
+                commit_message(message)
             ));
             true
         }
@@ -359,6 +369,28 @@ mod tests {
         assert!(handle_push_event(&event, &display));
     }
 
+    // The line for a commit made shows its message as the preview did: on one
+    // line, an invisible character and a line break written as escapes.
+    #[test]
+    fn a_created_commit_shows_its_message_as_a_name() {
+        let display = DisplayManager::new(false);
+        let event = PackageEvent::SyncCommitCreated {
+            operation_info: make_operation_info(),
+            package_name: "starship".to_string(),
+            message: "abc1234 feat(starship): add\u{200B}\nthe body\n".to_string(),
+        };
+
+        assert!(handle_push_event(&event, &display));
+
+        assert_eq!(
+            display.printed(),
+            [(
+                crate::display_manager::Channel::Stdout,
+                r"starship: abc1234 feat(starship): add\u{200b}\nthe body".to_string()
+            )]
+        );
+    }
+
     #[test]
     fn handles_push_complete() {
         let display = DisplayManager::new(false);
@@ -452,14 +484,15 @@ mod tests {
         show_pending_commits(&commits, &display, true);
     }
 
-    // A commit message's lines after its first start under its first line,
-    // past the commit's number.
+    // A commit message is previewed as the note under its prompt shows it: on
+    // one line, an invisible character or a line break in it written as an
+    // escape.
     #[test]
-    fn a_pending_commit_message_continues_under_its_first_line() {
+    fn a_push_preview_shows_the_message_as_a_name() {
         let display = DisplayManager::new(false);
         let commits = vec![make_pending_commit(
             "starship",
-            "feat(starship): add\nthe body",
+            "feat(starship): add\u{200B}\nthe body",
             &["starship.yml"],
         )];
 
@@ -470,7 +503,7 @@ mod tests {
             .into_iter()
             .find(|line| line.contains("feat"))
             .expect("the commit was listed");
-        assert_eq!(line, "  1. feat(starship): add\n     the body (1 file)");
+        assert_eq!(line, r"  1. feat(starship): add\u{200b}\nthe body (1 file)");
     }
 
     // --- confirm_commits tests ---
