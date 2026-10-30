@@ -836,7 +836,8 @@ pub(crate) fn with_name_hint<R: PackageRepository + ?Sized>(
 
 /// The sentence a not-found failure appends for `declared`, naming each file
 /// and the name to use instead, or nothing when `declared` is empty.
-pub(crate) fn name_field_hint(declared: &[NameDeclaration]) -> String {
+#[must_use]
+pub fn name_field_hint(declared: &[NameDeclaration]) -> String {
     if declared.is_empty() {
         return String::new();
     }
@@ -1229,7 +1230,7 @@ pub struct ListingNames<'a> {
 /// names the file, so renderers put the path where their own layout wants it -- a
 /// column, a label, a JSON field -- and
 /// [`skipped_spec_warning`](crate::package::service::skipped_spec_warning) is the
-/// one that puts it in prose.
+/// library's wording of it in prose.
 // Split into a path and a path-free reason so that "the message names the file
 // exactly once" holds for every `#[error]` attribute at once rather than for each
 // of them separately. The kinds carrying free text -- `Io`, `Unreadable`,

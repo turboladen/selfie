@@ -10,10 +10,11 @@
 //!
 //! What a text is decides how much is escaped, and each kind of text is a type
 //! that holds its escaped form: a [`Name`] or a [`DisplayPath`] escapes
-//! strictly, since an invisible character in it makes it read as another; a
-//! [`Content`] line of a file keeps its tabs; [`Prose`] and a tool's
-//! [`Output`] escape only what can act on the terminal or reorder the text, so
-//! emoji sequences and joiners render. selfie's own text is a [`Literal`].
+//! strictly, since an invisible character, or a blank other than a space, in it
+//! makes it read as another; a [`Content`] line of a file keeps its tabs;
+//! [`Prose`] and a tool's [`Output`] escape only what can act on the terminal
+//! or reorder the text, so emoji sequences and joiners render. selfie's own
+//! text is a [`Literal`].
 
 use std::borrow::Cow;
 use std::fmt;
@@ -54,10 +55,14 @@ fn in_base_set(c: char) -> bool {
 }
 
 // The strict set, for names and paths, where two values that read alike are
-// two different things. It is the base set until ADR 0014's slice 3 adds the
-// blanks that render as a space or as nothing, such as U+00A0 and U+2800.
+// two different things: the base set, every space separator other than U+0020,
+// and U+2800, the braille blank. Those blanks are not added to the base set
+// because in file content U+00A0 and U+3000 are ordinary French and CJK text.
 fn in_strict_set(c: char) -> bool {
     in_base_set(c)
+        || c == '\u{2800}'
+        || (c != ' '
+            && CodePointMapData::<GeneralCategory>::new().get(c) == GeneralCategory::SpaceSeparator)
 }
 
 // One variant per distinct escape. `Name` and `DisplayPath` share `Strict`.
@@ -77,9 +82,8 @@ enum Policy {
     // handled as the `Sgr` says.
     Guard(Sgr),
     // The base set, a newline and a tab included: how a command is escaped
-    // until the Command kind exists. It escapes what `Strict` does until the
-    // strict set widens; it stays apart because a command must keep those
-    // blanks to paste as it runs.
+    // until the Command kind exists. It stays apart from `Strict` because a
+    // command must keep the blanks `Strict` escapes to paste as it runs.
     Interim,
 }
 
@@ -444,8 +448,8 @@ macro_rules! kinds {
 
 kinds! {
     /// Holds a spec, package, environment or file-stem name, or a list item, on
-    /// one line, with every invisible or controlling character shown as an
-    /// escape.
+    /// one line, with every invisible or controlling character, and every blank
+    /// other than a space, shown as an escape.
     Name;
     /// Holds a path or a dotfile source, escaped as a [`Name`] is.
     // Escaped rather than dropped: dropping would show `evil\rgood` as the name
@@ -634,14 +638,14 @@ mod tests {
             ('\u{3164}', false, true, true),
             ('\u{FFF9}', false, true, true),
             ('\u{600}', false, true, true),
-            ('\u{A0}', false, false, false),
-            ('\u{1680}', false, false, false),
-            ('\u{2000}', false, false, false),
-            ('\u{200A}', false, false, false),
-            ('\u{202F}', false, false, false),
-            ('\u{205F}', false, false, false),
-            ('\u{3000}', false, false, false),
-            ('\u{2800}', false, false, false),
+            ('\u{A0}', false, false, true),
+            ('\u{1680}', false, false, true),
+            ('\u{2000}', false, false, true),
+            ('\u{200A}', false, false, true),
+            ('\u{202F}', false, false, true),
+            ('\u{205F}', false, false, true),
+            ('\u{3000}', false, false, true),
+            ('\u{2800}', false, false, true),
             (' ', false, false, false),
             ('a', false, false, false),
             ('\u{301}', false, false, false),
@@ -658,13 +662,23 @@ mod tests {
     }
 
     // Each set holds the one before it: what can act on the terminal is also
-    // what a name or a line of content escapes.
+    // what a name or a line of content escapes. The strict set adds exactly
+    // the 16 space separators other than U+0020, and U+2800.
     #[test]
     fn the_sets_nest() {
+        let mut blanks = Vec::new();
         for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
             assert!(!in_guard_set(c) || in_base_set(c), "{c:?}");
             assert!(!in_base_set(c) || in_strict_set(c), "{c:?}");
+            if in_strict_set(c) && !in_base_set(c) {
+                blanks.push(c);
+            }
         }
+        assert_eq!(blanks.len(), 17, "{blanks:?}");
+        assert!(
+            blanks.contains(&'\u{2800}') && !blanks.contains(&' '),
+            "{blanks:?}"
+        );
     }
 
     // Each kind against each class of character, as (text, name, prose,
@@ -795,11 +809,17 @@ mod tests {
                 "a\u{AD}b",
             ),
             (
-                "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b", "a\u{A0}b",
+                "a\u{A0}b",
+                "a\\u{a0}b",
+                "a\u{A0}b",
+                "a\u{A0}b",
+                "a\u{A0}b",
+                "a\u{A0}b",
+                "a\u{A0}b",
             ),
             (
                 "a\u{2800}b",
-                "a\u{2800}b",
+                "a\\u{2800}b",
                 "a\u{2800}b",
                 "a\u{2800}b",
                 "a\u{2800}b",
@@ -808,7 +828,7 @@ mod tests {
             ),
             (
                 "a\u{3000}b",
-                "a\u{3000}b",
+                "a\\u{3000}b",
                 "a\u{3000}b",
                 "a\u{3000}b",
                 "a\u{3000}b",
@@ -861,9 +881,9 @@ mod tests {
         }
     }
 
-    // A command or a step's description is not a name: a blank in it shows as
-    // written, so a command pastes as it runs, and a line break or an invisible
-    // character still shows as an escape.
+    // A command is not a name: a blank in it shows as written, so it pastes as
+    // it runs, and a line break or an invisible character still shows as an
+    // escape.
     #[test]
     fn a_command_keeps_its_blanks_and_stays_on_one_line() {
         assert_eq!(
@@ -896,6 +916,10 @@ mod tests {
             "evil\u{FEFF}good",
             "evil\u{E0041}good",
             "evil\u{FE0F}good",
+            "evil good",
+            "evil\u{A0}good",
+            "evil\u{2800}good",
+            "evil\u{3000}good",
         ];
 
         let shown: std::collections::BTreeSet<Name> =

@@ -311,7 +311,7 @@ fn handle_already_tracked(event: &PackageEvent, display: &DisplayManager) -> boo
                 ),
             ..
         } => {
-            display.print_info(crate::received::sentence(success));
+            display.print_info(crate::received::success(success));
             true
         }
         _ => false,

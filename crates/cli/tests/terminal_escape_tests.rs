@@ -670,3 +670,329 @@ fn an_install_names_a_failed_recommend_escaped() {
 
     assert!(stderr.contains(r"re\u{200b}c failed:"), "{stderr}");
 }
+
+// A configuration file that will not parse is named as a path, so a line
+// break in its directory's name stays on the error's line and U+200B shows.
+#[test]
+fn a_configuration_file_that_will_not_parse_names_its_path_escaped() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join("cfg\nzw\u{200B}dir");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(config_dir.join("config.yaml"), "environment: [\n").unwrap();
+
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("selfie"))
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join(".config"))
+        .env("SELFIE_CONFIG_DIR", &config_dir)
+        .env("SHELL", "/bin/sh")
+        .args(["--no-color", "package", "list"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(common::FAILED), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(
+        stderr.contains(r"Cannot parse the configuration file ")
+            && stderr.contains(r"cfg\nzw\u{200b}dir/config.yaml: "),
+        "{stderr}"
+    );
+}
+
+// `config validate` names a configuration file that will not parse as a path,
+// as a command's startup error does.
+#[test]
+fn config_validate_names_a_configuration_file_that_will_not_parse_escaped() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_dir = temp.path().join("cfg\nzw\u{200B}dir");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(config_dir.join("config.yaml"), "environment: [\n").unwrap();
+
+    let output = std::process::Command::new(assert_cmd::cargo::cargo_bin("selfie"))
+        .env("HOME", temp.path())
+        .env("XDG_CONFIG_HOME", temp.path().join(".config"))
+        .env("SELFIE_CONFIG_DIR", &config_dir)
+        .env("SHELL", "/bin/sh")
+        .args(["--no-color", "config", "validate"])
+        .output()
+        .unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(both.contains(r"cfg\nzw\u{200b}dir/config.yaml: "), "{both}");
+    assert!(!both.contains('\u{200B}'), "{both:?}");
+}
+
+// A spec file whose name breaks the rule is named alike in the listing and in
+// the sentence beside it.
+#[test]
+fn an_invalid_spec_name_reads_as_it_does_in_the_listing() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("zw\u{200B}q.yml"),
+        "name: zwq\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "spec", "list"])
+        .output()
+        .unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        both.contains(r"its name 'zw\u{200b}q' is not a valid spec name"),
+        "{both}"
+    );
+    assert!(!both.contains('\u{200B}'), "{both:?}");
+}
+
+// `spec create` refuses a name that breaks the rule naming it as a name.
+#[test]
+fn spec_create_refuses_an_invalid_name_escaped() {
+    let temp = setup_default_test_config();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "spec", "create", "zw\u{200B}x"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains(r"Refusing to create 'zw\u{200b}x': it is not a valid spec name"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
+// `spec edit` of a missing spec whose name breaks the rule refuses it as
+// `spec create` does.
+#[test]
+fn spec_edit_refuses_an_invalid_name_escaped() {
+    let temp = setup_default_test_config();
+
+    let output = sandboxed_std_command(&temp)
+        .env("EDITOR", "true")
+        .args(["--no-color", "spec", "edit", "zw\u{200B}x"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains(r"Refusing to create 'zw\u{200b}x': it is not a valid spec name"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
+// A spec file whose name breaks the rule is named the same way on every line
+// of a command that meets it: its row, the summary that names it among what
+// could not be answered, and the error that names it.
+#[test]
+fn an_invalid_spec_name_is_escaped_on_every_line_of_a_run() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    for name in ["z\u{200B}w", "a\u{A0}b"] {
+        fs::write(
+            packages.join(format!("{name}.yaml")),
+            format!("name: zw\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+        )
+        .unwrap();
+    }
+
+    for args in [
+        &["package", "list"][..],
+        &["spec", "validate", "--all"][..],
+        &["spec", "validate", "z\u{200B}w"][..],
+        &["spec", "validate", "a\u{A0}b"][..],
+        &["spec", "info", "z\u{200B}w"][..],
+        &["spec", "info", "a\u{A0}b"][..],
+        &["package", "check", "z\u{200B}w"][..],
+        &["package", "check", "a\u{A0}b"][..],
+        &["spec", "edit", "z\u{200B}w"][..],
+        &["spec", "edit", "a\u{A0}b"][..],
+    ] {
+        let output = sandboxed_std_command(&temp)
+            .env("EDITOR", "true")
+            .arg("--no-color")
+            .args(args)
+            .output()
+            .unwrap();
+        let both = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // A command over every spec names both; one asked about a spec names
+        // that one.
+        let named: Vec<&str> = match args.last() {
+            Some(&"z\u{200B}w") => vec![r"z\u{200b}w"],
+            Some(&"a\u{A0}b") => vec![r"a\u{a0}b"],
+            _ => vec![r"z\u{200b}w", r"a\u{a0}b"],
+        };
+        for name in named {
+            assert!(both.contains(name), "{args:?} names {name}: {both}");
+        }
+        for line in both.lines() {
+            assert!(
+                !line.contains('\u{200B}') && !line.contains('\u{A0}'),
+                "{args:?}: {line:?}"
+            );
+        }
+    }
+}
+
+// A dependency and an unloadable spec file are named the same way on every
+// line of a run: a dependency's status, and the warning listing what was not
+// checked for collisions, whose line a line break in a file name must not
+// split.
+#[test]
+fn a_dependency_and_an_unchecked_file_are_escaped_on_every_line() {
+    let temp = setup_default_test_config();
+    let home = temp.path();
+    let packages = home.join("packages");
+    fs::write(
+        home.join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\nstate_directory: {}\n",
+            packages.display(),
+            home.join("state").display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        packages.join("good.yaml"),
+        format!(
+            "name: good\ndotfiles:\n  - source: rc\n    target: ~/.rc\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \
+             dependencies: [\"dep\\u200Bx\"]\n"
+        ),
+    )
+    .unwrap();
+    fs::write(packages.join("rc"), "x\n").unwrap();
+    for name in ["z\u{200B}w", "l\nf"] {
+        fs::write(packages.join(format!("{name}.yaml")), "name: x\n").unwrap();
+    }
+
+    for args in [
+        &["package", "status", "good"][..],
+        &["apply", "--dry-run"][..],
+        &["dotfiles", "drift"][..],
+    ] {
+        let output = sandboxed_std_command(&temp)
+            .arg("--no-color")
+            .args(args)
+            .output()
+            .unwrap();
+        let both = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let named = match args[0] {
+            "package" => r"dep\u{200b}x",
+            _ => r"packages/l\nf.yaml, packages/z\u{200b}w.yaml",
+        };
+        assert!(both.contains(named), "{args:?} names {named}: {both}");
+        for line in both.lines() {
+            assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
+        }
+    }
+}
+
+// A blank that is not a space, such as U+00A0 or U+2800, makes one name or path
+// read as another, so a listing naming a spec file shows it as an escape.
+#[test]
+fn a_spec_file_named_with_a_visible_blank_shows_it_escaped() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("a\u{A0}b.yaml"),
+        format!("name: \"a\\u00A0b\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "spec", "list"])
+        .output()
+        .unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The library's sentence after the path names the spec unescaped, as prose
+    // does, so only the path is checked here.
+    assert!(both.contains(r"a\u{a0}b.yaml"), "{both}");
+    assert!(!both.contains("a\u{A0}b.yaml"), "{both:?}");
+}
+
+// A dotfile target holding U+2800 or U+3000 shows each as an escape in the
+// plan apply prints.
+#[test]
+fn a_target_holding_a_visible_blank_shows_it_escaped() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::write(packages.join("blank.conf"), "x\n").unwrap();
+    fs::write(
+        packages.join("blank.yaml"),
+        format!(
+            "name: blank\ndotfiles:\n  - source: blank.conf\n    target: \"~/.br\\u2800aille\"\n\
+             \x20 - source: blank.conf\n    target: \"~/.ideo\\u3000space\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "apply", "--dry-run"])
+        .output()
+        .unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        both.contains(r".br\u{2800}aille") && both.contains(r".ideo\u{3000}space"),
+        "{both}"
+    );
+    assert!(!both.contains(['\u{2800}', '\u{3000}']), "{both:?}");
+}
+
+// A `command:` dotfile source is a command, so its blanks show as written in
+// `dotfiles list` and `spec info`, where a name's escape would change what
+// pasting it runs.
+#[test]
+fn a_command_source_keeps_its_blanks_in_the_dotfiles_list() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("cmd.yml"),
+        format!(
+            "name: cmd\ndotfiles:\n  - command: \"printf 'a\\u00A0b'\"\n    target: \"~/.cmdrc\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+
+    for args in [&["dotfiles", "list"][..], &["spec", "info", "cmd"][..]] {
+        let output = sandboxed_std_command(&temp)
+            .arg("--no-color")
+            .args(args)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert!(stdout.contains("printf 'a\u{A0}b'"), "{args:?}: {stdout}");
+        assert!(!stdout.contains(r"\u{a0}"), "{args:?}: {stdout}");
+    }
+}

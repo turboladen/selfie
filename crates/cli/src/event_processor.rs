@@ -218,9 +218,9 @@ impl EventProcessor {
 
             PackageEvent::Progress { kind, message, .. } => match kind {
                 StepKind::Waiting(step) => {
-                    self.display.start_waiting(step, Name::new(&message));
+                    self.display.start_waiting(step, received::step(&message));
                 }
-                StepKind::Local => self.display.print_status(received::sentence(message)),
+                StepKind::Local => self.display.print_status(received::step(&message)),
             },
 
             PackageEvent::StepEnded { step, ending, .. } => {
@@ -256,9 +256,8 @@ impl EventProcessor {
             }
 
             PackageEvent::CollisionsUnchecked { sources, .. } => {
-                self.display.print_warning(received::sentence(
-                    selfie::package::service::collisions_unchecked_warning(&sources),
-                ));
+                self.display
+                    .print_warning(received::collisions_unchecked(&sources));
             }
 
             PackageEvent::PackagesRefused {
@@ -297,7 +296,7 @@ impl EventProcessor {
                 // not an answer, and stays on stderr below.
                 OperationResult::Success(success) => {
                     let outcome = success.outcome();
-                    let line = received::sentence(&success);
+                    let line = received::success(&success);
                     if outcome == Outcome::Failed {
                         self.display
                             .collect_error(ErrorDetail::of(&operation_info, line.clone()));
@@ -308,7 +307,10 @@ impl EventProcessor {
                     use selfie::package::event::{CommandFailure, OperationFailure};
 
                     // Collect structured error detail for end-of-operation summary
-                    let detail = ErrorDetail::of(&operation_info, received::sentence(&err));
+                    // The summary collects the line printed below, so the
+                    // two name a spec alike.
+                    let message = received::failure(&err);
+                    let detail = ErrorDetail::of(&operation_info, message.clone());
                     let stderr_lines: Vec<Output> = match &err {
                         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
                             stderr,
@@ -334,8 +336,8 @@ impl EventProcessor {
                     match err {
                         // The library's sentence, so its hint about a `name:` field
                         // reaches the terminal.
-                        OperationFailure::Package(error @ PackageError::PackageNotFound { .. }) => {
-                            self.display.print_error(received::sentence(error));
+                        OperationFailure::Package(PackageError::PackageNotFound { .. }) => {
+                            self.display.print_error(message.clone());
                         }
                         OperationFailure::PackageList(listing) => {
                             // The reason, not "not found". A plain file or a dangling
@@ -380,6 +382,9 @@ impl EventProcessor {
                             }
                             self.display
                                 .print_suggestion(received::sentence(suggestion));
+                        }
+                        OperationFailure::Uncreatable { .. } => {
+                            self.display.print_error(message.clone());
                         }
                         OperationFailure::Privilege(refusal) => {
                             self.display
@@ -446,18 +451,18 @@ impl EventProcessor {
                         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
                             ..
                         }) => {
-                            self.display.print_error(received::sentence(&err));
+                            self.display.print_error(message.clone());
                             self.display.print_command_stderr(&stderr_lines);
                         }
                         OperationFailure::InvalidSpec { ref issues, .. } => {
-                            self.display.print_error(received::sentence(&err));
+                            self.display.print_error(message.clone());
                             crate::commands::validation_display::print_issues(
                                 &self.display,
                                 issues,
                             );
                         }
                         _ => {
-                            self.display.print_error(received::sentence(&err));
+                            self.display.print_error(message.clone());
                         }
                     }
                 }
@@ -999,6 +1004,52 @@ mod tests {
         );
     }
 
+    // A step's message is escaped as a name, on both routes: a waiting step's
+    // progress line and a local step's status line. One row per kind of
+    // source: a target path, a package name, a count, a remote's name, and the
+    // local install and commit steps.
+    #[tokio::test]
+    async fn a_progress_message_shows_on_one_line_escaped() {
+        let rows = [
+            (
+                "Running the commands that produce ~/.a\u{A0}b\nc",
+                r"Running the commands that produce ~/.a\u{a0}b\nc",
+            ),
+            (
+                "Running the install command for z\u{200B}w",
+                r"Running the install command for z\u{200b}w",
+            ),
+            ("Checking 3 packages", "Checking 3 packages"),
+            (
+                "Pushing to remote 'or\u{2800}igin'",
+                r"Pushing to remote 'or\u{2800}igin'",
+            ),
+            (
+                "Checking whether t\u{200B}x is already installed",
+                r"Checking whether t\u{200b}x is already installed",
+            ),
+            ("Committing: fix\nbody", r"Committing: fix\nbody"),
+            ("Committing: fix\r\n", "Committing: fix"),
+        ];
+        for (message, shown) in rows {
+            let waiting = printed_for(
+                verbose(),
+                vec![step(StepKind::Waiting(StepId::from_raw(1)), message)],
+            )
+            .await;
+            let local = printed_for(verbose(), vec![step(StepKind::Local, message)]).await;
+
+            let lines = |printed: &[(crate::display_manager::Channel, String)]| -> Vec<String> {
+                printed
+                    .iter()
+                    .map(|(_, line)| line.trim().to_string())
+                    .collect()
+            };
+            assert_eq!(lines(&waiting), [format!("{shown}...")], "{message:?}");
+            assert_eq!(lines(&local), [shown.to_string()], "{message:?}");
+        }
+    }
+
     #[tokio::test]
     async fn a_local_step_is_hidden_unless_verbose() {
         use crate::display_manager::Channel;
@@ -1267,6 +1318,43 @@ mod tests {
             .find(|line| line.starts_with("/p/a"))
             .unwrap_or_else(|| panic!("no location line in {printed:?}"));
         assert!(location.starts_with(r"/p/a\u{200b}b.yml:"), "{location}");
+    }
+
+    // The error summary collects the line printed for a failure, so a refusal
+    // the CLI composes names its spec there as it does on the error line.
+    #[tokio::test]
+    async fn the_error_summary_collects_the_composed_refusal() {
+        use selfie::package::event::{OperationFailure, Uncreatable};
+
+        let events: Vec<PackageEvent> = ["a\u{200B}b", "c\u{200B}d"]
+            .into_iter()
+            .map(|name| PackageEvent::Completed {
+                operation_info: make_operation_info(name),
+                result: OperationResult::Failure(OperationFailure::Uncreatable {
+                    package_name: name.to_string(),
+                    reason: Uncreatable::InvalidName,
+                }),
+            })
+            .collect();
+        let display = DisplayManager::new(false);
+        let display_clone = display.clone();
+        EventProcessor::new(display)
+            .process_events(Box::pin(stream::iter(events)), |_event| false)
+            .await;
+
+        let messages: Vec<String> = display_clone
+            .collected_errors()
+            .iter()
+            .map(|error| error.message.to_string())
+            .collect();
+        assert!(
+            messages[0].starts_with(r"Refusing to create 'a\u{200b}b'"),
+            "{messages:?}"
+        );
+        assert!(
+            messages.iter().all(|m| !m.contains('\u{200B}')),
+            "{messages:?}"
+        );
     }
 
     // The error summary names each package as a name, so one holding an

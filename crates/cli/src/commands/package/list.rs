@@ -196,7 +196,7 @@ fn handle_list_event(
                     failed(shown!(
                         "refused ({}): {}",
                         DisplayPath::of(shown),
-                        crate::received::sentence(&refused.reason)
+                        crate::received::refusal_reason(refused)
                     )),
                     None,
                 );

@@ -113,6 +113,17 @@ async fn until_force_quit(signals: &mut impl NextSignal, token: &CancellationTok
 /// Print `error`, with its causes, as the error a run that could not start
 /// ends with: its first line marked, the rest beneath it.
 fn report_startup_error(display: &DisplayManager, error: &anyhow::Error) {
+    // A configuration file's error is composed from its parts, so its path is
+    // escaped as a path whatever it holds. Only a bare one is: an error with a
+    // context or a cause prints its whole chain below.
+    if let Some(composed) = (error.chain().count() == 1)
+        .then(|| error.downcast_ref::<ConfigLoadError>())
+        .flatten()
+        .and_then(crate::received::config_load_error)
+    {
+        display.print_error(composed);
+        return;
+    }
     let text = format!("{error:#}");
     let mut lines = text.lines();
     display.print_error(crate::received::sentence(lines.next().unwrap_or_default()));

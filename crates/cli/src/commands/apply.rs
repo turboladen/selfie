@@ -376,7 +376,7 @@ pub(crate) async fn handle_apply(
             selfie::package::event::PackageEvent::Completed { result, .. } => {
                 match summary_to_render(result) {
                     Some(success) => {
-                        display_for_handler.print_info(crate::received::sentence(success));
+                        display_for_handler.print_info(crate::received::success(success));
                         true
                     }
                     None => false,

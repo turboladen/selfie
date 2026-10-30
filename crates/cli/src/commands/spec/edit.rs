@@ -39,7 +39,7 @@ pub(crate) async fn handle_edit(
             display.print_error(shown!(
                 "Cannot edit '{}': {}",
                 Name::new(package_name),
-                crate::received::sentence(e)
+                crate::received::repo_error(&e)
             ));
             return Exit::Failed;
         }
@@ -49,7 +49,7 @@ pub(crate) async fn handle_edit(
                  that name, and opens no new package beside it. Edit the existing file directly. \
                  {}",
                 Name::new(package_name),
-                crate::received::sentence(e)
+                crate::received::repo_error(&e)
             ));
             return Exit::Failed;
         }
@@ -128,8 +128,8 @@ async fn create_for_edit(
     //
     // Every check comes ahead of the prompt: asking someone to confirm a create
     // that is about to be refused wastes the answer.
-    if let Some(refusal) = selfie::package::spec_name_refusal(package_name) {
-        display.print_error(crate::received::sentence(refusal));
+    if let Some(refusal) = crate::received::invalid_name_refusal(package_name) {
+        display.print_error(refusal);
         return Err(Exit::Failed);
     }
     if repo.path_is_occupied(package.path()) {

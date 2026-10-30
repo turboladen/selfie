@@ -355,9 +355,9 @@ fn get_valid_package_name(
                         };
                     // As the first name prompt does: a name the rule refuses would
                     // be refused only when the spec is written.
-                    match selfie::package::spec_name_refusal(&name) {
+                    match crate::received::invalid_name_refusal(&name) {
                         None => break name,
-                        Some(refusal) => display.print_warning(crate::received::sentence(refusal)),
+                        Some(refusal) => display.print_warning(refusal),
                     }
                 };
                 continue;
@@ -440,9 +440,9 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
 
         // Here, not only when the spec is written: every answer after this one
         // would be thrown away with it.
-        match selfie::package::spec_name_refusal(&name) {
+        match crate::received::invalid_name_refusal(&name) {
             None => return Ok(name),
-            Some(refusal) => display.print_warning(crate::received::sentence(refusal)),
+            Some(refusal) => display.print_warning(refusal),
         }
     }
 }
@@ -715,7 +715,7 @@ mod tests {
         let (_temp, packages, config, service) = packages_holding(&["tool"]);
         let display = DisplayManager::new(false).answering(vec![
             answer(1_usize), // a different name
-            answer("my app".to_string()),
+            answer("my\u{200B}app".to_string()),
             answer("fresh".to_string()),
         ]);
 
@@ -727,7 +727,7 @@ mod tests {
             display
                 .printed()
                 .iter()
-                .any(|(_, line)| line.contains("'my app': it is not a valid spec name")),
+                .any(|(_, line)| line.contains(r"'my\u{200b}app': it is not a valid spec name")),
             "{:?}",
             display.printed()
         );
@@ -805,7 +805,7 @@ mod tests {
 
         let (_temp, packages, config, service) = packages_holding(&[]);
         let display = DisplayManager::new(false).answering(vec![
-            answer("my app".to_string()),
+            answer("my\u{200B}app".to_string()),
             answer("fresh".to_string()),
             answer(String::new()), // homepage
             answer(String::new()), // description
@@ -824,7 +824,7 @@ mod tests {
             display
                 .printed()
                 .iter()
-                .any(|(_, line)| line.contains("'my app': it is not a valid spec name")),
+                .any(|(_, line)| line.contains(r"'my\u{200b}app': it is not a valid spec name")),
             "{:?}",
             display.printed()
         );

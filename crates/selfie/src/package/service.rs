@@ -62,20 +62,15 @@ use crate::{commands::runner::CommandRunner, config::SelfieConfig};
 /// [`valid_packages`](super::port::ListPackagesOutput::valid_packages), which is
 /// what most callers iterate. Say what was skipped and why, or the run reports
 /// on the files it could read and looks like a clean result.
-///
-/// `pub` rather than `pub(crate)`: the CLI and the MCP server both call
-/// `list_packages` directly in places, and they need the same sentence.
-// One shared function rather than a loop per caller, so every command names a
-// skipped file the same way and no caller can quietly omit it.
-//
-// This is the only place a `PackageParseError` is rendered with the file named in
-// prose. Nothing here has to decide whether the path is already in the message,
-// because a `PackageParseKind` has no field to put one in.
-//
-// The wording avoids both "invalid" and "unparsable". A fifo is neither: it was
-// never opened, let alone parsed.
 #[must_use]
 pub fn skipped_spec_warning(invalid: &super::port::PackageParseError) -> String {
+    // `pub` for an adapter that wants the sentence as text; one that shows the
+    // path and the reason apart composes its own from the error. A
+    // `PackageParseKind` has no field for a path, so nothing here checks
+    // whether the message already names one.
+    //
+    // The wording avoids both "invalid" and "unparsable". A fifo is neither: it
+    // was never opened, let alone parsed.
     format!(
         "Skipping package file {}: {invalid}",
         invalid.package_path().display()

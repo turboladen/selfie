@@ -335,7 +335,12 @@ fn prompt_for_name(
 // Accepted, an escaped default would become the spec's name, backslashes and
 // all, so a name holding such a character is typed instead.
 fn offered_name(file: &str) -> Option<String> {
-    Some(suggest_name(file)).filter(|name| crate::terminal_text::Name::is_plain(name))
+    // Neither a name the prompt could only draw escaped, nor one the spec-name
+    // rule refuses, which Enter would only send back to be refused.
+    Some(suggest_name(file)).filter(|name| {
+        crate::terminal_text::Name::is_plain(name)
+            && selfie::package::spec_name_refusal(name).is_none()
+    })
 }
 
 /// Derive a suggested spec name from the file path.
@@ -624,6 +629,18 @@ mod tests {
         assert_eq!(offered_name("~/.batrc").as_deref(), Some("batrc"));
         assert_eq!(offered_name("~/.bat\u{1b}[2Jrc"), None);
         assert_eq!(offered_name("~/.bat\u{202E}rc"), None);
+    }
+
+    // A file stem holding a blank is not suggested: the prompt would draw one
+    // other than a space as a space, and the spec-name rule refuses every
+    // blank. The rule still admits the four Hangul fillers, which slice 4
+    // refuses (selfie-gr8z.73).
+    #[test]
+    fn a_file_stem_with_a_visible_blank_is_not_suggested() {
+        assert_eq!(offered_name("~/.batrc").as_deref(), Some("batrc"));
+        assert_eq!(offered_name("~/.bat rc"), None);
+        assert_eq!(offered_name("~/.bat\u{A0}rc"), None);
+        assert_eq!(offered_name("~/.bat\u{2800}rc"), None);
     }
 
     #[test]
