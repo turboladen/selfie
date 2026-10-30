@@ -541,7 +541,7 @@ impl EventProcessor {
                     EntryOutcome::from(&reason),
                     &source,
                     &target,
-                    Some(Shown::indented(Prose::new(&reason.to_string()), lit!("  "))),
+                    Some(Shown::from(Prose::new(&reason.to_string()))),
                 );
             }
 

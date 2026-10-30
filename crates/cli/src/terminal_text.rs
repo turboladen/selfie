@@ -213,12 +213,6 @@ impl Shown {
         )
     }
 
-    /// `text` with every line after the first starting with `indent`, so no
-    /// line of it starts at the left margin.
-    pub(crate) fn indented(text: impl Into<Shown>, indent: Literal) -> Self {
-        Self(text.into().0.replace('\n', &format!("\n{indent}")))
-    }
-
     /// `self` as [`guard`] leaves it: selfie's own styling kept when `colors`
     /// and removed otherwise.
     #[must_use]

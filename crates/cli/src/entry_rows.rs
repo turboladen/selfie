@@ -139,13 +139,15 @@ pub(crate) fn entry_line(row: &EntryRow, columns: EntryColumns, use_colors: bool
     };
     let source = padded(&row.source, columns.source);
     match &row.detail {
+        // A detail's lines after its first start under the source column, so
+        // they read as part of this row and not as the next one.
         Some(detail) => shown!(
             "{}{}{} → {}  {}",
             label,
             after_label,
             source,
             padded(&row.target, columns.target),
-            detail
+            detail.clone().hang(measure_text_width(&under_row()))
         ),
         // Not padded: padding with nothing after it is trailing space.
         None => shown!("{}{}{} → {}", label, after_label, source, row.target),
@@ -170,6 +172,7 @@ fn spaces(count: usize) -> Shown {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::display_manager::column;
 
     fn row(outcome: EntryOutcome, source: &str, target: &str, detail: Option<&str>) -> EntryRow {
         EntryRow {
@@ -189,14 +192,6 @@ mod tests {
             rows.iter()
                 .map(|row| (row.source.as_str(), row.target.as_str())),
         )
-    }
-
-    // The terminal column at which `needle` starts in `line`.
-    fn column(line: &str, needle: &str) -> usize {
-        let at = line
-            .find(needle)
-            .unwrap_or_else(|| panic!("{needle:?} not in {line:?}"));
-        measure_text_width(&line[..at])
     }
 
     fn all_equal(columns: &[usize]) -> bool {
@@ -384,5 +379,24 @@ mod tests {
             line(&row, columns),
             "{colored:?}"
         );
+    }
+
+    // A detail's lines after its first start under the source column, past the
+    // outcome's label, so they read as this row's and not as a row of their own.
+    #[test]
+    fn a_detail_continues_under_the_source_column() {
+        let columns = EntryColumns::of([("bat/config", "~/.b")]);
+        let row = EntryRow {
+            outcome: EntryOutcome::Skipped,
+            source: DisplayPath::new("bat/config").into(),
+            target: DisplayPath::new("~/.b"),
+            detail: Some(Shown::from(crate::terminal_text::Prose::new("a\nb"))),
+        };
+
+        let line = line(&row, columns);
+
+        let second = line.lines().nth(1).expect("a second line");
+        assert_eq!(second, format!("{}b", under_row()), "{line:?}");
+        assert_eq!(column(second, "b"), column(&line, "bat/config"), "{line:?}");
     }
 }
