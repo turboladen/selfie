@@ -141,8 +141,8 @@ Desktop, etc.), not run interactively.
 ```bash
 just test-lib          # canonical: cargo test -p selfie (needs test-common's with_mocks feature —
                         # see the root CLAUDE.md if this ever fails to compile)
-cargo test -p selfie-cli
-cargo test -p selfie-mcp
+just test-cli          # a bare cargo test would overwrite the mock-free binaries in target/debug
+just test-mcp
 just check             # every CI gate: fmt, typos, clippy, build, test, hack, docs-check; stops at first failure
 ```
 

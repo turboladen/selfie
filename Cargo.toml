@@ -1,5 +1,11 @@
 [workspace]
 members = ["crates/*"]
+# A bare `cargo build` selects these. `test-common` is left out because its
+# normal dependency is `selfie` with `with_mocks`, and a build that selects it
+# links the mocks and test-only helpers into every binary. `xtask` is a tool,
+# not part of selfie. Anything that has to cover them, `cargo clippy` and
+# `cargo test` included, says `--workspace`. A new binary crate is added here.
+default-members = ["crates/cli", "crates/mcp-server", "crates/selfie"]
 resolver = "3"
 
 [workspace.dependencies]
