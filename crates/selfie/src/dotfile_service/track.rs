@@ -28,7 +28,7 @@ use super::refusal::{TargetState, directory_at_target, guard_refusal, read_targe
 use super::state_file::{
     Recorder, StateLoad, StateSaveError, load_deploy_state, save_deploy_state,
 };
-use crate::package::collect::unchecked::{Checking, Unchecked};
+use crate::package::collect::unchecked::{Checking, Others};
 
 /// A spec that already has an entry for a target.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -412,19 +412,12 @@ struct TrackSpec {
     kind: SpecKind,
 }
 
-/// The other specs a track checks for an entry deploying its file, and what kept
-/// the check from seeing all of them, already worded.
-pub(super) struct OtherSpecs {
-    pub(super) packages: Vec<Package>,
-    pub(super) unchecked: Vec<Unchecked>,
-}
-
 /// Handle `track_standalone`: copy the target file into the dotfiles directory,
 /// create a new YAML spec, and record initial deploy state.
 pub(super) async fn handle_track_standalone<R, F>(
     name: &str,
     target_path: &str,
-    others: impl FnOnce() -> OtherSpecs,
+    others: impl FnOnce() -> Others,
     dotfiles_repo: &R,
     filesystem: &F,
     sender: &EventSender,
@@ -485,7 +478,7 @@ where
 pub(super) async fn handle_track_for_package<R, F>(
     package_name: &str,
     target_path: &str,
-    others: impl FnOnce() -> OtherSpecs,
+    others: impl FnOnce() -> Others,
     repo: &R,
     filesystem: &F,
     sender: &EventSender,
@@ -551,7 +544,7 @@ where
 async fn handle_track<R, F>(
     mut spec: TrackSpec,
     target_path: &str,
-    others: OtherSpecs,
+    others: Others,
     repo: &R,
     filesystem: &F,
     sender: &EventSender,

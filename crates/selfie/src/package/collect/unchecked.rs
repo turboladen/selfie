@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::config::SelfieConfig;
 use crate::package::{
     Package,
-    collect::{collect_all_packages, warning::CollectionRefusal},
+    collect::{
+        Claim, NameTable, collect_all_packages,
+        warning::{CollectionRefusal, Finding},
+    },
     event::{BaseKind, EventSender, UncheckedSource},
     port::{PackageListError, PackageRepository},
 };
@@ -35,6 +38,8 @@ pub(crate) enum Checking {
     /// Apply, about the targets it deploys. Names spec files as `packages/<file>`
     /// or `dotfiles/<file>`.
     Apply,
+    /// Validate, about the one spec it validates. Names spec files as apply does.
+    Validate,
 }
 
 impl From<&CollectionRefusal> for Unchecked {
@@ -63,6 +68,7 @@ impl Checking {
         match self {
             Self::Track => "an entry deploying this file",
             Self::Apply => "an entry deploying to a target this apply deploys",
+            Self::Validate => "an entry deploying to a target this spec deploys",
         }
     }
 
@@ -70,9 +76,31 @@ impl Checking {
     fn name(self, path: &Path, base: BaseKind) -> String {
         match self {
             Self::Track => path.display().to_string(),
-            Self::Apply => UncheckedSource::spec_file(path, base).to_string(),
+            Self::Apply | Self::Validate => UncheckedSource::spec_file(path, base).to_string(),
         }
     }
+
+    /// Whether any of `packages` has an entry this command could see share a
+    /// target with a spec it could not use. Apply and track deploy or write in the
+    /// environment in use. A validation compares in every environment any spec
+    /// declares, so a spec with an entry in any environment it declares can meet one.
+    fn sees_entries_in(self, packages: &[Package], environment: &str) -> bool {
+        match self {
+            Self::Track | Self::Apply => any_deploys_in(packages, environment),
+            Self::Validate => packages
+                .iter()
+                .any(Package::has_dotfiles_in_any_environment),
+        }
+    }
+}
+
+/// Whether any of `packages` deploys an entry in `environment`, so that a target
+/// of theirs could be shared with a spec the run could not use. A package
+/// refused whole deploys nothing, so it has none.
+fn any_deploys_in(packages: &[Package], environment: &str) -> bool {
+    packages
+        .iter()
+        .any(|package| !package.is_refused(environment) && package.has_dotfiles_in(environment))
 }
 
 impl Unchecked {
@@ -123,7 +151,7 @@ pub(crate) async fn send_unchecked_line(
     packages: &[Package],
     config: &SelfieConfig,
 ) {
-    if refusals.is_empty() || !has_entries(packages, config.environment()) {
+    if refusals.is_empty() || !any_deploys_in(packages, config.environment()) {
         return;
     }
     let mut sources: Vec<UncheckedSource> = Vec::new();
@@ -140,50 +168,42 @@ pub(crate) async fn send_unchecked_line(
     }
 }
 
-/// Name each place `refusals` leave unchecked, saying why, when any of
-/// `packages` has an entry in play here.
+/// Name each of `places`, saying why, when any of `packages` has an entry
+/// `checking` could see shared.
 // A run asked for one package sends it, since it sent no finding of its own
-// about a spec of another name.
-pub(crate) async fn send_unchecked_sentences(
+// about a spec of another name. An apply and a validation of one spec both do.
+pub(crate) async fn send_unchecked_warnings(
     sender: &EventSender,
-    refusals: &[CollectionRefusal],
+    places: &[Unchecked],
     packages: &[Package],
     config: &SelfieConfig,
+    checking: Checking,
 ) {
-    if refusals.is_empty() || !has_entries(packages, config.environment()) {
+    if places.is_empty() || !checking.sees_entries_in(packages, config.environment()) {
         return;
     }
     // A file that fails to parse under a name several files claim is refused
     // twice, once as each. It is named once, for the first reason found, as the
     // line over everything names it once.
     let mut named: Vec<PathBuf> = Vec::new();
-    for refusal in refusals {
-        let unchecked = Unchecked::from(refusal);
+    for unchecked in places {
         let files = unchecked.files();
         if !files.is_empty() && files.iter().all(|file| named.contains(file)) {
             continue;
         }
         named.extend(files.into_iter().cloned());
-        sender
-            .send_warning(unchecked.sentence(Checking::Apply))
-            .await;
+        sender.send_warning(unchecked.sentence(checking)).await;
     }
 }
 
-/// Whether any of `packages` deploys an entry in `environment`, so that a target
-/// of theirs could be shared with a spec the run could not use. A package
-/// refused whole deploys nothing, so it has none.
-fn has_entries(packages: &[Package], environment: &str) -> bool {
-    packages
-        .iter()
-        .any(|package| !package.is_refused(environment) && package.has_dotfiles_in(environment))
-}
-
-/// The other specs a command compares its targets with, and what kept it from
-/// seeing all of them, already worded.
+/// The other specs a command compares its targets with, what collecting them
+/// found, and what kept the command from seeing all of them.
 pub(crate) struct Others {
     pub(crate) packages: Vec<Package>,
-    /// What could not be used.
+    /// What collection found worth saying, in the order found. Empty when the
+    /// package directory could not be listed.
+    pub(crate) findings: Vec<Finding>,
+    /// What could not be used, which `Unchecked::sentence` words for a command.
     pub(crate) unchecked: Vec<Unchecked>,
 }
 
@@ -206,6 +226,7 @@ pub(crate) fn collect_others<R: PackageRepository>(
     ) {
         Ok(collected) => Others {
             unchecked: collected.unusable().iter().map(Unchecked::from).collect(),
+            findings: collected.findings,
             packages: collected.packages,
         },
         Err(error) => {
@@ -215,13 +236,41 @@ pub(crate) fn collect_others<R: PackageRepository>(
             }
             let packages = match dotfiles_repo.list_packages() {
                 Ok(output) => {
+                    // The names are judged as collection judges the dotfiles directory
+                    // alone: a name several files claim is used by none of them, and
+                    // is named as left unchecked, since a spec apply would not use must
+                    // not be compared.
+                    let mut packages: Vec<Package> = output.valid_packages().cloned().collect();
+                    let table = NameTable::of(
+                        std::iter::empty(),
+                        packages
+                            .iter()
+                            .map(|package| package.path().clone())
+                            .chain(super::unparsable_paths(&output)),
+                        |path: &PathBuf| path.file_name().and_then(|name| name.to_str()),
+                    );
+                    unchecked.extend(table.dotfiles_claims().filter_map(|(name, _, claim)| {
+                        match claim {
+                            Claim::Ambiguous(paths) => Some(Unchecked::Ambiguous {
+                                name: name.to_string(),
+                                paths: paths.to_vec(),
+                                base: BaseKind::DotfilesDirectory,
+                            }),
+                            Claim::One | Claim::SetAside(_) => None,
+                        }
+                    }));
                     unchecked.extend(output.invalid_packages().map(|invalid| {
                         Unchecked::Unloadable {
                             path: invalid.package_path().to_path_buf(),
                             base: BaseKind::DotfilesDirectory,
                         }
                     }));
-                    output.valid_packages().cloned().collect()
+                    packages.retain(|package| {
+                        package
+                            .spec_name()
+                            .is_none_or(|name| table.uses_dotfiles(&name))
+                    });
+                    packages
                 }
                 Err(error) => {
                     if !error.is_absent() {
@@ -232,8 +281,138 @@ pub(crate) fn collect_others<R: PackageRepository>(
             };
             Others {
                 packages,
+                findings: Vec::new(),
                 unchecked,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::SelfieConfigBuilder,
+        fs::DirectoryState,
+        package::{
+            PackageBuilder,
+            event::{OperationContext, PackageEvent, metadata::OperationType},
+            port::{ListPackagesOutput, MockPackageRepository},
+        },
+    };
+
+    fn config() -> SelfieConfig {
+        SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/packages")
+            .dotfiles_directory(PathBuf::from("/dotfiles"))
+            .build()
+    }
+
+    fn empty_packages() -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages()
+            .returning(|| Ok(ListPackagesOutput(Vec::new())));
+        repo.expect_directory_identity().return_const(None);
+        repo
+    }
+
+    // A dotfiles repository whose listing failed with the directory in `state`.
+    fn unlisted_dotfiles(state: DirectoryState) -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_list_packages().returning(move || {
+            Err(PackageListError::new(
+                PathBuf::from("/dotfiles"),
+                state.clone(),
+            ))
+        });
+        repo.expect_directory_identity().return_const(None);
+        repo
+    }
+
+    fn package_with_an_entry() -> Package {
+        let entry: crate::package::DotfileEntry =
+            crate::yaml::parse("command: echo key\ntarget: ~/.key\n").expect("fixture must parse");
+        PackageBuilder::default()
+            .name("alpha")
+            .environment("test", |b| b.install("true"))
+            .dotfiles(vec![entry])
+            .path("/packages/alpha.yml")
+            .build()
+    }
+
+    async fn warnings_sent_for(places: &[Unchecked], package: &Package) -> Vec<String> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageValidate,
+            "alpha".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+        send_unchecked_warnings(
+            &sender,
+            places,
+            std::slice::from_ref(package),
+            &config(),
+            Checking::Validate,
+        )
+        .await;
+        drop(sender);
+        let mut warnings = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::Warning { message, .. } = event {
+                warnings.push(message);
+            }
+        }
+        warnings
+    }
+
+    // A dotfiles directory that cannot be classified is refused, and named as the
+    // one place left unchecked, once.
+    #[tokio::test]
+    async fn an_uncheckable_dotfiles_directory_is_named_once() {
+        let dotfiles = unlisted_dotfiles(DirectoryState::Unknown(std::sync::Arc::new(
+            std::io::Error::other("Too many levels of symbolic links"),
+        )));
+
+        let others = collect_others(&empty_packages(), &dotfiles, &config());
+
+        assert!(
+            matches!(
+                others.unchecked.as_slice(),
+                [Unchecked::DotfilesDirectory(_)]
+            ),
+            "got {} places",
+            others.unchecked.len()
+        );
+        let warnings = warnings_sent_for(&others.unchecked, &package_with_an_entry()).await;
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("standalone dotfiles"), "{warnings:?}");
+    }
+
+    // Collision checks across the environments a spec declares: an entry in an
+    // environment other than the one in use is an entry that could be shared.
+    #[tokio::test]
+    async fn an_entry_in_another_environment_gets_the_warning() {
+        let package = PackageBuilder::default()
+            .name("alpha")
+            .environment("test", |b| b.install("true"))
+            .environment("work", |b| {
+                let entry: crate::package::DotfileEntry =
+                    crate::yaml::parse("command: echo key\ntarget: ~/.key\n")
+                        .expect("fixture must parse");
+                b.install("true").dotfiles(vec![entry])
+            })
+            .path("/packages/alpha.yml")
+            .build();
+        let place = Unchecked::Unloadable {
+            path: PathBuf::from("/packages/beta.yml"),
+            base: BaseKind::PackageDirectory,
+        };
+
+        let warnings = warnings_sent_for(std::slice::from_ref(&place), &package).await;
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 }

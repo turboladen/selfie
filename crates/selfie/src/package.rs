@@ -1712,6 +1712,16 @@ impl Package {
                 .is_some_and(|env| !env.dotfiles().is_empty())
     }
 
+    /// Whether the package has a dotfile entry in any environment it declares: one
+    /// of its shared list, or of any environment's own.
+    pub(crate) fn has_dotfiles_in_any_environment(&self) -> bool {
+        !self.dotfiles().is_empty()
+            || self
+                .environments()
+                .values()
+                .any(|env| !env.dotfiles().is_empty())
+    }
+
     /// The entries [`Self::dotfiles_for_environment`] deploys, each with the
     /// field path naming it. `None` is the shared list alone, which is what an
     /// environment declaring no dotfiles deploys.

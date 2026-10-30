@@ -291,7 +291,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate would before it is written: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\")."
+        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated on its own, as selfie_spec_validate validates a spec alone, before it is written; unlike selfie_spec_validate it does not check the spec against other specs for a shared target: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\")."
     )]
     async fn spec_create(
         &self,
@@ -361,7 +361,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update",
-        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved. The whole updated spec is validated as selfie_spec_validate validates it. An error on a field the update wrote, or one the save would refuse whatever the update wrote (an unknown key in the file), writes nothing: the call fails, and the result carries every issue under `issues`, each with `level`, `category`, `field`, `message`, `suggestion`, `line` and `column`, as selfie_spec_create's does; `line` and `column` are null for an issue on a field the update changed, which has no place in the file yet. An error on any other field was already in the spec and does not stop the update. Every other issue the updated spec has, warnings, notices, and such an error on a field the update did not write, is reported as a validation_result entry in `data`, sent before the spec is saved, so it is there even when the save fails. The call's own `result.outcome` says how the update went; the entry's `outcome` is the spec's own, as selfie_spec_validate scores it: \"clean\" for notices alone, \"found\" for warnings, or \"failed\" for an error the update left in place."
+        description = "Update fields of an existing spec. Environment-scoped fields (install, check, audit, dependencies) require the environment parameter. A blank install command (empty, whitespace, or only a comment), set or in add_environment, is refused and nothing is saved. The whole updated spec is validated on its own, as selfie_spec_validate validates a spec alone; unlike selfie_spec_validate it does not check the spec against other specs for a shared target. An error on a field the update wrote, or one the save would refuse whatever the update wrote (an unknown key in the file), writes nothing: the call fails, and the result carries every issue under `issues`, each with `level`, `category`, `field`, `message`, `suggestion`, `line` and `column`, as selfie_spec_create's does; `line` and `column` are null for an issue on a field the update changed, which has no place in the file yet. An error on any other field was already in the spec and does not stop the update. Every other issue the updated spec has, warnings, notices, and such an error on a field the update did not write, is reported as a validation_result entry in `data`, sent before the spec is saved, so it is there even when the save fails. The call's own `result.outcome` says how the update went; the entry's `outcome` is the spec's own, as selfie_spec_validate scores it: \"clean\" for notices alone, \"found\" for warnings, or \"failed\" for an error the update left in place."
     )]
     async fn spec_update(
         &self,
@@ -508,7 +508,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate",
-        description = "Validate a single spec file for correctness. The package directory is searched first, then the dotfiles directory for a standalone dotfile spec. Returns validation issues at three levels: errors, warnings, and informational notices. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\"; branch on it. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. Each `validation_result` row carries the spec's own `outcome`: \"clean\", \"found\" (warnings) or \"failed\" (errors). A spec with warnings is a successful call with status 'found'; a notice alone leaves it 'success'. A spec with errors is an error result with status 'failed', whose message counts its errors and warnings; its issues are still in the data rows. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"canceled\" for a canceled call."
+        description = "Validate a single spec file for correctness. The package directory is searched first, then the dotfiles directory for a standalone dotfile spec. Returns validation issues at three levels: errors, warnings, and informational notices. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\"; branch on it. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. Each `validation_result` row carries the spec's own `outcome`: \"clean\", \"found\" (warnings) or \"failed\" (errors). A spec with warnings is a successful call with status 'found'; a notice alone leaves it 'success'. A spec with errors is an error result with status 'failed', whose message counts its errors and warnings; its issues are still in the data rows. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"canceled\" for a canceled call. The spec is also checked against the other specs, as selfie_spec_validate_all checks them: two specs that deploy one target in an environment are an error on each, naming both, and the call reports the named spec's own entries only. A spec that could not be read takes no part. When the named spec has a dotfile entry in any environment it declares, the call names each place it could not check as a warning row, saying why, and reports a warning about the dotfiles directory, such as one that is not there, as selfie_spec_validate_all does; a spec with no dotfile entry cannot collide and hears neither. None of that changes the named spec's result."
     )]
     async fn spec_validate(
         &self,
@@ -1733,6 +1733,39 @@ mod tests {
             "description": "A new description",
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn spec_validate_reports_a_target_another_spec_deploys() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        for name in ["alpha", "beta"] {
+            std::fs::write(
+                packages.join(format!("{name}.yml")),
+                format!(
+                    "name: {name}\nenvironments:\n  test:\n    install: \"true\"\n    dotfiles:\n      \
+                     - command: echo {name}\n        target: ~/.shared\n"
+                ),
+            )
+            .unwrap();
+        }
+        let server = server_over(&packages, None);
+        let params: PackageNameParam =
+            serde_json::from_value(serde_json::json!({ "package": "alpha" })).unwrap();
+
+        let result = server.spec_validate(Parameters(params)).await.unwrap();
+        let json = tool_json(&result);
+
+        assert_eq!(json["result"]["outcome"], "failed", "got {json}");
+        let rows = event_collector::validation_result_rows(&json);
+        assert_eq!(rows.len(), 1, "got {json}");
+        assert_eq!(rows[0]["package"], "alpha", "got {json}");
+        let messages = rows[0]["issues"].to_string();
+        assert!(
+            messages.contains("package 'alpha'") && messages.contains("package 'beta'"),
+            "got {json}"
+        );
     }
 
     #[tokio::test]

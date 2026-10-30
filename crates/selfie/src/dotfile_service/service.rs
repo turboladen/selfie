@@ -42,20 +42,6 @@ fn is_named(package: &Package, folded_name: &str) -> bool {
         .is_some_and(|spec_name| spec_name == folded_name)
 }
 
-/// Every collected spec, for track to check for an entry already deploying its
-/// file, with what the check cannot see worded.
-fn other_specs<R: PackageRepository>(
-    package_repo: &R,
-    dotfiles_repo: &R,
-    config: &SelfieConfig,
-) -> super::track::OtherSpecs {
-    let others = collect_others(package_repo, dotfiles_repo, config);
-    super::track::OtherSpecs {
-        packages: others.packages,
-        unchecked: others.unchecked,
-    }
-}
-
 /// Concrete implementation of the [`DotfileService`] trait
 ///
 /// Coordinates between the package repository, file system, and application
@@ -233,17 +219,10 @@ where
                     // `handle_apply` names what it could not check for a shared
                     // target, once it is known to be deploying something.
                     for finding in &findings {
-                        let sent = match filter.as_deref() {
-                            None => true,
-                            Some(name) => {
-                                !finding.is_about_another_name(name)
-                                    && !matches!(
-                                        finding,
-                                        Finding::Refusal(CollectionRefusal::AmbiguousName { .. })
-                                    )
-                            }
-                        };
-                        if sent {
+                        if filter
+                            .as_deref()
+                            .is_none_or(|name| finding.reported_for(name))
+                        {
                             finding.send(&sender).await;
                         }
                     }
@@ -540,7 +519,7 @@ where
                     handle_track_standalone(
                         &name,
                         &target_path,
-                        || other_specs(&package_repo, &dotfiles_repo, &config),
+                        || collect_others(&package_repo, &dotfiles_repo, &config),
                         &dotfiles_repo,
                         &fs,
                         &sender,
@@ -579,7 +558,7 @@ where
                     handle_track_for_package(
                         &package_name,
                         &target_path,
-                        || other_specs(&repo, &dotfiles_repo, &config),
+                        || collect_others(&repo, &dotfiles_repo, &config),
                         &repo,
                         &fs,
                         &sender,

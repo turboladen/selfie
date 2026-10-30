@@ -482,3 +482,38 @@ fn validate_all_names_an_unlistable_directory_only_in_its_results() {
         "{stderr}"
     );
 }
+
+// A spec is judged against the others, as `--all` judges every spec: a pair that
+// deploys one target is an error on the one named, naming both, as apply refuses
+// both entries.
+#[test]
+fn validating_one_spec_reports_the_target_another_spec_deploys() {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("packages");
+    for name in ["alpha", "beta"] {
+        fs::write(
+            packages_dir.join(format!("{name}.yml")),
+            format!(
+                "name: {name}\nenvironments:\n  {}:\n    install: \"true\"\n    dotfiles:\n      \
+                 - command: echo {name}\n        target: ~/.shared\n",
+                common::SELFIE_ENV
+            ),
+        )
+        .unwrap();
+    }
+
+    let out = common::run_sandboxed(&temp_dir, &["--no-color", "spec", "validate", "alpha"]);
+
+    assert_eq!(
+        out.code,
+        Some(FAILED),
+        "stdout: {} stderr: {}",
+        out.stdout,
+        out.stderr
+    );
+    let shown = format!("{}{}", out.stdout, out.stderr);
+    assert!(
+        shown.contains("package 'alpha'") && shown.contains("package 'beta'"),
+        "the collision must name both specs, got: {shown}"
+    );
+}

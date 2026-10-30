@@ -358,8 +358,16 @@ where
                 .await;
             }
             Scope::Named(_, refusals) => {
-                crate::package::collect::unchecked::send_unchecked_sentences(
-                    sender, refusals, packages, config,
+                let places: Vec<_> = refusals
+                    .iter()
+                    .map(crate::package::collect::unchecked::Unchecked::from)
+                    .collect();
+                crate::package::collect::unchecked::send_unchecked_warnings(
+                    sender,
+                    &places,
+                    packages,
+                    config,
+                    crate::package::collect::unchecked::Checking::Apply,
                 )
                 .await;
             }
