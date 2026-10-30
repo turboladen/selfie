@@ -38,7 +38,9 @@ pub(crate) async fn handle_track(
     let repo = create_package_repository(config);
     let dotfiles_repo = create_dotfiles_repository(config);
     if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
-        display.print_error(common::name_check_message(name, &e));
+        display.print_error(crate::terminal_text::Prose::message(
+            common::name_check_message(name, &e),
+        ));
         return Exit::Failed;
     }
 

@@ -17,7 +17,9 @@ pub(crate) async fn handle_search(
 ) -> Exit {
     tracing::debug!("Running spec search command (pattern={pattern:?})");
 
-    display.print_status(format!("Searching specs for \"{pattern}\"..."));
+    display.print_status(crate::terminal_text::Prose::message(format!(
+        "Searching specs for \"{pattern}\"..."
+    )));
 
     let event_stream = service.search(pattern).await;
 

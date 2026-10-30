@@ -72,8 +72,8 @@ pub(crate) fn force_heading(
 fn print_heading(display: &DisplayManager, channel: Channel, kind: BaseKind, directory: &Path) {
     let line = base_directory_line(kind, directory);
     match channel {
-        Channel::Stdout => display.print_info(line),
-        Channel::Stderr => display.print_run_note(line),
+        Channel::Stdout => display.print_info(crate::terminal_text::Prose::message(line)),
+        Channel::Stderr => display.print_run_note(crate::terminal_text::Prose::message(line)),
     }
 }
 

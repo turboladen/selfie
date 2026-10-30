@@ -22,7 +22,7 @@ pub(crate) async fn handle_list(
 ) -> Exit {
     tracing::debug!("Running spec list command (show_all={show_all})");
 
-    display.print_status("Loading specs...");
+    display.print_status(crate::terminal_text::lit!("Loading specs..."));
 
     let event_stream = service.list(show_all).await;
 
@@ -56,13 +56,18 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
     let use_colors = config.use_colors();
 
     if data.specs.is_empty() && data.invalid_packages.is_empty() && data.refused.is_empty() {
-        display.print_info("No specs found.");
+        display.print_info(crate::terminal_text::lit!("No specs found."));
         return;
     }
 
     if !data.specs.is_empty() {
         let mut table = SafeTable::new();
-        table.set_header(["Name", "Description", "Environments", "Git"]);
+        table.set_header([
+            lit!("Name"),
+            lit!("Description"),
+            lit!("Environments"),
+            lit!("Git"),
+        ]);
 
         for spec in &data.specs {
             let git_col = spec
@@ -71,8 +76,14 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
                 .map(|s| git_style::format_git_status_short(s, use_colors))
                 .unwrap_or_default();
             table.add_row([
-                Cell::painted(&spec.name, use_colors, |s| s.bold()),
-                Cell::prose(spec.description.as_deref().unwrap_or_default()),
+                Cell::painted(
+                    crate::terminal_text::Name::new(&spec.name),
+                    use_colors,
+                    |s| s.bold(),
+                ),
+                Cell::from(crate::terminal_text::Prose::new(
+                    spec.description.as_deref().unwrap_or_default(),
+                )),
                 format_environment_names(&spec.environments, &data.current_environment, config)
                     .into(),
                 git_col.into(),

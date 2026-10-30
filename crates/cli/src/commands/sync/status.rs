@@ -56,16 +56,22 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             let is_clean = total_changes == 0;
 
             if is_clean && *ahead == 0 && *behind == 0 {
-                display.print_success(format!("Repository: {short_root} ({branch_str})"));
+                display.print_success(crate::terminal_text::Prose::message(format!(
+                    "Repository: {short_root} ({branch_str})"
+                )));
                 display.println(shown!(
                     "{}No uncommitted changes, up to date with remote",
                     INDENT
                 ));
             } else {
                 if is_clean {
-                    display.print_success(format!("Repository: {short_root} ({branch_str})"));
+                    display.print_success(crate::terminal_text::Prose::message(format!(
+                        "Repository: {short_root} ({branch_str})"
+                    )));
                 } else {
-                    display.print_info(format!("Repository: {short_root} ({branch_str})"));
+                    display.print_info(crate::terminal_text::Prose::message(format!(
+                        "Repository: {short_root} ({branch_str})"
+                    )));
                 }
 
                 // File changes summary
@@ -131,9 +137,9 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
             // It counts specs that could not be loaded, packages and unlistable
             // directories alike, so the line names none of them.
             if *refused_count > 0 {
-                display.print_warning(format!(
+                display.print_warning(crate::terminal_text::Prose::message(format!(
                     "{refused_count} refusal(s) left dotfiles unchecked -- see the warnings above"
-                ));
+                )));
             }
             // The drift line is part of this command's answer, so it is on
             // stdout, marked by what it found.
@@ -148,39 +154,42 @@ fn handle_status_event(event: &PackageEvent, display: &DisplayManager, use_color
                 // Drift depends on the environment, so the line names it.
                 display.print_result(
                     outcome,
-                    format!("{line} in environment '{}'", operation_info.environment),
+                    crate::terminal_text::Prose::message(format!(
+                        "{line} in environment '{}'",
+                        operation_info.environment
+                    )),
                 );
             } else {
                 let count = drifted_targets.len();
                 display.print_result(
                     Outcome::Found,
-                    format!(
+                    crate::terminal_text::Prose::message(format!(
                         "Dotfile drift in environment '{}': {count} drifted out of {}",
                         operation_info.environment,
                         deployed_phrase(*total_deployed, *unverified)
-                    ),
+                    )),
                 );
                 // Show drifted file paths (shortened)
                 for target in drifted_targets {
                     let short = Shown::from(shorten_path(target)).paint(use_colors, |s| s.yellow());
                     display.println(shown!("{}{}", INDENT, short));
                 }
-                display.print_suggestion(
-                    "Run 'selfie apply' to redeploy or 'selfie dotfiles drift' for details",
-                );
+                display.print_suggestion(crate::terminal_text::lit!(
+                    "Run 'selfie apply' to redeploy or 'selfie dotfiles drift' for details"
+                ));
             }
             // Their own line: an orphan is neither drift nor a gap in the check.
             if *orphan_count > 0 {
-                display.print_warning(format!(
+                display.print_warning(crate::terminal_text::Prose::message(format!(
                     "{orphan_count} orphaned target(s): no entry deploys to them now -- run \
                      'selfie dotfiles drift' for details"
-                ));
+                )));
             }
             if *unjudged_count > 0 {
-                display.print_warning(format!(
+                display.print_warning(crate::terminal_text::Prose::message(format!(
                     "{unjudged_count} deployed target(s) not checked for orphans -- see the \
                      warnings above"
-                ));
+                )));
             }
             true
         }

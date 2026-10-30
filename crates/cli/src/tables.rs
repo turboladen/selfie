@@ -2,16 +2,15 @@ use std::fmt;
 
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 
-use crate::terminal_text::{Name, Paint, Prose, Shown};
+use crate::terminal_text::{Content, DisplayPath, Literal, Name, Output, Paint, Prose, Shown};
 use selfie::validation::ValidationIssue;
 
 /// A table in the CLI's style, rounded and fitted to the terminal, whose cells
 /// show text from outside selfie escaped.
 ///
-/// A cell built from text, `"x".into()`, is a name: escaped strictly, on one
-/// line. [`Cell::prose`] keeps a line break inside the cell, and a [`Shown`]
-/// keeps its text and styling. Every multi-line cell has its lines after the
-/// first indented two columns inside the cell.
+/// Each cell is built from a kind or a [`Shown`], which keeps its text and
+/// styling. Every multi-line cell has its lines after the first indented two
+/// columns inside the cell.
 // The indent is what tells a continued line from the next row, since the
 // table draws no line between rows.
 pub(crate) struct SafeTable(Table);
@@ -20,15 +19,9 @@ pub(crate) struct SafeTable(Table);
 pub(crate) struct Cell(Shown);
 
 impl Cell {
-    /// Builds a cell from `text`, escaped as [`Prose`], its line breaks kept.
-    pub(crate) fn prose(text: &str) -> Self {
-        Self(Shown::from(Prose::new(text)))
-    }
-
-    /// Builds a cell from `text`, a name, escaped and then styled by `paint`
-    /// when `use_colors`.
-    pub(crate) fn painted(text: &str, use_colors: bool, paint: Paint) -> Self {
-        Self(Shown::from(Name::new(text)).paint(use_colors, paint))
+    /// Builds a cell from `text`, styled by `paint` when `use_colors`.
+    pub(crate) fn painted(text: impl Into<Shown>, use_colors: bool, paint: Paint) -> Self {
+        Self(text.into().paint(use_colors, paint))
     }
 
     // The cell's text as the table lays it out, its lines after the first two
@@ -41,33 +34,17 @@ impl Cell {
     }
 }
 
-impl From<Shown> for Cell {
-    /// Builds a cell that shows `text` as it is, styling included.
-    fn from(text: Shown) -> Self {
-        Self(text)
-    }
+// A cell shows a kind as it is, styling included.
+macro_rules! cells_from {
+    ($($kind:ty),*) => {$(
+        impl From<$kind> for Cell {
+            fn from(text: $kind) -> Self {
+                Self(Shown::from(text))
+            }
+        }
+    )*};
 }
-
-impl From<&str> for Cell {
-    /// Builds a cell from `text`, a name, escaped as a [`Name`].
-    fn from(text: &str) -> Self {
-        Self(Shown::from(Name::new(text)))
-    }
-}
-
-impl From<String> for Cell {
-    /// Builds a cell from `text`, a name, escaped as a [`Name`].
-    fn from(text: String) -> Self {
-        Self::from(text.as_str())
-    }
-}
-
-impl From<&String> for Cell {
-    /// Builds a cell from `text`, a name, escaped as a [`Name`].
-    fn from(text: &String) -> Self {
-        Self::from(text.as_str())
-    }
-}
+cells_from!(Shown, Literal, Name, DisplayPath, Prose, Content, Output);
 
 impl SafeTable {
     /// Returns an empty table.
@@ -125,7 +102,7 @@ impl ValidationTableReporter {
         }
     }
 
-    pub(crate) fn setup(&mut self, header: Vec<&'static str>) -> &mut Self {
+    pub(crate) fn setup(&mut self, header: [Literal; 4]) -> &mut Self {
         self.table.set_header(header);
         self
     }
@@ -150,10 +127,14 @@ impl ValidationTableReporter {
     // One issue's row, its category painted with `color`.
     fn add_issue(&mut self, issue: &ValidationIssue, color: Paint) {
         self.table.add_row([
-            Cell::painted(&issue.category().to_string(), self.use_colors, color),
-            issue.field().into(),
-            Cell::prose(issue.message()),
-            Cell::prose(issue.suggestion().map_or("", String::as_str)),
+            Cell::painted(
+                Name::new(&issue.category().to_string()),
+                self.use_colors,
+                color,
+            ),
+            Name::new(issue.field()).into(),
+            Prose::new(issue.message()).into(),
+            Prose::new(issue.suggestion().map_or("", String::as_str)).into(),
         ]);
     }
 
@@ -187,14 +168,14 @@ mod tests {
     #[test]
     fn a_multi_line_cell_continues_two_columns_inside_it() {
         let mut table = SafeTable::new();
-        table.set_header([Cell::prose("h1\nh2"), "k".into()]);
+        table.set_header([Cell::from(Prose::new("h1\nh2")), Name::new("k").into()]);
         table.add_row([
-            Cell::prose("a1\na2"),
-            crate::status_style::styled_text("b1\nb2", true, |s| s.red()).into(),
+            Cell::from(Prose::new("a1\na2")),
+            crate::status_style::styled_text(Prose::new("b1\nb2"), true, |s| s.red()).into(),
         ]);
         table.add_row([
             Cell::from(shown!("{}\n{}", lit!("c1"), lit!("c2"))),
-            "d1".into(),
+            Name::new("d1").into(),
         ]);
 
         let rendered = console::strip_ansi_codes(&table.to_string()).into_owned();

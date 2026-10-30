@@ -70,7 +70,7 @@ pub(crate) fn display_validation_groups(
         _ => format!("Validation Issues ({})", counted.join(", ")),
     };
     display.line_to(channel, lit!(""));
-    display.print_section_header_to(channel, header);
+    display.print_section_header_to(channel, Name::new(&header));
 
     for group in groups {
         if group.rows.is_empty() {
@@ -96,15 +96,21 @@ pub(crate) fn display_validation_groups(
         // A Suggestion column only where some issue has one, so a table without
         // any keeps its width.
         let suggested = group.rows.iter().any(|r| r.suggestion.is_some());
-        let mut header = vec!["Level", "Category", "Field", "Message", "Location"];
+        let mut header = vec![
+            lit!("Level"),
+            lit!("Category"),
+            lit!("Field"),
+            lit!("Message"),
+            lit!("Location"),
+        ];
         if suggested {
-            header.push("Suggestion");
+            header.push(lit!("Suggestion"));
         }
         table.set_header(header);
 
         for row in &group.rows {
             let level = Cell::painted(
-                level_label(&row.level),
+                crate::terminal_text::Name::new(level_label(&row.level)),
                 use_colors,
                 match row.level {
                     ValidationLevel::Error => |s| s.red().bold(),
@@ -117,13 +123,23 @@ pub(crate) fn display_validation_groups(
                 .map_or_else(|| "-".to_string(), |at| at.to_string());
             let mut cells = vec![
                 level,
-                Cell::painted(&row.category, use_colors, |s| s.magenta()),
-                Cell::painted(row.field, use_colors, |s| s.cyan()),
-                Cell::prose(row.message),
-                location.into(),
+                Cell::painted(
+                    crate::terminal_text::Name::new(&row.category),
+                    use_colors,
+                    |s| s.magenta(),
+                ),
+                Cell::painted(
+                    crate::terminal_text::Name::new(row.field),
+                    use_colors,
+                    |s| s.cyan(),
+                ),
+                Cell::from(crate::terminal_text::Prose::new(row.message)),
+                Name::new(&location).into(),
             ];
             if suggested {
-                cells.push(Cell::prose(row.suggestion.unwrap_or("-")));
+                cells.push(Cell::from(crate::terminal_text::Prose::new(
+                    row.suggestion.unwrap_or("-"),
+                )));
             }
             table.add_row(cells);
         }
@@ -177,9 +193,15 @@ pub(crate) fn print_issues(display: &DisplayManager, issues: &[ValidationIssueDa
     for issue in issues {
         let line = issue_line(issue);
         match issue.level {
-            ValidationLevel::Error => display.print_error(line),
-            ValidationLevel::Warning => display.print_warning(line),
-            ValidationLevel::Info => display.print_run_note(line),
+            ValidationLevel::Error => {
+                display.print_error(crate::terminal_text::Prose::message(line))
+            }
+            ValidationLevel::Warning => {
+                display.print_warning(crate::terminal_text::Prose::message(line))
+            }
+            ValidationLevel::Info => {
+                display.print_run_note(crate::terminal_text::Prose::message(line))
+            }
         }
     }
 }

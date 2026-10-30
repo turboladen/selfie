@@ -50,7 +50,9 @@ pub(crate) async fn handle_create(
     // under: the check never sees a name the prompts change afterwards.
     let asked_name;
     let package_name = if interactive {
-        display.print_run_note("Creating package interactively...");
+        display.print_run_note(crate::terminal_text::lit!(
+            "Creating package interactively..."
+        ));
         asked_name = match prompt_package_name(package_name, display) {
             Ok(name) => name,
             Err(exit) => return exit,
@@ -64,10 +66,10 @@ pub(crate) async fn handle_create(
     let package_name = match get_valid_package_name(package_name, &repo, config, display) {
         Ok(PackageNameResult::CreateNew(name)) => name,
         Ok(PackageNameResult::EditExisting(path)) => {
-            display.print_run_note(format!(
+            display.print_run_note(crate::terminal_text::Prose::message(format!(
                 "Opening existing package for editing at {}",
                 DisplayPath::of(&path)
-            ));
+            )));
             let success_message =
                 format!("Package editing completed at {}", DisplayPath::of(&path));
             return common::open_editor(&path, display, Some(success_message));
@@ -75,7 +77,7 @@ pub(crate) async fn handle_create(
         // A create that wrote nothing did not do what it was asked, so a script
         // must not read it as success.
         Ok(PackageNameResult::Canceled) => {
-            display.print_run_note("Package creation canceled.");
+            display.print_run_note(crate::terminal_text::lit!("Package creation canceled."));
             return Exit::Failed;
         }
         Err(exit) => return exit,
@@ -98,7 +100,9 @@ pub(crate) async fn handle_create(
     };
 
     if !interactive {
-        display.print_info("Package created. Use 'selfie spec edit' to customize it.");
+        display.print_info(crate::terminal_text::lit!(
+            "Package created. Use 'selfie spec edit' to customize it."
+        ));
         return created_exit;
     }
 
@@ -109,10 +113,10 @@ pub(crate) async fn handle_create(
     );
 
     let edit_later = || {
-        display.print_info(format!(
+        display.print_info(crate::terminal_text::Prose::message(format!(
             "Package created. You can edit it later with `selfie spec edit {}`.",
             name_argument(&created_name)
-        ));
+        )));
     };
     match edit_now {
         // Asked for, so the editor's failure is the run's; a create's own score
@@ -129,7 +133,9 @@ pub(crate) async fn handle_create(
             ))
         }
         Ok(false) => {
-            display.print_info("Package created. You can edit it later with 'selfie spec edit'.");
+            display.print_info(crate::terminal_text::lit!(
+                "Package created. You can edit it later with 'selfie spec edit'."
+            ));
             created_exit
         }
         // The spec is already written, so only Ctrl+C changes how the run ends: a
@@ -225,8 +231,10 @@ pub(super) fn name_check_refusal(name: &str, error: &NamespaceValidationError) -
 fn refuse_interactive(display: &DisplayManager, failure: &PromptFailure) -> Exit {
     display.refuse_prompt(
         failure,
-        "spec create --interactive",
-        "Leave off --interactive to write a template, then edit it with 'selfie spec edit'.",
+        crate::terminal_text::lit!("spec create --interactive"),
+        crate::terminal_text::lit!(
+            "Leave off --interactive to write a template, then edit it with 'selfie spec edit'."
+        ),
     )
 }
 
@@ -254,7 +262,10 @@ fn get_valid_package_name(
                 error @ (NamespaceValidationError::PackageDirectoryUnreadable(_)
                 | NamespaceValidationError::DotfilesDirectoryUnreadable(_)),
             ) => {
-                display.print_error(name_check_refusal(&current_name, &error));
+                display.print_error(crate::terminal_text::Prose::message(name_check_refusal(
+                    &current_name,
+                    &error,
+                )));
                 return Err(Exit::Failed);
             }
             Err(NamespaceValidationError::Conflict(conflict)) => {
@@ -266,8 +277,9 @@ fn get_valid_package_name(
                     namespace::NameLocation::Dotfiles => None,
                 };
                 if let Some(existing_package) = editable {
-                    display
-                        .print_warning(format!("{conflict} Edit it, or choose a different name."));
+                    display.print_warning(crate::terminal_text::Prose::message(format!(
+                        "{conflict} Edit it, or choose a different name."
+                    )));
 
                     let action = display.prompt(
                         Select::with_theme(&SimpleTheme)
@@ -293,13 +305,14 @@ fn get_valid_package_name(
                         Err(failure) => {
                             return Err(display.refuse_prompt(
                                 &failure,
-                                "Choosing what to do about an existing package",
-                                format!(
+                                crate::terminal_text::lit!(
+                                    "Choosing what to do about an existing package"
+                                ),
+                                crate::terminal_text::Prose::message(format!(
                                     "Edit it with `selfie spec edit {}`, or run `selfie spec \
                                          create` with a different name.",
                                     name_argument(&current_name)
-                                )
-                                .as_str(),
+                                )),
                             ));
                         }
                     }
@@ -312,15 +325,17 @@ fn get_valid_package_name(
                         }
                         namespace::NameLocation::Dotfiles => "",
                     };
-                    display.print_warning(format!("{conflict}{why} Choose a different name."));
+                    display.print_warning(crate::terminal_text::Prose::message(format!(
+                        "{conflict}{why} Choose a different name."
+                    )));
                 }
 
                 // Prompt for a new name
                 retry_count += 1;
                 if retry_count > MAX_NAME_RETRIES {
-                    display.print_error(format!(
+                    display.print_error(crate::terminal_text::Prose::message(format!(
                         "Too many retry attempts ({MAX_NAME_RETRIES}). Please try again later."
-                    ));
+                    )));
                     return Err(Exit::Failed);
                 }
 
@@ -333,8 +348,10 @@ fn get_valid_package_name(
                             Err(failure) => {
                                 return Err(display.refuse_prompt(
                                     &failure,
-                                    "Choosing a different name",
-                                    "Run 'selfie spec create' again with a different name.",
+                                    crate::terminal_text::lit!("Choosing a different name"),
+                                    crate::terminal_text::lit!(
+                                        "Run 'selfie spec create' again with a different name."
+                                    ),
                                 ));
                             }
                         };
@@ -342,7 +359,9 @@ fn get_valid_package_name(
                     // be refused only when the spec is written.
                     match selfie::package::spec_name_refusal(&name) {
                         None => break name,
-                        Some(refusal) => display.print_warning(refusal),
+                        Some(refusal) => {
+                            display.print_warning(crate::terminal_text::Prose::message(refusal))
+                        }
                     }
                 };
                 continue;
@@ -427,7 +446,7 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
         // would be thrown away with it.
         match selfie::package::spec_name_refusal(&name) {
             None => return Ok(name),
-            Some(refusal) => display.print_warning(refusal),
+            Some(refusal) => display.print_warning(crate::terminal_text::Prose::message(refusal)),
         }
     }
 }
@@ -472,7 +491,9 @@ fn prompt_environments(
     let mut environments = Environments::new();
 
     loop {
-        display.print_run_note("Adding environment configuration...");
+        display.print_run_note(crate::terminal_text::lit!(
+            "Adding environment configuration..."
+        ));
 
         let env_name = prompt_environment_name(&environments, config, display)?;
         let install_cmd = prompt_install_command(display)?;
@@ -523,9 +544,9 @@ fn prompt_environment_name(
         if !existing_environments.contains_key(&name) {
             return Ok(name);
         }
-        display.print_warning(format!(
+        display.print_warning(crate::terminal_text::Prose::message(format!(
             "Environment '{name}' is already in this spec. Choose a different name."
-        ));
+        )));
     }
 }
 
@@ -539,7 +560,9 @@ fn prompt_install_command(display: &DisplayManager) -> Result<String, Exit> {
             break Ok(cmd);
         }
 
-        display.print_error("Install command cannot be empty.");
+        display.print_error(crate::terminal_text::lit!(
+            "Install command cannot be empty."
+        ));
     }
 }
 
@@ -595,7 +618,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
     let repo = common::create_package_repository(config);
 
     let (available_packages, skipped) = available_dependency_names(&repo).map_err(|msg| {
-        display.print_error(msg);
+        display.print_error(crate::terminal_text::Prose::message(msg));
         Exit::Failed
     })?;
 
@@ -603,7 +626,7 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
     // when the dependency is resolved. Naming these stops the picker reading as
     // every package the user has.
     for warning in skipped {
-        display.print_warning(warning);
+        display.print_warning(crate::terminal_text::Prose::message(warning));
     }
 
     if available_packages.is_empty() {

@@ -138,19 +138,29 @@ fn handle_list_event(
             // under `--all`, in their own columns.
             state.buffered_rows.sort_by(|a, b| a.name.cmp(&b.name));
             let mut table = SafeTable::new();
-            let mut header = vec!["", "Package", "Status"];
+            let mut header = vec![lit!(""), lit!("Package"), lit!("Status")];
             if show_all {
-                header.push("Environments");
+                header.push(lit!("Environments"));
             }
             table.set_header(header);
             let package_dir = std::path::Path::new(&package_list.package_directory);
             let failed = |text: String| {
-                Cell::from(status_style::styled_text(&text, use_colors, |s| s.red()))
+                Cell::from(status_style::styled_text(
+                    crate::terminal_text::Prose::new(&text),
+                    use_colors,
+                    |s| s.red(),
+                ))
             };
             let mut add = |result: &RowResult, name: &str, status: Cell, envs: Option<Shown>| {
-                let mut row = vec![row_marker(result, use_colors).into(), name.into(), status];
+                let mut row = vec![
+                    row_marker(result, use_colors).into(),
+                    crate::terminal_text::Name::new(name).into(),
+                    status,
+                ];
                 if show_all {
-                    row.push(envs.map_or_else(|| "-".into(), Cell::from));
+                    row.push(
+                        envs.map_or_else(|| crate::terminal_text::lit!("-").into(), Cell::from),
+                    );
                 }
                 table.add_row(row);
             };
@@ -249,18 +259,22 @@ fn display_environment_stats(
     env_counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
     let mut table = SafeTable::new();
-    table.set_header(["Environment", "Package Count"]);
+    table.set_header([lit!("Environment"), lit!("Package Count")]);
 
     let use_colors = config.use_colors();
     for (env_name, count) in env_counts {
         let env_cell = if env_name == config.environment() {
-            Cell::painted(&env_name, use_colors, |s| s.green().bold())
+            Cell::painted(
+                crate::terminal_text::Name::new(&env_name),
+                use_colors,
+                |s| s.green().bold(),
+            )
         } else {
-            env_name.into()
+            Name::new(&env_name).into()
         };
         table.add_row([
             env_cell,
-            Cell::painted(&count.to_string(), use_colors, |s| s.cyan()),
+            Cell::painted(shown!("{}", count), use_colors, |s| s.cyan()),
         ]);
     }
 
@@ -268,7 +282,7 @@ fn display_environment_stats(
 
     // Advice about the run, so on stderr, as one suggestion: a second line on
     // its own would read as an unrelated note.
-    display.print_styled_suggestion(shown!(
+    display.print_suggestion(shown!(
         "{} to see packages for a different environment, or {} to see all packages regardless \
          of environment",
         Shown::from(lit!("--environment <env>")).paint(use_colors, |s| s.yellow()),

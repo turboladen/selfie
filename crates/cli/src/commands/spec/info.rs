@@ -1,5 +1,5 @@
 use crate::tables::{Cell, SafeTable};
-use crate::terminal_text::{Literal, Name, Shown, lit, shown};
+use crate::terminal_text::{Literal, Name, Prose, Shown, lit, shown};
 use selfie::package::{
     event::{
         DependencyStatus, EnvironmentStatus, EnvironmentStatusData, OperationResult, PackageEvent,
@@ -27,7 +27,9 @@ pub(crate) async fn handle_info(
     tracing::debug!("Getting package definition for: {package_name}");
 
     // Status message:
-    display.print_status(format!("Getting info for {package_name}..."));
+    display.print_status(crate::terminal_text::Prose::message(format!(
+        "Getting info for {package_name}..."
+    )));
 
     // Call the service's spec_info method to get an event stream
     let event_stream = service.spec_info(package_name).await;
@@ -42,9 +44,9 @@ pub(crate) async fn handle_info(
                     display.println(shown!("{}", table));
                     print_dotfiles(package_info, display);
                     if let Some(reason) = &package_info.refusal_elsewhere {
-                        display.print_info(format!(
+                        display.print_info(crate::terminal_text::Prose::message(format!(
                             "selfie apply would refuse this spec in another environment: {reason}"
-                        ));
+                        )));
                     }
                     true // Handled
                 }
@@ -72,15 +74,20 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
     let use_colors = config.use_colors();
     let key = |name: Literal| Cell::from(format_key(name, use_colors));
 
-    table.add_row([key(lit!("Name")), package_info.name.as_str().into()]);
+    table.add_row([key(lit!("Name")), Name::new(&package_info.name).into()]);
     if let Some(desc) = &package_info.description {
-        table.add_row([key(lit!("Description")), Cell::prose(desc)]);
+        table.add_row([
+            key(lit!("Description")),
+            Cell::from(crate::terminal_text::Prose::new(desc)),
+        ]);
     }
 
     if let Some(homepage) = &package_info.homepage {
         table.add_row([
             key(lit!("Homepage")),
-            Cell::painted(homepage, use_colors, |s| s.underlined().blue()),
+            Cell::painted(crate::terminal_text::Name::new(homepage), use_colors, |s| {
+                s.underlined().blue()
+            }),
         ]);
     }
 
@@ -90,7 +97,7 @@ fn create_package_info_table(package_info: &PackageInfoData, config: &CliConfig)
         let text = format!("selfie apply would refuse this spec here: {refusal}");
         table.add_row([
             key(lit!("Refused")),
-            status_style::styled_text(&text, use_colors, |s| s.red()).into(),
+            status_style::styled_text(Prose::new(&text), use_colors, |s| s.red()).into(),
         ]);
     } else {
         let env_names = presentation::format_environment_names(
@@ -119,16 +126,17 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
     }
 
     let mut table = SafeTable::new();
-    table.set_header(["Environment", "Content", "Target"]);
+    table.set_header([lit!("Environment"), lit!("Content"), lit!("Target")]);
     for dotfile in &package_info.dotfiles {
         table.add_row([
             match (&dotfile.environment, dotfile.refused) {
-                (Some(environment), true) => format!("{environment} (refused)"),
-                (Some(environment), false) => environment.clone(),
-                (None, _) => "(shared)".to_string(),
-            },
-            crate::commands::dotfiles::list::source_cell(&dotfile.entry),
-            shorten_path(dotfile.entry.target()).to_string(),
+                (Some(environment), true) => Name::new(&format!("{environment} (refused)")).into(),
+                (Some(environment), false) => Name::new(environment).into(),
+                (None, _) => Shown::from(lit!("(shared)")),
+            }
+            .into(),
+            Cell::from(crate::commands::dotfiles::list::source_cell(&dotfile.entry)),
+            shorten_path(dotfile.entry.target()).into(),
         ]);
     }
     display.println(shown!("\n{}", table));
@@ -136,12 +144,12 @@ fn print_dotfiles(package_info: &PackageInfoData, display: &DisplayManager) {
     // A reader may take a package file for data, and applying this one runs
     // commands.
     if package_info.apply_commands > 0 {
-        display.print_warning(format!(
+        display.print_warning(crate::terminal_text::Prose::message(format!(
             "selfie apply runs {} {} in environment '{}' to produce this package's dotfiles",
             package_info.apply_commands,
             selfie::pluralize(package_info.apply_commands, "command", "commands"),
             package_info.current_environment,
-        ));
+        )));
     }
 }
 
@@ -160,12 +168,12 @@ pub(crate) fn create_environment_table(
     } else {
         Shown::from(Name::new(&format!("Environment: {name}"))).paint(use_colors, |s| s.bold())
     };
-    env_table.set_header([Cell::from(env_header), "".into()]);
+    env_table.set_header([Cell::from(env_header), Name::new("").into()]);
 
     let format_env_key = |key: Literal| Cell::from(format_key(key, use_colors));
     // Commands, as prose: a block-scalar command keeps its line breaks inside
     // the cell.
-    let format_env_value = Cell::prose;
+    let format_env_value = |text: &str| Cell::from(Prose::new(text));
 
     // Add installation status if this is the current environment and we have status
     if env_status.is_current {
@@ -223,11 +231,11 @@ pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Sho
     match status {
         EnvironmentStatus::Installed => status_style::format_installed(use_colors),
         EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
-        EnvironmentStatus::Unknown(reason) => {
-            status_style::styled_text(&format!("Unknown ({reason})"), use_colors, |s| {
-                s.yellow().italic()
-            })
-        }
+        EnvironmentStatus::Unknown(reason) => status_style::styled_text(
+            Prose::new(&format!("Unknown ({reason})")),
+            use_colors,
+            |s| s.yellow().italic(),
+        ),
     }
 }
 

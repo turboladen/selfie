@@ -36,15 +36,17 @@ pub(crate) async fn handle_edit(
         // Not about a file at this name, so "a file is already there" would be
         // false. The error names the directory and what is at it.
         Err(e @ selfie::package::port::PackageRepoError::PackageListError(_)) => {
-            display.print_error(format!("Cannot edit '{package_name}': {e}"));
+            display.print_error(crate::terminal_text::Prose::message(format!(
+                "Cannot edit '{package_name}': {e}"
+            )));
             return Exit::Failed;
         }
         Err(e) => {
-            display.print_error(format!(
+            display.print_error(crate::terminal_text::Prose::message(format!(
                 "Cannot edit '{package_name}': selfie could not use what already answers to \
                  that name, and opens no new package beside it. Edit the existing file directly. \
                  {e}"
-            ));
+            )));
             return Exit::Failed;
         }
     };
@@ -62,9 +64,9 @@ pub(crate) async fn handle_edit(
     // first: a serde round trip flattens YAML anchors, drops every comment and
     // reorders keys, and would refuse the very file a typo guard just rejected.
     let (path, created, created_exit) = if let Some(pkg) = existing_package {
-        display.print_run_note(format!(
+        display.print_run_note(crate::terminal_text::Prose::message(format!(
             "Opening existing package '{package_name}' for editing"
-        ));
+        )));
         (pkg.file_path().to_path_buf(), false, Exit::Clean)
     } else {
         match create_for_edit(service, &repo, package_name, config, display).await {
@@ -121,11 +123,14 @@ async fn create_for_edit(
     // Every check comes ahead of the prompt: asking someone to confirm a create
     // that is about to be refused wastes the answer.
     if let Some(refusal) = selfie::package::spec_name_refusal(package_name) {
-        display.print_error(refusal);
+        display.print_error(crate::terminal_text::Prose::message(refusal));
         return Err(Exit::Failed);
     }
     if repo.path_is_occupied(package.path()) {
-        display.print_error(occupied_path_refusal(package_name, package.path()));
+        display.print_error(crate::terminal_text::Prose::message(occupied_path_refusal(
+            package_name,
+            package.path(),
+        )));
         return Err(Exit::Failed);
     }
 
@@ -134,7 +139,7 @@ async fn create_for_edit(
     if let Err(error) = namespace::validate_unique_name(package_name, repo, Some(&dotfiles_repo)) {
         // The user asked to edit that spec, so a different name is not the way
         // out: say which kind it is and where to edit it.
-        display.print_error(match &error {
+        display.print_error(crate::terminal_text::Prose::message(match &error {
             namespace::NamespaceValidationError::Conflict(
                 conflict @ namespace::NamespaceConflict {
                     found_in: namespace::NameLocation::Dotfiles,
@@ -156,13 +161,17 @@ async fn create_for_edit(
                 conflict.claimants()
             ),
             _ => name_check_refusal(package_name, &error),
-        });
+        }));
         return Err(Exit::Failed);
     }
 
-    display.print_run_note(format!("Package '{package_name}' does not exist."));
+    display.print_run_note(crate::terminal_text::Prose::message(format!(
+        "Package '{package_name}' does not exist."
+    )));
     confirm_new_package(package_name, display)?;
-    display.print_run_note(format!("Creating new package '{package_name}'"));
+    display.print_run_note(crate::terminal_text::Prose::message(format!(
+        "Creating new package '{package_name}'"
+    )));
 
     write_spec(service, package, display)
         .await
@@ -198,17 +207,16 @@ fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(
         Ok(true) => Ok(()),
         // A create that wrote nothing did not do what it was asked.
         Ok(false) => {
-            display.print_run_note("Package creation canceled.");
+            display.print_run_note(crate::terminal_text::lit!("Package creation canceled."));
             Err(Exit::Failed)
         }
         Err(failure) => Err(display.refuse_prompt(
             &failure,
-            "Confirming a new package",
-            format!(
+            crate::terminal_text::lit!("Confirming a new package"),
+            crate::terminal_text::Prose::message(format!(
                 "Create it with `selfie spec create {}`, then edit it.",
                 name_argument(package_name)
-            )
-            .as_str(),
+            )),
         )),
     }
 }

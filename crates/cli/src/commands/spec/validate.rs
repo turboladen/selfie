@@ -1,4 +1,4 @@
-use crate::terminal_text::{DisplayPath, lit};
+use crate::terminal_text::{DisplayPath, Name, lit};
 use selfie::package::{
     event::{
         CollectionRefusal, OperationResult, OperationSuccess, Outcome, PackageEvent,
@@ -30,7 +30,9 @@ pub(crate) async fn handle_validate(
 ) -> Exit {
     tracing::debug!("Running validate command for package: {}", package_name);
 
-    display.print_status(format!("Validating {package_name}..."));
+    display.print_status(crate::terminal_text::Prose::message(format!(
+        "Validating {package_name}..."
+    )));
 
     let event_stream = service.validate(package_name, None).await;
 
@@ -50,7 +52,7 @@ pub(crate) async fn handle_validate_all(
 ) -> Exit {
     tracing::debug!("Running validate --all command");
 
-    display.print_status("Validating all packages...");
+    display.print_status(crate::terminal_text::lit!("Validating all packages..."));
 
     let event_stream = service.validate_all().await;
 
@@ -150,7 +152,9 @@ fn print_unlisted_warnings(
     for warning in warnings {
         match warning {
             PackageEvent::SpecSkipped { error, .. } if !listed(&|r| names_file(r, error)) => {
-                display.print_warning(skipped_spec_warning(error));
+                display.print_warning(crate::terminal_text::Prose::message(skipped_spec_warning(
+                    error,
+                )));
             }
             PackageEvent::PackagesRefused {
                 reason, packages, ..
@@ -161,13 +165,13 @@ fn print_unlisted_warnings(
                     .cloned()
                     .collect();
                 for line in refused_packages_lines(reason, &unlisted, display.is_verbose()) {
-                    display.print_warning(line);
+                    display.print_warning(crate::terminal_text::Prose::message(line));
                 }
             }
             // A directory refusal arrives as a plain warning carrying its
             // sentence, so that sentence is what identifies it.
             PackageEvent::Warning { message, .. } if !listed(&|r| names_directory(r, message)) => {
-                display.print_warning(message);
+                display.print_warning(crate::terminal_text::Prose::message(message));
             }
             _ => {}
         }
@@ -285,13 +289,18 @@ fn display_results(
     }
 
     let mut table = SafeTable::new();
-    table.set_header(["", "Spec", "Status", "Issues"]);
+    table.set_header([lit!(""), lit!("Spec"), lit!("Status"), lit!("Issues")]);
     let mut add = |result: RowResult, spec: &str, status: SpecStatus, issues: Option<&str>| {
         table.add_row([
             Cell::from(row_marker(&result, use_colors)),
-            spec.into(),
-            paint_row_text(&status.to_string(), &result, use_colors).into(),
-            issues.unwrap_or(NO_VALUE).into(),
+            Name::new(spec).into(),
+            paint_row_text(
+                crate::terminal_text::Prose::new(&status.to_string()),
+                &result,
+                use_colors,
+            )
+            .into(),
+            Name::new(issues.unwrap_or(NO_VALUE)).into(),
         ]);
     };
     for result in &results {
@@ -379,10 +388,13 @@ fn display_validation_success_card(
     display: &DisplayManager,
 ) {
     display
-        .result_card("Validation Results")
-        .field(lit!("Package"), &validation_result.package_name)
-        .field(lit!("Environment"), &validation_result.environment)
-        .styled_field(
+        .result_card(lit!("Validation Results"))
+        .field(lit!("Package"), Name::new(&validation_result.package_name))
+        .field(
+            lit!("Environment"),
+            Name::new(&validation_result.environment),
+        )
+        .field(
             lit!("Status"),
             status_style::format_valid(config.use_colors()),
         )

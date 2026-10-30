@@ -5,7 +5,7 @@ use selfie::package::{
 };
 
 use crate::formatters::name_list;
-use crate::terminal_text::{Literal, Name, Output, Paint, Shown, lit, shown};
+use crate::terminal_text::{Literal, Name, Output, Paint, Shown, interim_one_line, lit, shown};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -110,27 +110,39 @@ fn display_audit_output_only(audit_result: &AuditResultData, display: &DisplayMa
     let name = Name::new(&audit_result.package_name);
     match &audit_result.result {
         AuditResult::Clean { sources } => {
-            display.print_success(format!("{name} — clean ({})", name_list(sources)));
+            display.print_success(crate::terminal_text::Prose::message(format!(
+                "{name} — clean ({})",
+                name_list(sources)
+            )));
         }
         AuditResult::Conflicts {
             sources, expected, ..
         } => {
-            display.print_warning(format!(
+            display.print_warning(crate::terminal_text::Prose::message(format!(
                 "{name} — conflicts detected: unexpected source(s): {}",
                 name_list(unexpected(sources, expected))
-            ));
+            )));
         }
         AuditResult::NotInstalled => {
-            display.print_info(format!("{name} — not installed"));
+            display.print_info(crate::terminal_text::Prose::message(format!(
+                "{name} — not installed"
+            )));
         }
         AuditResult::NoAuditCommand => {
-            display.print_info(format!("{name} — no audit command defined"));
+            display.print_info(crate::terminal_text::Prose::message(format!(
+                "{name} — no audit command defined"
+            )));
         }
         AuditResult::Error(err) => {
-            display.print_error(format!("{name} — error: {}", Output::new(err)));
+            display.print_error(crate::terminal_text::Prose::message(format!(
+                "{name} — error: {}",
+                Output::new(err)
+            )));
         }
         AuditResult::CouldNotRun(failure) => {
-            display.print_error(format!("{name} — error: {failure}"));
+            display.print_error(crate::terminal_text::Prose::message(format!(
+                "{name} — error: {failure}"
+            )));
         }
     }
 }
@@ -230,10 +242,13 @@ fn display_audit_result_card(
     };
 
     display
-        .result_card("Audit Results")
-        .field(lit!("Package"), &audit_result.package_name)
-        .field(lit!("Environment"), &audit_result.environment)
-        .command_if(lit!("Command"), audit_result.audit_command.as_deref())
+        .result_card(lit!("Audit Results"))
+        .field(lit!("Package"), Name::new(&audit_result.package_name))
+        .field(lit!("Environment"), Name::new(&audit_result.environment))
+        .command_if(
+            lit!("Command"),
+            audit_result.audit_command.as_deref().map(interim_one_line),
+        )
         .styled_fields(status)
         .print();
 }

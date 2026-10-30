@@ -107,7 +107,10 @@ pub(crate) fn library_config_notices(ignored: &[IgnoredKey]) -> Vec<ConfigNotice
 // One warning, so the notice and its remedy print as one line, on stderr.
 pub(crate) fn report_config_notices(notices: &[ConfigNotice], display: &DisplayManager) {
     for notice in notices {
-        display.print_warning(format!("{} {}", notice.message, notice.suggestion));
+        display.print_warning(crate::terminal_text::Prose::message(format!(
+            "{} {}",
+            notice.message, notice.suggestion
+        )));
     }
 }
 
@@ -117,7 +120,10 @@ pub(crate) fn print_config_notices(notices: &[ConfigNotice], display: &DisplayMa
     for notice in notices {
         display.print_result(
             selfie::package::event::Outcome::Found,
-            format!("{} {}", notice.message, notice.suggestion),
+            crate::terminal_text::Prose::message(format!(
+                "{} {}",
+                notice.message, notice.suggestion
+            )),
         );
     }
 }

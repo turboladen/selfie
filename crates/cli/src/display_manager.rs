@@ -284,7 +284,7 @@ pub(crate) enum Channel {
 // and the last lines its command wrote.
 struct WaitingLine {
     bar: Option<ProgressBar>,
-    subject: String,
+    subject: Shown,
     started: Instant,
     tail: VecDeque<String>,
 }
@@ -447,10 +447,10 @@ impl DisplayManager {
     pub(crate) fn with_cancellation(mut self, token: CancellationToken) -> Self {
         #[cfg(not(test))]
         if let Err(error) = wakeup::install() {
-            self.print_warning(format!(
+            self.print_warning(crate::terminal_text::Prose::message(format!(
                 "A signal cannot end a prompt in this run, so it takes a second one to stop \
                  selfie while it asks: {error}"
-            ));
+            )));
         }
         self.cancellation = Some(token);
         self
@@ -529,12 +529,12 @@ impl DisplayManager {
     /// Show that the run now waits on `subject`, something outside selfie: a
     /// spinner on a terminal, otherwise one status line (stderr). Steps may
     /// overlap; each lasts until [`end_waiting`](Self::end_waiting) with its id.
-    pub(crate) fn start_waiting(&self, step: StepId, subject: impl Display) {
-        let subject = interim_one_line(&subject.to_string()).to_string();
+    pub(crate) fn start_waiting(&self, step: StepId, subject: Name) {
+        let subject = Shown::from(subject);
         let bar = if self.draws_spinner {
             Some(self.spinner(&subject))
         } else {
-            self.print_progress(format!("{subject}..."));
+            self.print_progress(shown!("{}...", subject));
             None
         };
         if let Ok(mut waiting) = self.waiting.lock() {
@@ -582,7 +582,7 @@ impl DisplayManager {
             // Under `--verbose` the lines were printed as they came.
             if !self.is_verbose() {
                 let tail: Vec<&str> = line.tail.iter().map(String::as_str).collect();
-                self.print_error_context(&tail.join("\n"));
+                self.print_error_context(content_lines(&tail.join("\n")));
             }
             if let Ok(mut failed) = self.failed_tail.lock() {
                 *failed = line.tail.into_iter().collect();
@@ -657,19 +657,20 @@ impl DisplayManager {
 
     /// Print a failed command's stderr as context for its error (stderr),
     /// leaving out the lines its step already showed when it ended.
-    pub(crate) fn print_command_stderr(&self, stderr: &str) {
+    pub(crate) fn print_command_stderr(&self, stderr: &selfie::commands::BoundedText) {
         let shown = self
             .failed_tail
             .lock()
             .map(|mut failed| std::mem::take(&mut *failed))
             .unwrap_or_default();
         let rest: Vec<String> = stderr
+            .as_str()
             .lines()
             .map(|line| Output::line(line).to_string())
             .filter(|line| !shown.contains(line))
             .collect();
         if rest.iter().any(|line| !line.trim().is_empty()) {
-            self.print_error_context(&rest.join("\n"));
+            self.print_error_context(content_lines(&rest.join("\n")));
         }
     }
 
@@ -679,8 +680,8 @@ impl DisplayManager {
     /// terminal, and is not shown otherwise. Under `--verbose` every line is
     /// printed: indented and dimmed on a terminal, and prefixed with what the
     /// step waits on without one.
-    pub(crate) fn command_output(&self, step: StepId, line: &str) {
-        let line = Output::line(line).to_string();
+    pub(crate) fn command_output(&self, step: StepId, line: Output) {
+        let line = line.to_string();
         if line.trim().is_empty() {
             return;
         }
@@ -693,7 +694,7 @@ impl DisplayManager {
         let current = waiting.get_mut(&step);
         let subject = current
             .as_ref()
-            .map(|w| w.subject.clone())
+            .map(|w| w.subject.to_string())
             .unwrap_or_default();
         if let Some(current) = current {
             if current.tail.len() == TAIL_LINES {
@@ -771,7 +772,7 @@ impl DisplayManager {
     // stream (stdout or stderr), then resumes. Safe when no spinners are active.
 
     /// Print an informational message (stdout)
-    pub(crate) fn print_info(&self, message: impl Display) {
+    pub(crate) fn print_info(&self, message: impl Into<Shown>) {
         self.print_marked(
             Channel::Stdout,
             lit!("ℹ"),
@@ -782,7 +783,7 @@ impl DisplayManager {
     }
 
     /// Print an error message (stderr)
-    pub(crate) fn print_error(&self, message: impl Display) {
+    pub(crate) fn print_error(&self, message: impl Into<Shown>) {
         self.print_marked(
             Channel::Stderr,
             lit!("✗"),
@@ -795,16 +796,12 @@ impl DisplayManager {
     /// Print supporting lines under an error (stderr), one per line.
     ///
     /// For a block a reader looks at rather than reads — a source window under a
-    /// parse failure. `block` is split on its line breaks, LF or CRLF, so a
-    /// trailing one costs nothing. Each line is escaped as a line of file
-    /// content, so an invisible character shows as its escape and a tab stays a
-    /// tab. Each line is indented and dimmed and carries no `✗`; the marker
-    /// belongs to the sentence above, not to every line of its evidence.
-    pub(crate) fn print_error_context(&self, block: &str) {
-        let lines: Vec<String> = block
-            .lines()
-            .map(|line| Content::new(line).to_string())
-            .collect();
+    /// parse failure. Each line is indented and dimmed and carries no `✗`; the
+    /// marker belongs to the sentence above, not to every line of its evidence.
+    pub(crate) fn print_error_context(&self, block: impl Into<Shown>) {
+        // Its own styling is written below, so the block's is removed.
+        let block = guard(block.into().as_str(), false).into_owned();
+        let lines: Vec<&str> = block.lines().collect();
         for line in &lines {
             self.record_stderr(line);
         }
@@ -826,7 +823,7 @@ impl DisplayManager {
     pub(crate) fn print_result(
         &self,
         outcome: selfie::package::event::Outcome,
-        message: impl Display,
+        message: impl Into<Shown>,
     ) {
         use selfie::package::event::Outcome;
 
@@ -839,7 +836,7 @@ impl DisplayManager {
     }
 
     /// Print a success message (stdout)
-    pub(crate) fn print_success(&self, message: impl Display) {
+    pub(crate) fn print_success(&self, message: impl Into<Shown>) {
         self.print_marked(
             Channel::Stdout,
             lit!("✓"),
@@ -850,7 +847,7 @@ impl DisplayManager {
     }
 
     /// Print a warning message (stderr)
-    pub(crate) fn print_warning(&self, message: impl Display) {
+    pub(crate) fn print_warning(&self, message: impl Into<Shown>) {
         self.print_marked(
             Channel::Stderr,
             lit!("⚠"),
@@ -861,8 +858,8 @@ impl DisplayManager {
     }
 
     /// Print a line about the run's progress (stderr).
-    pub(crate) fn print_progress(&self, message: impl Display) {
-        let text = untrusted(message).paint(self.use_colors, |s| s.dim());
+    pub(crate) fn print_progress(&self, message: impl Into<Shown>) {
+        let text = message.into().paint(self.use_colors, |s| s.dim());
         self.print_led(
             Channel::Stderr,
             self.stdout_colors(),
@@ -878,14 +875,14 @@ impl DisplayManager {
     /// Use it for work selfie does itself. A step that waits on something
     /// outside selfie uses [`start_waiting`](Self::start_waiting), which shows
     /// at every verbosity.
-    pub(crate) fn print_status(&self, message: impl Display) {
+    pub(crate) fn print_status(&self, message: impl Into<Shown>) {
         if self.is_verbose() {
             self.print_progress(message);
         }
     }
 
     /// Print a note about the run (stderr), such as the operation header.
-    pub(crate) fn print_run_note(&self, message: impl Display) {
+    pub(crate) fn print_run_note(&self, message: impl Into<Shown>) {
         self.print_marked(
             Channel::Stderr,
             lit!("ℹ"),
@@ -903,11 +900,11 @@ impl DisplayManager {
         mark: Literal,
         mark_paint: Paint,
         paint: Paint,
-        message: impl Display,
+        message: impl Into<Shown>,
     ) {
         // The space stays outside the mark's styling.
         let mark = shown!("{} ", Shown::from(mark).paint(self.use_colors, mark_paint));
-        let text = untrusted(message).paint(self.use_colors, paint);
+        let text = message.into().paint(self.use_colors, paint);
         self.print_led(channel, self.stdout_colors(), mark, Shown::default(), text);
     }
 
@@ -964,17 +961,8 @@ impl DisplayManager {
     }
 
     /// Print a suggestion (stderr): advice about the run, never the answer.
-    pub(crate) fn print_suggestion(&self, message: impl Display) {
-        self.suggest(untrusted(message));
-    }
-
-    /// Print a suggestion selfie styled itself, such as one naming a command
-    /// to run in a highlight (stderr).
-    pub(crate) fn print_styled_suggestion(&self, suggestion: Shown) {
-        self.suggest(suggestion);
-    }
-
-    fn suggest(&self, text: Shown) {
+    pub(crate) fn print_suggestion(&self, message: impl Into<Shown>) {
+        let text = message.into();
         let mark = shown!(
             "{} {}: ",
             Shown::from(lit!("✨")).paint(self.use_colors, |s| s.bold()),
@@ -989,13 +977,14 @@ impl DisplayManager {
     }
 
     /// Print a section header (stdout)
-    pub(crate) fn print_section_header(&self, title: impl Display) {
+    pub(crate) fn print_section_header(&self, title: impl Into<Shown>) {
         self.print_section_header_to(Channel::Stdout, title);
     }
 
     /// Print a section header on `channel`.
-    pub(crate) fn print_section_header_to(&self, channel: Channel, title: impl Display) {
-        let title = Name::new(&title.to_string()).to_string();
+    pub(crate) fn print_section_header_to(&self, channel: Channel, title: impl Into<Shown>) {
+        // Its own styling is written below, so the title's is removed.
+        let title = guard(title.into().as_str(), false).into_owned();
         let rendered = if self.use_colors {
             format!("── {} ──", style(&title).bold())
         } else {
@@ -1028,44 +1017,12 @@ impl DisplayManager {
     ///
     /// Colors: `---` red, `+++` green, `@@` cyan, `-` red, `+` green,
     /// context dim, separator dim. Paths shortened with `~`.
-    pub(crate) fn print_diff(&self, diff: &str) {
-        const SEPARATOR: Literal =
-            lit!("──────────────────────────────────────────────────────────────────────");
-
-        // Each line is file content, so a tab stays a tab and everything else
-        // that could act on the terminal shows as an escape.
-        let mut rows: Vec<(Shown, Paint)> = Vec::new();
-        let mut printed_separator = false;
-        for line in diff_lines(diff) {
-            match line {
-                DiffLine::OldFile(rest) => {
-                    rows.push((shown!("--- {}", shorten_path(rest)), |s| s.red()));
-                }
-                DiffLine::NewFile(rest) => {
-                    rows.push((shown!("+++ {}", shorten_path(rest)), |s| s.green()));
-                    rows.push((Shown::from(SEPARATOR), |s| s.dim()));
-                    printed_separator = true;
-                }
-                DiffLine::Hunk(line) => rows.push((Shown::from(Content::new(line)), |s| s.cyan())),
-                DiffLine::Removed(line) => {
-                    rows.push((Shown::from(Content::new(line)), |s| s.red()))
-                }
-                DiffLine::Added(line) => {
-                    rows.push((Shown::from(Content::new(line)), |s| s.green()))
-                }
-                DiffLine::Context(line) => {
-                    rows.push((Shown::from(Content::new(line)), |s| s.dim()))
-                }
-            }
-        }
-        if printed_separator {
-            rows.push((Shown::from(SEPARATOR), |s| s.dim()));
-        }
-
+    pub(crate) fn print_diff(&self, diff: Diff) {
         // Written in one suspend, so no other line lands between two rows of
         // the diff and a spinner does not redraw between them.
         let colors = self.stdout_colors();
-        let rendered: Vec<String> = rows
+        let rendered: Vec<String> = diff
+            .0
             .into_iter()
             .map(|(text, paint)| {
                 let row = shown!("  {}", text.paint(self.use_colors, paint));
@@ -1155,16 +1112,18 @@ impl DisplayManager {
     pub(crate) fn refuse_prompt(
         &self,
         failure: &PromptFailure,
-        needs: &str,
-        without_terminal: &str,
+        needs: Literal,
+        without_terminal: impl Into<Shown>,
     ) -> Exit {
         match failure {
             PromptFailure::NoTerminal => {
-                self.print_error(format!("{needs} needs a terminal to ask on."));
+                self.print_error(shown!("{} needs a terminal to ask on.", needs));
                 self.print_suggestion(without_terminal);
             }
             PromptFailure::Interrupted => {}
-            PromptFailure::Unreadable(error) => self.print_error(unreadable_answer(error)),
+            PromptFailure::Unreadable(error) => {
+                self.print_error(Prose::message(unreadable_answer(error)));
+            }
         }
         failure.exit()
     }
@@ -1174,7 +1133,7 @@ impl DisplayManager {
     /// nothing.
     pub(crate) fn note_unanswered_prompt(&self, failure: &PromptFailure) {
         if let PromptFailure::Unreadable(error) = failure {
-            self.print_warning(unreadable_answer(error));
+            self.print_warning(Prose::message(unreadable_answer(error)));
         }
     }
 
@@ -1312,7 +1271,7 @@ impl DisplayManager {
     ///     .command_if(lit!("Command"), check_command.as_deref())
     ///     .print();
     /// ```
-    pub(crate) fn result_card(&self, title: impl Display) -> ResultCard<'_> {
+    pub(crate) fn result_card(&self, title: Literal) -> ResultCard<'_> {
         ResultCard::new(self, title)
     }
 
@@ -1369,39 +1328,30 @@ impl DisplayManager {
 /// to add rows, then `.print()` to render.
 pub(crate) struct ResultCard<'a> {
     display: &'a DisplayManager,
-    title: String,
+    title: Literal,
     fields: Vec<(Literal, Shown)>,
 }
 
 impl<'a> ResultCard<'a> {
-    fn new(display: &'a DisplayManager, title: impl Display) -> Self {
+    fn new(display: &'a DisplayManager, title: Literal) -> Self {
         Self {
             display,
-            title: title.to_string(),
+            title,
             fields: Vec::new(),
         }
     }
 
-    /// Add a key-value field to the card. The value is shown escaped, a
-    /// newline included, so it may come from outside selfie.
-    pub(crate) fn field(mut self, key: Literal, value: impl Display) -> Self {
-        self.fields
-            .push((key, Shown::from(Name::new(&value.to_string()))));
+    /// Add a key-value field to the card.
+    pub(crate) fn field(mut self, key: Literal, value: impl Into<Shown>) -> Self {
+        self.fields.push((key, value.into()));
         self
     }
 
-    /// Add a field holding a command, only if there is one. It shows on one
-    /// line with its blanks as written, so it still pastes as it runs.
-    pub(crate) fn command_if(mut self, key: Literal, command: Option<&str>) -> Self {
+    /// Add a field holding a command, only if there is one.
+    pub(crate) fn command_if(mut self, key: Literal, command: Option<Shown>) -> Self {
         if let Some(command) = command {
-            self.fields.push((key, interim_one_line(command)));
+            self.fields.push((key, command));
         }
-        self
-    }
-
-    /// Add a field whose value selfie styled itself.
-    pub(crate) fn styled_field(mut self, key: Literal, value: Shown) -> Self {
-        self.fields.push((key, value));
         self
     }
 
@@ -1419,7 +1369,7 @@ impl<'a> ResultCard<'a> {
         use crate::formatters::format_key;
 
         self.display.println(lit!(""));
-        self.display.print_section_header(&self.title);
+        self.display.print_section_header(self.title);
 
         let use_colors = self.display.use_colors();
         for (key, value) in self.fields {
@@ -1438,6 +1388,57 @@ pub(crate) fn column(text: &str, needle: &str) -> usize {
         .unwrap_or_else(|| panic!("{needle:?} not in {text:?}"));
     let start = text[..at].rfind('\n').map_or(0, |n| n + 1);
     console::measure_text_width(&text[start..at])
+}
+
+/// A unified diff, each line escaped as file content and the file names as
+/// paths, ready for [`DisplayManager::print_diff`].
+pub(crate) struct Diff(Vec<(Shown, Paint)>);
+
+impl Diff {
+    /// Escapes each line of `diff`, a unified diff.
+    pub(crate) fn new(diff: &str) -> Self {
+        const SEPARATOR: Literal =
+            lit!("──────────────────────────────────────────────────────────────────────");
+
+        // Each line is file content, so a tab stays a tab and everything else
+        // that could act on the terminal shows as an escape.
+        let mut rows: Vec<(Shown, Paint)> = Vec::new();
+        let mut printed_separator = false;
+        for line in diff_lines(diff) {
+            match line {
+                DiffLine::OldFile(rest) => {
+                    rows.push((shown!("--- {}", shorten_path(rest)), |s| s.red()));
+                }
+                DiffLine::NewFile(rest) => {
+                    rows.push((shown!("+++ {}", shorten_path(rest)), |s| s.green()));
+                    rows.push((Shown::from(SEPARATOR), |s| s.dim()));
+                    printed_separator = true;
+                }
+                DiffLine::Hunk(line) => rows.push((Shown::from(Content::new(line)), |s| s.cyan())),
+                DiffLine::Removed(line) => {
+                    rows.push((Shown::from(Content::new(line)), |s| s.red()))
+                }
+                DiffLine::Added(line) => {
+                    rows.push((Shown::from(Content::new(line)), |s| s.green()))
+                }
+                DiffLine::Context(line) => {
+                    rows.push((Shown::from(Content::new(line)), |s| s.dim()))
+                }
+            }
+        }
+        if printed_separator {
+            rows.push((Shown::from(SEPARATOR), |s| s.dim()));
+        }
+
+        Self(rows)
+    }
+}
+
+/// `block`'s lines, each escaped as a line of file content, so an invisible
+/// character shows as its escape and a tab stays a tab. A trailing line break,
+/// LF or CRLF, costs nothing.
+pub(crate) fn content_lines(block: &str) -> Shown {
+    Shown::join(block.lines().map(Content::new), lit!("\n"))
 }
 
 // `text` from outside selfie, as a message printer shows it: escaped as prose,
@@ -1701,7 +1702,7 @@ mod tests {
     fn every_message_printer_escapes_what_it_prints() {
         use selfie::package::event::Outcome;
 
-        let text = "a\u{1b}[2J\u{202E}b\u{200D}\n✓ c\n";
+        let text = lit!("a\u{1b}[2J\u{202E}b\u{200D}\n✓ c");
         let shown = "a\\u{1b}[2J\\u{202e}b\u{200D}\n  ✓ c";
         let display = DisplayManager::new(false);
         display.print_info(text);
@@ -1724,8 +1725,10 @@ mod tests {
         let display = DisplayManager::new(false);
         // Words no mark could hold, so each is found in the text.
         let (first, second) = ("¶one", "¶two");
-        display.print_suggestion(format!("{first}\u{1b}[2J\n{second}"));
-        display.print_styled_suggestion(shown!(
+        display.print_suggestion(crate::terminal_text::Prose::message(format!(
+            "{first}\u{1b}[2J\n{second}"
+        )));
+        display.print_suggestion(shown!(
             "{}\n{}",
             Shown::from(lit!("¶one")).paint(true, |s| s.bold()),
             lit!("¶two")
@@ -1767,8 +1770,8 @@ mod tests {
         let display = DisplayManager::new(false);
 
         display
-            .result_card("Results")
-            .styled_field(lit!("Output"), Shown::from(Prose::new("a\nb")))
+            .result_card(lit!("Results"))
+            .field(lit!("Output"), Prose::new("a\nb"))
             .print();
 
         let line = display
@@ -1798,16 +1801,33 @@ mod tests {
     #[test]
     fn a_message_ending_in_a_carriage_return_shows_none() {
         let display = DisplayManager::new(false);
-        display.print_info("one\r\n");
+        display.print_info(crate::terminal_text::Prose::message("one\r\n"));
 
         assert_eq!(display.printed(), [(Channel::Stdout, "one".to_string())]);
+    }
+
+    // The two printers that write their text themselves still guard it: a
+    // control in selfie's own text shows as an escape.
+    #[test]
+    fn error_context_and_section_headers_guard_what_they_print() {
+        let display = DisplayManager::new(false);
+        display.print_error_context(lit!("a\u{1b}[2Jb"));
+        display.print_section_header(lit!("t\u{1b}]0;x\u{7}"));
+
+        assert_eq!(
+            display.printed(),
+            [
+                (Channel::Stderr, r"a\u{1b}[2Jb".to_string()),
+                (Channel::Stdout, r"t\u{1b}]0;x\u{7}".to_string()),
+            ]
+        );
     }
 
     // A section header is one line: a line break in its title is escaped.
     #[test]
     fn a_section_header_stays_on_one_line() {
         let display = DisplayManager::new(false);
-        display.print_section_header("a\n✓ b");
+        display.print_section_header(Name::new("a\n✓ b"));
 
         assert_eq!(
             display.printed(),
@@ -1838,7 +1858,7 @@ mod tests {
     #[test]
     fn error_context_lines_show_invisible_characters_and_keep_tabs() {
         let display = DisplayManager::new(false);
-        display.print_error_context("a\u{200B}b\tc\nd\u{200D}e\u{1b}[2J");
+        display.print_error_context(content_lines("a\u{200B}b\tc\nd\u{200D}e\u{1b}[2J"));
 
         assert_eq!(
             display.printed(),
@@ -1855,9 +1875,9 @@ mod tests {
     #[test]
     fn error_context_treats_crlf_as_a_line_break_and_prints_nothing_for_nothing() {
         let crlf = DisplayManager::new(false);
-        crlf.print_error_context("one\r\ntwo\r\n");
+        crlf.print_error_context(content_lines("one\r\ntwo\r\n"));
         let empty = DisplayManager::new(false);
-        empty.print_error_context("");
+        empty.print_error_context(content_lines(""));
 
         let lines = |display: &DisplayManager| -> Vec<String> {
             display
@@ -1887,11 +1907,11 @@ mod tests {
     fn a_waiting_subject_is_escaped() {
         let shown = "Running `printf \\u{1b}[2J`";
         let plain = DisplayManager::new(false);
-        plain.start_waiting(ONE, "Running `printf \u{1b}[2J`");
+        plain.start_waiting(ONE, Name::new("Running `printf \u{1b}[2J`"));
         assert_eq!(plain.printed(), [(Channel::Stderr, format!("{shown}..."))]);
 
         let drawn = DisplayManager::new(false).drawing_as_a_terminal();
-        drawn.start_waiting(ONE, "Running `printf \u{1b}[2J`");
+        drawn.start_waiting(ONE, Name::new("Running `printf \u{1b}[2J`"));
         assert_eq!(drawn.waiting_messages(), [shown]);
         drawn.end_waiting(ONE, StepEnding::Succeeded);
         let ended = drawn.printed();
@@ -1913,11 +1933,11 @@ mod tests {
         let shown = "Running the commands that produce ~/.a\\n✓ b\u{A0}c";
 
         let plain = DisplayManager::new(false);
-        plain.start_waiting(ONE, subject);
+        plain.start_waiting(ONE, Name::new(subject));
         assert_eq!(plain.printed(), [(Channel::Stderr, format!("{shown}..."))]);
 
         let drawn = DisplayManager::new(false).drawing_as_a_terminal();
-        drawn.start_waiting(ONE, subject);
+        drawn.start_waiting(ONE, Name::new(subject));
         assert_eq!(drawn.waiting_messages(), [shown]);
         drawn.end_waiting(ONE, StepEnding::Succeeded);
         let ended = drawn.printed();
@@ -1969,7 +1989,7 @@ mod tests {
     fn a_diff_is_written_in_one_draw() {
         let display = DisplayManager::new(false);
 
-        display.print_diff("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n");
+        display.print_diff(Diff::new("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n"));
 
         assert_eq!(display.draws.load(std::sync::atomic::Ordering::Relaxed), 1);
         assert_eq!(display.printed().len(), 7, "{:?}", display.printed());
@@ -2053,13 +2073,13 @@ mod tests {
     #[test]
     fn test_static_output_methods_dont_panic() {
         let dm = DisplayManager::new(false);
-        dm.print_info("test info");
-        dm.print_error("test error");
-        dm.print_success("test success");
-        dm.print_warning("test warning");
-        dm.print_progress("test progress");
-        dm.print_suggestion("test suggestion");
-        dm.print_section_header("test section");
+        dm.print_info(crate::terminal_text::lit!("test info"));
+        dm.print_error(crate::terminal_text::lit!("test error"));
+        dm.print_success(crate::terminal_text::lit!("test success"));
+        dm.print_warning(crate::terminal_text::lit!("test warning"));
+        dm.print_progress(crate::terminal_text::lit!("test progress"));
+        dm.print_suggestion(crate::terminal_text::lit!("test suggestion"));
+        dm.print_section_header(lit!("test section"));
         dm.println(lit!("test println"));
         dm.print_field(lit!("key:"), lit!("value"));
     }
@@ -2067,10 +2087,10 @@ mod tests {
     #[test]
     fn test_static_output_with_colors() {
         let dm = DisplayManager::new(true);
-        dm.print_info("test info");
-        dm.print_error("test error");
-        dm.print_success("test success");
-        dm.print_warning("test warning");
+        dm.print_info(crate::terminal_text::lit!("test info"));
+        dm.print_error(crate::terminal_text::lit!("test error"));
+        dm.print_success(crate::terminal_text::lit!("test success"));
+        dm.print_warning(crate::terminal_text::lit!("test warning"));
     }
 
     #[test]
@@ -2170,18 +2190,18 @@ mod tests {
     fn test_result_card_basic() {
         let dm = DisplayManager::new(false);
         // Verify the builder API works without panicking
-        dm.result_card("Test Results")
-            .field(lit!("Package"), "test-pkg")
-            .field(lit!("Environment"), "macos")
+        dm.result_card(lit!("Test Results"))
+            .field(lit!("Package"), lit!("test-pkg"))
+            .field(lit!("Environment"), lit!("macos"))
             .print();
     }
 
     #[test]
     fn test_result_card_with_colors() {
         let dm = DisplayManager::new(true);
-        dm.result_card("Test Results")
-            .field(lit!("Package"), "test-pkg")
-            .field(lit!("Status"), "valid")
+        dm.result_card(lit!("Test Results"))
+            .field(lit!("Package"), lit!("test-pkg"))
+            .field(lit!("Status"), lit!("valid"))
             .print();
     }
 
@@ -2191,9 +2211,9 @@ mod tests {
     fn a_result_card_shows_a_command_as_written() {
         let dm = DisplayManager::new(false);
 
-        dm.result_card("Test Results")
-            .field(lit!("Package"), "test-pkg")
-            .command_if(lit!("Command"), Some("echo 'a\u{A0}b'"))
+        dm.result_card(lit!("Test Results"))
+            .field(lit!("Package"), lit!("test-pkg"))
+            .command_if(lit!("Command"), Some(interim_one_line("echo 'a\u{A0}b'")))
             .command_if(lit!("Missing"), None)
             .print();
 
@@ -2213,16 +2233,16 @@ mod tests {
     #[test]
     fn test_static_output_during_a_waiting_step() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
-        dm.start_waiting(ONE, "Running the install command for bat");
+        dm.start_waiting(ONE, Name::new("Running the install command for bat"));
         // These should not panic even with a spinner running
-        dm.print_info("info during spinner");
-        dm.print_warning("warning during spinner");
-        dm.print_error("error during spinner");
-        dm.print_success("success during spinner");
+        dm.print_info(crate::terminal_text::lit!("info during spinner"));
+        dm.print_warning(crate::terminal_text::lit!("warning during spinner"));
+        dm.print_error(crate::terminal_text::lit!("error during spinner"));
+        dm.print_success(crate::terminal_text::lit!("success during spinner"));
         dm.println(lit!("plain during spinner"));
-        dm.print_section_header("header during spinner");
-        dm.print_progress("progress during spinner");
-        dm.print_suggestion("suggestion during spinner");
+        dm.print_section_header(lit!("header during spinner"));
+        dm.print_progress(crate::terminal_text::lit!("progress during spinner"));
+        dm.print_suggestion(crate::terminal_text::lit!("suggestion during spinner"));
         dm.print_field(lit!("key:"), lit!("value"));
         // An ordinary line does not end the wait.
         assert!(!dm.waiting_messages().is_empty());
@@ -2232,12 +2252,12 @@ mod tests {
     #[test]
     fn a_command_line_becomes_the_spinner_message_on_a_terminal() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
-        dm.start_waiting(ONE, "Running the install command for ripgrep");
+        dm.start_waiting(ONE, Name::new("Running the install command for ripgrep"));
 
-        dm.command_output(ONE, "\x1b[32mDownloading\x1b[0m ripgrep\r");
+        dm.command_output(ONE, Output::line("\x1b[32mDownloading\x1b[0m ripgrep\r"));
         assert_eq!(dm.waiting_messages(), vec!["Downloading ripgrep"]);
 
-        dm.command_output(ONE, "Pouring ripgrep");
+        dm.command_output(ONE, Output::line("Pouring ripgrep"));
         assert_eq!(dm.waiting_messages(), vec!["Pouring ripgrep"]);
         // Nothing from the command is printed as a line of its own.
         assert!(dm.printed().is_empty(), "{:?}", dm.printed());
@@ -2248,8 +2268,8 @@ mod tests {
     #[test]
     fn a_command_line_is_hidden_without_a_terminal() {
         let dm = DisplayManager::new(false);
-        dm.start_waiting(ONE, "Running the install command for ripgrep");
-        dm.command_output(ONE, "Downloading ripgrep");
+        dm.start_waiting(ONE, Name::new("Running the install command for ripgrep"));
+        dm.command_output(ONE, Output::line("Downloading ripgrep"));
 
         assert_eq!(
             dm.printed(),
@@ -2265,8 +2285,8 @@ mod tests {
     #[test]
     fn a_command_line_is_prefixed_when_verbose() {
         let dm = DisplayManager::new(false).with_verbosity(Verbosity::Verbose);
-        dm.start_waiting(ONE, "Running the install command for ripgrep");
-        dm.command_output(ONE, "Downloading ripgrep");
+        dm.start_waiting(ONE, Name::new("Running the install command for ripgrep"));
+        dm.command_output(ONE, Output::line("Downloading ripgrep"));
 
         assert_eq!(
             dm.printed().last(),
@@ -2281,7 +2301,7 @@ mod tests {
     #[test]
     fn a_finished_wait_collapses_to_one_line_with_its_time() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
-        dm.start_waiting(ONE, "Running the install command for ripgrep");
+        dm.start_waiting(ONE, Name::new("Running the install command for ripgrep"));
         dm.end_waiting(ONE, StepEnding::Succeeded);
 
         assert_eq!(
@@ -2389,11 +2409,15 @@ mod tests {
     fn refusing_a_prompt_reports_on_stderr_by_kind() {
         let dm = DisplayManager::new(false);
 
-        let exit = dm.refuse_prompt(&PromptFailure::NoTerminal, "Removing a spec", "Pass --yes.");
+        let exit = dm.refuse_prompt(
+            &PromptFailure::NoTerminal,
+            lit!("Removing a spec"),
+            lit!("Pass --yes."),
+        );
         let canceled = dm.refuse_prompt(
             &PromptFailure::Interrupted,
-            "Removing a spec",
-            "Pass --yes.",
+            lit!("Removing a spec"),
+            lit!("Pass --yes."),
         );
 
         assert_eq!((exit, canceled), (Exit::Usage, Exit::Canceled));
@@ -2416,7 +2440,7 @@ mod tests {
         let dm = DisplayManager::new(false)
             .drawing_as_a_terminal()
             .answering(vec![Ok(Box::new(()))]);
-        dm.start_waiting(ONE, "Running the commands that produce ~/.creds");
+        dm.start_waiting(ONE, Name::new("Running the commands that produce ~/.creds"));
 
         dm.prompt(Answered).unwrap();
         assert_eq!(
@@ -2446,7 +2470,7 @@ mod tests {
     #[test]
     fn finishing_clears_a_waiting_spinner() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
-        dm.start_waiting(ONE, "Running the install command for bat");
+        dm.start_waiting(ONE, Name::new("Running the install command for bat"));
 
         dm.finish();
 
@@ -2460,8 +2484,8 @@ mod tests {
     #[test]
     fn overlapping_steps_end_one_at_a_time() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
-        dm.start_waiting(ONE, "Running the audit command for bat");
-        dm.start_waiting(TWO, "Running the audit command for fd");
+        dm.start_waiting(ONE, Name::new("Running the audit command for bat"));
+        dm.start_waiting(TWO, Name::new("Running the audit command for fd"));
 
         dm.end_waiting(ONE, StepEnding::Succeeded);
 
@@ -2483,10 +2507,10 @@ mod tests {
     #[test]
     fn a_line_is_labeled_with_its_own_step() {
         let dm = DisplayManager::new(false).with_verbosity(Verbosity::Verbose);
-        dm.start_waiting(ONE, "Running the install command for a");
-        dm.start_waiting(TWO, "Running the install command for b");
+        dm.start_waiting(ONE, Name::new("Running the install command for a"));
+        dm.start_waiting(TWO, Name::new("Running the install command for b"));
 
-        dm.command_output(ONE, "from a");
+        dm.command_output(ONE, Output::line("from a"));
 
         assert_eq!(
             dm.printed().last(),
@@ -2504,10 +2528,10 @@ mod tests {
         let dm = DisplayManager::new(false)
             .drawing_as_a_terminal()
             .with_verbosity(Verbosity::Verbose);
-        dm.start_waiting(ONE, "Running the install command for a");
-        dm.command_output(ONE, "alone");
-        dm.start_waiting(TWO, "Running the install command for b");
-        dm.command_output(ONE, "beside b");
+        dm.start_waiting(ONE, Name::new("Running the install command for a"));
+        dm.command_output(ONE, Output::line("alone"));
+        dm.start_waiting(TWO, Name::new("Running the install command for b"));
+        dm.command_output(ONE, Output::line("beside b"));
 
         let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
         assert_eq!(
@@ -2524,8 +2548,8 @@ mod tests {
     #[test]
     fn a_failed_step_is_marked_and_shows_its_last_lines() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
-        dm.start_waiting(ONE, "Running the commands that produce ~/.creds");
-        dm.command_output(ONE, "no session");
+        dm.start_waiting(ONE, Name::new("Running the commands that produce ~/.creds"));
+        dm.command_output(ONE, Output::line("no session"));
 
         dm.end_waiting(ONE, StepEnding::Failed);
 
@@ -2548,12 +2572,14 @@ mod tests {
     #[test]
     fn a_failure_shows_the_stderr_its_tail_left_out() {
         let dm = DisplayManager::new(false);
-        dm.start_waiting(ONE, "Running the install command for foo");
-        dm.command_output(ONE, "Error: no bottle");
-        dm.command_output(ONE, "==> Caveats");
+        dm.start_waiting(ONE, Name::new("Running the install command for foo"));
+        dm.command_output(ONE, Output::line("Error: no bottle"));
+        dm.command_output(ONE, Output::line("==> Caveats"));
         dm.end_waiting(ONE, StepEnding::Failed);
 
-        dm.print_command_stderr("Error: checksum mismatch\nError: no bottle");
+        dm.print_command_stderr(&selfie::commands::BoundedText::bound(
+            b"Error: checksum mismatch\nError: no bottle",
+        ));
 
         let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
         let count = |needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
@@ -2566,8 +2592,8 @@ mod tests {
     #[test]
     fn a_failed_step_does_not_repeat_lines_shown_verbosely() {
         let dm = DisplayManager::new(false).with_verbosity(Verbosity::Verbose);
-        dm.start_waiting(ONE, "Running the install command for a");
-        dm.command_output(ONE, "no bottle");
+        dm.start_waiting(ONE, Name::new("Running the install command for a"));
+        dm.command_output(ONE, Output::line("no bottle"));
 
         dm.end_waiting(ONE, StepEnding::Failed);
 
@@ -2584,9 +2610,9 @@ mod tests {
     #[test]
     fn elapsed_time_covers_only_its_own_step() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
-        dm.start_waiting(ONE, "first");
+        dm.start_waiting(ONE, Name::new("first"));
         std::thread::sleep(Duration::from_millis(1100));
-        dm.start_waiting(TWO, "second");
+        dm.start_waiting(TWO, Name::new("second"));
 
         dm.end_waiting(TWO, StepEnding::Succeeded);
         dm.end_waiting(ONE, StepEnding::Succeeded);
@@ -2602,7 +2628,7 @@ mod tests {
     #[test]
     fn a_canceled_step_prints_nothing() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
-        dm.start_waiting(ONE, "Running the install command for a");
+        dm.start_waiting(ONE, Name::new("Running the install command for a"));
 
         dm.end_waiting(ONE, StepEnding::Canceled);
 
@@ -2613,11 +2639,11 @@ mod tests {
     #[test]
     fn a_status_line_prints_only_when_verbose() {
         let normal = DisplayManager::new(false);
-        normal.print_status("Loading specs...");
+        normal.print_status(crate::terminal_text::lit!("Loading specs..."));
         assert!(normal.printed().is_empty());
 
         let verbose = DisplayManager::new(false).with_verbosity(Verbosity::Verbose);
-        verbose.print_status("Loading specs...");
+        verbose.print_status(crate::terminal_text::lit!("Loading specs..."));
         assert_eq!(
             verbose.printed(),
             vec![(Channel::Stderr, "Loading specs...".to_string())]

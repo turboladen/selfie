@@ -4,7 +4,7 @@ use selfie::package::{
     service::PackageService,
 };
 
-use crate::terminal_text::{Literal, Output, Shown, lit, shown};
+use crate::terminal_text::{Literal, Name, Output, Shown, interim_one_line, lit, shown};
 use crate::{
     commands::presentation,
     config::CliConfig,
@@ -112,20 +112,32 @@ fn display_check_output_only(check_result: &CheckResultData, display: &DisplayMa
         CheckResult::Success { stdout, stderr } => {
             // Show stdout output if present
             if !stdout.trim().is_empty() {
-                display.print_info(format!("Check output: {}", Output::new(stdout)));
+                display.print_info(crate::terminal_text::Prose::message(format!(
+                    "Check output: {}",
+                    Output::new(stdout)
+                )));
             } else if !stderr.trim().is_empty() {
-                display.print_info(format!("Check output: {}", Output::new(stderr)));
+                display.print_info(crate::terminal_text::Prose::message(format!(
+                    "Check output: {}",
+                    Output::new(stderr)
+                )));
             }
         }
         CheckResult::Failed { stdout, stderr, .. } => {
             // Not installed: the check's own output explains the answer, so it
             // is a warning, on stderr, beside the result line on stdout.
             if !stderr.trim().is_empty() {
-                display.print_warning(format!("Check failed: {}", Output::new(stderr)));
+                display.print_warning(crate::terminal_text::Prose::message(format!(
+                    "Check failed: {}",
+                    Output::new(stderr)
+                )));
             } else if !stdout.trim().is_empty() {
-                display.print_warning(format!("Check failed: {}", Output::new(stdout)));
+                display.print_warning(crate::terminal_text::Prose::message(format!(
+                    "Check failed: {}",
+                    Output::new(stdout)
+                )));
             } else {
-                display.print_warning("Check failed with no output");
+                display.print_warning(crate::terminal_text::lit!("Check failed with no output"));
             }
         }
         _ => {
@@ -177,10 +189,13 @@ fn display_check_result_card(
     };
 
     display
-        .result_card("Check Results")
-        .field(lit!("Package"), &check_result.package_name)
-        .field(lit!("Environment"), &check_result.environment)
-        .command_if(lit!("Command"), check_result.check_command.as_deref())
+        .result_card(lit!("Check Results"))
+        .field(lit!("Package"), Name::new(&check_result.package_name))
+        .field(lit!("Environment"), Name::new(&check_result.environment))
+        .command_if(
+            lit!("Command"),
+            check_result.check_command.as_deref().map(interim_one_line),
+        )
         .styled_fields(status)
         .print();
 }

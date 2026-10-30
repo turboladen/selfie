@@ -50,7 +50,9 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
             ..
         } => {
             let label = selfie::pluralize(*commits_pulled, "commit", "commits");
-            display.print_success(format!("Pulled {commits_pulled} {label} from remote"));
+            display.print_success(crate::terminal_text::Prose::message(format!(
+                "Pulled {commits_pulled} {label} from remote"
+            )));
 
             if !packages_updated.is_empty() {
                 let names = format_package_list(packages_updated, use_colors);
@@ -71,7 +73,7 @@ fn handle_pull_event(event: &PackageEvent, display: &DisplayManager, use_colors:
             result: OperationResult::Success(OperationSuccess::SyncPullUpToDate { .. }),
             ..
         } => {
-            display.print_success("Already up to date");
+            display.print_success(crate::terminal_text::lit!("Already up to date"));
             true
         }
 

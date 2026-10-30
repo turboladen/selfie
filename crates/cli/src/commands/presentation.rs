@@ -56,7 +56,11 @@ fn row_color(result: &RowResult) -> Paint {
 
 /// `text` in the color of a row that turned out as `result`, or plain when
 /// `use_colors` is off.
-pub(crate) fn paint_row_text(text: &str, result: &RowResult, use_colors: bool) -> Shown {
+pub(crate) fn paint_row_text(
+    text: impl Into<Shown>,
+    result: &RowResult,
+    use_colors: bool,
+) -> Shown {
     crate::status_style::styled_text(text, use_colors, row_color(result))
 }
 
@@ -109,25 +113,25 @@ pub(crate) fn display_environment_summary(
             command,
         );
     } else {
-        display.print_error(format!(
+        display.print_error(crate::terminal_text::Prose::message(format!(
             "Package '{package_name}' doesn't support environment '{current_environment}'."
-        ));
+        )));
         display.print_note(shown!("{}Available environments for this package:", INDENT));
 
         let mut table = SafeTable::new();
         // Printed on stderr, so sized to the terminal stderr is on.
         table.use_stderr();
-        table.set_header(vec!["Environment"]);
+        table.set_header([lit!("Environment")]);
 
         // The spec file's order, which every other surface lists them in. The
         // current environment is never among them: its absence is the error.
         for env in available_environments {
-            table.add_row([env]);
+            table.add_row([Name::new(env)]);
         }
 
         display.print_note(shown!("{}", table));
 
-        display.print_styled_suggestion(shown!(
+        display.print_suggestion(shown!(
             "{} with one of the environments above",
             shown!(
                 "selfie package {} --environment <env> <package>",
@@ -147,10 +151,10 @@ pub(crate) fn display_missing_command(
     environment: &str,
     others: &[String],
 ) {
-    display.print_error(format!(
+    display.print_error(crate::terminal_text::Prose::message(format!(
         "No {} command defined for '{package_name}' in environment '{environment}'.",
         command.word()
-    ));
+    )));
     if !others.is_empty() {
         // Sorted, so the line reads the same on every run.
         let mut others = others.to_vec();
@@ -171,9 +175,9 @@ pub(crate) fn display_generic_environment_suggestion(
     display: &DisplayManager,
     command: PackageCommand,
 ) {
-    display.print_error(format!(
+    display.print_error(crate::terminal_text::Prose::message(format!(
         "Package '{package_name}' doesn't support environment '{current_environment}'."
-    ));
+    )));
     display.print_note(shown!("{}Try one of these options:", INDENT));
     let use_colors = config.use_colors();
     display.print_note(shown!(

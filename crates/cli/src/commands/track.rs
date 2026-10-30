@@ -75,7 +75,7 @@ pub(crate) async fn handle_track(
         let mut reported: HashSet<String> = HashSet::new();
         for warning in unchecked {
             if reported.insert(warning.clone()) {
-                display.print_warning(warning);
+                display.print_warning(crate::terminal_text::Prose::message(warning));
             }
         }
         return report_existing_trackers(&trackers, display);
@@ -88,7 +88,7 @@ pub(crate) async fn handle_track(
     let (package_names, skipped) = match load_package_names(&repo) {
         Ok(loaded) => loaded,
         Err(msg) => {
-            display.print_error(msg);
+            display.print_error(crate::terminal_text::Prose::message(msg));
             return Exit::Failed;
         }
     };
@@ -104,7 +104,7 @@ pub(crate) async fn handle_track(
     let mut reported: HashSet<String> = HashSet::new();
     for warning in unchecked.into_iter().chain(skipped) {
         if reported.insert(warning.clone()) {
-            display.print_warning(warning);
+            display.print_warning(crate::terminal_text::Prose::message(warning));
         }
     }
 
@@ -113,10 +113,12 @@ pub(crate) async fn handle_track(
         Err(failure) => {
             return display.refuse_prompt(
                 &failure,
-                "Choosing where to track a file",
-                "Name the destination instead: `selfie package track-dotfile <package> <file>` \
+                crate::terminal_text::lit!("Choosing where to track a file"),
+                crate::terminal_text::lit!(
+                    "Name the destination instead: `selfie package track-dotfile <package> <file>` \
                      to add it to an existing package, or `selfie dotfiles track <name> <file>` to \
-                     make it a standalone dotfile.",
+                     make it a standalone dotfile."
+                ),
             );
         }
     };
@@ -128,14 +130,16 @@ pub(crate) async fn handle_track(
         TrackChoice::NewStandalone(ref name) => {
             // Validate namespace before creating
             if let Err(e) = namespace::validate_unique_name(name, &repo, Some(&dotfiles_repo)) {
-                display.print_error(common::name_check_message(name, &e));
+                display.print_error(crate::terminal_text::Prose::message(
+                    common::name_check_message(name, &e),
+                ));
                 return Exit::Failed;
             }
             common::handle_track_standalone(name, file, config, display, cancellation_token).await
         }
         // Nothing was tracked, so the run did not do what it was asked.
         TrackChoice::Declined => {
-            display.print_run_note("Canceled.");
+            display.print_run_note(crate::terminal_text::lit!("Canceled."));
             Exit::Failed
         }
     }
@@ -156,11 +160,11 @@ fn report_existing_trackers(trackers: &[Tracker], display: &DisplayManager) -> E
     // file is not handled, whatever each entry says on its own.
     if let [_, _, ..] = trackers {
         let names: Vec<&str> = trackers.iter().map(|t| t.spec_name.as_str()).collect();
-        display.print_error(format!(
+        display.print_error(crate::terminal_text::Prose::message(format!(
             "{} specs track this file: {}. Keep it in one of them.",
             trackers.len(),
             names.join(", ")
-        ));
+        )));
         return exit.max(Exit::Failed);
     }
     exit
@@ -196,22 +200,23 @@ fn report_existing_tracker(
     let expanded = match selfie::fs::deploy_target(&fs, target) {
         Ok(expanded) => expanded,
         Err(rejection) => {
-            display.print_error(format!(
+            display.print_error(crate::terminal_text::Prose::message(format!(
                 "'{target}' is tracked in spec '{spec_name}', but {}",
                 rejection.message()
-            ));
+            )));
             // `NoHome` is the machine's state rather than the spec's: that entry
             // is correct and editing it would break a spec that works everywhere
             // else, so it keeps the rule's own advice. The other two are defects
             // in a file the user can open, and the path to open is what they
             // need rather than advice on choosing a target.
             if matches!(rejection, selfie::fs::TargetRejection::NoHome) {
-                display.print_suggestion(rejection.suggestion());
+                display
+                    .print_suggestion(crate::terminal_text::Prose::message(rejection.suggestion()));
             } else {
-                display.print_suggestion(format!(
+                display.print_suggestion(crate::terminal_text::Prose::message(format!(
                     "Edit {} to correct the target.",
                     DisplayPath::of(spec_path)
-                ));
+                )));
             }
             return Exit::Failed;
         }
@@ -225,10 +230,12 @@ fn report_existing_tracker(
     if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded)
         && warned.insert(warning.clone())
     {
-        display.print_warning(warning);
+        display.print_warning(crate::terminal_text::Prose::message(warning));
     }
 
-    display.print_info(format!("Already tracking '{target}' in spec '{spec_name}'"));
+    display.print_info(crate::terminal_text::Prose::message(format!(
+        "Already tracking '{target}' in spec '{spec_name}'"
+    )));
     Exit::Clean
 }
 

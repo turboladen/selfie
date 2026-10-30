@@ -114,10 +114,12 @@ async fn until_force_quit(signals: &mut impl NextSignal, token: &CancellationTok
 fn report_startup_error(display: &DisplayManager, error: &anyhow::Error) {
     let text = format!("{error:#}");
     let mut lines = text.lines();
-    display.print_error(lines.next().unwrap_or_default());
+    display.print_error(crate::terminal_text::Prose::message(
+        lines.next().unwrap_or_default(),
+    ));
     let rest: Vec<&str> = lines.collect();
     if !rest.is_empty() {
-        display.print_error_context(&rest.join("\n"));
+        display.print_error_context(crate::display_manager::content_lines(&rest.join("\n")));
     }
 }
 

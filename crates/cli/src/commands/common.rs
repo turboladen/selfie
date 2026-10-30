@@ -203,8 +203,8 @@ fn sudo_policy(config: &CliConfig) -> SudoPolicy<RealPrivilege> {
 /// whose answers a refusal afterward would discard.
 pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<Exit> {
     let refusal = sudo_policy(config).refusal(WriteScope::Dotfiles)?;
-    display.print_error(refusal.message());
-    display.print_suggestion(refusal.suggestion());
+    display.print_error(crate::terminal_text::Prose::message(refusal.message()));
+    display.print_suggestion(crate::terminal_text::Prose::message(refusal.suggestion()));
     Some(Exit::Failed)
 }
 
@@ -311,7 +311,7 @@ fn handle_already_tracked(event: &PackageEvent, display: &DisplayManager) -> boo
                 ),
             ..
         } => {
-            display.print_info(success.to_string());
+            display.print_info(crate::terminal_text::Prose::message(success.to_string()));
             true
         }
         _ => false,
@@ -346,16 +346,20 @@ pub(crate) fn open_editor(
     match cmd.status() {
         Ok(status) if status.success() => {
             if let Some(message) = success_message {
-                display.print_success(message);
+                display.print_success(crate::terminal_text::Prose::message(message));
             }
             Exit::Clean
         }
         Ok(_) => {
-            display.print_warning("Editor exited with non-zero status.");
+            display.print_warning(crate::terminal_text::lit!(
+                "Editor exited with non-zero status."
+            ));
             Exit::Failed
         }
         Err(e) => {
-            display.print_error(format!("Failed to start editor '{editor}': {e}"));
+            display.print_error(crate::terminal_text::Prose::message(format!(
+                "Failed to start editor '{editor}': {e}"
+            )));
             Exit::Failed
         }
     }
@@ -363,8 +367,12 @@ pub(crate) fn open_editor(
 
 // The error and its remedy, both on stderr.
 fn report_missing_editor(display: &DisplayManager) {
-    display.print_error("EDITOR environment variable is not set.");
-    display.print_suggestion("Please set EDITOR and try again.");
+    display.print_error(crate::terminal_text::lit!(
+        "EDITOR environment variable is not set."
+    ));
+    display.print_suggestion(crate::terminal_text::lit!(
+        "Please set EDITOR and try again."
+    ));
 }
 
 /// Check if EDITOR environment variable is set and provide helpful error messages
@@ -380,24 +388,26 @@ pub(crate) fn check_editor_available(
     if let Ok(editor) = std::env::var("EDITOR") {
         Some(editor)
     } else {
-        display.print_error("EDITOR environment variable is not set.");
+        display.print_error(crate::terminal_text::lit!(
+            "EDITOR environment variable is not set."
+        ));
 
         if package_exists {
             if let Some(path) = package_path {
-                display.print_suggestion(format!(
+                display.print_suggestion(crate::terminal_text::Prose::message(format!(
                     "Package '{}' exists at {}. Go ahead and open it in your editor of choice!",
                     package_name,
                     DisplayPath::of(path)
-                ));
+                )));
             } else {
-                display.print_suggestion(format!(
+                display.print_suggestion(crate::terminal_text::Prose::message(format!(
                     "Package '{package_name}' exists. Set EDITOR to edit it automatically."
-                ));
+                )));
             }
         } else {
-            display.print_suggestion(format!(
+            display.print_suggestion(crate::terminal_text::Prose::message(format!(
                 "Package '{package_name}' doesn't exist yet. Set EDITOR and try again to create it."
-            ));
+            )));
         }
         None
     }

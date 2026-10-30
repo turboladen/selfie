@@ -145,14 +145,14 @@ mod tests {
         let display = create_display();
 
         // Test that DisplayManager output methods don't panic
-        display.print_progress("test progress");
+        display.print_progress(crate::terminal_text::lit!("test progress"));
         display.println(lit!("test output line"));
-        display.print_info("test info");
-        display.print_success("test success");
-        display.print_error("test error");
+        display.print_info(crate::terminal_text::lit!("test info"));
+        display.print_success(crate::terminal_text::lit!("test success"));
+        display.print_error(crate::terminal_text::lit!("test error"));
 
         // Test that clone shares state
         let display2 = display.clone();
-        display2.print_progress("cloned display output");
+        display2.print_progress(crate::terminal_text::lit!("cloned display output"));
     }
 }
