@@ -1,5 +1,5 @@
 use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
-use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
+use dialoguer::{Input, theme::SimpleTheme};
 use selfie::{
     namespace::{self, NamespaceValidationError},
     package::{
@@ -15,7 +15,7 @@ use crate::formatters::name_argument;
 
 use crate::{
     config::CliConfig,
-    display_manager::{DisplayManager, PromptFailure},
+    display_manager::{Choice, DisplayManager, PromptFailure},
     event_processor::{EventProcessor, Exit},
 };
 
@@ -103,10 +103,9 @@ pub(crate) async fn handle_create(
         return created_exit;
     }
 
-    let edit_now = display.prompt(
-        Confirm::with_theme(&SimpleTheme)
-            .with_prompt("Would you like to open the package file for editing now?")
-            .default(true),
+    let edit_now = display.confirm(
+        lit!("Would you like to open the package file for editing now?"),
+        true,
     );
 
     let edit_later = || {
@@ -239,6 +238,14 @@ fn refuse_interactive(display: &DisplayManager, failure: &PromptFailure) -> Exit
     )
 }
 
+/// What to do about a package already under the name asked for.
+#[derive(Clone, Copy)]
+enum Existing {
+    Edit,
+    Rename,
+    Cancel,
+}
+
 fn get_valid_package_name(
     initial_name: &str,
     repo: &impl PackageRepository,
@@ -280,27 +287,28 @@ fn get_valid_package_name(
                         crate::received::sentence(&conflict)
                     ));
 
-                    let action = display.prompt(
-                        Select::with_theme(&SimpleTheme)
-                            .with_prompt("What would you like to do?")
-                            .items([
-                                "Edit the existing package",
-                                "Create a new package with a different name",
-                                "Cancel",
-                            ])
-                            .default(0),
+                    let action = display.select(
+                        lit!("What would you like to do?"),
+                        &[
+                            Choice::labeled(lit!("Edit the existing package"), Existing::Edit),
+                            Choice::labeled(
+                                lit!("Create a new package with a different name"),
+                                Existing::Rename,
+                            ),
+                            Choice::labeled(lit!("Cancel"), Existing::Cancel),
+                        ],
                     );
 
                     match action {
-                        Ok(0) => {
+                        Ok(Existing::Edit) => {
                             return Ok(PackageNameResult::EditExisting(
                                 existing_package.file_path().to_path_buf(),
                             ));
                         }
-                        Ok(1) => {
+                        Ok(Existing::Rename) => {
                             // Fall through to prompt for new name below
                         }
-                        Ok(_) => return Ok(PackageNameResult::Canceled),
+                        Ok(Existing::Cancel) => return Ok(PackageNameResult::Canceled),
                         Err(failure) => {
                             return Err(display.refuse_prompt(
                                 &failure,
@@ -629,36 +637,21 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         return Ok(Vec::new());
     }
 
-    let selected = display
-        .prompt(
-            MultiSelect::with_theme(&SimpleTheme)
-                .with_prompt("Dependencies (select with space, confirm with enter)")
-                .items(dependency_items(&available_packages)),
-        )
-        .map_err(|failure| refuse_interactive(display, &failure))?;
-
-    Ok(selected
-        .into_iter()
-        .map(|i| available_packages[i].clone())
-        .collect())
-}
-
-/// The dependency picker's items as it shows them: each name escaped. The
-/// choice is read back from the raw list by index.
-fn dependency_items(available: &[String]) -> Vec<String> {
-    available
+    let choices: Vec<Choice<String>> = available_packages
         .iter()
-        .map(|name| crate::terminal_text::Name::new(name).to_string())
-        .collect()
+        .map(|name| Choice::named(name, name.clone()))
+        .collect();
+    display
+        .multi_select(
+            lit!("Dependencies (select with space, confirm with enter)"),
+            &choices,
+        )
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, Exit> {
     display
-        .prompt(
-            Confirm::with_theme(&SimpleTheme)
-                .with_prompt("Add another environment?")
-                .default(false),
-        )
+        .confirm(lit!("Add another environment?"), false)
         .map_err(|failure| refuse_interactive(display, &failure))
 }
 
@@ -667,15 +660,6 @@ mod tests {
     use selfie::package::port::PackageListError;
 
     use super::*;
-
-    // The picker shows a name escaped, so a name holding a filler character
-    // reads differently from the plain one it imitates.
-    #[test]
-    fn the_dependency_picker_shows_names_escaped() {
-        let available = vec!["git".to_string(), "git\u{3164}".to_string()];
-
-        assert_eq!(dependency_items(&available), ["git", "git\\u{3164}"]);
-    }
     use futures::StreamExt;
     use selfie::package::SpecService;
     use selfie::package::event::{OperationResult, OperationSuccess, PackageEvent};

@@ -78,6 +78,39 @@ pub(crate) struct TextLine<'a>(
     pub(crate)  dialoguer::Input<'a, String>,
 );
 
+/// One entry of a menu: the text it shows, and the value picking it returns.
+pub(crate) struct Choice<T> {
+    label: Shown,
+    value: T,
+}
+
+impl<T> Choice<T> {
+    /// A choice showing `name`, escaped as a [`Name`]. Picking it returns
+    /// `value`, which may hold the raw name.
+    pub(crate) fn named(name: &str, value: T) -> Self {
+        Self {
+            label: Name::new(name).into(),
+            value,
+        }
+    }
+
+    /// A choice showing selfie's own `label`.
+    pub(crate) fn labeled(label: Literal, value: T) -> Self {
+        Self {
+            label: label.into(),
+            value,
+        }
+    }
+}
+
+// Which dialoguer theme a prompt draws with. An enum so a test can read the
+// decision without drawing.
+#[derive(Debug, PartialEq, Eq)]
+enum PromptTheme {
+    Colorful,
+    Simple,
+}
+
 // The one place dialoguer's reading calls are allowed; crates/cli/clippy.toml
 // forbids them everywhere else, so a prompt that bypasses `DisplayManager::prompt`
 // does not build.
@@ -85,8 +118,125 @@ pub(crate) struct TextLine<'a>(
     clippy::disallowed_methods,
     reason = "every prompt is asked here, inside DisplayManager::prompt"
 )]
-mod ask {
-    use super::{Prompt, TextLine};
+mod prompts {
+    use dialoguer::theme::{ColorfulTheme, SimpleTheme, Theme};
+
+    use super::{Choice, DisplayManager, Prompt, PromptFailure, PromptTheme, Shown, TextLine};
+
+    impl DisplayManager {
+        /// Ask a yes-or-no question; Enter alone answers `default`.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn confirm(
+            &self,
+            text: impl Into<Shown>,
+            default: bool,
+        ) -> Result<bool, PromptFailure> {
+            let theme = self.theme();
+            self.prompt(
+                dialoguer::Confirm::with_theme(theme.as_ref())
+                    .with_prompt(self.prompt_text(text))
+                    .default(default),
+            )
+        }
+
+        /// Ask for one of `choices`, the first highlighted, and return its
+        /// value.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn select<T: Clone>(
+            &self,
+            text: impl Into<Shown>,
+            choices: &[Choice<T>],
+        ) -> Result<T, PromptFailure> {
+            let theme = self.theme();
+            let picked = self.prompt(
+                dialoguer::Select::with_theme(theme.as_ref())
+                    .with_prompt(self.prompt_text(text))
+                    .items(self.labels(choices))
+                    .default(0),
+            )?;
+            Ok(choices[picked].value.clone())
+        }
+
+        /// Ask for one of `choices`, filtered as the user types, and return
+        /// its value. `None` when the user pressed Esc.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn fuzzy_select<T: Clone>(
+            &self,
+            text: impl Into<Shown>,
+            choices: &[Choice<T>],
+        ) -> Result<Option<T>, PromptFailure> {
+            let theme = self.theme();
+            let picked = self.prompt(
+                dialoguer::FuzzySelect::with_theme(theme.as_ref())
+                    .with_prompt(self.prompt_text(text))
+                    .items(self.labels(choices))
+                    .default(0),
+            )?;
+            Ok(picked.map(|picked| choices[picked].value.clone()))
+        }
+
+        /// Ask for any number of `choices`, none checked at first, and return
+        /// the values of those picked, in the order of `choices`.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn multi_select<T: Clone>(
+            &self,
+            text: impl Into<Shown>,
+            choices: &[Choice<T>],
+        ) -> Result<Vec<T>, PromptFailure> {
+            let theme = self.theme();
+            let picked = self.prompt(
+                dialoguer::MultiSelect::with_theme(theme.as_ref())
+                    .with_prompt(self.prompt_text(text))
+                    .items(self.labels(choices)),
+            )?;
+            Ok(picked
+                .into_iter()
+                .map(|picked| choices[picked].value.clone())
+                .collect())
+        }
+
+        // Prompts draw on stderr, so they follow its color decision.
+        pub(super) fn prompt_theme(&self) -> PromptTheme {
+            if self.stderr_colors() {
+                PromptTheme::Colorful
+            } else {
+                PromptTheme::Simple
+            }
+        }
+
+        fn theme(&self) -> Box<dyn Theme> {
+            match self.prompt_theme() {
+                PromptTheme::Colorful => Box::new(ColorfulTheme::default()),
+                PromptTheme::Simple => Box::new(SimpleTheme),
+            }
+        }
+
+        fn prompt_text(&self, text: impl Into<Shown>) -> String {
+            text.into()
+                .guarded(self.stderr_colors())
+                .as_str()
+                .to_string()
+        }
+
+        fn labels<T>(&self, choices: &[Choice<T>]) -> Vec<String> {
+            choices
+                .iter()
+                .map(|choice| self.prompt_text(choice.label.clone()))
+                .collect()
+        }
+    }
 
     impl Prompt for dialoguer::Confirm<'_> {
         type Answer = bool;
@@ -2383,6 +2533,75 @@ mod tests {
         fn ask(self) -> dialoguer::Result<()> {
             Ok(())
         }
+    }
+
+    // A menu answers with the value of the choice at the index picked, so a
+    // name's raw bytes come back even though the menu showed them escaped.
+    #[test]
+    fn select_returns_the_picked_choices_value() {
+        let choices = [
+            Choice::named("plain", "plain".to_string()),
+            Choice::named("evil\u{1b}[2J", "evil\u{1b}[2J".to_string()),
+        ];
+        let dm = DisplayManager::new(false).answering(vec![answer(1_usize)]);
+
+        assert_eq!(
+            dm.select(lit!("Which?"), &choices).unwrap(),
+            "evil\u{1b}[2J"
+        );
+    }
+
+    #[test]
+    fn multi_select_returns_only_the_picked_values() {
+        let choices = [
+            Choice::labeled(lit!("one"), 1),
+            Choice::labeled(lit!("two"), 2),
+            Choice::labeled(lit!("three"), 3),
+        ];
+        let dm = DisplayManager::new(false).answering(vec![answer(vec![0_usize, 2])]);
+
+        assert_eq!(dm.multi_select(lit!("Which?"), &choices).unwrap(), [1, 3]);
+    }
+
+    // Esc at a fuzzy select picks nothing.
+    #[test]
+    fn fuzzy_select_returns_none_for_esc() {
+        let choices = [
+            Choice::labeled(lit!("one"), 1),
+            Choice::labeled(lit!("two"), 2),
+        ];
+        let dm = DisplayManager::new(false)
+            .answering(vec![answer(None::<usize>), answer(Some(1_usize))]);
+
+        assert_eq!(dm.fuzzy_select(lit!("Which?"), &choices).unwrap(), None);
+        assert_eq!(dm.fuzzy_select(lit!("Which?"), &choices).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn confirm_returns_the_answer() {
+        let dm = DisplayManager::new(false).answering(vec![answer(true), answer(false)]);
+
+        assert!(dm.confirm(lit!("Sure?"), false).unwrap());
+        assert!(!dm.confirm(lit!("Sure?"), true).unwrap());
+    }
+
+    // A named choice shows its name escaped; the menu never draws it raw.
+    #[test]
+    fn a_named_choice_shows_its_name_escaped() {
+        let choice = Choice::named("a\u{1b}\u{200b}b", ());
+
+        assert_eq!(choice.label.as_str(), "a\\u{1b}\\u{200b}b");
+    }
+
+    // Without colors a prompt draws with the plain theme. The colored half is
+    // tested on a pseudoterminal in prompt_signal_tests.rs, since a unit test
+    // run from a terminal can see one on stderr.
+    #[test]
+    fn a_display_without_colors_prompts_in_the_plain_theme() {
+        assert_eq!(
+            DisplayManager::new(false).prompt_theme(),
+            PromptTheme::Simple
+        );
     }
 
     fn io_error(kind: std::io::ErrorKind) -> Scripted {

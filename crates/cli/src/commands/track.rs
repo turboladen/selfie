@@ -9,7 +9,7 @@ use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit, shown};
 use selfie::dotfile_service::track::Tracker;
 use std::collections::HashSet;
 
-use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
+use dialoguer::{Input, theme::ColorfulTheme};
 use selfie::{
     fs::{DirectoryState, real::RealFileSystem},
     namespace,
@@ -25,14 +25,20 @@ use tracing::info;
 use crate::{
     commands::common::{self, create_dotfiles_repository, create_package_repository},
     config::CliConfig,
-    display_manager::{DisplayManager, PromptFailure},
+    display_manager::{Choice, DisplayManager, PromptFailure},
     event_processor::Exit,
 };
 
-/// Sentinel item appended after real package names in the select list.
-const NEW_STANDALONE: &str = "→ New standalone dotfile";
-/// Sentinel item for free-text name entry.
-const TYPE_A_NAME: &str = "→ Let me type a name";
+/// An entry of the destination picker.
+#[derive(Clone, Debug, PartialEq)]
+enum Destination {
+    /// An existing package, by its raw name.
+    Existing(String),
+    /// A new standalone dotfile, named after the file.
+    NewStandalone,
+    /// A new standalone dotfile under a name the user types.
+    TypeAName,
+}
 
 /// What the user chose in the interactive prompt.
 #[derive(Debug, PartialEq)]
@@ -251,58 +257,49 @@ fn prompt_track_choice(
     file: &str,
     display: &DisplayManager,
 ) -> Result<TrackChoice, PromptFailure> {
-    let (shown, items) = select_items(package_names);
+    let picked = display.fuzzy_select(
+        lit!("Where should this file be tracked?"),
+        &destinations(package_names),
+    )?;
 
-    let selection = display.prompt(
-        FuzzySelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("Where should this file be tracked?")
-            .items(&shown)
-            .default(0),
-    );
-
-    let Some(choice) = selection? else {
+    let Some(destination) = picked else {
         return Ok(TrackChoice::Declined);
     };
 
-    resolve_choice(&items, choice, file, display)
+    resolve_choice(destination, file, display)
 }
 
-/// The selection list, existing packages then the two sentinel options: as the
-/// prompt shows it, escaped, and as the choice is read back, raw.
-// Escaped only where it is shown: the choice is looked up in the raw list, so
-// picking a spec whose name holds an escaped character tracks into that spec,
-// not into one named by its escaped spelling.
-fn select_items(package_names: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut items: Vec<String> = package_names.to_vec();
-    items.push(NEW_STANDALONE.to_string());
-    items.push(TYPE_A_NAME.to_string());
-    let shown = items
+/// The picker's entries: existing packages, then the two ways to make a new
+/// standalone dotfile.
+// A package's entry holds its raw name, so picking a spec whose name the picker
+// shows escaped tracks into that spec, not into one named by its escaped
+// spelling.
+fn destinations(package_names: &[String]) -> Vec<Choice<Destination>> {
+    package_names
         .iter()
-        .map(|item| crate::terminal_text::Name::new(item).to_string())
-        .collect();
-    (shown, items)
+        .map(|name| Choice::named(name, Destination::Existing(name.clone())))
+        .chain([
+            Choice::labeled(lit!("→ New standalone dotfile"), Destination::NewStandalone),
+            Choice::labeled(lit!("→ Let me type a name"), Destination::TypeAName),
+        ])
+        .collect()
 }
 
-/// Given the selection list and the chosen index, determine the action, asking
-/// for a name when the choice needs one.
+/// The action for the picked `destination`, asking for a name when it needs
+/// one.
 ///
 /// # Errors
 ///
 /// [`PromptFailure`] when the name prompt got no answer.
 fn resolve_choice(
-    items: &[String],
-    choice: usize,
+    destination: Destination,
     file: &str,
     display: &DisplayManager,
 ) -> Result<TrackChoice, PromptFailure> {
-    let selected = &items[choice];
-
-    let default = if selected == TYPE_A_NAME {
-        None
-    } else if selected == NEW_STANDALONE {
-        offered_name(file)
-    } else {
-        return Ok(TrackChoice::ExistingPackage(selected.clone()));
+    let default = match destination {
+        Destination::Existing(name) => return Ok(TrackChoice::ExistingPackage(name)),
+        Destination::NewStandalone => offered_name(file),
+        Destination::TypeAName => None,
     };
 
     Ok(match prompt_for_name(default, display)? {
@@ -643,16 +640,19 @@ mod tests {
         assert_eq!(offered_name("~/.bat\u{2800}rc"), None);
     }
 
+    // Picking a package the picker shows escaped tracks into it by its raw name.
     #[test]
-    fn select_items_shows_names_escaped_and_keeps_them_raw() {
+    fn a_picked_package_is_tracked_into_by_its_raw_name() {
         let names = vec!["plain".to_string(), "evil\u{1b}[2J".to_string()];
+        let display = DisplayManager::new(false)
+            .answering(vec![crate::display_manager::answer(Some(1_usize))]);
 
-        let (shown, raw) = select_items(&names);
+        let choice = prompt_track_choice(&names, "~/.batrc", &display).unwrap();
 
-        assert_eq!(shown[1], "evil\\u{1b}[2J");
-        assert_eq!(raw[1], "evil\u{1b}[2J");
-        assert_eq!(shown[0], raw[0]);
-        assert_eq!(shown.len(), raw.len());
+        assert_eq!(
+            choice,
+            TrackChoice::ExistingPackage("evil\u{1b}[2J".to_string())
+        );
     }
 
     #[test]
@@ -1076,15 +1076,8 @@ mod tests {
 
     #[test]
     fn resolve_choice_selects_existing_package() {
-        let items = vec![
-            "alacritty".to_string(),
-            "fnm".to_string(),
-            NEW_STANDALONE.to_string(),
-            TYPE_A_NAME.to_string(),
-        ];
         let result = resolve_choice(
-            &items,
-            0,
+            Destination::Existing("alacritty".to_string()),
             "~/.config/test.toml",
             &DisplayManager::new(false),
         );

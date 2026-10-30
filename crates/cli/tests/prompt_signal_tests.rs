@@ -18,7 +18,7 @@ use std::{
 };
 
 use common::{
-    CANCELED, CLEAN, SELFIE_ENV, sandboxed_std_command, setup_default_test_config,
+    CANCELED, CLEAN, FAILED, SELFIE_ENV, sandboxed_std_command, setup_default_test_config,
     setup_test_config_with_state_directory,
 };
 use nix::{
@@ -300,7 +300,10 @@ fn ctrl_c_typed_at_a_question_ends_its_line() {
 
     assert_eq!(finished.code, Some(CANCELED), "{}", finished.output);
     finished.assert_terminal_restored();
-    let (_, after) = finished.output.rsplit_once("[y/N] ").unwrap();
+    let (_, after) = finished
+        .output
+        .rsplit_once("Remove package 'doomed'?")
+        .unwrap();
     assert!(after.contains('\n'), "{:?}", finished.output);
     assert!(exists(&spec), "a canceled remove removed the spec");
 }
@@ -317,6 +320,46 @@ fn an_answered_prompt_still_answers() {
     assert_eq!(finished.code, Some(CLEAN), "{}", finished.output);
     finished.assert_terminal_restored();
     assert!(!exists(&spec), "the answered remove left the spec");
+}
+
+// Enter alone answers a confirm with its default, which for removing a spec is
+// no.
+#[test]
+fn enter_alone_takes_the_confirms_default() {
+    let (temp, spec) = one_spec();
+    let mut run = remove_doomed(&temp);
+
+    run.type_keys(b"\r");
+    let finished = run.finish();
+
+    assert_eq!(finished.code, Some(FAILED), "{}", finished.output);
+    assert!(
+        finished.output.contains("Package removal canceled."),
+        "{}",
+        finished.output
+    );
+    assert!(exists(&spec), "Enter alone removed the spec");
+}
+
+// A prompt draws on stderr and follows its color decision: the colorful theme,
+// whose question ends in `›`, on a terminal with colors on, and the plain
+// theme's `[y/N]` with them off.
+#[test]
+fn a_prompt_follows_stderrs_colors() {
+    let (temp, _spec) = one_spec();
+
+    let mut colored = remove_doomed(&temp);
+    colored.wait_for_text("›");
+    colored.type_keys(b"n");
+    let colored = colored.finish();
+
+    let mut plain = PtyRun::spawn(&temp, &["--no-color", "spec", "remove", "doomed"]);
+    plain.wait_for_text("Remove package 'doomed'? [y/N] ");
+    plain.type_keys(b"n");
+    let plain = plain.finish();
+
+    assert!(!colored.output.contains("[y/N]"), "{}", colored.output);
+    assert!(!plain.output.contains('›'), "{}", plain.output);
 }
 
 // apply asks about a conflict on a thread of its own, which a signal never
