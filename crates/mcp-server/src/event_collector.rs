@@ -116,11 +116,22 @@ fn gap_json(gap: &Gap) -> Value {
 
 /// The `validation_result` entries in a collected result's `data`.
 pub(crate) fn validation_result_rows(collected: &Value) -> Vec<&Value> {
+    rows_of_type(collected, &["validation_result"])
+}
+
+/// Returns the `warning` and `spec_skipped` entries in a collected result's
+/// `data`, in order.
+pub(crate) fn warning_rows(collected: &Value) -> Vec<&Value> {
+    rows_of_type(collected, &["warning", "spec_skipped"])
+}
+
+// The entries in a collected result's `data` whose `type` is one of `types`.
+fn rows_of_type<'v>(collected: &'v Value, types: &[&str]) -> Vec<&'v Value> {
     collected["data"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|entry| entry["type"] == "validation_result")
+        .filter(|entry| types.iter().any(|t| entry["type"] == *t))
         .collect()
 }
 

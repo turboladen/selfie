@@ -336,8 +336,11 @@ is reported and does not stop the update. When the spec has a dotfile entry, eac
 comparison could not read comes back as a warning. Every other issue, warnings, notices, and such an
 error, comes back as a `validation_result` entry in the result's `data`, sent before the spec is
 saved. `selfie_spec_update_batch` puts that entry under `validation_result` in the matching
-`results` entry, which has no such key when there is nothing to report. The entry's `outcome` is the
-spec's own, as `selfie_spec_validate` scores it; the result's `outcome` says how the update went.
+`results` entry, which has no such key when there is nothing to report. It puts the update's
+warnings, such as a spec the comparison could not read, under `warnings`, as the same `warning` and
+`spec_skipped` rows `selfie_spec_update` returns, and an entry with none has no such key. The
+entry's `outcome` is the spec's own, as `selfie_spec_validate` scores it; the result's `outcome`
+says how the update went.
 
 A package directory that does not exist yet holds no names, so it does not stop
 `selfie spec create`, `selfie dotfiles track` or the MCP tools that check a new name: the first spec

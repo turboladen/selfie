@@ -407,7 +407,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update_batch",
-        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. An entry whose update reported anything about the spec carries selfie_spec_update's validation_result entry under `validation_result`, whether or not the save succeeded; an entry with nothing to report has no such key. Prefer this over calling selfie_spec_update repeatedly."
+        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. An entry whose update reported anything about the spec carries selfie_spec_update's validation_result entry under `validation_result`, whether or not the save succeeded; an entry with nothing to report has no such key. An entry whose update sent warnings, such as a spec the check against other specs could not read, carries them under `warnings`, as the `warning` and `spec_skipped` rows selfie_spec_update returns in `data`; an entry with none has no such key. Prefer this over calling selfie_spec_update repeatedly."
     )]
     async fn spec_update_batch(
         &self,
@@ -461,6 +461,12 @@ impl SelfieServer {
             if let Some(validation) = event_collector::validation_result_rows(&result.data).first()
             {
                 entry["validation_result"] = (*validation).clone();
+            }
+            // What the update could not check or use, as the single call reports it,
+            // so an entry is never cleaner than that call's result.
+            let warnings = event_collector::warning_rows(&result.data);
+            if !warnings.is_empty() {
+                entry["warnings"] = warnings.into_iter().cloned().collect();
             }
             results.push(entry);
         }
@@ -1966,6 +1972,84 @@ mod tests {
             "got {json}"
         );
         assert_eq!(json["succeeded"], 2, "got {json}");
+    }
+
+    // A batch entry carries the rows the single call reports about what it could
+    // not check, so its result is no cleaner than that call's.
+    async fn single_and_batch_warnings(
+        server: &SelfieServer,
+    ) -> (Vec<serde_json::Value>, serde_json::Value) {
+        let single = tool_json(
+            &server
+                .spec_update(Parameters(update_description("alpha")))
+                .await
+                .unwrap(),
+        );
+        let params: BatchUpdateParam = serde_json::from_value(serde_json::json!({
+            "updates": [{ "package": "alpha", "description": "d" }],
+        }))
+        .unwrap();
+        let batch = tool_json(&server.spec_update_batch(Parameters(params)).await.unwrap());
+        (
+            event_collector::warning_rows(&single)
+                .into_iter()
+                .cloned()
+                .collect(),
+            batch["results"][0]["warnings"].clone(),
+        )
+    }
+
+    fn write_alpha_with_an_entry(packages: &std::path::Path) {
+        std::fs::write(
+            packages.join("alpha.yml"),
+            "name: alpha\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  - command: \
+             echo alpha\n    target: ~/.alpharc\n",
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn spec_update_batch_entry_carries_the_warnings_the_single_call_reports() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        write_alpha_with_an_entry(&packages);
+        std::fs::write(packages.join("beta.yml"), "name: [unclosed\n").unwrap();
+        let server = server_over(&packages, None);
+
+        let (single, batch) = single_and_batch_warnings(&server).await;
+
+        assert_eq!(
+            single.len(),
+            1,
+            "control: the single call warns, got {single:?}"
+        );
+        assert!(
+            single[0].to_string().contains("packages/beta.yml"),
+            "got {single:?}"
+        );
+        assert_eq!(batch, serde_json::Value::Array(single));
+    }
+
+    #[tokio::test]
+    async fn spec_update_batch_entry_carries_a_skipped_spec() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        write_alpha_with_an_entry(&packages);
+        // A dotfiles copy of the name packages/ claims, which does not parse.
+        std::fs::write(dotfiles.join("alpha.yml"), "name: [unclosed\n").unwrap();
+        let server = server_over(&packages, Some(&dotfiles));
+
+        let (single, batch) = single_and_batch_warnings(&server).await;
+
+        assert!(
+            single.iter().any(|row| row["type"] == "spec_skipped"),
+            "control: the single call reports the skipped spec, got {single:?}"
+        );
+        assert_eq!(batch, serde_json::Value::Array(single));
     }
 
     // The JSON a tool returned.
