@@ -120,9 +120,9 @@ fn display_check_output_only(check_result: &CheckResultData, display: &DisplayMa
         CheckResult::Failed { stdout, stderr, .. } => {
             // Not installed: the check's own output explains the answer, so it
             // is a warning, on stderr, beside the result line on stdout.
-            if !stderr.is_empty() {
+            if !stderr.trim().is_empty() {
                 display.print_warning(format!("Check failed: {}", Output::new(stderr)));
-            } else if !stdout.is_empty() {
+            } else if !stdout.trim().is_empty() {
                 display.print_warning(format!("Check failed: {}", Output::new(stdout)));
             } else {
                 display.print_warning("Check failed with no output");
@@ -163,9 +163,9 @@ fn display_check_result_card(
                 lit!("Status"),
                 status_style::format_not_installed(use_colors),
             )];
-            if !stderr.is_empty() {
+            if !stderr.trim().is_empty() {
                 fields.push((lit!("Details"), output(stderr)));
-            } else if !stdout.is_empty() {
+            } else if !stdout.trim().is_empty() {
                 fields.push((lit!("Details"), output(stdout)));
             } else if let Some(code) = exit_code {
                 fields.push((lit!("Details"), shown!("Exit code {}", *code)));
@@ -188,7 +188,7 @@ fn display_check_result_card(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display_manager::column;
+    use crate::display_manager::{Channel, column};
 
     // What a check printed continues under its first line in the card, past
     // its key, whether the check passed or failed.
@@ -233,5 +233,68 @@ mod tests {
             assert!(line.starts_with(&format!("   {key}: o1")), "{line:?}");
             assert_eq!(column(&line, "o2"), column(&line, "o1"), "{line:?}");
         }
+    }
+
+    // A failed check whose stderr is only blank space shows in its card what it
+    // printed on stdout instead, and with neither, its exit code; never an empty
+    // Details.
+    #[test]
+    fn a_failed_check_with_blank_stderr_falls_back() {
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(
+            std::path::Path::new("/packages"),
+        ));
+        let details = |stdout: &str| {
+            let check = CheckResultData {
+                package_name: "pkg".to_string(),
+                environment: "test".to_string(),
+                check_command: None,
+                result: CheckResult::Failed {
+                    stdout: stdout.to_string(),
+                    stderr: " \n\n".to_string(),
+                    exit_code: Some(3),
+                },
+            };
+            let display = DisplayManager::new(false);
+            display_check_result_card(&check, &config, &display);
+            display
+                .written()
+                .into_iter()
+                .find(|line| line.contains("Details"))
+                .expect("the card has details")
+        };
+
+        assert_eq!(details("from stdout\n"), "   Details: from stdout");
+        assert_eq!(details("\n"), "   Details: Exit code 3");
+    }
+
+    // Without the card, a failed check whose stderr is only blank space warns
+    // with what it printed on stdout instead, and with neither, says it printed
+    // nothing; never an empty warning.
+    #[test]
+    fn a_failed_check_with_blank_stderr_warns_with_what_it_printed() {
+        let warning = |stdout: &str| {
+            let check = CheckResultData {
+                package_name: "pkg".to_string(),
+                environment: "test".to_string(),
+                check_command: None,
+                result: CheckResult::Failed {
+                    stdout: stdout.to_string(),
+                    stderr: " \n\n".to_string(),
+                    exit_code: Some(3),
+                },
+            };
+            let display = DisplayManager::new(false);
+            display_check_output_only(&check, &display);
+            display.printed()
+        };
+
+        assert_eq!(
+            warning("from stdout\n"),
+            [(Channel::Stderr, "Check failed: from stdout".to_string())]
+        );
+        assert_eq!(
+            warning("\n"),
+            [(Channel::Stderr, "Check failed with no output".to_string())]
+        );
     }
 }
