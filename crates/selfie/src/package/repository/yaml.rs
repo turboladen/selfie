@@ -284,10 +284,11 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         // it, `audt:` takes the user's command text, and a top level selfie could
         // not read back may hide either (selfie-ebvx).
         //
-        // Asked of `listing_refusal`, so a writer and apply cannot reach different
-        // conclusions about one key. Field names rather than the rendered sentence,
-        // because this error names the file and the caller needs the keys.
-        match package.listing_refusal() {
+        // Asked of `untrusted_keys_refusal`, so a writer and apply cannot reach
+        // different conclusions about one key. Field names rather than the
+        // rendered sentence, because this error names the file and the caller
+        // needs the keys.
+        match package.untrusted_keys_refusal() {
             Some(SpecRefusal::UnknownTopLevelKeys(unknown)) => {
                 let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
                 return Err(PackageRepoError::UnknownTopLevelFields {
@@ -314,15 +315,16 @@ impl<F: FileSystem> YamlPackageRepository<F> {
                     error,
                 });
             }
-            // Unreachable while `listing_refusal` composes only the three rules
-            // above. A missing environment is a deployment rule, not a writing one:
-            // a spec declaring none is still the user's text.
+            // Unreachable while `untrusted_keys_refusal` composes only the three
+            // rules above. A missing environment is a deployment rule, not a
+            // writing one: a spec declaring none is still the user's text.
             //
-            // Named rather than left to a catch-all, so a new `SpecRefusal` variant
-            // fails to compile here. Widening `listing_refusal` to return a variant
-            // already named here is NOT caught, and that path is now shared with the
-            // listing, so a change made for the listing's benefit reaches this write
-            // silently.
+            // Named rather than left to a catch-all, so a new `SpecRefusal`
+            // variant fails to compile here. Widening `untrusted_keys_refusal` to
+            // return a variant already named here is NOT caught: it must never
+            // return `NoEnvironments`, or a save proceeds past this arm silently.
+            // The listings' rule, which does refuse a missing environment, is
+            // `every_environment_refusal`.
             Some(SpecRefusal::NoEnvironments(_)) | None => {}
         }
 
@@ -611,7 +613,9 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
                     spec_name.as_deref().unwrap_or_default(),
                     files,
                 )),
-                None => package.listing_refusal().map(|reason| reason.to_string()),
+                None => package
+                    .untrusted_keys_refusal()
+                    .map(|reason| reason.to_string()),
             };
             if let Some(reason) = reason {
                 unreadable.push(PackageParseError::new(

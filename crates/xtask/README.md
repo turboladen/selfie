@@ -65,12 +65,12 @@ test_timeout_secs = 600   # optional
 
 [[mutation]]
 id = "every-rule"         # letters, digits, `-`, `_` or `.`; names the mutation's directory
-file = "crates/selfie/src/package/service/steps.rs"
+file = "crates/selfie/src/package/refusal.rs"
 anchor = '''
-        Shown::Every => package.listing_refusal(),
+            Shown::Every => package.every_environment_refusal(),
 '''
 replacement = '''
-        Shown::Every => None,
+            Shown::Every => None,
 '''
 package = "selfie"
 target = ["--test", "package_service_tests"]   # required: one test target

@@ -12858,6 +12858,57 @@ async fn list_omits_packages_with_no_dotfiles_and_reports_nothing_skipped() {
     assert!(listed.packages.is_empty());
 }
 
+// A package spec that declares no environment is refused by apply everywhere,
+// so the listing refuses it as well, entries and all. The same bytes in the
+// dotfiles directory are a standalone spec, which declares none by design and
+// still lists.
+#[tokio::test]
+async fn list_refuses_a_package_spec_declaring_no_environment() {
+    let dirs = TestDirs::new();
+    let no_environment =
+        "name: NAME\ndotfiles:\n  - source: NAME.conf\n    target: ~/.config/NAME/config\n";
+    write_package_yaml(
+        &dirs.package_dir,
+        "noenv",
+        &no_environment.replace("NAME", "noenv"),
+    );
+    write_package_yaml(
+        &dirs.dotfiles_dir,
+        "gemrc",
+        &no_environment.replace("NAME", "gemrc"),
+    );
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+    let names: Vec<&str> = listed
+        .packages
+        .iter()
+        .map(selfie::package::Package::name)
+        .collect();
+    assert_eq!(names, ["gemrc"]);
+    let refused: Vec<(&str, selfie::package::event::RefusalKind)> = listed
+        .refused
+        .iter()
+        .map(|spec| (spec.package_name.as_str(), spec.kind))
+        .collect();
+    assert_eq!(
+        refused,
+        [("noenv", selfie::package::event::RefusalKind::NoEnvironments)]
+    );
+    assert!(
+        listed.refused[0].reason.contains("environment"),
+        "the reason must name what is missing, got: {}",
+        listed.refused[0].reason
+    );
+}
+
 // A listing that fails outright is a failure, not an empty answer. Reporting it
 // as success with no entries is indistinguishable, to a caller with no stderr,
 // from a directory that genuinely holds no dotfiles.

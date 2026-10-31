@@ -713,13 +713,43 @@ mod table {
         assert!(broken[2].starts_with("unparsable: "), "{broken:?}");
         assert_eq!(broken[3], "-", "{broken:?}");
 
-        // A spec with no environment is refused for this one.
-        let stdout = listing(&["package", "list"]);
-        let noenv = row(&stdout, "noenv");
+        // A spec with no environment is refused for this one, and for every
+        // one under `--all`, where it has no environments to show.
+        for args in [&["package", "list"][..], &["package", "list", "--all"]] {
+            let stdout = listing(args);
+            let noenv = row(&stdout, "noenv");
+            assert!(
+                noenv[2].starts_with("refused (noenv.yaml): ")
+                    && noenv[2].contains("At least one environment"),
+                "{args:?}: {noenv:?}"
+            );
+        }
+        assert_eq!(row(&all, "noenv")[3], "-", "{all}");
+    }
+
+    // A spec with no environment alone makes `--all` exit 3, as it does without
+    // `--all`: the listing found a spec selfie will not read.
+    #[test]
+    fn all_exits_3_for_a_spec_declaring_no_environment() {
+        let temp_dir = setup_default_test_config();
+        let packages = temp_dir.path().join("packages");
+        fs::write(
+            packages.join("bat.yaml"),
+            "name: bat\nenvironments:\n  test-env:\n    install: \"true\"\n",
+        )
+        .unwrap();
+        fs::write(packages.join("noenv.yaml"), "name: noenv\n").unwrap();
+
+        let output = sandboxed_command(&temp_dir)
+            .args(["package", "list", "--all"])
+            .output()
+            .unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(FOUND), "{output:?}");
         assert!(
-            noenv[2].starts_with("refused (noenv.yaml): ")
-                && noenv[2].contains("At least one environment"),
-            "{noenv:?}"
+            stdout.contains("1 valid package(s) and 1 refused package(s)"),
+            "{stdout}"
         );
     }
 

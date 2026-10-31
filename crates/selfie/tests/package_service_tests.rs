@@ -866,8 +866,9 @@ mod a_spec_selfie_cannot_read {
     // The rule follows the environments a listing shows. Without `--all` it is
     // apply's question here: a key only in 'work' leaves the spec readable, and a
     // spec declaring no environment is refused. With `--all`, or in a search,
-    // every environment is shown, so the key in 'work' refuses the spec, and
-    // declaring no environment is not a key selfie cannot trust.
+    // every environment is shown, so the key in 'work' refuses the spec too. A
+    // spec declaring no environment is refused in both, as apply refuses it in
+    // every environment.
     fn write_mode_fixtures(dir: &TempDir) {
         std::fs::write(
             dir.path().join("partial.yml"),
@@ -890,7 +891,7 @@ mod a_spec_selfie_cannot_read {
         write_mode_fixtures(&temp_dir);
         let service = create_service_test_service(&temp_dir);
 
-        for (show_all, expected) in [(false, ["noenv"]), (true, ["partial"])] {
+        for (show_all, expected) in [(false, &["noenv"][..]), (true, &["noenv", "partial"])] {
             let events = collect_events(PackageService::list(&service, show_all).await).await;
             let data = events
                 .iter()
@@ -916,6 +917,8 @@ mod a_spec_selfie_cannot_read {
 
         let events = collect_events(service.search("part").await).await;
         assert_eq!(refused_names(&spec_list_data(&events).refused), ["partial"]);
+        let events = collect_events(service.search("noenv").await).await;
+        assert_eq!(refused_names(&spec_list_data(&events).refused), ["noenv"]);
     }
 
     #[tokio::test]

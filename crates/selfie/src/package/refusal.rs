@@ -18,7 +18,7 @@ pub(crate) enum SpecRefusal {
     /// Top-level keys a package does not accept.
     UnknownTopLevelKeys(Vec<UnknownKey>),
     /// Unrecognized keys inside environment mappings, in name order, each
-    /// environment with its keys. [`Package::listing_refusal`] names every
+    /// environment with its keys. [`Package::untrusted_keys_refusal`] names every
     /// environment carrying any; [`Package::spec_refusal`] names only the one
     /// asked about.
     UnknownEnvironmentKeys(Vec<(String, Vec<UnknownKey>)>),
@@ -161,17 +161,19 @@ impl Package {
             .collect()
     }
 
-    /// Why this file cannot be trusted at any scope, when it cannot.
-    ///
-    /// The top level, plus the unknown keys in any environment rather than one
-    /// named environment.
+    /// Why this file's keys cannot be trusted at any scope, when they cannot:
+    /// an unknown key at the top level or in any environment, or a top level
+    /// selfie could not read back. A rewrite refuses such a file, since it
+    /// would drop what the keys hold.
     ///
     /// Says nothing about the individual entries, which are refused one at a
     /// time where they are read, and nothing about whether an environment is
-    /// declared at all, which is a question about deploying.
-    pub(crate) fn listing_refusal(&self) -> Option<SpecRefusal> {
-        // One answer serves a listing and a rewrite because neither knows which
-        // environment matters, so both ask about all of them rather than one.
+    /// declared at all, which is a question about deploying. A command showing
+    /// every environment asks [`Package::every_environment_refusal`], which
+    /// adds that question.
+    pub(crate) fn untrusted_keys_refusal(&self) -> Option<SpecRefusal> {
+        // Every environment rather than one, because a rewrite serializes all of
+        // them, and so does a listing that shows them.
         //
         // It names every offending environment, so a file with keys in two is fixed
         // in one pass.
@@ -182,6 +184,17 @@ impl Package {
         self.unknown_top_level_keys()
             .or_else(|| self.any_unknown_environment_keys())
             .or_else(|| self.unchecked_top_level())
+    }
+
+    /// Why a command showing every environment refuses this package, when it
+    /// does: [`Package::untrusted_keys_refusal`], then a package spec that
+    /// declares no environment, which no environment can deploy.
+    pub(crate) fn every_environment_refusal(&self) -> Option<SpecRefusal> {
+        // A rewrite asks `untrusted_keys_refusal` alone, since `spec update` is
+        // how a spec with no environment gets its first one. The missing
+        // environment is judged last, as it is in `spec_refusal`.
+        self.untrusted_keys_refusal()
+            .or_else(|| self.no_environments())
     }
 
     // In name order, whatever order the file gives, as every environment
@@ -315,7 +328,8 @@ pub(crate) enum Shown<'a> {
     /// it here.
     Current(&'a str),
     /// Every environment: a spec is refused when a key in any of them, or at its
-    /// top level, cannot be trusted.
+    /// top level, cannot be trusted, or when it is a package spec that declares
+    /// no environment.
     Every,
 }
 
@@ -330,7 +344,7 @@ pub(crate) fn separate_refused<'a>(
     for package in packages {
         let refusal = match shown {
             Shown::Current(environment) => package.spec_refusal(environment),
-            Shown::Every => package.listing_refusal(),
+            Shown::Every => package.every_environment_refusal(),
         };
         match refusal {
             Some(reason) => refused.push((package, RefusedSpec::new(package, &reason))),
@@ -681,7 +695,7 @@ environments: {}
              ~/.config/myapp/config.toml\n"
         );
         let refusal = package_from(&yaml)
-            .listing_refusal()
+            .untrusted_keys_refusal()
             .expect("both rules apply");
         assert!(
             refusal.to_string().starts_with("in environment 'test':"),
@@ -708,7 +722,7 @@ environments:
         target: ~/.config/myapp/z.toml
 "#;
         let refusal = package_from(yaml)
-            .listing_refusal()
+            .untrusted_keys_refusal()
             .expect("both environments carry a shadowing key");
         let rendered = refusal.to_string();
         assert!(
@@ -728,7 +742,7 @@ environments:
         let yaml = "name: myapp\nenvironments:\n  alpha:\n    install: \"echo i\"\n    audt: \
                     \"x\"\n  zulu:\n    install: \"echo i\"\n    chk: \"x\"\n";
         let rendered = package_from(yaml)
-            .listing_refusal()
+            .untrusted_keys_refusal()
             .expect("both environments carry an unknown key")
             .to_string();
         assert!(
@@ -736,5 +750,47 @@ environments:
             "got: {rendered}"
         );
         assert!(!rendered.contains("; in environment"), "got: {rendered}");
+    }
+
+    // A listing of every environment refuses a package spec declaring none, as
+    // one of the current environment does, and still lists a standalone spec
+    // declaring none. A spec that also carries a top-level key reports the key,
+    // as `spec_refusal` does.
+    #[test]
+    fn a_listing_of_every_environment_refuses_a_spec_declaring_none() {
+        use crate::package::event::RefusalKind;
+
+        let no_environment = package_from("name: noenv\n");
+        let with_key = package_from("name: keyed\nconfigs: []\n");
+        let standalone = standalone_from(TRACKED_STANDALONE);
+        let clean = package_from(CLEAN);
+
+        let (readable, refused) = super::separate_refused(
+            [&no_environment, &with_key, &standalone, &clean],
+            super::Shown::Every,
+        );
+
+        let readable: Vec<&str> = readable.iter().map(|package| package.name()).collect();
+        assert_eq!(readable, ["gemrc", "myapp"]);
+        let refused: Vec<(&str, RefusalKind)> = refused
+            .iter()
+            .map(|(_, spec)| (spec.package_name.as_str(), spec.kind))
+            .collect();
+        assert_eq!(
+            refused,
+            [
+                ("noenv", RefusalKind::NoEnvironments),
+                ("keyed", RefusalKind::UnknownTopLevelKeys)
+            ]
+        );
+        // The listing of the current environment gives the same answers.
+        for package in [&no_environment, &with_key] {
+            assert_eq!(
+                package.every_environment_refusal().map(|r| r.kind()),
+                package.spec_refusal("test").map(|r| r.kind()),
+                "{}",
+                package.name()
+            );
+        }
     }
 }

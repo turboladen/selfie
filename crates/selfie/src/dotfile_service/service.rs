@@ -436,15 +436,13 @@ where
                             .await;
                     }
 
-                    // `listing_refusal` rather than `spec_refusal`: this
-                    // listing spans every environment, so a reason keyed to one
-                    // named environment would refuse a package for a question
-                    // the table never asks -- while a shadowing key in ANY
-                    // environment empties a list this table would otherwise show
-                    // as simply absent.
+                    // Not `spec_refusal`: this listing spans every environment,
+                    // so a reason keyed to one would refuse a package for a
+                    // question the table never asks, while a shadowing key in
+                    // ANY of them empties a list it would show as simply absent.
                     let mut listable = Vec::new();
                     for package in packages {
-                        if let Some(reason) = package.listing_refusal() {
+                        if let Some(reason) = package.every_environment_refusal() {
                             refused
                                 .push(crate::package::event::RefusedSpec::new(&package, &reason));
                         } else if !package.dotfiles_with_scope().is_empty() {
