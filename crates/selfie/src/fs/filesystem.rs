@@ -1,6 +1,7 @@
 //! Port for file system operations, and the errors they report.
 
 use std::{
+    borrow::Cow,
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -152,22 +153,34 @@ impl AbsentReason {
         // `--` ends the option list. Without it a dotfiles directory named `-p` or
         // `-foo` is read by mkdir as options, so the command fails or creates
         // something the user did not ask for.
+        if !self.creatable() {
+            return None;
+        }
+        shell_quote(path).map(|path| format!("Create it with: mkdir -p -- {path}"))
+    }
+
+    /// Reports whether `mkdir -p` creates the directory, which it does only when
+    /// nothing is at the path.
+    #[must_use]
+    pub fn creatable(&self) -> bool {
         match self {
-            Self::Empty => Some(format!("Create it with: mkdir -p -- {}", shell_quote(path))),
+            Self::Empty => true,
             Self::Occupied { .. }
             | Self::DanglingSymlink { .. }
-            | Self::ParentNotADirectory { .. } => None,
+            | Self::ParentNotADirectory { .. } => false,
         }
     }
 }
 
-/// `path` as shell words that expand to it, for a remedy the user will paste.
+/// Quotes `path` as shell words that expand to it, for a command the user will
+/// paste, or returns `None` when it holds a NUL byte, which no shell word can carry.
 ///
 /// A leading `~/` is left outside the quotes, so the shell still expands it. Pair it
 /// with a `--` before the path, which this does not add: a leading dash is not a
-/// character quoting protects, so only the option separator ends it.
+/// character quoting protects, so only the option separator ends it. Quote a name
+/// with [`shell_word`] instead, so a name starting with `~` is quoted whole.
 #[must_use]
-pub fn shell_quote(path: &Path) -> String {
+pub fn shell_quote(path: &Path) -> Option<String> {
     let rendered = path.display().to_string();
     // A tilde arrives here only when the config loader could not expand it, which
     // needs a home directory selfie cannot determine. Quoting it whole offers a
@@ -176,19 +189,22 @@ pub fn shell_quote(path: &Path) -> String {
     // expands; `~user` stays quoted, since a command reaching further than selfie
     // does would name a directory selfie will not then use.
     if rendered == "~" {
-        return rendered;
+        return Some(rendered);
     }
     match rendered.strip_prefix("~/") {
-        Some(rest) => format!("~/{}", quote_word(rest)),
-        None => quote_word(&rendered),
+        Some(rest) => shell_word(rest).map(|rest| format!("~/{rest}")),
+        None => shell_word(&rendered).map(Cow::into_owned),
     }
 }
 
-/// One shell word, quoted unless every character is one the shell leaves alone.
-fn quote_word(word: &str) -> String {
-    // `try_quote` refuses only a NUL byte, which no path can hold. Should one ever
-    // arrive, the word goes out as written rather than as a panic.
-    shlex::try_quote(word).map_or_else(|_| word.to_string(), std::borrow::Cow::into_owned)
+/// Quotes `word` as one shell word, unless the shell leaves every character in it
+/// alone, or returns `None` when it holds a NUL byte, which no shell word can carry.
+///
+/// Quoting keeps every other character as it is, control characters included, so
+/// a quoted word is not safe to print as it is.
+#[must_use]
+pub fn shell_word(word: &str) -> Option<Cow<'_, str>> {
+    shlex::try_quote(word).ok()
 }
 
 impl DirectoryState {
@@ -1084,12 +1100,41 @@ mod tests {
             "/home/me/café",
             "-foo",
         ] {
-            let quoted = super::shell_quote(std::path::Path::new(path));
+            let quoted = super::shell_quote(std::path::Path::new(path)).expect("no NUL");
             assert_eq!(
                 shlex::split(&quoted),
                 Some(vec![path.to_string()]),
                 "{path} quoted as {quoted}"
             );
         }
+    }
+
+    // A readback cannot tell `~/x` from `'~/x'`, since splitting does no tilde
+    // expansion, so the exact text is what shows the tilde stays outside the
+    // quotes, where the shell expands it.
+    #[test]
+    fn shell_quote_holds_a_leading_tilde_outside_the_quotes() {
+        let quote = |path: &str| super::shell_quote(std::path::Path::new(path));
+        assert_eq!(quote("~/my dir").as_deref(), Some("~/'my dir'"));
+        assert_eq!(quote("~/plain").as_deref(), Some("~/plain"));
+        assert_eq!(quote("~").as_deref(), Some("~"));
+        assert_eq!(quote("~user/x").as_deref(), Some("'~user/x'"));
+        assert_eq!(quote("/a\0b"), None);
+    }
+
+    // A word is quoted whole, a leading `~` included, and reads back as itself; a
+    // NUL byte cannot be carried by any shell word.
+    #[test]
+    fn a_word_reads_back_as_one_word() {
+        for word in ["~x", "~/x", "-x", "café", "it's", "a b", ""] {
+            let quoted = super::shell_word(word).expect("no NUL");
+            assert_eq!(
+                shlex::split(&quoted),
+                Some(vec![word.to_string()]),
+                "{quoted}"
+            );
+        }
+        assert_eq!(super::shell_word("~/x").as_deref(), Some("'~/x'"));
+        assert_eq!(super::shell_word("a\0b"), None);
     }
 }

@@ -1,4 +1,4 @@
-use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
+use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown, then_command};
 use selfie::{
     namespace,
     package::{SpecService, port::PackageRepository},
@@ -9,7 +9,7 @@ use tracing::info;
 
 use crate::display_manager::DisplayManager;
 use crate::event_processor::Exit;
-use crate::formatters::name_argument;
+use crate::formatters::selfie_command;
 
 use crate::commands::common;
 use crate::commands::spec::create::{create_basic_package, name_check_refusal, write_spec};
@@ -213,9 +213,9 @@ fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(
         Err(failure) => Err(display.refuse_prompt(
             &failure,
             lit!("Confirming a new package"),
-            shown!(
-                "Create it with `selfie spec create {}`, then edit it.",
-                name_argument(package_name)
+            then_command(
+                lit!("Create it with `selfie spec create`, then edit it.").into(),
+                selfie_command(&[lit!("spec"), lit!("create")], package_name, &[]).as_ref(),
             ),
         )),
     }

@@ -1,4 +1,4 @@
-use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
+use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown, then_command};
 use selfie::{
     namespace::{self, NamespaceValidationError},
     package::{
@@ -10,7 +10,7 @@ use selfie::{
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::formatters::name_argument;
+use crate::formatters::selfie_command;
 
 use crate::{
     config::CliConfig,
@@ -108,9 +108,9 @@ pub(crate) async fn handle_create(
     );
 
     let edit_later = || {
-        display.print_info(shown!(
-            "Package created. You can edit it later with `selfie spec edit {}`.",
-            name_argument(&created_name)
+        display.print_info(then_command(
+            lit!("Package created. You can edit it later with `selfie spec edit`.").into(),
+            selfie_command(&[lit!("spec"), lit!("edit")], &created_name, &[]).as_ref(),
         ));
     };
     match edit_now {
@@ -312,10 +312,18 @@ fn get_valid_package_name(
                             return Err(display.refuse_prompt(
                                 &failure,
                                 lit!("Choosing what to do about an existing package"),
-                                shown!(
-                                    "Edit it with `selfie spec edit {}`, or run `selfie spec \
-                                         create` with a different name.",
-                                    name_argument(&current_name)
+                                then_command(
+                                    lit!(
+                                        "Edit it with `selfie spec edit`, or run `selfie spec \
+                                         create` with a different name."
+                                    )
+                                    .into(),
+                                    selfie_command(
+                                        &[lit!("spec"), lit!("edit")],
+                                        &current_name,
+                                        &[],
+                                    )
+                                    .as_ref(),
                                 ),
                             ));
                         }
@@ -1000,7 +1008,9 @@ mod tests {
         assert!(packages.join("fresh.yml").exists());
         assert_eq!(
             display.printed().last().map(|(_, line)| line.as_str()),
-            Some("Package created. You can edit it later with `selfie spec edit fresh`.")
+            Some(
+                "Package created. You can edit it later with `selfie spec edit`.\n  selfie spec edit fresh"
+            )
         );
         assert_eq!(lines_containing(&display, "needs a terminal"), 0);
     }
@@ -1020,7 +1030,9 @@ mod tests {
         assert!(packages.join("fresh.yml").exists());
         assert_eq!(
             display.printed().last().map(|(_, line)| line.as_str()),
-            Some("Package created. You can edit it later with `selfie spec edit fresh`.")
+            Some(
+                "Package created. You can edit it later with `selfie spec edit`.\n  selfie spec edit fresh"
+            )
         );
     }
 
@@ -1048,7 +1060,9 @@ mod tests {
         );
         assert_eq!(
             display.printed().last().map(|(_, line)| line.as_str()),
-            Some("Package created. You can edit it later with `selfie spec edit fresh`.")
+            Some(
+                "Package created. You can edit it later with `selfie spec edit`.\n  selfie spec edit fresh"
+            )
         );
     }
 

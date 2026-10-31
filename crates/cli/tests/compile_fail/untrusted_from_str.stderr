@@ -15,4 +15,5 @@ help: the trait `From<&str>` is not implemented for `Shown`
              From<Literal>
              From<Name>
              From<Prose>
+             From<terminal_text::Command>
              From<terminal_text::Output>

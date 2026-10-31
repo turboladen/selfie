@@ -110,6 +110,55 @@ fn a_package_directory_holding_a_space_is_quoted_in_the_remedy() {
     );
 }
 
+// A zero-width space in the path reads as nothing, so the remedy shows two
+// lines: the command as it runs, still ending its line, and under it the same
+// command with the space written as an escape. The remedy is composed by the
+// CLI, which is where the note comes from.
+#[test]
+fn a_remedy_whose_path_reads_as_another_gets_an_escaped_line_under_it() {
+    let temp_dir = setup_default_test_config();
+    let packages_dir = temp_dir.path().join("pack\u{200B}ages");
+    let config = temp_dir
+        .path()
+        .join(".config")
+        .join("selfie")
+        .join("config.yaml");
+    let existing = std::fs::read_to_string(&config).unwrap();
+    let rewritten: String = existing
+        .lines()
+        .map(|line| {
+            if line.starts_with("package_directory:") {
+                format!("package_directory: \"{}\"", packages_dir.display())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&config, format!("{rewritten}\n")).unwrap();
+
+    let output = output_of(&temp_dir, &["spec", "list"]);
+
+    let command = format!("mkdir -p -- '{}'", packages_dir.display());
+    let lines: Vec<&str> = output.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.contains(&command))
+        .unwrap_or_else(|| panic!("the remedy must name the path as written, got: {output}"));
+    assert!(lines[at].trim_end().ends_with(&command), "{output}");
+    let escaped = command.replace('\u{200B}', r"\u{200b}");
+    assert_eq!(
+        lines[at + 1].trim(),
+        format!("Escaped: {escaped}"),
+        "the note must follow on its own line, got: {output}"
+    );
+    assert_eq!(
+        output.matches("Escaped:").count(),
+        1,
+        "one note, under the one command, got: {output}"
+    );
+}
+
 // A listing command gives the same guidance, so a regression in the shared arm
 // cannot pass by breaking only the commands that deploy.
 #[test]

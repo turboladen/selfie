@@ -425,10 +425,8 @@ async fn find_executable_path<CR>(
 where
     CR: CommandRunner,
 {
-    let finder_command = format!(
-        "which {}",
-        shlex::try_quote(package_name).unwrap_or(package_name.into())
-    );
+    // A name no shell word can carry names no executable either.
+    let finder_command = format!("which {}", crate::fs::shell_word(package_name)?);
 
     // In the package directory, which the install has just run in. The runner
     // has no way to run a command where selfie was started without entering it

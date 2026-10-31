@@ -154,8 +154,8 @@ when it is pasted.
 3. A composed command is one line. After quoting, it escapes the guard set, a newline and a tab:
    every Cc character, Zl, Zp, the bidi controls and the tag characters. An argument holding one of
    those, a newline included, is shown escaped and is not runnable as shown; no form of it is both
-   safe to print and pasteable. An argument `try_quote` refuses is shown escaped as a `Name` and
-   unquoted.
+   safe to print and pasteable. When `try_quote` refuses an argument, which happens only for one
+   holding NUL, no command is shown, as the library offers no remedy for such a path.
 4. A command a spec's author wrote, such as an install or check command, is already shell text and
    is not quoted, since quoting would make it one word. It escapes the guard set only, so its line
    breaks and tabs are kept, and §3 lays out its lines.

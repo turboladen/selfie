@@ -5,8 +5,9 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
+use crate::formatters::mkdir_command;
 use crate::received;
-use crate::terminal_text::{DisplayPath, Name, Output, Prose, Shown, interim_one_line, lit, shown};
+use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, noted, shown};
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -324,7 +325,7 @@ impl EventProcessor {
                             exit_code,
                             ..
                         }) => ErrorDetail {
-                            command: Some(interim_one_line(command)),
+                            command: Some(Command::written(command)),
                             exit_code: *exit_code,
                             stderr: Some(stderr_lines.clone()),
                             ..detail
@@ -357,31 +358,34 @@ impl EventProcessor {
                             // directory is already missing to a usage error.
                             // The global flag is per-run and the file is the
                             // durable fix, so both are named.
-                            let mut suggestion = String::from(
-                                "Edit 'package_directory' in your config file, or name another for this run with the global flag 'selfie --package-directory <path> …'",
+                            let settings = lit!(
+                                "Edit 'package_directory' in your config file, or name another for this run with the global flag 'selfie --package-directory <path> …'"
                             );
                             // `mkdir -p` answers an empty path and nothing else, so
                             // the remedy comes from the reason rather than being
                             // offered for every state. The two settings are named
                             // either way, since they are the fix when no command is.
-                            // Same quoter and same `--` as the dotfiles directory's
-                            // remedy, because this sentence is pasted too: a path
-                            // holding a space breaks the command, and one beginning
-                            // with a dash is read by mkdir as options.
-                            if let selfie::fs::DirectoryState::Absent(reason) = listing.state()
-                                && let Some(command) = reason.remedy(listing.path())
-                            {
-                                // The command ends the sentence, and nothing may follow
-                                // it. A shell word ends at whitespace, so a comma or a
-                                // period touching the closing quote is inside the word,
-                                // and the pasted command creates a directory whose name
-                                // carries it.
-                                suggestion.push_str(". Or ");
-                                suggestion.push_str(&command[..1].to_lowercase());
-                                suggestion.push_str(&command[1..]);
-                            }
-                            self.display
-                                .print_suggestion(received::sentence(suggestion));
+                            let mkdir = match listing.state() {
+                                selfie::fs::DirectoryState::Absent(reason)
+                                    if reason.creatable() =>
+                                {
+                                    mkdir_command(listing.path())
+                                }
+                                _ => None,
+                            };
+                            let suggestion = match mkdir {
+                                // The command ends the sentence, and nothing may
+                                // follow it on its line. A shell word ends at
+                                // whitespace, so a comma or a period touching the
+                                // closing quote is inside the word, and the pasted
+                                // command creates a directory whose name carries it.
+                                Some(mkdir) => noted(
+                                    shown!("{}. Or create it with: {}", settings, mkdir),
+                                    &mkdir,
+                                ),
+                                None => settings.into(),
+                            };
+                            self.display.print_suggestion(suggestion);
                         }
                         OperationFailure::Uncreatable { .. } => {
                             self.display.print_error(message.clone());
@@ -606,13 +610,13 @@ impl EventProcessor {
                 let by = package
                     .map(|package| shown!(" by package '{}'", Name::new(&package)))
                     .unwrap_or_default();
-                let line = shown!(
+                let line = source.noted(shown!(
                     "  Orphaned {}: deployed from {}{}, and no entry deploys to it now. selfie \
                      leaves it in place; check whether you still need it",
                     short_target,
-                    source,
+                    source.text(),
                     by
-                );
+                ));
                 if answer {
                     self.display.print_result(Outcome::Found, line);
                 } else {
@@ -1429,6 +1433,38 @@ mod tests {
         );
     }
 
+    // An orphaned target deployed from a command that reads as another names
+    // the command in its warning, and the escaped command follows on the
+    // warning's next line.
+    #[tokio::test]
+    async fn an_orphan_from_a_command_that_reads_as_another_notes_the_command() {
+        let orphaned = PackageEvent::DotfileOrphaned {
+            operation_info: make_operation_info("bat"),
+            source: DotfileSource::Command("echo a\u{200B}b".to_string()),
+            target: "/x/.batrc".to_string(),
+            package: None,
+        };
+
+        let printed = printed_for(DisplayManager::new(false), vec![orphaned]).await;
+
+        let warning = printed
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .find(|line| line.contains("Orphaned"))
+            .unwrap_or_else(|| panic!("{printed:?}"));
+        let lines: Vec<&str> = warning.lines().collect();
+        assert_eq!(lines.len(), 2, "{warning}");
+        assert!(
+            lines[0].contains("deployed from command: echo a\u{200B}b,"),
+            "{warning}"
+        );
+        assert_eq!(
+            lines[1].trim_start(),
+            "Escaped: echo a\\u{200b}b",
+            "{warning}"
+        );
+    }
+
     fn checked() -> PackageEvent {
         use selfie::package::event::{CheckVerdict, OperationSuccess};
 
@@ -1942,7 +1978,11 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].package_name.to_string(), "fail-pkg");
         assert_eq!(
-            errors[0].command.as_ref().map(Shown::as_str),
+            errors[0]
+                .command
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
             Some("brew install fail-pkg")
         );
         assert_eq!(errors[0].exit_code, Some(1));

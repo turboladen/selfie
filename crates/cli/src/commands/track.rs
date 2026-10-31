@@ -5,7 +5,7 @@
 //! existing package or should become a new standalone dotfile, then delegates
 //! to the appropriate tracking handler.
 
-use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit, shown};
+use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use selfie::dotfile_service::track::Tracker;
 use std::collections::HashSet;
 
@@ -396,10 +396,11 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
                 DisplayPath::of(path),
                 crate::received::sentence(reason.clause())
             );
-            // The remedy is a command, escaped as prose until slice 5's Command
-            // kind takes it.
-            match reason.remedy(path) {
-                Some(command) => shown!("{} {}", sentence, Prose::new(&command)),
+            match crate::formatters::mkdir_command(path).filter(|_| reason.creatable()) {
+                Some(mkdir) => crate::terminal_text::noted(
+                    shown!("{} Create it with: {}", sentence, mkdir),
+                    &mkdir,
+                ),
                 None => sentence,
             }
         }
@@ -856,6 +857,42 @@ mod tests {
             skipped[0].matches(&packages.display().to_string()).count() == 1,
             "the warning must name the directory once: {}",
             skipped[0]
+        );
+    }
+
+    // An absent dotfiles directory whose path holds an invisible character ends
+    // its warning with the `mkdir` that creates it, and the escaped form of that
+    // command follows on the next line.
+    #[test]
+    fn an_absent_dotfiles_directory_reading_as_another_notes_its_remedy() {
+        use selfie::config::SelfieConfigBuilder;
+
+        let path = std::path::PathBuf::from("/nonexistent/dot\u{200B}files");
+        let config = CliConfig::wrap_for_test(
+            SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(std::path::PathBuf::from("/nonexistent/packages"))
+                .dotfiles_directory(path.clone())
+                .build(),
+        );
+        let error = PackageListError::new(
+            path,
+            DirectoryState::Absent(selfie::fs::AbsentReason::Empty),
+        );
+
+        let warning = dotfiles_absence_warning(&config, &error)
+            .expect("an absence the user named warns")
+            .into_string();
+
+        let lines: Vec<&str> = warning.lines().collect();
+        assert_eq!(lines.len(), 2, "{warning}");
+        assert!(
+            lines[0].ends_with("Create it with: mkdir -p -- '/nonexistent/dot\u{200B}files'"),
+            "{warning}"
+        );
+        assert_eq!(
+            lines[1], "Escaped: mkdir -p -- '/nonexistent/dot\\u{200b}files'",
+            "{warning}"
         );
     }
 

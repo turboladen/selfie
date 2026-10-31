@@ -119,7 +119,8 @@ fn render_listing(data: &DotfileListData, config: &CliConfig, display: &DisplayM
 }
 
 /// Where `entry`'s content comes from, as a table cell: var names and command
-/// strings, never a resolved value.
+/// strings, never a resolved value. A command that reads as another has its
+/// escaped note on the cell's second line.
 pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> Shown {
     // A refused entry is shown as the reason it was refused rather than omitted:
     // it is in the package file, `selfie apply` will report skipping it, and a
@@ -127,8 +128,8 @@ pub(crate) fn source_cell(entry: &selfie::package::DotfileEntry) -> Shown {
     // says does not exist. The brief form, since a cell cannot hold the anchor
     // advice.
     match entry.content_source() {
-        Ok(source @ ContentSource::Provider(_)) => {
-            crate::terminal_text::interim_one_line(&source.to_string())
+        Ok(ContentSource::Provider(command)) => {
+            crate::source_paths::command_source(command).with_note()
         }
         Ok(source) => DisplayPath::new(&source.to_string()).into(),
         Err(invalid) => DisplayPath::new(&invalid.brief()).into(),
@@ -150,5 +151,28 @@ fn print_base_directories(config: &CliConfig, display: &DisplayManager, packages
             BaseKind::DotfilesDirectory,
             &config.selfie_config().dotfiles_directory(),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(yaml: &str) -> selfie::package::DotfileEntry {
+        selfie::yaml::parse(yaml).expect("an entry")
+    }
+
+    // A command source that reads as another has its escaped note on the
+    // cell's second line, and one that reads as written has a single line.
+    #[test]
+    fn a_command_source_cell_carries_its_note() {
+        assert_eq!(
+            source_cell(&entry("command: \"echo a\\u200Bb\"\ntarget: ~/.x\n")),
+            "command: echo a\u{200B}b\nEscaped: echo a\\u{200b}b"
+        );
+        assert_eq!(
+            source_cell(&entry("command: echo token\ntarget: ~/.x\n")),
+            "command: echo token"
+        );
     }
 }

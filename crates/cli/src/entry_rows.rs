@@ -5,7 +5,10 @@
 use console::measure_text_width;
 use selfie::package::event::SkipReason;
 
-use crate::terminal_text::{DisplayPath, Literal, Name, Paint, Shown, Trusted, lit, shown};
+use crate::source_paths::SourceText;
+use crate::terminal_text::{
+    DisplayPath, ESCAPED, Literal, Name, Paint, Shown, Trusted, lit, shown,
+};
 
 /// The widest a source or target column grows, in terminal columns. A longer
 /// value overflows its column on its own row.
@@ -116,28 +119,37 @@ fn capped(text: &str) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EntryRow {
     pub(crate) outcome: EntryOutcome,
-    /// The source as the row shows it: a path, or a command.
-    pub(crate) source: Shown,
+    /// Holds the source as the row shows it.
+    pub(crate) source: SourceText,
     /// The target as the row shows it.
     pub(crate) target: DisplayPath,
     /// What the row says after the target, such as why it was skipped.
     pub(crate) detail: Option<Shown>,
 }
 
-/// `row`'s line laid out in `columns`, its outcome's label colored when
-/// `use_colors`.
+/// Lays out `row`'s line in `columns`, its outcome's label colored when
+/// `use_colors`, with the source's note on a line under the source column.
 ///
 /// The label is padded by its own width, so its color takes no room in the
 /// table. A value wider than its column is never cut; it pushes the rest of its
 /// own row right.
 pub(crate) fn entry_line(row: &EntryRow, columns: EntryColumns, use_colors: bool) -> Shown {
+    let line = row_line(row, columns, use_colors);
+    // The note's line starts under the source column, as a detail's lines do.
+    match row.source.note() {
+        Some(note) => shown!("{}\n{}{}: {}", line, under_row(), ESCAPED, note),
+        None => line,
+    }
+}
+
+fn row_line(row: &EntryRow, columns: EntryColumns, use_colors: bool) -> Shown {
     let label = row.outcome.label();
     let after_label = spaces(LABEL_WIDTH.saturating_sub(label.as_str().len()) + 2);
     let label = match row.outcome.paint() {
         Some(paint) => Shown::from(label).paint(use_colors, paint),
         None => Shown::from(label),
     };
-    let source = padded(&row.source, columns.source);
+    let source = padded(&row.source.text(), columns.source);
     match &row.detail {
         // A detail's lines after its first start under the source column, so
         // they read as part of this row and not as the next one.
@@ -177,7 +189,7 @@ mod tests {
     fn row(outcome: EntryOutcome, source: &str, target: &str, detail: Option<&str>) -> EntryRow {
         EntryRow {
             outcome,
-            source: DisplayPath::new(source).into(),
+            source: SourceText::Plain(DisplayPath::new(source).into()),
             target: DisplayPath::new(target),
             detail: detail.map(|detail| Shown::from(Name::new(detail))),
         }
@@ -188,9 +200,12 @@ mod tests {
     }
 
     fn columns_for(rows: &[EntryRow]) -> EntryColumns {
+        let sources: Vec<Shown> = rows.iter().map(|row| row.source.text()).collect();
         EntryColumns::of(
-            rows.iter()
-                .map(|row| (row.source.as_str(), row.target.as_str())),
+            sources
+                .iter()
+                .zip(rows)
+                .map(|(source, row)| (source.as_str(), row.target.as_str())),
         )
     }
 
@@ -388,7 +403,7 @@ mod tests {
         let columns = EntryColumns::of([("bat/config", "~/.b")]);
         let row = EntryRow {
             outcome: EntryOutcome::Skipped,
-            source: DisplayPath::new("bat/config").into(),
+            source: SourceText::Plain(DisplayPath::new("bat/config").into()),
             target: DisplayPath::new("~/.b"),
             detail: Some(Shown::from(crate::terminal_text::Prose::new("a\nb"))),
         };
@@ -398,5 +413,40 @@ mod tests {
         let second = line.lines().nth(1).expect("a second line");
         assert_eq!(second, format!("{}b", under_row()), "{line:?}");
         assert_eq!(column(second, "b"), column(&line, "bat/config"), "{line:?}");
+    }
+
+    // A command source's note is a line of the row's own, under the source
+    // column, after a detail's lines or with no detail at all.
+    #[test]
+    fn a_source_note_sits_under_the_source_column() {
+        let source = crate::source_paths::command_source("echo a\u{200B}b");
+        let columns = EntryColumns::of([(source.text().as_str(), "~/.b")]);
+        for detail in [None, Some("a\nb")] {
+            let row = EntryRow {
+                outcome: EntryOutcome::Unverified,
+                source: source.clone(),
+                target: DisplayPath::new("~/.b"),
+                detail: detail.map(|detail| Shown::from(crate::terminal_text::Prose::new(detail))),
+            };
+
+            let line = line(&row, columns);
+
+            let last = line.lines().last().expect("a note line");
+            assert_eq!(
+                last,
+                format!("{}Escaped: echo a\\u{{200b}}b", under_row()),
+                "{line:?}"
+            );
+            assert_eq!(
+                column(last, "Escaped"),
+                column(&line, "command:"),
+                "{line:?}"
+            );
+            assert_eq!(
+                line.lines().count(),
+                2 + usize::from(detail.is_some()),
+                "{line:?}"
+            );
+        }
     }
 }

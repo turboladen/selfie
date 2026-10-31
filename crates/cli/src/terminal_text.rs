@@ -13,8 +13,9 @@
 //! strictly, since an invisible character, or a blank other than a space, in it
 //! makes it read as another; a [`Content`] line of a file keeps its tabs;
 //! [`Prose`] and a tool's [`Output`] escape only what can act on the terminal
-//! or reorder the text, so emoji sequences and joiners render. selfie's own
-//! text is a [`Literal`].
+//! or reorder the text, so emoji sequences and joiners render. A [`Command`]
+//! escapes no more than that, so it still pastes as it runs, and its note shows
+//! it escaped as a name would be. selfie's own text is a [`Literal`].
 
 use std::borrow::Cow;
 use std::fmt;
@@ -79,16 +80,17 @@ enum Policy {
     // the guard set.
     Output,
     // The guard set, a newline and a tab kept, with selfie's own SGR sequences
-    // handled as the `Sgr` says.
+    // handled as the `Sgr` says. A command a spec's author wrote takes it with
+    // `Sgr::Escape`.
     Guard(Sgr),
-    // The base set, a newline and a tab included: how a command is escaped
-    // until the Command kind exists. It stays apart from `Strict` because a
-    // command must keep the blanks `Strict` escapes to paste as it runs.
-    Interim,
+    // This escapes the guard set, a newline and a tab, for a command on one
+    // line. It escapes neither an invisible character nor a blank, so the
+    // command still pastes as it runs; its note shows those.
+    CommandLine,
 }
 
 // The one escaping function. Its callers are the kind constructors,
-// `Name::is_plain`, `guard` and `interim_one_line`.
+// `Name::is_plain`, `Command::note` and `guard`.
 fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
     match policy {
         Policy::Strict => escape_with(text, in_strict_set, Sgr::Escape),
@@ -96,17 +98,10 @@ fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
         Policy::Prose => escape_with(text, |c| c == '\t' || in_guard_set(c), Sgr::Escape),
         Policy::Output => Cow::Owned(cleaned(text)),
         Policy::Guard(sgr) => escape_with(text, in_guard_set, sgr),
-        Policy::Interim => escape_with(text, in_base_set, Sgr::Escape),
+        Policy::CommandLine => {
+            escape_with(text, |c| c.is_control() || in_guard_set(c), Sgr::Escape)
+        }
     }
-}
-
-/// Shows `text`, a command, on one line, with every control, format or
-/// invisible character written as an escape. A blank such as U+00A0 shows as
-/// written, so a command quoting French or CJK text still pastes as it runs.
-// A command is not a name, so it does not take the strict set; the Command
-// kind replaces this.
-pub(crate) fn interim_one_line(text: &str) -> Shown {
-    Shown(escape(text, Policy::Interim).into_owned())
 }
 
 // `line`, one line of a command's output, as a terminal would leave it: its
@@ -244,6 +239,32 @@ impl Shown {
             hung.push_str(line);
         }
         Self(hung)
+    }
+
+    /// Returns `self` with each tab replaced by the spaces that reach the next
+    /// tab stop, every eight columns from the start of the tab's line. Columns
+    /// are counted as a terminal shows them, so styling takes none.
+    // A layout that measures text to place it calls this, since a raw tab
+    // takes one column in a measurement and up to eight on the terminal.
+    #[must_use]
+    pub(crate) fn tabs_expanded(self) -> Self {
+        const TAB_STOP: usize = 8;
+        if !self.0.contains('\t') {
+            return self;
+        }
+        let mut expanded = String::with_capacity(self.0.len() + TAB_STOP);
+        let mut line_start = 0;
+        for (index, part) in self.0.split('\t').enumerate() {
+            if index > 0 {
+                let column = console::measure_text_width(&expanded[line_start..]);
+                expanded.push_str(&" ".repeat(TAB_STOP - column % TAB_STOP));
+            }
+            if let Some(at) = part.rfind('\n') {
+                line_start = expanded.len() + at + 1;
+            }
+            expanded.push_str(part);
+        }
+        Self(expanded)
     }
 
     /// `self` styled by `paint` when `use_colors`.
@@ -472,6 +493,11 @@ kinds! {
     /// become spaces, no control character is left but the line breaks between
     /// its lines, and what could reorder the text is escaped.
     Output;
+    /// Holds a command for the user to run, or one a spec runs, escaped only
+    /// where showing it would act on the terminal or reorder the text, so it
+    /// still pastes as it runs. When it holds a character that makes it read as
+    /// another command, [`Command::note`] shows it escaped.
+    Command;
 }
 
 impl Name {
@@ -549,6 +575,104 @@ impl Output {
     /// Returns the cleaned text.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Each variant is one word of a command selfie composes.
+pub(crate) enum Word<'a> {
+    /// Holds selfie's own word, such as `mkdir` or `--`, which goes in as
+    /// written.
+    Literal(Literal),
+    /// Holds a name from outside selfie, which is quoted whole as one shell
+    /// word, a leading `~` included.
+    Name(&'a str),
+    /// Holds a path, which is quoted as shell words with a leading `~/` left
+    /// outside the quotes, so the shell still expands it.
+    Path(&'a std::path::Path),
+}
+
+impl Word<'_> {
+    // Renders the word as the shell reads it, or returns `None` for a word no
+    // shell word can carry, one holding NUL.
+    fn quoted(self) -> Option<String> {
+        match self {
+            Self::Literal(word) => Some(word.as_str().to_string()),
+            Self::Name(name) => selfie::fs::shell_word(name).map(Cow::into_owned),
+            Self::Path(path) => selfie::fs::shell_quote(path),
+        }
+    }
+}
+
+impl Command {
+    /// Builds a command selfie composes from `words`, joined by spaces on one
+    /// line. Each argument from outside selfie is quoted as one shell word, and
+    /// a line break or a tab in one shows as an escape. Returns `None` when an
+    /// argument holds NUL, which no shell word can carry, so no command is the
+    /// remedy.
+    pub(crate) fn composed<'a>(words: impl IntoIterator<Item = Word<'a>>) -> Option<Self> {
+        let words: Vec<String> = words.into_iter().map(Word::quoted).collect::<Option<_>>()?;
+        Some(Self(
+            escape(&words.join(" "), Policy::CommandLine).into_owned(),
+        ))
+    }
+
+    /// Shows a command a spec's author wrote as written, keeping its line
+    /// breaks and tabs for the layout to place.
+    pub(crate) fn written(text: &str) -> Self {
+        Self(escape(text, Policy::Guard(Sgr::Escape)).into_owned())
+    }
+
+    /// Shows a command a spec's author wrote on one line, where a line break
+    /// or a tab in it shows as an escape.
+    // A dotfile's command source sits in a slot one line high (an entry row's
+    // source column, a list cell), so a kept line break would break the columns
+    // after it. ADR 0014 §1 lists a dotfile source under DisplayPath and §5.4
+    // names only install and check commands; this reads a command source as an
+    // author's command shown on one line.
+    pub(crate) fn one_line(text: &str) -> Self {
+        Self(escape(text, Policy::CommandLine).into_owned())
+    }
+
+    /// Returns the whole command with every invisible character and every
+    /// blank other than a space shown as an escape and its line breaks kept,
+    /// or `None` when the command shows nothing of the kind.
+    pub(crate) fn note(&self) -> Option<Shown> {
+        // Escaping what is already escaped changes nothing, so the strict
+        // escape of the shown text is the strict escape of the command. It
+        // escapes line by line, so each line of the note matches a line of the
+        // command.
+        let lines: Vec<Cow<'_, str>> = self
+            .0
+            .split('\n')
+            .map(|line| escape(line, Policy::Strict))
+            .collect();
+        lines
+            .iter()
+            .any(|line| matches!(line, Cow::Owned(_)))
+            .then(|| Shown(lines.join("\n")))
+    }
+}
+
+/// Labels the note under a command that reads as another.
+pub(crate) const ESCAPED: Literal = lit!("Escaped");
+
+/// Returns `text`, followed by `command` on a line of its own and the
+/// command's note under it, or `text` alone when there is no command.
+// The command gets a line of its own because a quoted word may hold any
+// delimiter a sentence could put around it, a backtick included.
+pub(crate) fn then_command(text: Shown, command: Option<&Command>) -> Shown {
+    match command {
+        Some(command) => noted(shown!("{}\n{}", text, command), command),
+        None => text,
+    }
+}
+
+/// Returns `text`, followed by `command`'s note on a line of its own after
+/// `Escaped: `, or `text` alone when the command has no note.
+pub(crate) fn noted(text: Shown, command: &Command) -> Shown {
+    match command.note() {
+        Some(note) => shown!("{}\n{}: {}", text, ESCAPED, note),
+        None => text,
     }
 }
 
@@ -908,14 +1032,107 @@ mod tests {
         }
     }
 
-    // A command is not a name: a blank in it shows as written, so it pastes as
-    // it runs, and a line break or an invisible character still shows as an
-    // escape.
+    // Each row pairs a text with how `written` and `one_line` show it. A
+    // command is not a name: a blank or an invisible character in it shows as
+    // written, so it pastes as it runs. Only what acts on the terminal or
+    // reorders the text is escaped, and on one line a line break and a tab are
+    // escaped too.
     #[test]
-    fn a_command_keeps_its_blanks_and_stays_on_one_line() {
+    fn each_command_constructor_escapes_each_class() {
+        let own = "\u{1b}[31mx\u{1b}[0m";
+        let rows = [
+            ("a\u{1b}[2Jb", "a\\u{1b}[2Jb", "a\\u{1b}[2Jb"),
+            ("a\rb", "a\\rb", "a\\rb"),
+            ("a\nb", "a\nb", "a\\nb"),
+            ("a\tb", "a\tb", "a\\tb"),
+            ("a\u{7f}b", "a\\u{7f}b", "a\\u{7f}b"),
+            ("a\u{85}b", "a\\u{85}b", "a\\u{85}b"),
+            ("a\u{202E}b", "a\\u{202e}b", "a\\u{202e}b"),
+            ("a\u{E0041}b", "a\\u{e0041}b", "a\\u{e0041}b"),
+            ("a\u{2028}b", "a\\u{2028}b", "a\\u{2028}b"),
+            ("a\u{200B}b", "a\u{200B}b", "a\u{200B}b"),
+            ("a\u{A0}b", "a\u{A0}b", "a\u{A0}b"),
+            ("a\u{2800}b", "a\u{2800}b", "a\u{2800}b"),
+            ("cafe\u{301}", "cafe\u{301}", "cafe\u{301}"),
+            (
+                "echo 'a\u{A0}b'\n\u{200B}x",
+                "echo 'a\u{A0}b'\n\u{200B}x",
+                "echo 'a\u{A0}b'\\n\u{200B}x",
+            ),
+            (own, "\\u{1b}[31mx\\u{1b}[0m", "\\u{1b}[31mx\\u{1b}[0m"),
+        ];
+        for (text, written, one_line) in rows {
+            assert_eq!(
+                (
+                    Command::written(text).to_string().as_str(),
+                    Command::one_line(text).to_string().as_str()
+                ),
+                (written, one_line),
+                "{text:?}"
+            );
+        }
+    }
+
+    // A note appears exactly when the command shows a character the strict set
+    // escapes, and keeps a written command's line breaks, so each of its lines
+    // sits under the line it explains.
+    #[test]
+    fn a_note_appears_only_when_the_command_reads_as_another() {
+        let note = |command: Command| command.note().map(Shown::into_string);
+
+        assert_eq!(note(Command::written("brew install bat")), None);
+        assert_eq!(note(Command::written("echo 日本 café\nnext")), None);
+        assert_eq!(note(Command::written("echo \u{1b}[2J")), None);
         assert_eq!(
-            interim_one_line("echo 'a\u{A0}b'\n\u{200B}x").as_str(),
-            "echo 'a\u{A0}b'\\n\\u{200b}x"
+            note(Command::written("echo a\u{200B}b")).as_deref(),
+            Some("echo a\\u{200b}b")
+        );
+        assert_eq!(
+            note(Command::written("echo 'a\u{A0}b'\n\tdone")).as_deref(),
+            Some("echo 'a\\u{a0}b'\n\\tdone")
+        );
+        assert_eq!(
+            note(Command::one_line("echo a\u{2800}\nb")).as_deref(),
+            Some("echo a\\u{2800}\\nb")
+        );
+    }
+
+    // Each argument from outside selfie is one shell word, quoted only where
+    // the shell would split or expand it. A path keeps a leading `~/` outside
+    // the quotes so the shell expands it; a name is quoted whole. A line break
+    // or a tab in an argument shows as an escape. An argument holding NUL,
+    // which no shell word can carry, leaves no command at all.
+    #[test]
+    fn a_composed_command_quotes_each_argument() {
+        let mkdir = |word: Word<'_>| {
+            Command::composed([Word::Literal(lit!("mkdir")), word])
+                .map(|command| command.to_string())
+        };
+        let path = |text: &'static str| mkdir(Word::Path(std::path::Path::new(text)));
+        let some = |text: &str| Some(text.to_string());
+
+        assert_eq!(mkdir(Word::Name("tool")), some("mkdir tool"));
+        assert_eq!(mkdir(Word::Name("~/x")), some("mkdir '~/x'"));
+        assert_eq!(mkdir(Word::Name("~x")), some("mkdir '~x'"));
+        assert_eq!(mkdir(Word::Name("café")), some("mkdir 'café'"));
+        assert_eq!(mkdir(Word::Name("it's")), some("mkdir \"it's\""));
+        assert_eq!(path("~/x y"), some("mkdir ~/'x y'"));
+        assert_eq!(path("/a b"), some("mkdir '/a b'"));
+        assert_eq!(path("/a\nb\tc"), some("mkdir '/a\\nb\\tc'"));
+        assert_eq!(path("/a\u{200B}b"), some("mkdir '/a\u{200B}b'"));
+        assert_eq!(mkdir(Word::Name("a\0b")), None);
+        assert_eq!(path("/a\0b"), None);
+    }
+
+    // A note goes on a line of its own under the text naming the command, and
+    // there is no line when there is no note.
+    #[test]
+    fn noted_puts_the_note_on_its_own_line() {
+        let text = || Shown::from(lit!("Run it."));
+        assert_eq!(noted(text(), &Command::written("true")), "Run it.");
+        assert_eq!(
+            noted(text(), &Command::written("a\u{200B}")),
+            "Run it.\nEscaped: a\\u{200b}"
         );
     }
 
@@ -1008,6 +1225,21 @@ mod tests {
         assert_eq!(Prose::new("  a\n  b\u{1b}").to_string(), "  a\n  b\\u{1b}");
     }
 
+    // Each tab reaches the next multiple of eight columns from its line's
+    // start, and styling takes no columns.
+    #[test]
+    fn a_tab_reaches_the_next_tab_stop() {
+        let expand = |text: &str| Shown(text.to_string()).tabs_expanded().into_string();
+        assert_eq!(expand("a\tb"), format!("a{}b", " ".repeat(7)));
+        assert_eq!(expand("abcdefgh\tb"), format!("abcdefgh{}b", " ".repeat(8)));
+        assert_eq!(expand("x\n  \tb"), format!("x\n  {}b", " ".repeat(6)));
+        assert_eq!(
+            expand("\u{1b}[31mab\u{1b}[0m\tc"),
+            format!("\u{1b}[31mab\u{1b}[0m{}c", " ".repeat(6))
+        );
+        assert_eq!(expand("plain"), "plain");
+    }
+
     // A hang starts every line after the first at the column it is given, and
     // leaves the first where it is.
     #[test]
@@ -1066,6 +1298,8 @@ mod tests {
         assert_eq!(Prose::new(once).to_string(), once);
         assert_eq!(Content::new(once).to_string(), once);
         assert_eq!(Output::line(once).to_string(), once);
+        assert_eq!(Command::written(once).to_string(), once);
+        assert_eq!(Command::one_line(once).to_string(), once);
         assert_eq!(guard(once, false), once);
     }
 }

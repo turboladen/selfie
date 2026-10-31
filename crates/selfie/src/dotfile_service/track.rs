@@ -90,12 +90,6 @@ pub fn trackers_of<H: HomeDir + ?Sized>(
         .collect()
 }
 
-// One shell word, quoted unless the shell leaves every character alone. `try_quote`
-// refuses only a NUL byte, which neither a spec name nor a path can hold.
-fn shell_word(word: &str) -> String {
-    shlex::try_quote(word).map_or_else(|_| word.to_string(), std::borrow::Cow::into_owned)
-}
-
 // The refusal of a track whose file another spec already deploys.
 fn tracked_elsewhere_refusal(target: &str, trackers: &[Tracker]) -> String {
     let named: Vec<String> = trackers
@@ -109,12 +103,16 @@ fn tracked_elsewhere_refusal(target: &str, trackers: &[Tracker]) -> String {
                 origin: SpecOrigin::PackageDirectory,
                 ..
             },
-        ] => format!(
-            "Track it there with `selfie package track-dotfile {} {}`, or remove that entry \
-             first.",
-            shell_word(spec_name),
-            shell_word(target)
-        ),
+        ] if let (Some(spec_name), Some(target)) = (
+            crate::fs::shell_word(spec_name),
+            crate::fs::shell_word(target),
+        ) =>
+        {
+            format!(
+                "Track it there with `selfie package track-dotfile {spec_name} {target}`, or \
+                 remove that entry first."
+            )
+        }
         _ => "Remove the entry from the spec that should not deploy it first.".to_string(),
     };
     format!(

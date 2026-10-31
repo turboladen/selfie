@@ -3,7 +3,7 @@ use std::fmt;
 use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL_CONDENSED};
 
 use crate::terminal_text::{
-    Content, DisplayPath, Literal, Name, Output, Paint, Prose, Shown, lit, shown,
+    Command, Content, DisplayPath, Literal, Name, Output, Paint, Prose, Shown, lit, shown,
 };
 use selfie::validation::ValidationIssue;
 
@@ -31,8 +31,12 @@ impl Cell {
     // comfy-table wraps to fit the terminal starts at the cell's edge, and so
     // does a continued line wider than its cell, whose leading spaces the wrap
     // drops (selfie-bh34).
+    //
+    // A tab is expanded here, because comfy-table counts it as one column where
+    // the terminal moves to the next tab stop, which pushes that row's right
+    // border out of line.
     fn laid_out(self) -> String {
-        self.0.hang(2).into_string()
+        self.0.hang(2).tabs_expanded().into_string()
     }
 }
 
@@ -46,7 +50,16 @@ macro_rules! cells_from {
         }
     )*};
 }
-cells_from!(Shown, Literal, Name, DisplayPath, Prose, Content, Output);
+cells_from!(
+    Shown,
+    Literal,
+    Name,
+    DisplayPath,
+    Prose,
+    Content,
+    Output,
+    Command
+);
 
 impl SafeTable {
     /// Returns an empty table.
@@ -81,6 +94,25 @@ impl SafeTable {
     ) -> &mut Self {
         self.0
             .add_row(cells.into_iter().map(|cell| cell.into().laid_out()));
+        self
+    }
+
+    /// Add a row holding `command` under the field name `key`, and, when the
+    /// command reads as another, a row under it holding its escaped note, so
+    /// the note's lines line up with the command's. Each key is styled as
+    /// [`format_key`](crate::formatters::format_key) styles it.
+    pub(crate) fn add_command_row(
+        &mut self,
+        key: Literal,
+        command: Command,
+        use_colors: bool,
+    ) -> &mut Self {
+        let key_cell = |key| Cell::from(crate::formatters::format_key(key, use_colors));
+        let note = command.note();
+        self.add_row([key_cell(key), command.into()]);
+        if let Some(note) = note {
+            self.add_row([key_cell(crate::terminal_text::ESCAPED), note.into()]);
+        }
         self
     }
 }
@@ -194,5 +226,36 @@ mod tests {
             1 + 2 + 1 + 2 + 2 + 1,
             "{rendered}"
         );
+    }
+
+    // A tab moves to the next tab stop on a terminal, and comfy-table counts it
+    // as one column, so a cell holding one would push its row's border out of
+    // line. Every line of the table is one width, wherever in its cell the tab
+    // sits, a continued line's included, and no tab reaches the terminal.
+    #[test]
+    fn a_tab_in_a_cell_keeps_every_row_the_same_width() {
+        let mut table = SafeTable::new();
+        table.set_header([lit!("key"), lit!("value")]);
+        for text in [
+            "\tat0",
+            "abc\tat3",
+            "abcdefg\tat7",
+            "first\n\tafter-hang",
+            "x\t\ty",
+        ] {
+            table.add_row([Cell::from(lit!("k")), Content::new(text).into()]);
+        }
+
+        let rendered = table.to_string();
+
+        assert!(!rendered.contains('\t'), "{rendered}");
+        let widths: Vec<usize> = rendered.lines().map(console::measure_text_width).collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "{widths:?}\n{rendered}"
+        );
+        let (_, at3) = find(&rendered, "at3");
+        let (_, abc) = find(&rendered, "abc\u{20}");
+        assert_eq!(at3 - abc, 8, "{rendered}");
     }
 }

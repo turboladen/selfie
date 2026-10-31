@@ -971,7 +971,8 @@ fn a_target_holding_a_visible_blank_shows_it_escaped() {
 
 // A `command:` dotfile source is a command, so its blanks show as written in
 // `dotfiles list` and `spec info`, where a name's escape would change what
-// pasting it runs.
+// pasting it runs. The blank reads as a space, so the line under the command
+// shows it escaped.
 #[test]
 fn a_command_source_keeps_its_blanks_in_the_dotfiles_list() {
     let temp = setup_default_test_config();
@@ -992,7 +993,15 @@ fn a_command_source_keeps_its_blanks_in_the_dotfiles_list() {
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        assert!(stdout.contains("printf 'a\u{A0}b'"), "{args:?}: {stdout}");
-        assert!(!stdout.contains(r"\u{a0}"), "{args:?}: {stdout}");
+        let lines: Vec<&str> = stdout.lines().collect();
+        let command = lines
+            .iter()
+            .position(|line| line.contains("command: printf 'a\u{A0}b'"))
+            .unwrap_or_else(|| panic!("{args:?}: {stdout}"));
+        assert!(!lines[command].contains(r"\u{a0}"), "{args:?}: {stdout}");
+        assert!(
+            lines[command + 1].contains(r"Escaped: printf 'a\u{a0}b'"),
+            "{args:?}: {stdout}"
+        );
     }
 }
