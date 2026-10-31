@@ -200,7 +200,14 @@ fn raw_leaks(output: &str, colored: bool, tabs: bool) -> Vec<String> {
 
 struct Run {
     code: Option<i32>,
+    // This holds everything the run wrote, stdout then stderr.
     both: String,
+    // This holds the same without the lines that start a verbose log event,
+    // which leaves what selfie's printers wrote and the continuation lines of a
+    // multi-line event.
+    printed: String,
+    // This holds the lines that start a verbose log event.
+    log: String,
 }
 
 fn run(temp: &tempfile::TempDir, args: &[&str], colored: bool) -> Run {
@@ -212,27 +219,26 @@ fn run(temp: &tempfile::TempDir, args: &[&str], colored: bool) -> Run {
         command.arg("--no-color");
     }
     let output = command.args(args).output().unwrap();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (log, printed): (Vec<&str>, Vec<&str>) = both
+        .split_inclusive('\n')
+        .partition(|line| is_log_line(line));
     Run {
         code: output.status.code(),
-        both: without_log_lines(&format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )),
+        printed: printed.concat(),
+        log: log.concat(),
+        both,
     }
 }
 
-// `output` without a verbose run's log lines, which tracing writes and escapes
-// by its own rules; this file checks what selfie's printers write. Each log line
-// starts with its timestamp, after tracing's own color when stderr has colors.
-fn without_log_lines(output: &str) -> String {
-    output
-        .split_inclusive('\n')
-        .filter(|line| {
-            let line = console::strip_ansi_codes(line);
-            !(line.starts_with("20") && line.get(10..11) == Some("T"))
-        })
-        .collect()
+// Whether `line` is the first line of a verbose log event, which starts with
+// the event's timestamp. The log is never colored, so nothing comes before it.
+fn is_log_line(line: &str) -> bool {
+    line.starts_with("20") && line.get(10..11) == Some("T")
 }
 
 // Each command, what it must show escaped to prove it reached the fixture, and
@@ -328,9 +334,9 @@ fn check_every_command(colored: bool, guard: Guard) {
     let mut fake_lines = 0;
     for (args, escaped, tabs) in COMMANDS {
         let run = run(&temp, args, colored);
-        styled += usize::from(run.both.contains("\u{1b}["));
-        fake_names += run.both.matches("x\\n✓ fake").count();
-        fake_lines += run.both.matches("✓ fake line").count();
+        styled += usize::from(run.printed.contains("\u{1b}["));
+        fake_names += run.printed.matches("x\\n✓ fake").count();
+        fake_lines += run.printed.matches("✓ fake line").count();
         if guard != Guard::Codes {
             // Selfie's own styling cannot be told from a repository's by its
             // parameters, only by where it came from.
@@ -350,10 +356,12 @@ fn check_every_command(colored: bool, guard: Guard) {
         if guard == Guard::Codes {
             continue;
         }
-        if !run.both.contains(escaped) {
+        // A log line could show the value escaped too, so only what the
+        // printers wrote counts here.
+        if !run.printed.contains(escaped) {
             failures.push(format!(
                 "{args:?} ({:?}) does not show {escaped}:\n{}",
-                run.code, run.both
+                run.code, run.printed
             ));
         }
         // A post-install note keeps its line breaks: its second line starts a
@@ -407,6 +415,102 @@ fn a_colored_run_writes_only_selfies_own_sequences() {
 #[test]
 fn a_colored_run_keeps_no_styling_from_the_repository() {
     check_every_command(true, Guard::Provenance);
+}
+
+// A check command's text reaches the verbose log in a message, which tracing
+// escapes only ESC in: its override and tag character arrive raw, and the log
+// shows them as escapes.
+fn check_the_log_escapes_a_spec_value(colored: bool) {
+    let temp = torture();
+    let run = run(
+        &temp,
+        &["--verbose", "package", "check", "torture"],
+        colored,
+    );
+    // Controls: the run logged, and the hostile value reached the log.
+    assert!(run.log.lines().count() > 0, "no log lines:\n{}", run.both);
+    for escaped in [r"k\x1b[2J", r"\u{202e}", r"\u{e0041}"] {
+        assert!(
+            run.log
+                .lines()
+                .any(|line| line.contains("Found check command") && line.contains(escaped)),
+            "no log line shows {escaped}:\n{}",
+            run.log
+        );
+    }
+    let leaks = raw_leaks(&run.log, false, false);
+    assert!(leaks.is_empty(), "the log leaked: {leaks:#?}");
+}
+
+#[test]
+fn the_verbose_log_shows_a_spec_value_escaped_without_color() {
+    check_the_log_escapes_a_spec_value(false);
+}
+
+#[test]
+fn the_verbose_log_shows_a_spec_value_escaped_with_color() {
+    check_the_log_escapes_a_spec_value(true);
+}
+
+// A check command over several lines is logged as one message, which keeps its
+// line breaks. Each line after the first is indented, so none can pass for a
+// log line of its own or start at the left margin with selfie's result mark.
+#[test]
+fn a_logged_value_on_several_lines_starts_no_line_of_its_own() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("lines.yml"),
+        format!(
+            "name: lines\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    check: \": '\\n✓ fake \
+             line\\u202E\\U000E0041\\rz\\n2026-10-31T00:00:00.000000Z  INFO forged\\n'\"\n"
+        ),
+    )
+    .unwrap();
+    let run = run(&temp, &["--verbose", "package", "check", "lines"], false);
+    let forged: Vec<&str> = run
+        .log
+        .lines()
+        .filter(|line| line.contains("forged"))
+        .collect();
+    assert!(forged.is_empty(), "{forged:#?}");
+    let fake: Vec<&str> = run
+        .both
+        .lines()
+        .filter(|line| line.starts_with("✓ fake"))
+        .collect();
+    assert!(fake.is_empty(), "{fake:#?}");
+    // A later line of an event is guarded as its first is.
+    let leaks = raw_leaks(&run.both, false, false);
+    assert!(leaks.is_empty(), "{leaks:#?}");
+    // Control: the command's lines reached the log, indented under its first,
+    // its override, tag character and carriage return escaped.
+    assert!(
+        run.both.contains(
+            "\n    ✓ fake line\\u{202e}\\u{e0041}\\rz\n    2026-10-31T00:00:00.000000Z  INFO forged\n"
+        ),
+        "{}",
+        run.both
+    );
+}
+
+// The log is plain on a colored stderr: it holds no escape sequence, raw or
+// escaped, while the printers' own lines on the same stream are colored.
+#[test]
+fn a_colored_run_writes_a_plain_log() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("plain.yml"),
+        format!("name: plain\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+    let run = run(&temp, &["--verbose", "spec", "info", "plain"], true);
+    assert_eq!(run.code, Some(0), "{}", run.both);
+    assert!(run.log.lines().count() > 0, "no log lines:\n{}", run.both);
+    assert!(!run.log.contains('\u{1b}'), "{:?}", run.log);
+    // tracing styles nothing either, or its styling would show as escapes.
+    assert!(!run.log.contains(r"\u{1b}"), "{}", run.log);
+    // Control: the run had colors.
+    assert!(run.printed.contains("\u{1b}["), "{:?}", run.printed);
 }
 
 // A refusal names its source and target in a library sentence, and a real apply

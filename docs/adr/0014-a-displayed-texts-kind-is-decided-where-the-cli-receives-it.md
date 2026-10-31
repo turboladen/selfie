@@ -94,6 +94,12 @@ Options considered:
    reference. It is implemented for nothing else.
 7. A list of names is shown by joining `Name` values with a `Literal` separator. No function escapes
    and joins in one step.
+8. The verbose log is the one writer whose input is not a `Shown`. tracing formats each event
+   itself, so `VerboseLog` holds the whole event and writes it through `guard_unstyled`, which
+   escapes every escape sequence along with the rest of the guard set. The log is never colored
+   (§8), so no styling has to survive, and nothing of an event that passes through the writer
+   reaches the terminal raw, whichever field it came from. The MCP server's own log is outside this
+   decision.
 
 ### 2. The kind is decided where the CLI receives a value
 
@@ -118,6 +124,10 @@ Options considered:
    the layout adds only its column. Printed at column 0, it is unchanged.
 4. A block whose lines must stay together, such as a diff, is rendered whole and then written in one
    draw, so no other line lands between two of its rows and a spinner does not redraw inside it.
+5. The verbose log hangs each event's lines after its first by four columns, so a line break in a
+   logged value cannot start a line that passes for a log line or for selfie's result line. It uses
+   `hang_text`, the `&str` loop `Shown::hang` calls, which the same source rule confines to the
+   layout modules (§7.4).
 
 ### 4. One table style
 
@@ -221,8 +231,8 @@ when it is pasted.
    call. A clippy ban does not fit: it fires on the paths tests format into fixtures, and an
    `#[expect]` over a test module silences the CLI's other method bans along with it. The same walk
    holds the rest of this decision where no type can:
-   - only the layout modules call `Shown::hang`, and no `lit!` or `shown!` literal outside them
-     indents the line after a line break (§3);
+   - only the layout modules call `Shown::hang` or `hang_text`, and no `lit!` or `shown!` literal
+     outside them indents the line after a line break (§3);
    - the hidden constructors are called only in `terminal_text.rs`, test code included (§7.3), and
      only `tables.rs` builds a comfy-table table (§4.1);
    - a kind is built from one value, never from a string composed by `format!` or a join (§1.7);
@@ -251,7 +261,8 @@ stderr and are styled by indicatif and dialoguer, take stderr's answer through w
 a styled spinner template and `ColorfulTheme` when stderr gets colors, a plain template and
 `SimpleTheme` when it does not. A source rule (§7.4) keeps every write behind the writer that
 applies the stream's answer, and keeps `console`'s process-wide state from being set or styled
-through.
+through. The verbose log is the exception: it is never colored, whatever stderr's answer, since its
+writer escapes every escape sequence (§1.8).
 
 ## Consequences
 

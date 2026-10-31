@@ -90,7 +90,7 @@ enum Policy {
 }
 
 // The one escaping function. Its callers are the kind constructors,
-// `Name::is_plain`, `Command::note` and `guard`.
+// `Name::is_plain`, `Command::note`, `guard` and `guard_unstyled`.
 fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
     match policy {
         Policy::Strict => escape_with(text, in_strict_set, Sgr::Escape),
@@ -141,6 +141,14 @@ pub(crate) fn guard(block: &str, colors: bool) -> Cow<'_, str> {
     )
 }
 
+/// Returns `block` with every escape sequence, and everything else that could
+/// act on the terminal, escaped. A newline and a tab are kept. Unlike
+/// [`guard`], it keeps no styling, so it suits text that must reach the stream
+/// uncolored.
+pub(crate) fn guard_unstyled(block: &str) -> Cow<'_, str> {
+    escape(block, Policy::Guard(Sgr::Escape))
+}
+
 // What the escaping loop does with an SGR sequence selfie's own styling writes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Sgr {
@@ -186,6 +194,25 @@ fn painted(text: String, paint: Paint) -> String {
         .to_string()
 }
 
+/// Returns `text` with `column` spaces after each line break, so every line
+/// after the first starts `column` columns in. An empty line stays empty.
+// A layout calls this for text it writes that is not a `Shown`. Only a layout
+// may, as only a layout calls `Shown::hang`.
+pub(crate) fn hang_text(text: &str, column: usize) -> String {
+    let indent = " ".repeat(column);
+    let mut lines = text.split('\n');
+    let mut hung = lines.next().unwrap_or_default().to_string();
+    for line in lines {
+        hung.push('\n');
+        // Spaces on an empty line are trailing space, which shows nothing.
+        if !line.is_empty() {
+            hung.push_str(&indent);
+        }
+        hung.push_str(line);
+    }
+    hung
+}
+
 /// Text safe to print: every part of it from outside selfie has been escaped,
 /// and only selfie styled it.
 ///
@@ -227,18 +254,7 @@ impl Shown {
         if column == 0 || !self.0.contains('\n') {
             return self;
         }
-        let indent = " ".repeat(column);
-        let mut lines = self.0.split('\n');
-        let mut hung = lines.next().unwrap_or_default().to_string();
-        for line in lines {
-            hung.push('\n');
-            // Spaces on an empty line are trailing space, which shows nothing.
-            if !line.is_empty() {
-                hung.push_str(&indent);
-            }
-            hung.push_str(line);
-        }
-        Self(hung)
+        Self(hang_text(&self.0, column))
     }
 
     /// Returns `self` with each tab replaced by the spaces that reach the next
