@@ -182,18 +182,23 @@ pub(crate) fn create_environment_table(
 
     // Add environment detail rows
     // A blank install still gets its row, so the user sees why install refuses.
-    let install = environment.install_command.map_or_else(
-        || {
-            Cell::from(lit!(
-                "none (blank: `package install` refuses it unless the check says it is installed)"
-            ))
-        },
-        Cell::from,
-    );
-    env_table.add_row([format_env_key(lit!("Install")), install]);
+    match environment.install_command {
+        Some(install) => {
+            env_table.add_command_row(lit!("Install"), install, use_colors);
+        }
+        None => {
+            env_table.add_row([
+                format_env_key(lit!("Install")),
+                Cell::from(lit!(
+                    "none (blank: `package install` refuses it unless the check says it is \
+                     installed)"
+                )),
+            ]);
+        }
+    }
 
     if let Some(check) = environment.check_command {
-        env_table.add_row([format_env_key(lit!("Check")), check.into()]);
+        env_table.add_command_row(lit!("Check"), check, use_colors);
     }
 
     // A checked list shows each name with its status, an unchecked one the
@@ -268,6 +273,53 @@ mod tests {
         assert!(table.contains(r"z\u{200b}w, git"), "{table}");
         assert!(table.contains(r"r\u{200b}s"), "{table}");
         assert!(!table.contains('\u{200B}'), "{table:?}");
+    }
+
+    // An install command that reads as another gets an `Escaped` row right
+    // under it, whose lines start where the command's do and keep its line
+    // breaks; a check command that reads as written gets none. A tab is kept
+    // in the command, which the table expands, and escaped in the note.
+    #[test]
+    fn a_command_that_reads_as_another_gets_an_escaped_row() {
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let env_status = EnvironmentStatusData {
+            environment_name: TEST_ENV.to_string(),
+            is_current: false,
+            install_command: Some("echo a\u{200B}b\n\tdone".to_string()),
+            check_command: Some("true".to_string()),
+            dependencies: Vec::new(),
+            dependency_statuses: Vec::new(),
+            recommends: Vec::new(),
+            recommend_statuses: Vec::new(),
+            status: EnvironmentStatus::NotInstalled,
+        };
+
+        let table = create_environment_table(&env_status, &config).to_string();
+        let lines: Vec<&str> = table.lines().collect();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not in\n{table}"))
+        };
+
+        let install = at("Install");
+        let escaped = at("Escaped");
+        assert!(lines[install].contains("echo a\u{200B}b"), "{table}");
+        assert!(lines[install + 1].contains("done"), "{table}");
+        assert_eq!(escaped, install + 2, "{table}");
+        assert!(lines[escaped].contains(r"echo a\u{200b}b"), "{table}");
+        assert!(lines[escaped + 1].contains(r"\tdone"), "{table}");
+        let column = |line: &str, needle: &str| {
+            console::measure_text_width(&line[..line.find(needle).expect("present")])
+        };
+        assert_eq!(
+            column(lines[escaped], "echo"),
+            column(lines[install], "echo")
+        );
+        assert!(lines[escaped + 2].contains("Check"), "{table}");
+        assert_eq!(table.matches("Escaped").count(), 1, "{table}");
+        assert!(!table.contains('\t'), "{table:?}");
     }
 
     #[test]

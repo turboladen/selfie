@@ -13,8 +13,9 @@
 //! strictly, since an invisible character, or a blank other than a space, in it
 //! makes it read as another; a [`Content`] line of a file keeps its tabs;
 //! [`Prose`] and a tool's [`Output`] escape only what can act on the terminal
-//! or reorder the text, so emoji sequences and joiners render. selfie's own
-//! text is a [`Literal`].
+//! or reorder the text, so emoji sequences and joiners render. A [`Command`]
+//! escapes no more than that, so it still pastes as it runs, and its note shows
+//! it escaped as a name would be. selfie's own text is a [`Literal`].
 
 use std::borrow::Cow;
 use std::fmt;
@@ -79,16 +80,17 @@ enum Policy {
     // the guard set.
     Output,
     // The guard set, a newline and a tab kept, with selfie's own SGR sequences
-    // handled as the `Sgr` says.
+    // handled as the `Sgr` says. A command a spec's author wrote takes it with
+    // `Sgr::Escape`.
     Guard(Sgr),
-    // The base set, a newline and a tab included: how a command is escaped
-    // until the Command kind exists. It stays apart from `Strict` because a
-    // command must keep the blanks `Strict` escapes to paste as it runs.
-    Interim,
+    // This escapes the guard set, a newline and a tab, for a command on one
+    // line. It escapes neither an invisible character nor a blank, so the
+    // command still pastes as it runs; its note shows those.
+    CommandLine,
 }
 
 // The one escaping function. Its callers are the kind constructors,
-// `Name::is_plain`, `guard` and `interim_one_line`.
+// `Name::is_plain`, `Command::note` and `guard`.
 fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
     match policy {
         Policy::Strict => escape_with(text, in_strict_set, Sgr::Escape),
@@ -96,17 +98,10 @@ fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
         Policy::Prose => escape_with(text, |c| c == '\t' || in_guard_set(c), Sgr::Escape),
         Policy::Output => Cow::Owned(cleaned(text)),
         Policy::Guard(sgr) => escape_with(text, in_guard_set, sgr),
-        Policy::Interim => escape_with(text, in_base_set, Sgr::Escape),
+        Policy::CommandLine => {
+            escape_with(text, |c| c.is_control() || in_guard_set(c), Sgr::Escape)
+        }
     }
-}
-
-/// Shows `text`, a command, on one line, with every control, format or
-/// invisible character written as an escape. A blank such as U+00A0 shows as
-/// written, so a command quoting French or CJK text still pastes as it runs.
-// A command is not a name, so it does not take the strict set; the Command
-// kind replaces this.
-pub(crate) fn interim_one_line(text: &str) -> Shown {
-    Shown(escape(text, Policy::Interim).into_owned())
 }
 
 // `line`, one line of a command's output, as a terminal would leave it: its
@@ -498,6 +493,11 @@ kinds! {
     /// become spaces, no control character is left but the line breaks between
     /// its lines, and what could reorder the text is escaped.
     Output;
+    /// Holds a command for the user to run, or one a spec runs, escaped only
+    /// where showing it would act on the terminal or reorder the text, so it
+    /// still pastes as it runs. When it holds a character that makes it read as
+    /// another command, [`Command::note`] shows it escaped.
+    Command;
 }
 
 impl Name {
@@ -575,6 +575,56 @@ impl Output {
     /// Returns the cleaned text.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl Command {
+    /// Shows a command a spec's author wrote as written, keeping its line
+    /// breaks and tabs for the layout to place.
+    pub(crate) fn written(text: &str) -> Self {
+        Self(escape(text, Policy::Guard(Sgr::Escape)).into_owned())
+    }
+
+    /// Shows a command a spec's author wrote on one line, where a line break
+    /// or a tab in it shows as an escape.
+    // A dotfile's command source sits in a slot one line high (an entry row's
+    // source column, a list cell), so a kept line break would break the columns
+    // after it. ADR 0014 §1 lists a dotfile source under DisplayPath and §5.4
+    // names only install and check commands; this reads a command source as an
+    // author's command shown on one line.
+    pub(crate) fn one_line(text: &str) -> Self {
+        Self(escape(text, Policy::CommandLine).into_owned())
+    }
+
+    /// Returns the whole command with every invisible character and every
+    /// blank other than a space shown as an escape and its line breaks kept,
+    /// or `None` when the command shows nothing of the kind.
+    pub(crate) fn note(&self) -> Option<Shown> {
+        // Escaping what is already escaped changes nothing, so the strict
+        // escape of the shown text is the strict escape of the command. It
+        // escapes line by line, so each line of the note matches a line of the
+        // command.
+        let lines: Vec<Cow<'_, str>> = self
+            .0
+            .split('\n')
+            .map(|line| escape(line, Policy::Strict))
+            .collect();
+        lines
+            .iter()
+            .any(|line| matches!(line, Cow::Owned(_)))
+            .then(|| Shown(lines.join("\n")))
+    }
+}
+
+/// Labels the note under a command that reads as another.
+pub(crate) const ESCAPED: Literal = lit!("Escaped");
+
+/// Returns `text`, followed by `command`'s note on a line of its own after
+/// `Escaped: `, or `text` alone when the command has no note.
+pub(crate) fn noted(text: Shown, command: &Command) -> Shown {
+    match command.note() {
+        Some(note) => shown!("{}\n{}: {}", text, ESCAPED, note),
+        None => text,
     }
 }
 
@@ -934,14 +984,80 @@ mod tests {
         }
     }
 
-    // A command is not a name: a blank in it shows as written, so it pastes as
-    // it runs, and a line break or an invisible character still shows as an
-    // escape.
+    // Each row pairs a text with how `written` and `one_line` show it. A
+    // command is not a name: a blank or an invisible character in it shows as
+    // written, so it pastes as it runs. Only what acts on the terminal or
+    // reorders the text is escaped, and on one line a line break and a tab are
+    // escaped too.
     #[test]
-    fn a_command_keeps_its_blanks_and_stays_on_one_line() {
+    fn each_command_constructor_escapes_each_class() {
+        let own = "\u{1b}[31mx\u{1b}[0m";
+        let rows = [
+            ("a\u{1b}[2Jb", "a\\u{1b}[2Jb", "a\\u{1b}[2Jb"),
+            ("a\rb", "a\\rb", "a\\rb"),
+            ("a\nb", "a\nb", "a\\nb"),
+            ("a\tb", "a\tb", "a\\tb"),
+            ("a\u{7f}b", "a\\u{7f}b", "a\\u{7f}b"),
+            ("a\u{85}b", "a\\u{85}b", "a\\u{85}b"),
+            ("a\u{202E}b", "a\\u{202e}b", "a\\u{202e}b"),
+            ("a\u{E0041}b", "a\\u{e0041}b", "a\\u{e0041}b"),
+            ("a\u{2028}b", "a\\u{2028}b", "a\\u{2028}b"),
+            ("a\u{200B}b", "a\u{200B}b", "a\u{200B}b"),
+            ("a\u{A0}b", "a\u{A0}b", "a\u{A0}b"),
+            ("a\u{2800}b", "a\u{2800}b", "a\u{2800}b"),
+            ("cafe\u{301}", "cafe\u{301}", "cafe\u{301}"),
+            (
+                "echo 'a\u{A0}b'\n\u{200B}x",
+                "echo 'a\u{A0}b'\n\u{200B}x",
+                "echo 'a\u{A0}b'\\n\u{200B}x",
+            ),
+            (own, "\\u{1b}[31mx\\u{1b}[0m", "\\u{1b}[31mx\\u{1b}[0m"),
+        ];
+        for (text, written, one_line) in rows {
+            assert_eq!(
+                (
+                    Command::written(text).to_string().as_str(),
+                    Command::one_line(text).to_string().as_str()
+                ),
+                (written, one_line),
+                "{text:?}"
+            );
+        }
+    }
+
+    // A note appears exactly when the command shows a character the strict set
+    // escapes, and keeps a written command's line breaks, so each of its lines
+    // sits under the line it explains.
+    #[test]
+    fn a_note_appears_only_when_the_command_reads_as_another() {
+        let note = |command: Command| command.note().map(Shown::into_string);
+
+        assert_eq!(note(Command::written("brew install bat")), None);
+        assert_eq!(note(Command::written("echo 日本 café\nnext")), None);
+        assert_eq!(note(Command::written("echo \u{1b}[2J")), None);
         assert_eq!(
-            interim_one_line("echo 'a\u{A0}b'\n\u{200B}x").as_str(),
-            "echo 'a\u{A0}b'\\n\\u{200b}x"
+            note(Command::written("echo a\u{200B}b")).as_deref(),
+            Some("echo a\\u{200b}b")
+        );
+        assert_eq!(
+            note(Command::written("echo 'a\u{A0}b'\n\tdone")).as_deref(),
+            Some("echo 'a\\u{a0}b'\n\\tdone")
+        );
+        assert_eq!(
+            note(Command::one_line("echo a\u{2800}\nb")).as_deref(),
+            Some("echo a\\u{2800}\\nb")
+        );
+    }
+
+    // A note goes on a line of its own under the text naming the command, and
+    // there is no line when there is no note.
+    #[test]
+    fn noted_puts_the_note_on_its_own_line() {
+        let text = || Shown::from(lit!("Run it."));
+        assert_eq!(noted(text(), &Command::written("true")), "Run it.");
+        assert_eq!(
+            noted(text(), &Command::written("a\u{200B}")),
+            "Run it.\nEscaped: a\\u{200b}"
         );
     }
 
@@ -1107,6 +1223,8 @@ mod tests {
         assert_eq!(Prose::new(once).to_string(), once);
         assert_eq!(Content::new(once).to_string(), once);
         assert_eq!(Output::line(once).to_string(), once);
+        assert_eq!(Command::written(once).to_string(), once);
+        assert_eq!(Command::one_line(once).to_string(), once);
         assert_eq!(guard(once, false), once);
     }
 }

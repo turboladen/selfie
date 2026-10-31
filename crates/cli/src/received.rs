@@ -25,9 +25,7 @@ use selfie::validation::{ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
 
 use crate::display_manager::Suggestion;
-use crate::terminal_text::{
-    DisplayPath, Literal, Name, Output, Prose, Shown, interim_one_line, lit, shown,
-};
+use crate::terminal_text::{Command, DisplayPath, Literal, Name, Output, Prose, Shown, lit, shown};
 
 /// `value`'s sentence, as the library words it, without a trailing line
 /// break.
@@ -49,9 +47,9 @@ pub(crate) fn location(at: Option<SourceLocation>) -> Option<Name> {
     at.map(|at| Name::new(&at.to_string()))
 }
 
-// A command a spec runs, shown on one line until the Command kind exists.
-fn command(text: Option<&str>) -> Option<Shown> {
-    text.map(interim_one_line)
+// Shows a command a spec runs as its author wrote it.
+fn command(text: Option<&str>) -> Option<Command> {
+    text.map(Command::written)
 }
 
 /// An operation, as a run's header and its error summary name it.
@@ -76,7 +74,7 @@ impl From<&OperationInfo> for Operation {
 pub(crate) struct Check {
     pub(crate) package: Name,
     pub(crate) environment: Name,
-    pub(crate) command: Option<Shown>,
+    pub(crate) command: Option<Command>,
     pub(crate) answer: CheckAnswer,
 }
 
@@ -124,7 +122,7 @@ impl From<&CheckResultData> for Check {
 pub(crate) struct Audit {
     pub(crate) package: Name,
     pub(crate) environment: Name,
-    pub(crate) command: Option<Shown>,
+    pub(crate) command: Option<Command>,
     pub(crate) finding: AuditFinding,
 }
 
@@ -707,9 +705,8 @@ pub(crate) struct Environment {
     pub(crate) name: Name,
     /// The install and check commands, each keeping a block-scalar
     /// command's line breaks.
-    // Prose until the Command kind exists.
-    pub(crate) install_command: Option<Prose>,
-    pub(crate) check_command: Option<Prose>,
+    pub(crate) install_command: Option<Command>,
+    pub(crate) check_command: Option<Command>,
     pub(crate) dependencies: Vec<Name>,
     pub(crate) recommends: Vec<Name>,
     /// Each checked dependency's name, with its status.
@@ -728,8 +725,8 @@ impl From<&EnvironmentStatusData> for Environment {
     fn from(data: &EnvironmentStatusData) -> Self {
         Self {
             name: Name::new(&data.environment_name),
-            install_command: data.install_command.as_deref().map(Prose::new),
-            check_command: data.check_command.as_deref().map(Prose::new),
+            install_command: command(data.install_command.as_deref()),
+            check_command: command(data.check_command.as_deref()),
             dependencies: names(&data.dependencies),
             recommends: names(&data.recommends),
             dependency_statuses: statuses(&data.dependency_statuses),

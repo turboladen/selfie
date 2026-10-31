@@ -6,7 +6,7 @@
 //! take the default rendering.
 
 use crate::received;
-use crate::terminal_text::{DisplayPath, Name, Output, Prose, Shown, interim_one_line, lit, shown};
+use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -324,7 +324,7 @@ impl EventProcessor {
                             exit_code,
                             ..
                         }) => ErrorDetail {
-                            command: Some(interim_one_line(command)),
+                            command: Some(Command::written(command)),
                             exit_code: *exit_code,
                             stderr: Some(stderr_lines.clone()),
                             ..detail
@@ -606,13 +606,13 @@ impl EventProcessor {
                 let by = package
                     .map(|package| shown!(" by package '{}'", Name::new(&package)))
                     .unwrap_or_default();
-                let line = shown!(
+                let line = source.noted(shown!(
                     "  Orphaned {}: deployed from {}{}, and no entry deploys to it now. selfie \
                      leaves it in place; check whether you still need it",
                     short_target,
-                    source,
+                    source.text(),
                     by
-                );
+                ));
                 if answer {
                     self.display.print_result(Outcome::Found, line);
                 } else {
@@ -1429,6 +1429,38 @@ mod tests {
         );
     }
 
+    // An orphaned target deployed from a command that reads as another names
+    // the command in its warning, and the escaped command follows on the
+    // warning's next line.
+    #[tokio::test]
+    async fn an_orphan_from_a_command_that_reads_as_another_notes_the_command() {
+        let orphaned = PackageEvent::DotfileOrphaned {
+            operation_info: make_operation_info("bat"),
+            source: DotfileSource::Command("echo a\u{200B}b".to_string()),
+            target: "/x/.batrc".to_string(),
+            package: None,
+        };
+
+        let printed = printed_for(DisplayManager::new(false), vec![orphaned]).await;
+
+        let warning = printed
+            .iter()
+            .map(|(_, line)| line.as_str())
+            .find(|line| line.contains("Orphaned"))
+            .unwrap_or_else(|| panic!("{printed:?}"));
+        let lines: Vec<&str> = warning.lines().collect();
+        assert_eq!(lines.len(), 2, "{warning}");
+        assert!(
+            lines[0].contains("deployed from command: echo a\u{200B}b,"),
+            "{warning}"
+        );
+        assert_eq!(
+            lines[1].trim_start(),
+            "Escaped: echo a\\u{200b}b",
+            "{warning}"
+        );
+    }
+
     fn checked() -> PackageEvent {
         use selfie::package::event::{CheckVerdict, OperationSuccess};
 
@@ -1942,7 +1974,11 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].package_name.to_string(), "fail-pkg");
         assert_eq!(
-            errors[0].command.as_ref().map(Shown::as_str),
+            errors[0]
+                .command
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
             Some("brew install fail-pkg")
         );
         assert_eq!(errors[0].exit_code, Some(1));

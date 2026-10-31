@@ -1,6 +1,6 @@
 //! Showing dotfile sources relative to the directory they were read from.
 
-use crate::terminal_text::{Shown, interim_one_line, lit, shown};
+use crate::terminal_text::{Command, Shown, lit, noted, shown};
 use std::path::Path;
 
 use selfie::package::event::{BaseKind, DotfileSource, RepoPath};
@@ -20,28 +20,78 @@ pub(crate) fn base_directory_line(kind: BaseKind, directory: &Path) -> Shown {
 /// A source as one line shows it once its base directory is known: the path
 /// relative to the base with any var names, or the command. A file under no
 /// known base is shown in full, and a recorded spelling is marked as one. A
-/// path is shown as a [`DisplayPath`]; a command keeps its blanks, so it still
-/// pastes as it runs.
-pub(crate) fn relative_text(source: &DotfileSource) -> Shown {
+/// path is shown as a [`DisplayPath`]; a command is a [`Command`] on one line,
+/// which keeps its blanks so it still pastes as it runs, with its note when it
+/// reads as another.
+pub(crate) fn relative_text(source: &DotfileSource) -> SourceText {
     match source {
         DotfileSource::File(RepoPath { base: None, .. })
         | DotfileSource::Template {
             file: RepoPath { base: None, .. },
             ..
-        } => shorten_path(&source.relative().to_string()).into(),
+        } => SourceText::Plain(shorten_path(&source.relative().to_string()).into()),
         DotfileSource::File(_) | DotfileSource::Template { .. } => {
-            DisplayPath::new(&source.relative().to_string()).into()
+            SourceText::Plain(DisplayPath::new(&source.relative().to_string()).into())
         }
-        DotfileSource::Command(_) => interim_one_line(&source.relative().to_string()),
+        DotfileSource::Command(command) => command_source(command),
         // No base is known, so the line says so: under a heading printed for an
         // earlier line, a bare spelling would read as relative to it.
-        DotfileSource::Recorded(spelling) => {
-            shown!(
-                "{} (as recorded, directory unknown)",
-                DisplayPath::new(spelling)
-            )
+        DotfileSource::Recorded(spelling) => SourceText::Plain(shown!(
+            "{} (as recorded, directory unknown)",
+            DisplayPath::new(spelling)
+        )),
+    }
+}
+
+/// Holds a source as a line shows it: a path, or the command of a command
+/// source, whose note is shown where the line is placed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourceText {
+    /// Holds a path, a template's path or a recorded spelling, as shown.
+    Plain(Shown),
+    /// Holds a command source's command, which is shown after `command: `.
+    Command(Command),
+}
+
+impl SourceText {
+    /// Returns the source on one line, without the note. A caller placing the
+    /// line also places [`note`](Self::note), or calls
+    /// [`with_note`](Self::with_note) or [`noted`](Self::noted) instead.
+    pub(crate) fn text(&self) -> Shown {
+        match self {
+            Self::Plain(text) => text.clone(),
+            Self::Command(command) => shown!("command: {}", command),
         }
     }
+
+    /// Returns the command's note when the source is a command that reads as
+    /// another.
+    pub(crate) fn note(&self) -> Option<Shown> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Command(command) => command.note(),
+        }
+    }
+
+    /// Returns `sentence`, a sentence naming the source, followed by the
+    /// command's note on a line of its own when there is one.
+    pub(crate) fn noted(&self, sentence: Shown) -> Shown {
+        match self {
+            Self::Plain(_) => sentence,
+            Self::Command(command) => noted(sentence, command),
+        }
+    }
+
+    /// Returns the source on one line, followed by its note on a second line
+    /// when there is one.
+    pub(crate) fn with_note(&self) -> Shown {
+        self.noted(self.text())
+    }
+}
+
+/// Returns a command source, which shows `command` on one line.
+pub(crate) fn command_source(command: &str) -> SourceText {
+    SourceText::Command(Command::one_line(command))
 }
 
 /// `source` as its line shows it, printing its base directory's line first on
@@ -51,7 +101,11 @@ pub(crate) fn relative_text(source: &DotfileSource) -> Shown {
 // never guesses. Apply and drift walk every package-directory spec before any
 // standalone one, so each heading prints once; were that order to change, a
 // heading would print again instead of a path showing under the wrong one.
-pub(crate) fn label(display: &DisplayManager, channel: Channel, source: &DotfileSource) -> Shown {
+pub(crate) fn label(
+    display: &DisplayManager,
+    channel: Channel,
+    source: &DotfileSource,
+) -> SourceText {
     if let Some(base) = source.base()
         && display.swap_heading(channel, base.kind)
     {
@@ -108,7 +162,7 @@ mod tests {
     }
 
     fn out(display: &DisplayManager, source: &DotfileSource) -> String {
-        label(display, Channel::Stdout, source).to_string()
+        label(display, Channel::Stdout, source).text().to_string()
     }
 
     #[test]
@@ -206,14 +260,21 @@ mod tests {
 
     // A command source is a command, not a path: its blanks show as written, so
     // it still pastes as it runs, and a line break in it shows as an escape.
+    // The blank reads as a space, so the note shows it escaped, and the note
+    // holds the command alone, not its label.
     #[test]
     fn a_command_source_keeps_its_blanks_on_one_line() {
         let source = DotfileSource::Command("printf 'a\u{A0}b'\nexit".to_string());
 
+        let shown = relative_text(&source);
+
+        assert_eq!(shown.text(), "command: printf 'a\u{A0}b'\\nexit");
         assert_eq!(
-            relative_text(&source).to_string(),
-            "command: printf 'a\u{A0}b'\\nexit"
+            shown.note().map(Shown::into_string).as_deref(),
+            Some("printf 'a\\u{a0}b'\\nexit")
         );
+        let plain = relative_text(&DotfileSource::Command("echo token".to_string()));
+        assert_eq!(plain.note(), None);
     }
 
     #[test]
@@ -244,7 +305,7 @@ mod tests {
             vars: vec!["email".to_string()],
         };
         assert_eq!(
-            relative_text(&source).to_string(),
+            relative_text(&source).text().to_string(),
             "git/config.tmpl (vars: email)"
         );
     }
@@ -272,7 +333,7 @@ mod tests {
         ];
 
         for source in &sources {
-            let shown = relative_text(source).to_string();
+            let shown = relative_text(source).text().to_string();
             assert!(!shown.chars().any(char::is_control), "{shown:?}");
             assert!(
                 shown.contains("a\\u{1b}]0;pwned\\u{7}b\\u{1b}[2Jc.conf"),
@@ -287,6 +348,6 @@ mod tests {
             base: None,
             path: PathBuf::from("/elsewhere/x"),
         });
-        assert_eq!(relative_text(&source).to_string(), "/elsewhere/x");
+        assert_eq!(relative_text(&source).text().to_string(), "/elsewhere/x");
     }
 }

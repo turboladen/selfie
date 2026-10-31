@@ -18,7 +18,7 @@ use crate::event_processor::Exit;
 use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
-    Content, Literal, Name, Output, Paint, Prose, Shown, guard, lit, shown,
+    Command, Content, ESCAPED, Literal, Name, Output, Paint, Prose, Shown, guard, lit, shown,
 };
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
@@ -427,7 +427,7 @@ impl From<dialoguer::Error> for PromptFailure {
 pub(crate) struct ErrorDetail {
     pub package_name: Name,
     pub operation: Prose,
-    pub command: Option<Shown>,
+    pub command: Option<Command>,
     pub exit_code: Option<i32>,
     /// Bounded by the library: the only producer copies it out of
     /// `CommandFailure::ExecutionFailed`, whose field is a `BoundedText` and so
@@ -493,8 +493,18 @@ impl ErrorCollector {
             if !error.message.is_empty() {
                 lines.push(led(&Shown::from(lit!("  ")), error.message.clone()));
             }
+            // Each starts its continuation lines under its text, so a
+            // multi-line command keeps its shape and its note matches it.
             if let Some(command) = &error.command {
-                lines.push(shown!("  Command: {}", command));
+                const COMMAND: Literal = lit!("Command");
+                let [command_pad, escaped_pad] = aligned_pads(COMMAND, ESCAPED);
+                lines.push(led(
+                    &shown!("  {}: {}", COMMAND, spaces(command_pad)),
+                    command.clone(),
+                ));
+                if let Some(note) = command.note() {
+                    lines.push(led(&shown!("  {}: {}", ESCAPED, spaces(escaped_pad)), note));
+                }
             }
             if let Some(code) = error.exit_code {
                 lines.push(shown!("  Exit code: {}", code));
@@ -891,7 +901,12 @@ impl DisplayManager {
     pub(crate) fn plan_entry_columns(&self, entries: &[PlannedEntry]) {
         let shown: Vec<(Shown, DisplayPath)> = entries
             .iter()
-            .map(|entry| (relative_text(&entry.source), shorten_path(&entry.target)))
+            .map(|entry| {
+                (
+                    relative_text(&entry.source).text(),
+                    shorten_path(&entry.target),
+                )
+            })
             .collect();
         let columns = EntryColumns::of(
             shown
@@ -1559,10 +1574,10 @@ impl DisplayManager {
     ///
     /// Usage:
     /// ```ignore
-    /// display.result_card("Check Results")
-    ///     .field(lit!("Package"), &package_name)
-    ///     .field(lit!("Environment"), &environment)
-    ///     .command_if(lit!("Command"), check_command.as_deref())
+    /// display.result_card(lit!("Check Results"))
+    ///     .field(lit!("Package"), check.package)
+    ///     .field(lit!("Environment"), check.environment)
+    ///     .command_if(lit!("Command"), check.command)
     ///     .print();
     /// ```
     pub(crate) fn result_card(&self, title: Literal) -> ResultCard<'_> {
@@ -1623,7 +1638,9 @@ impl DisplayManager {
 pub(crate) struct ResultCard<'a> {
     display: &'a DisplayManager,
     title: Literal,
-    fields: Vec<(Literal, Shown)>,
+    // Each field's key, its value, and the spaces after the key's colon that
+    // start the value at a column shared with another field.
+    fields: Vec<(Literal, Shown, usize)>,
 }
 
 impl<'a> ResultCard<'a> {
@@ -1637,14 +1654,23 @@ impl<'a> ResultCard<'a> {
 
     /// Add a key-value field to the card.
     pub(crate) fn field(mut self, key: Literal, value: impl Into<Shown>) -> Self {
-        self.fields.push((key, value.into()));
+        self.fields.push((key, value.into(), 0));
         self
     }
 
-    /// Add a field holding a command, only if there is one.
-    pub(crate) fn command_if(mut self, key: Literal, command: Option<Shown>) -> Self {
+    /// Add a field holding a command, only if there is one, and a field
+    /// holding its note under it when it has one. The two values start at one
+    /// column, whatever `key` is.
+    pub(crate) fn command_if(mut self, key: Literal, command: Option<Command>) -> Self {
         if let Some(command) = command {
-            self.fields.push((key, command));
+            match command.note() {
+                Some(note) => {
+                    let [key_pad, escaped_pad] = aligned_pads(key, ESCAPED);
+                    self.fields.push((key, command.into(), key_pad));
+                    self.fields.push((ESCAPED, note, escaped_pad));
+                }
+                None => self.fields.push((key, command.into(), 0)),
+            }
         }
         self
     }
@@ -1654,7 +1680,8 @@ impl<'a> ResultCard<'a> {
         mut self,
         fields: impl IntoIterator<Item = (Literal, Shown)>,
     ) -> Self {
-        self.fields.extend(fields);
+        self.fields
+            .extend(fields.into_iter().map(|(key, value)| (key, value, 0)));
         self
     }
 
@@ -1666,11 +1693,26 @@ impl<'a> ResultCard<'a> {
         self.display.print_section_header(self.title);
 
         let use_colors = self.display.use_colors();
-        for (key, value) in self.fields {
-            self.display
-                .println_after(shown!("{}{}: ", INDENT, format_key(key, use_colors)), value);
+        for (key, value, pad) in self.fields {
+            self.display.println_after(
+                shown!("{}{}: {}", INDENT, format_key(key, use_colors), spaces(pad)),
+                value,
+            );
         }
     }
+}
+
+// The spaces that pad each of two labels to the wider one's width, so values
+// written after them start at one column.
+fn aligned_pads(first: Literal, second: Literal) -> [usize; 2] {
+    let width = |label: Literal| console::measure_text_width(label.as_str());
+    let widest = width(first).max(width(second));
+    [widest - width(first), widest - width(second)]
+}
+
+// `count` spaces, as text a lead can hold.
+fn spaces(count: usize) -> Shown {
+    Shown::from(Name::new(&" ".repeat(count)))
 }
 
 // The terminal column at which `needle` starts in `text`, counted from the
@@ -1735,14 +1777,18 @@ pub(crate) fn content_lines(block: &str) -> Shown {
     Shown::join(block.lines().map(Content::new), lit!("\n"))
 }
 
-// `lead`, then `text` with its continuation lines starting under its first
-// character: at the width of the lead's last line, as the terminal shows it.
+// Returns `lead`, then `text` with its continuation lines starting under its
+// first character: at the width of the lead's last line, as the terminal shows
+// it. A tab in `text` is expanded from the text's own start, so a line hung
+// under the lead keeps the shape it has at column 0.
 fn led(lead: &Shown, text: impl Into<Shown>) -> Shown {
     let last = lead.rsplit('\n').next().unwrap_or_default();
     shown!(
         "{}{}",
         lead,
-        text.into().hang(console::measure_text_width(last))
+        text.into()
+            .tabs_expanded()
+            .hang(console::measure_text_width(last))
     )
 }
 
@@ -1981,7 +2027,6 @@ mod wakeup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal_text::interim_one_line;
 
     // Each message printer shows a library sentence as prose: a joiner renders,
     // and a line break is kept with the line after it indented under the
@@ -2402,7 +2447,7 @@ mod tests {
         collector.collect(ErrorDetail {
             package_name: Name::new("test-pkg"),
             operation: Prose::new("install"),
-            command: Some(interim_one_line("brew install test-pkg")),
+            command: Some(Command::written("brew install test-pkg")),
             exit_code: Some(1),
             stderr: Some(vec![Output::line("Error: not found")]),
             message: Prose::new("Installation failed").into(),
@@ -2421,7 +2466,7 @@ mod tests {
         collector.collect(ErrorDetail {
             package_name: Name::new("test-pkg"),
             operation: Prose::new("install"),
-            command: Some(interim_one_line("brew install test-pkg")),
+            command: Some(Command::written("brew install test-pkg")),
             exit_code: Some(1),
             stderr: Some(vec![Output::line("Error: not found")]),
             message: Prose::new("Installation failed").into(),
@@ -2429,7 +2474,7 @@ mod tests {
         collector.collect(ErrorDetail {
             package_name: Name::new("other-pkg"),
             operation: Prose::new("install"),
-            command: Some(interim_one_line("brew install other-pkg")),
+            command: Some(Command::written("brew install other-pkg")),
             exit_code: Some(1),
             stderr: None,
             message: Prose::new("Also failed").into(),
@@ -2443,6 +2488,127 @@ mod tests {
         assert!(summary.contains("Error: not found"));
         assert!(summary.contains("other-pkg"));
         assert!(summary.contains("── Errors"));
+    }
+
+    // A failed command keeps its lines in the summary, each continued line
+    // under the command's first character, and a command that reads as another
+    // gets its escaped note the same way, line for line.
+    // A tab in a command is expanded from the command's own start, so a
+    // continued line keeps its shape under the value column in the summary and
+    // in a card, and no raw tab reaches the terminal to jump to the screen's
+    // own tab stop.
+    #[test]
+    fn a_tab_in_a_summary_or_card_command_is_expanded_under_its_text() {
+        let command = || Command::written("make\n\tbuild");
+        let mut collector = ErrorCollector::default();
+        for name in ["a", "b"] {
+            collector.collect(ErrorDetail {
+                package_name: Name::new(name),
+                operation: Prose::new("install"),
+                command: Some(command()),
+                exit_code: None,
+                stderr: None,
+                message: Prose::new("failed").into(),
+            });
+        }
+        let summary = collector.format_summary().unwrap().into_string();
+        let display = DisplayManager::new(false);
+        display
+            .result_card(lit!("Check Results"))
+            .command_if(lit!("Command"), Some(command()))
+            .print();
+        let card = display
+            .printed()
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for text in [&summary, &card] {
+            let lines: Vec<&str> = text.lines().collect();
+            let at = lines
+                .iter()
+                .position(|line| line.contains("Command: make"))
+                .unwrap_or_else(|| panic!("{lines:#?}"));
+            let value = column(lines[at], "make");
+            assert_eq!(
+                lines[at + 1],
+                format!("{}{}build", " ".repeat(value), " ".repeat(8)),
+                "{lines:#?}"
+            );
+            assert!(!text.contains('\t'), "{text:?}");
+        }
+    }
+
+    // A card's note starts at its command's column whatever the command's key
+    // is: a key shorter than the note's label is padded, and so is the label
+    // when the key is longer.
+    #[test]
+    fn a_card_note_lines_up_with_its_command_under_any_key() {
+        for key in [lit!("Run"), lit!("Install command")] {
+            let display = DisplayManager::new(false);
+            display
+                .result_card(lit!("Check Results"))
+                .command_if(key, Some(Command::written("echo a\u{200B}b")))
+                .print();
+            let text = display
+                .printed()
+                .into_iter()
+                .map(|(_, line)| line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let lines: Vec<&str> = text.lines().collect();
+            let at = lines
+                .iter()
+                .position(|line| line.contains(key.as_str()))
+                .unwrap_or_else(|| panic!("{lines:#?}"));
+
+            assert!(lines[at + 1].contains("Escaped:"), "{lines:#?}");
+            assert_eq!(
+                column(lines[at + 1], "echo"),
+                column(lines[at], "echo"),
+                "{lines:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_summary_hangs_a_command_and_its_note_under_the_command() {
+        let mut collector = ErrorCollector::default();
+        for name in ["a", "b"] {
+            collector.collect(ErrorDetail {
+                package_name: Name::new(name),
+                operation: Prose::new("install"),
+                command: Some(Command::written("echo a\u{200B}b\nfalse")),
+                exit_code: Some(1),
+                stderr: None,
+                message: Prose::new("failed").into(),
+            });
+        }
+
+        let summary = collector.format_summary().unwrap().into_string();
+        let lines: Vec<&str> = summary.lines().collect();
+        let command = lines
+            .iter()
+            .position(|line| line.starts_with("  Command: "))
+            .unwrap_or_else(|| panic!("{lines:#?}"));
+
+        let value = column(lines[command], "echo");
+        assert_eq!(
+            lines[command + 1],
+            format!("{}false", " ".repeat(value)),
+            "{lines:#?}"
+        );
+        assert_eq!(
+            lines[command + 2],
+            "  Escaped: echo a\\u{200b}b",
+            "{lines:#?}"
+        );
+        assert_eq!(
+            lines[command + 3],
+            format!("{}false", " ".repeat(value)),
+            "{lines:#?}"
+        );
     }
 
     // The end-of-run summary is printed on stderr, through the printer's
@@ -2532,28 +2698,54 @@ mod tests {
     }
 
     // A card's command shows with its blanks as written, so it pastes as it
-    // runs, and a missing one leaves no row.
+    // runs, and a missing one leaves no row. A blank that reads as a space gets
+    // an `Escaped` field under it, whose lines start at the command's column
+    // and match the command's lines.
     #[test]
     fn a_result_card_shows_a_command_as_written() {
         let dm = DisplayManager::new(false);
 
         dm.result_card(lit!("Test Results"))
             .field(lit!("Package"), lit!("test-pkg"))
-            .command_if(lit!("Command"), Some(interim_one_line("echo 'a\u{A0}b'")))
+            .command_if(
+                lit!("Command"),
+                Some(Command::written("echo 'a\u{A0}b'\necho \u{200B}done")),
+            )
+            .command_if(lit!("Plain"), Some(Command::written("true")))
             .command_if(lit!("Missing"), None)
             .print();
 
-        let lines: Vec<String> = dm.printed().into_iter().map(|(_, line)| line).collect();
-        assert!(
+        let printed: Vec<String> = dm.printed().into_iter().map(|(_, line)| line).collect();
+        let text = printed.join("\n");
+        let lines: Vec<&str> = text.lines().collect();
+        let at = |needle: &str| {
             lines
                 .iter()
-                .any(|line| line.ends_with("Command: echo 'a\u{A0}b'")),
-            "{lines:?}"
+                .position(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("{needle:?} not in {lines:#?}"))
+        };
+        let command = at("Command: echo 'a\u{A0}b'");
+        assert_eq!(
+            lines[command + 1].trim_start(),
+            "echo \u{200B}done",
+            "{lines:#?}"
         );
         assert!(
-            !lines.iter().any(|line| line.contains("Missing")),
-            "{lines:?}"
+            lines[command + 2].contains("Escaped: echo 'a\\u{a0}b'"),
+            "{lines:#?}"
         );
+        assert_eq!(
+            lines[command + 3].trim_start(),
+            "echo \\u{200b}done",
+            "{lines:#?}"
+        );
+        let value = column(lines[command], "echo");
+        for offset in 1..=3 {
+            assert_eq!(column(lines[command + offset], "echo"), value, "{lines:#?}");
+        }
+        assert_eq!(lines[command + 4].trim_start(), "Plain: true", "{lines:#?}");
+        assert_eq!(lines.len(), command + 5, "{lines:#?}");
+        assert!(!text.contains("Missing"), "{lines:#?}");
     }
 
     #[test]
