@@ -14,7 +14,9 @@ use crate::formatters::selfie_command;
 
 use crate::{
     config::CliConfig,
-    display_manager::{Blank, Choice, DisplayManager, PromptFailure, Suggestion},
+    display_manager::{
+        Blank, Choice, DisplayManager, PromptFailure, Suggestion, is_blank_command_answer,
+    },
     event_processor::{EventProcessor, Exit},
 };
 
@@ -577,7 +579,7 @@ fn prompt_install_command(display: &DisplayManager) -> Result<String, Exit> {
         .input(
             lit!("Install command (required)"),
             Suggestion::Nothing,
-            Blank::Refused(lit!("Install command cannot be empty.")),
+            Blank::RefusedCommand(lit!("Install command cannot be empty or only a comment.")),
         )
         .map_err(|failure| refuse_interactive(display, &failure))
 }
@@ -595,7 +597,11 @@ fn prompt_check_command(
         )
         .map_err(|failure| refuse_interactive(display, &failure))?;
 
-    Ok(if check_cmd.trim().is_empty() {
+    // This judges blank as the install prompt does. A comment-only check is
+    // saved as no check, which is what install and status make of it anyway,
+    // and so is an answer showing nothing, which the library would hand to the
+    // shell.
+    Ok(if is_blank_command_answer(&check_cmd) {
         None
     } else {
         Some(check_cmd)
@@ -905,8 +911,56 @@ mod tests {
         ]);
         assert_eq!(prompt_install_command(&display).unwrap(), "true");
         assert_eq!(
-            lines_containing(&display, "Install command cannot be empty."),
+            lines_containing(
+                &display,
+                "Install command cannot be empty or only a comment."
+            ),
             1
+        );
+    }
+
+    // An install answer that runs nothing, empty, whitespace or only a comment,
+    // is refused as install would refuse it, and asked again.
+    #[test]
+    fn a_comment_only_install_answer_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let display = DisplayManager::new(false).answering(vec![
+            answer("# TODO".to_string()),
+            answer("   # later".to_string()),
+            answer("true".to_string()),
+        ]);
+
+        assert_eq!(prompt_install_command(&display).unwrap(), "true");
+        assert_eq!(
+            lines_containing(
+                &display,
+                "Install command cannot be empty or only a comment."
+            ),
+            2
+        );
+    }
+
+    // A check answer the install prompt would call blank is no check: a
+    // comment-only one, as install and status read it, and one showing nothing,
+    // which the library would run. A real one is kept as typed.
+    #[test]
+    fn a_blank_check_answer_is_no_check() {
+        use crate::display_manager::answer;
+
+        let display = DisplayManager::new(false).answering(vec![answer("# TODO".to_string())]);
+        assert_eq!(prompt_check_command("x", &display).unwrap(), None);
+
+        // An answer showing nothing is refused at the install prompt, so it is
+        // no check here.
+        let display =
+            DisplayManager::new(false).answering(vec![answer("\u{115f}\u{200b}".to_string())]);
+        assert_eq!(prompt_check_command("x", &display).unwrap(), None);
+
+        let display = DisplayManager::new(false).answering(vec![answer("true".to_string())]);
+        assert_eq!(
+            prompt_check_command("x", &display).unwrap().as_deref(),
+            Some("true")
         );
     }
 

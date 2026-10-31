@@ -607,7 +607,7 @@ Each `package_list_item` row's `status` is \"installed\", \"not installed\", \"n
 A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location. \
 A spec that loaded but that selfie will not read is listed in the summary's `refused` array, with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim; branch on it) and `reason`, \
 and is not counted in total_packages. Without all=true, a spec is refused when 'selfie apply' would refuse it in the current environment; \
-with all=true, when a key in any environment cannot be trusted. A result that completed carries `steps`, `{completed, total}`, the operation's step count; no message carries a count, and a result with status 'failure' carries none."
+with all=true, when a key in any environment cannot be trusted or a package spec declares no environment. A result that completed carries `steps`, `{completed, total}`, the operation's step count; no message carries a count, and a result with status 'failure' carries none."
     )]
     async fn package_list(
         &self,
@@ -698,7 +698,7 @@ with all=true, when a key in any environment cannot be trusted. A result that co
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List the dotfile mappings `selfie apply` would use, with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec whose top level or any environment selfie will not trust is left out of the entries and listed in the row's `refused` array with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\" or \"ambiguous_name\", one row per file of a name several spec files claim, since none of them deploys; branch on it) and `reason`. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "List the dotfile mappings `selfie apply` would use, with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec whose top level or any environment selfie will not trust, or a package spec that declares no environment, is left out of the entries and listed in the row's `refused` array with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim, since none of them deploys; branch on it) and `reason`. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -1169,13 +1169,6 @@ mod tests {
         .into_iter()
         .map(|kind| <&str>::from(kind).to_string())
         .collect();
-        // A standalone spec declares no environment by design, so a dotfile
-        // listing never refuses one for it.
-        let listed_dotfiles: Vec<String> = every
-            .iter()
-            .filter(|kind| *kind != <&str>::from(RefusalKind::NoEnvironments))
-            .cloned()
-            .collect();
         for (tool, lead, expected) in [
             (
                 SelfieServer::spec_list_tool_attr(),
@@ -1190,7 +1183,7 @@ mod tests {
             (
                 SelfieServer::selfie_dotfiles_list_tool_attr(),
                 "`refused` array",
-                &listed_dotfiles,
+                &every,
             ),
             (
                 SelfieServer::package_audit_all_tool_attr(),

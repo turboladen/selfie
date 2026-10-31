@@ -9,7 +9,7 @@
 
 pub mod common;
 
-use common::{FAILED, SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // Write a package whose single dotfile is refused, and one that is not.
 fn write_packages(base: &tempfile::TempDir) {
@@ -175,4 +175,33 @@ fn a_shadowing_key_s_cell_gives_the_message_without_the_advice() {
         "{stdout}"
     );
     assert!(!stdout.contains("Anchors are legal"), "{stdout}");
+}
+
+// A package spec declaring no environment is a refused row with apply's
+// reason, in place of its entries, and the listing still exits 0.
+#[test]
+fn a_package_spec_declaring_no_environment_is_a_refused_row() {
+    let base = setup_default_test_config();
+    let packages = base.path().join("packages");
+    std::fs::create_dir_all(&packages).unwrap();
+    std::fs::write(
+        packages.join("noenv.yaml"),
+        "name: noenv\ndotfiles:\n  - source: \"noenv.conf\"\n    target: \"~/.noenv.conf\"\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&base)
+        .args(["dotfiles", "list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(CLEAN), "{stdout}{stderr}");
+    assert!(
+        stderr.contains("Cannot read the dotfiles in 'noenv'")
+            && stderr.contains("At least one environment must be defined"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("~/.noenv.conf"), "{stdout}");
 }

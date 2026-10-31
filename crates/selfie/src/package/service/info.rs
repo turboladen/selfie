@@ -108,7 +108,9 @@ where
                 .iter()
                 .map(crate::package::DotfileEntry::command_count)
                 .sum(),
-            package.listing_refusal().map(|reason| reason.to_string()),
+            package
+                .untrusted_keys_refusal()
+                .map(|reason| reason.to_string()),
         )
     };
 

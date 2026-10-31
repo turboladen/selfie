@@ -122,6 +122,19 @@ pub(crate) enum Blank {
     /// as [`Name::is_blank`] decides; a kept suggestion that is blank is
     /// refused too.
     Refused(Literal),
+    /// Refused with this warning, and asked again, when
+    /// [`is_blank_command_answer`] says so.
+    RefusedCommand(Literal),
+}
+
+/// Whether a command typed at a prompt is blank: it holds no words once
+/// whitespace and comments are set aside, such as `# TODO`, as
+/// [`selfie::package::is_blank_command`] decides, or nothing in it shows, as
+/// [`Name::is_blank`] decides.
+pub(crate) fn is_blank_command_answer(answer: &str) -> bool {
+    // The second half is the prompt's own. The library would hand an answer
+    // showing nothing to the shell, which then fails to find the command.
+    selfie::package::is_blank_command(answer) || Name::is_blank(answer)
 }
 
 // How `input` offers a suggestion: pre-filled when it shows as written,
@@ -170,7 +183,7 @@ mod prompts {
 
     use super::{
         Blank, Choice, DisplayManager, Name, Offer, Prompt, PromptFailure, PromptTheme, Shown,
-        Suggestion, lit, offer, shown,
+        Suggestion, is_blank_command_answer, lit, offer, shown,
     };
 
     impl DisplayManager {
@@ -300,9 +313,14 @@ mod prompts {
                     Some(kept) if typed.is_empty() => kept.to_string(),
                     _ => typed,
                 };
-                if let Blank::Refused(warning) = blank
-                    && Name::is_blank(&answer)
-                {
+                let refused = match blank {
+                    Blank::Allowed => None,
+                    Blank::Refused(warning) => Name::is_blank(&answer).then_some(warning),
+                    Blank::RefusedCommand(warning) => {
+                        is_blank_command_answer(&answer).then_some(warning)
+                    }
+                };
+                if let Some(warning) = refused {
                     self.print_warning(warning);
                     continue;
                 }
