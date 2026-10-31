@@ -267,6 +267,11 @@ impl Shown {
         Self(expanded)
     }
 
+    /// Each line of `self`, as [`str::lines`] splits it.
+    pub(crate) fn split_lines(&self) -> impl Iterator<Item = Shown> + '_ {
+        self.0.lines().map(|line| Self(line.to_string()))
+    }
+
     /// `self` styled by `paint` when `use_colors`.
     ///
     /// The styling is written whatever the stream; the printer removes it when
@@ -274,10 +279,17 @@ impl Shown {
     #[must_use]
     pub(crate) fn paint(self, use_colors: bool, paint: Paint) -> Self {
         if use_colors {
-            Self(painted(self.0, paint))
+            self.painted(paint)
         } else {
             self
         }
+    }
+
+    /// `self` styled by `paint`, whatever the stream. The printer removes the
+    /// styling when the stream it writes to has colors off.
+    #[must_use]
+    pub(crate) fn painted(self, paint: Paint) -> Self {
+        Self(painted(self.0, paint))
     }
 
     /// Returns the text, escapes and styling included.

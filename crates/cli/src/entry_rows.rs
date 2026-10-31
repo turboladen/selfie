@@ -127,14 +127,15 @@ pub(crate) struct EntryRow {
     pub(crate) detail: Option<Shown>,
 }
 
-/// Lays out `row`'s line in `columns`, its outcome's label colored when
-/// `use_colors`, with the source's note on a line under the source column.
+/// Lays out `row`'s line in `columns`, its outcome's label colored, with the
+/// source's note on a line under the source column. The printer removes the
+/// color where the stream has none.
 ///
 /// The label is padded by its own width, so its color takes no room in the
 /// table. A value wider than its column is never cut; it pushes the rest of its
 /// own row right.
-pub(crate) fn entry_line(row: &EntryRow, columns: EntryColumns, use_colors: bool) -> Shown {
-    let line = row_line(row, columns, use_colors);
+pub(crate) fn entry_line(row: &EntryRow, columns: EntryColumns) -> Shown {
+    let line = row_line(row, columns);
     // The note's line starts under the source column, as a detail's lines do.
     match row.source.note() {
         Some(note) => shown!("{}\n{}{}: {}", line, under_row(), ESCAPED, note),
@@ -142,11 +143,11 @@ pub(crate) fn entry_line(row: &EntryRow, columns: EntryColumns, use_colors: bool
     }
 }
 
-fn row_line(row: &EntryRow, columns: EntryColumns, use_colors: bool) -> Shown {
+fn row_line(row: &EntryRow, columns: EntryColumns) -> Shown {
     let label = row.outcome.label();
     let after_label = spaces(LABEL_WIDTH.saturating_sub(label.as_str().len()) + 2);
     let label = match row.outcome.paint() {
-        Some(paint) => Shown::from(label).paint(use_colors, paint),
+        Some(paint) => Shown::from(label).painted(paint),
         None => Shown::from(label),
     };
     let source = padded(&row.source.text(), columns.source);
@@ -196,7 +197,7 @@ mod tests {
     }
 
     fn line(row: &EntryRow, columns: EntryColumns) -> String {
-        entry_line(row, columns, false).to_string()
+        console::strip_ansi_codes(entry_line(row, columns).as_str()).into_owned()
     }
 
     fn columns_for(rows: &[EntryRow]) -> EntryColumns {
@@ -382,7 +383,7 @@ mod tests {
         let columns = EntryColumns::of([("bat/config", "~/.b")]);
         let row = row(EntryOutcome::Deployed, "bat/config", "~/.b", None);
 
-        let colored = entry_line(&row, columns, true);
+        let colored = entry_line(&row, columns);
 
         assert_ne!(
             colored.as_str(),

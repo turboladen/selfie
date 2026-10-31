@@ -45,6 +45,9 @@ mockall.workspace = true
 # tests, which drive the binary on a pseudoterminal and signal it.
 nix = { workspace = true, features = ["fs", "signal", "term"] }
 predicates = "3.1"
+# The matcher dialoguer's themes take, so a test can format a fuzzy-select item
+# the way the prompt would.
+fuzzy-matcher = "0.3.7"
 selfie = { path = "../selfie/", features = ["with_mocks"] }
 tempfile.workspace = true
 test-common = { path = "../test-common/" }

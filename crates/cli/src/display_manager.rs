@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use selfie::package::event::{BaseKind, PlannedEntry, StepEnding, StepId};
 use tokio_util::sync::CancellationToken;
@@ -229,6 +228,7 @@ mod prompts {
                 dialoguer::FuzzySelect::with_theme(theme.as_ref())
                     .with_prompt(self.prompt_text(text))
                     .items(self.labels(choices))
+                    .highlight_matches(self.fuzzy_highlights())
                     .default(0),
             )?;
             Ok(picked.map(|picked| choices[picked].value.clone()))
@@ -311,7 +311,7 @@ mod prompts {
 
         // Prompts draw on stderr, so they follow its color decision.
         pub(super) fn prompt_theme(&self) -> PromptTheme {
-            if self.stderr_colors() {
+            if self.colors.stderr {
                 PromptTheme::Colorful
             } else {
                 PromptTheme::Simple
@@ -320,16 +320,50 @@ mod prompts {
 
         fn theme(&self) -> Box<dyn Theme> {
             match self.prompt_theme() {
-                PromptTheme::Colorful => Box::new(ColorfulTheme::default()),
+                PromptTheme::Colorful => Box::new(colorful_theme()),
                 PromptTheme::Simple => Box::new(SimpleTheme),
             }
         }
 
+        // Whether a fuzzy select bolds the characters the filter matched.
+        // SimpleTheme bolds them through console's own answer for stderr, so
+        // they are left plain where this display gives stderr no colors.
+        pub(super) fn fuzzy_highlights(&self) -> bool {
+            self.colors.stderr
+        }
+    }
+
+    // ColorfulTheme, its styles written whatever console decides for stderr.
+    // Its defaults defer to that decision, and the theme is chosen only when
+    // the display gives stderr colors.
+    pub(super) fn colorful_theme() -> ColorfulTheme {
+        let mut theme = ColorfulTheme::default();
+        theme.defaults_style = theme.defaults_style.force_styling(true);
+        theme.prompt_style = theme.prompt_style.force_styling(true);
+        theme.prompt_prefix = theme.prompt_prefix.force_styling(true);
+        theme.prompt_suffix = theme.prompt_suffix.force_styling(true);
+        theme.success_prefix = theme.success_prefix.force_styling(true);
+        theme.success_suffix = theme.success_suffix.force_styling(true);
+        theme.error_prefix = theme.error_prefix.force_styling(true);
+        theme.error_style = theme.error_style.force_styling(true);
+        theme.hint_style = theme.hint_style.force_styling(true);
+        theme.values_style = theme.values_style.force_styling(true);
+        theme.active_item_style = theme.active_item_style.force_styling(true);
+        theme.inactive_item_style = theme.inactive_item_style.force_styling(true);
+        theme.active_item_prefix = theme.active_item_prefix.force_styling(true);
+        theme.inactive_item_prefix = theme.inactive_item_prefix.force_styling(true);
+        theme.checked_item_prefix = theme.checked_item_prefix.force_styling(true);
+        theme.unchecked_item_prefix = theme.unchecked_item_prefix.force_styling(true);
+        theme.picked_item_prefix = theme.picked_item_prefix.force_styling(true);
+        theme.unpicked_item_prefix = theme.unpicked_item_prefix.force_styling(true);
+        theme.fuzzy_cursor_style = theme.fuzzy_cursor_style.force_styling(true);
+        theme.fuzzy_match_highlight_style = theme.fuzzy_match_highlight_style.force_styling(true);
+        theme
+    }
+
+    impl DisplayManager {
         fn prompt_text(&self, text: impl Into<Shown>) -> String {
-            text.into()
-                .guarded(self.stderr_colors())
-                .as_str()
-                .to_string()
+            text.into().guarded(self.colors.stderr).into_string()
         }
 
         fn labels<T>(&self, choices: &[Choice<T>]) -> Vec<String> {
@@ -582,7 +616,7 @@ const TAIL_LINES: usize = 10;
 #[derive(Clone)]
 pub struct DisplayManager {
     mp: MultiProgress,
-    use_colors: bool,
+    colors: StreamColors,
     // stderr is a terminal: the waiting spinner draws there.
     draws_spinner: bool,
     // Both streams are terminals.
@@ -616,6 +650,10 @@ pub struct DisplayManager {
     // How many times `draw` wrote, so a test can see a block written as one.
     #[cfg(test)]
     draws: Arc<std::sync::atomic::AtomicUsize>,
+    // Each line exactly as it reached its stream, styling included, so a test
+    // can see which stream's colors a printer followed.
+    #[cfg(test)]
+    emitted: Arc<Mutex<Vec<(Channel, String)>>>,
     // stderr is a terminal, so a prompt can be drawn and answered.
     #[cfg_attr(test, expect(dead_code, reason = "a test answers from `script`"))]
     can_prompt: bool,
@@ -630,6 +668,56 @@ pub struct DisplayManager {
     // in a test.
     #[cfg(test)]
     while_asking: Arc<Mutex<Option<WhileAsking>>>,
+}
+
+/// Whether selfie's own styling reaches each stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StreamColors {
+    stdout: bool,
+    stderr: bool,
+}
+
+impl StreamColors {
+    fn of(self, channel: Channel) -> bool {
+        match channel {
+            Channel::Stdout => self.stdout,
+            Channel::Stderr => self.stderr,
+        }
+    }
+
+    // Give `channel` colors (test-only).
+    #[cfg(test)]
+    fn give(&mut self, channel: Channel) {
+        match channel {
+            Channel::Stdout => self.stdout = true,
+            Channel::Stderr => self.stderr = true,
+        }
+    }
+}
+
+// A stream gets colors when the run has them on and console would give that
+// stream colors. console gives them to a stream when `CLICOLOR_FORCE` is set to
+// anything but `0`, `NO_COLOR` included; otherwise to a terminal, unless
+// `NO_COLOR` is set to any value, `CLICOLOR` is `0` or `TERM` is `dumb` or unset.
+fn decided(use_colors: bool, console: StreamColors) -> StreamColors {
+    StreamColors {
+        stdout: use_colors && console.stdout,
+        stderr: use_colors && console.stderr,
+    }
+}
+
+// What console decides for each stream. Read, never set: console's answer is
+// process-wide, and each display decides for itself. A test never probes, so
+// a suite run from a terminal reads the same colors as one run from CI.
+fn console_colors() -> StreamColors {
+    if cfg!(test) {
+        StreamColors::default()
+    } else {
+        StreamColors {
+            stdout: console::colors_enabled(),
+            stderr: console::colors_enabled_stderr(),
+        }
+    }
 }
 
 // A test's action while a prompt is open, run before the scripted answer, has
@@ -664,13 +752,6 @@ impl DisplayManager {
             let stderr = console::Term::stderr().is_term();
             (stderr, stderr && console::Term::stdout().is_term())
         };
-        // Nothing styled may reach a stream once colors are off, whatever
-        // `console` would decide from the environment. Process-wide, so a test,
-        // which builds many displays, leaves it alone.
-        if !use_colors && !cfg!(test) {
-            console::set_colors_enabled(false);
-            console::set_colors_enabled_stderr(false);
-        }
         let mp = if draws_spinner {
             MultiProgress::new()
         } else {
@@ -681,7 +762,7 @@ impl DisplayManager {
 
         Self {
             mp,
-            use_colors,
+            colors: decided(use_colors, console_colors()),
             draws_spinner,
             is_tty,
             verbosity: Verbosity::Normal,
@@ -697,6 +778,8 @@ impl DisplayManager {
             written: Arc::new(Mutex::new(Vec::new())),
             #[cfg(test)]
             draws: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            emitted: Arc::new(Mutex::new(Vec::new())),
             can_prompt: draws_spinner,
             cancellation: None,
             #[cfg(test)]
@@ -748,9 +831,26 @@ impl DisplayManager {
         self.verbosity == Verbosity::Verbose
     }
 
-    /// Whether colors are enabled
-    pub fn use_colors(&self) -> bool {
-        self.use_colors
+    // Whether selfie's own styling is written to `channel`.
+    fn colors(&self, channel: Channel) -> bool {
+        self.colors.of(channel)
+    }
+
+    // Give `channel` colors, as though console had said that stream gets
+    // them, so a test can see the styling a printer writes there.
+    #[cfg(test)]
+    pub(crate) fn colored(mut self, channel: Channel) -> Self {
+        self.colors.give(channel);
+        self
+    }
+
+    // Every line as it reached its stream, styling included, in order.
+    #[cfg(test)]
+    pub(crate) fn emitted(&self) -> Vec<(Channel, String)> {
+        self.emitted
+            .lock()
+            .map(|emitted| emitted.clone())
+            .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -760,21 +860,15 @@ impl DisplayManager {
         }
     }
 
-    #[cfg(not(test))]
-    fn record_stdout(&self, _line: &str) {}
-
-    #[cfg(not(test))]
-    fn record_stderr(&self, _line: &str) {}
-
+    // Record `text` as `channel` gets it with its styling removed. Outside a
+    // test this does nothing, so it costs nothing.
     #[cfg(test)]
-    fn record_stdout(&self, line: &str) {
-        self.record(Channel::Stdout, line);
+    fn record_plain(&self, channel: Channel, text: &Shown) {
+        self.record(channel, &guard(text.as_str(), false));
     }
 
-    #[cfg(test)]
-    fn record_stderr(&self, line: &str) {
-        self.record(Channel::Stderr, line);
-    }
+    #[cfg(not(test))]
+    fn record_plain(&self, _channel: Channel, _text: &Shown) {}
 
     // Every line a lead and its text were written as, styling removed, in order.
     #[cfg(test)]
@@ -839,22 +933,25 @@ impl DisplayManager {
         };
         if let Some(bar) = &line.bar {
             bar.finish_and_clear();
-            let text = format!("{} ({})", line.subject, elapsed(line.started.elapsed()));
-            let mark = match ending {
-                StepEnding::Succeeded => Some(("✓", style("✓").green())),
-                StepEnding::Failed => Some(("✗", style("✗").red())),
+            let mark: Option<(Literal, Paint)> = match ending {
+                StepEnding::Succeeded => Some((lit!("✓"), |s| s.green())),
+                StepEnding::Failed => Some((lit!("✗"), |s| s.red())),
                 // The refusal or cancellation that follows says why; a mark
                 // would claim an outcome for commands that did not finish or start.
                 StepEnding::Canceled | StepEnding::NotRun => None,
             };
-            if let Some((plain, styled)) = mark {
-                self.record_stderr(&format!("{plain} {text}"));
-                let rendered = if self.use_colors {
-                    format!("{styled} {}", style(text).dim())
-                } else {
-                    format!("{plain} {text}")
-                };
-                let _ = self.mp.println(rendered);
+            if let Some((mark, paint)) = mark {
+                let text = shown!(
+                    "{} ({})",
+                    line.subject,
+                    Name::new(&elapsed(line.started.elapsed()))
+                );
+                let rendered = shown!(
+                    "{} {}",
+                    Shown::from(mark).painted(paint),
+                    text.painted(|s| s.dim())
+                );
+                self.put_above_spinners(&rendered);
             }
         }
         if ending == StepEnding::Failed && !line.tail.is_empty() {
@@ -926,7 +1023,7 @@ impl DisplayManager {
             .lock()
             .map(|columns| *columns)
             .unwrap_or_default();
-        self.println(entry_line(row, columns, self.use_colors));
+        self.println(entry_line(row, columns));
     }
 
     /// Hold every clone's printing of source lines until the guard drops, so
@@ -975,10 +1072,10 @@ impl DisplayManager {
         let subject = if self.is_verbose() {
             current
                 .as_ref()
-                .map(|w| w.subject.to_string())
+                .map(|w| w.subject.clone())
                 .unwrap_or_default()
         } else {
-            String::new()
+            Shown::default()
         };
         if let Some(current) = current {
             if current.tail.len() == TAIL_LINES {
@@ -997,20 +1094,15 @@ impl DisplayManager {
         }
         let rendered = if self.draws_spinner {
             let text = if concurrent {
-                format!("{subject} │ {line}")
+                shown!("{} │ {}", subject, output)
             } else {
-                line.to_string()
+                Shown::from(output)
             };
-            if self.use_colors {
-                format!("    {}", style(&text).dim())
-            } else {
-                format!("    {text}")
-            }
+            shown!("    {}", text.painted(|s| s.dim()))
         } else {
-            format!("  {subject} │ {line}")
+            shown!("  {} │ {}", subject, output)
         };
-        self.record_stderr(&rendered);
-        self.mp.suspend(|| eprintln!("{rendered}"));
+        self.draw(|| self.put(Channel::Stderr, &rendered));
     }
 
     // The message each waiting spinner shows, in the order the steps started
@@ -1028,20 +1120,26 @@ impl DisplayManager {
     }
 
     fn spinner(&self, message: &str) -> ProgressBar {
-        let template = if self.use_colors {
-            "{spinner:.cyan} {msg}"
-        } else {
-            "{spinner} {msg}"
-        };
         let bar = self.mp.add(ProgressBar::new_spinner());
         bar.set_style(
-            ProgressStyle::with_template(template)
+            ProgressStyle::with_template(self.spinner_template())
                 .unwrap()
                 .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
         );
         bar.set_message(message.to_string());
         bar.enable_steady_tick(Duration::from_millis(80));
         bar
+    }
+
+    // The spinner draws on stderr, so its template follows stderr's colors.
+    // indicatif applies a template's style through console's own answer for
+    // stderr, and the plain template gives it no style to apply.
+    fn spinner_template(&self) -> &'static str {
+        if self.colors.stderr {
+            "{spinner:.cyan} {msg}"
+        } else {
+            "{spinner} {msg}"
+        }
     }
 
     // ── Static output methods ──────────────────────────────────────────
@@ -1084,18 +1182,15 @@ impl DisplayManager {
     /// marker belongs to the sentence above, not to every line of its evidence.
     pub(crate) fn print_error_context(&self, block: impl Into<Shown>) {
         // Its own styling is written below, so the block's is removed.
-        let block = guard(block.into().as_str(), false).into_owned();
-        let lines: Vec<&str> = block.lines().collect();
-        for line in &lines {
-            self.record_stderr(line);
-        }
-        self.mp.suspend(|| {
+        let lines: Vec<Shown> = block.into().guarded(false).split_lines().collect();
+        self.draw(|| {
             for line in &lines {
-                if self.use_colors {
-                    eprintln!("  {}", style(line).dim());
-                } else {
-                    eprintln!("  {line}");
-                }
+                // A test reads the line back without the indent.
+                self.record_plain(Channel::Stderr, line);
+                self.write(
+                    Channel::Stderr,
+                    &shown!("  {}", line.clone().painted(|s| s.dim())),
+                );
             }
         });
     }
@@ -1143,10 +1238,9 @@ impl DisplayManager {
 
     /// Print a line about the run's progress (stderr).
     pub(crate) fn print_progress(&self, message: impl Into<Shown>) {
-        let text = message.into().paint(self.use_colors, |s| s.dim());
+        let text = message.into().painted(|s| s.dim());
         self.print_led(
             Channel::Stderr,
-            self.stdout_colors(),
             Shown::from(lit!("  ")),
             Shown::default(),
             text,
@@ -1187,48 +1281,25 @@ impl DisplayManager {
         message: impl Into<Shown>,
     ) {
         // The space stays outside the mark's styling.
-        let mark = shown!("{} ", Shown::from(mark).paint(self.use_colors, mark_paint));
-        let text = message.into().paint(self.use_colors, paint);
-        self.print_led(channel, self.stdout_colors(), mark, Shown::default(), text);
+        let mark = shown!("{} ", Shown::from(mark).painted(mark_paint));
+        let text = message.into().painted(paint);
+        self.print_led(channel, mark, Shown::default(), text);
     }
 
     /// Print `lead` and then `text` (stdout), the lines after the first of
     /// `text` starting under its first character.
     pub(crate) fn println_after(&self, lead: Shown, text: impl Into<Shown>) {
-        self.print_led(
-            Channel::Stdout,
-            self.stdout_colors(),
-            Shown::default(),
-            lead,
-            text,
-        );
+        self.print_led(Channel::Stdout, Shown::default(), lead, text);
     }
 
     // Print `mark`, `lead` and then `text` on `channel`, the text's
-    // continuation lines under its first character, with selfie's styling kept
-    // when `colors`. What a test reads back is the line without `mark`, as the
-    // stream gets it with its styling removed.
-    //
-    // Every message printer passes stdout's color decision as `colors`, on
-    // stderr as well, which is the decision console's own styling makes; a
-    // suggestion settles its parts itself and passes `true`. Deciding per
-    // stream belongs to ADR 0014's slice 6 (selfie-gr8z.75).
-    fn print_led(
-        &self,
-        channel: Channel,
-        colors: bool,
-        mark: Shown,
-        lead: Shown,
-        text: impl Into<Shown>,
-    ) {
+    // continuation lines under its first character. What a test reads back is
+    // the line without `mark`, as the stream gets it with its styling removed.
+    fn print_led(&self, channel: Channel, mark: Shown, lead: Shown, text: impl Into<Shown>) {
         let line = led(&shown!("{}{}", mark, lead), text);
         #[cfg(test)]
         self.record_led(channel, &mark, &line);
-        let rendered = guard(line.as_str(), colors);
-        match channel {
-            Channel::Stdout => self.mp.suspend(|| println!("{rendered}")),
-            Channel::Stderr => self.mp.suspend(|| eprintln!("{rendered}")),
-        }
+        self.draw(|| self.write(channel, &line));
     }
 
     // Record `line` as `print_led` wrote it, styling removed: whole in
@@ -1246,18 +1317,12 @@ impl DisplayManager {
 
     /// Print a suggestion (stderr): advice about the run, never the answer.
     pub(crate) fn print_suggestion(&self, message: impl Into<Shown>) {
-        let text = message.into();
         let mark = shown!(
             "{} {}: ",
-            Shown::from(lit!("✨")).paint(self.use_colors, |s| s.bold()),
-            Shown::from(lit!("Suggestion")).paint(self.use_colors, |s| s.yellow().bold())
+            Shown::from(lit!("✨")).painted(|s| s.bold()),
+            Shown::from(lit!("Suggestion")).painted(|s| s.yellow().bold())
         );
-        // The mark follows stdout's color decision, as the other printers'
-        // marks do, and the text stderr's. Each is settled before they are
-        // joined, so `print_led` keeps what is left of both.
-        let mark = mark.guarded(self.stdout_colors());
-        let text = text.guarded(self.stderr_colors());
-        self.print_led(Channel::Stderr, true, mark, Shown::default(), text);
+        self.print_led(Channel::Stderr, mark, Shown::default(), message);
     }
 
     /// Print a section header (stdout)
@@ -1268,22 +1333,11 @@ impl DisplayManager {
     /// Print a section header on `channel`.
     pub(crate) fn print_section_header_to(&self, channel: Channel, title: impl Into<Shown>) {
         // Its own styling is written below, so the title's is removed.
-        let title = guard(title.into().as_str(), false).into_owned();
-        let rendered = if self.use_colors {
-            format!("── {} ──", style(&title).bold())
-        } else {
-            format!("── {title} ──")
-        };
-        match channel {
-            Channel::Stdout => {
-                self.record_stdout(&title);
-                self.mp.suspend(|| println!("{rendered}"));
-            }
-            Channel::Stderr => {
-                self.record_stderr(&title);
-                self.mp.suspend(|| eprintln!("{rendered}"));
-            }
-        }
+        let title = title.into().guarded(false);
+        // A test reads the title back without its rules.
+        self.record_plain(channel, &title);
+        let rendered = shown!("── {} ──", title.painted(|s| s.bold()));
+        self.draw(|| self.write(channel, &rendered));
     }
 
     /// Print a unified diff with per-line coloring and visual framing (stdout)
@@ -1304,21 +1358,14 @@ impl DisplayManager {
     pub(crate) fn print_diff(&self, diff: Diff) {
         // Written in one suspend, so no other line lands between two rows of
         // the diff and a spinner does not redraw between them.
-        let colors = self.stdout_colors();
-        let rendered: Vec<String> = diff
+        let rendered: Vec<Shown> = diff
             .0
             .into_iter()
-            .map(|(text, paint)| {
-                let row = shown!("  {}", text.paint(self.use_colors, paint));
-                guard(row.as_str(), colors).into_owned()
-            })
+            .map(|(text, paint)| shown!("  {}", text.painted(paint)))
             .collect();
-        for row in &rendered {
-            self.record_stdout(row);
-        }
         self.draw(|| {
             for row in &rendered {
-                println!("{row}");
+                self.put(Channel::Stdout, row);
             }
         });
     }
@@ -1355,15 +1402,14 @@ impl DisplayManager {
         prompt: P,
     ) -> Result<P::Answer, PromptFailure> {
         self.ready()?;
-        let note = note.map(|note| guard(note.as_str(), self.stderr_colors()).into_owned());
+
         // Suspended, not cleared: a spinner would redraw over the question while
         // the user types, but a step still running, or whose end is already on
         // its way, keeps its line and gets its ✓ or ✗ once the prompt returns.
         let answer = self
             .draw(|| {
                 if let Some(note) = &note {
-                    self.record_stderr(note);
-                    eprintln!("{note}");
+                    self.put(Channel::Stderr, note);
                 }
                 self.ask(prompt)
             })
@@ -1517,17 +1563,15 @@ impl DisplayManager {
     /// styling is kept when the run and stdout have colors on, and removed
     /// otherwise.
     pub(crate) fn println(&self, message: impl Into<Shown>) {
-        let message = guard(message.into().as_str(), self.stdout_colors()).into_owned();
-        self.record_stdout(&message);
-        self.mp.suspend(|| println!("{message}"));
+        let message = message.into();
+        self.draw(|| self.put(Channel::Stdout, &message));
     }
 
     /// Print a block of plain lines to stderr, as [`println`](Self::println)
     /// prints them: its stderr twin, for the lines a diagnostic lists.
     pub(crate) fn print_note(&self, message: impl Into<Shown>) {
-        let message = guard(message.into().as_str(), self.stderr_colors()).into_owned();
-        self.record_stderr(&message);
-        self.draw(|| eprintln!("{message}"));
+        let message = message.into();
+        self.draw(|| self.put(Channel::Stderr, &message));
     }
 
     /// Print a plain line on `channel`.
@@ -1538,15 +1582,44 @@ impl DisplayManager {
         }
     }
 
-    // Whether selfie's own styling is written to stdout: colors are on for the
-    // run and for the stream itself.
-    fn stdout_colors(&self) -> bool {
-        self.use_colors && console::colors_enabled()
+    // Write `text` on `channel`, and record it for a test as the stream gets
+    // it. A caller that must not be drawn over writes inside `draw`.
+    fn put(&self, channel: Channel, text: &Shown) {
+        self.record_plain(channel, text);
+        self.write(channel, text);
     }
 
-    // As `stdout_colors`, for stderr.
-    fn stderr_colors(&self) -> bool {
-        self.use_colors && console::colors_enabled_stderr()
+    // The one writer of a line, which records nothing for `printed`: a printer
+    // whose test reads back part of the line records that part itself.
+    fn write(&self, channel: Channel, text: &Shown) {
+        let line = self.guarded(channel, text);
+        match channel {
+            Channel::Stdout => println!("{line}"),
+            Channel::Stderr => eprintln!("{line}"),
+        }
+    }
+
+    // As `put` on stderr, above the waiting spinners, which keep drawing.
+    fn put_above_spinners(&self, text: &Shown) {
+        self.record_plain(Channel::Stderr, text);
+        let _ = self.mp.println(self.guarded(Channel::Stderr, text));
+    }
+
+    // `text` as `channel` gets it: selfie's own styling kept when the stream
+    // has colors and removed otherwise, and anything else that could act on
+    // the terminal escaped.
+    fn guarded(&self, channel: Channel, text: &Shown) -> String {
+        let line = guard(text.as_str(), self.colors(channel)).into_owned();
+        #[cfg(test)]
+        self.record_emitted(channel, &line);
+        line
+    }
+
+    #[cfg(test)]
+    fn record_emitted(&self, channel: Channel, line: &str) {
+        if let Ok(mut emitted) = self.emitted.lock() {
+            emitted.push((channel, line.to_string()));
+        }
     }
 
     /// Print a styled key-value pair (stdout, for config display, etc.), the
@@ -1555,11 +1628,8 @@ impl DisplayManager {
         // The printer styles the value itself, so any styling in it is removed.
         let value = value.into().guarded(false);
         self.println_after(
-            shown!(
-                "  {} ",
-                Shown::from(key).paint(self.use_colors, |s| s.italic().dim())
-            ),
-            value.paint(self.use_colors, |s| s.bold()),
+            shown!("  {} ", Shown::from(key).painted(|s| s.italic().dim())),
+            value.painted(|s| s.bold()),
         );
     }
 
@@ -1692,10 +1762,10 @@ impl<'a> ResultCard<'a> {
         self.display.println(lit!(""));
         self.display.print_section_header(self.title);
 
-        let use_colors = self.display.use_colors();
         for (key, value, pad) in self.fields {
+            // The guard removes the key's styling where stdout has none.
             self.display.println_after(
-                shown!("{}{}: {}", INDENT, format_key(key, use_colors), spaces(pad)),
+                shown!("{}{}: {}", INDENT, format_key(key, true), spaces(pad)),
                 value,
             );
         }
@@ -1854,7 +1924,7 @@ fn elapsed(duration: Duration) -> String {
 impl std::fmt::Debug for DisplayManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DisplayManager")
-            .field("use_colors", &self.use_colors)
+            .field("colors", &self.colors)
             .field("is_tty", &self.is_tty)
             .field("verbosity", &self.verbosity)
             .finish()
@@ -2395,7 +2465,7 @@ mod tests {
     #[test]
     fn test_display_manager_creation() {
         let dm = DisplayManager::new(false);
-        assert!(!dm.use_colors());
+        assert_eq!(dm.colors, StreamColors::default());
     }
 
     #[test]
@@ -3466,6 +3536,328 @@ mod tests {
         assert_eq!(
             verbose.printed(),
             vec![(Channel::Stderr, "Loading specs...".to_string())]
+        );
+    }
+
+    // What one printer does to a display, and the stream it writes to.
+    type Printing = (&'static str, Channel, fn(&DisplayManager));
+
+    // Every printer that styles what it writes, each through selfie's own
+    // styling, so a line it writes holds an SGR sequence exactly when it kept
+    // that styling.
+    fn styling_printers() -> Vec<Printing> {
+        use selfie::package::event::Outcome;
+
+        fn red() -> Shown {
+            Shown::from(lit!("x")).painted(|s| s.red())
+        }
+        vec![
+            ("info", Channel::Stdout, |d| d.print_info(lit!("x"))),
+            ("success", Channel::Stdout, |d| d.print_success(lit!("x"))),
+            ("result", Channel::Stdout, |d| {
+                d.print_result(Outcome::Clean, lit!("x"));
+            }),
+            ("println", Channel::Stdout, |d| d.println(red())),
+            ("println_after", Channel::Stdout, |d| {
+                d.println_after(red(), lit!("x"));
+            }),
+            ("field", Channel::Stdout, |d| {
+                d.print_field(lit!("k:"), lit!("v"))
+            }),
+            ("diff", Channel::Stdout, |d| {
+                d.print_diff(Diff::new("--- a\n+++ b\n@@ -1 +1 @@\n-x\n+y\n"));
+            }),
+            ("entry row", Channel::Stdout, |d| {
+                d.print_entry_row(&EntryRow {
+                    outcome: crate::entry_rows::EntryOutcome::Deployed,
+                    source: crate::source_paths::SourceText::Plain(DisplayPath::new("s").into()),
+                    target: DisplayPath::new("t"),
+                    detail: None,
+                });
+            }),
+            ("result card", Channel::Stdout, |d| {
+                d.result_card(lit!("T")).field(lit!("k"), lit!("v")).print();
+            }),
+            ("section header", Channel::Stdout, |d| {
+                d.print_section_header(lit!("x"));
+            }),
+            ("error", Channel::Stderr, |d| d.print_error(lit!("x"))),
+            ("warning", Channel::Stderr, |d| d.print_warning(lit!("x"))),
+            ("run note", Channel::Stderr, |d| d.print_run_note(lit!("x"))),
+            ("progress", Channel::Stderr, |d| d.print_progress(lit!("x"))),
+            ("suggestion", Channel::Stderr, |d| {
+                d.print_suggestion(lit!("x"))
+            }),
+            ("note", Channel::Stderr, |d| d.print_note(red())),
+            ("error context", Channel::Stderr, |d| {
+                d.print_error_context(lit!("x"));
+            }),
+            ("stderr section header", Channel::Stderr, |d| {
+                d.print_section_header_to(Channel::Stderr, lit!("x"));
+            }),
+            ("verbose command output", Channel::Stderr, |d| {
+                d.start_waiting(ONE, Name::new("step"));
+                d.command_output(ONE, Output::line("out"));
+            }),
+        ]
+    }
+
+    fn styled(line: &str) -> bool {
+        line.contains("\u{1b}[")
+    }
+
+    fn other(channel: Channel) -> Channel {
+        match channel {
+            Channel::Stdout => Channel::Stderr,
+            Channel::Stderr => Channel::Stdout,
+        }
+    }
+
+    fn display_for(colored: Channel) -> DisplayManager {
+        DisplayManager::new(true)
+            .with_verbosity(Verbosity::Verbose)
+            .drawing_as_a_terminal()
+            .colored(colored)
+    }
+
+    // A printer keeps selfie's styling exactly when the stream it writes to has
+    // colors: colored on its own stream it writes SGR there, and colored only
+    // on the other stream it writes none, on either stream.
+    #[test]
+    fn each_printer_styles_only_when_its_own_stream_has_colors() {
+        for (name, channel, print) in styling_printers() {
+            let own = display_for(channel);
+            print(&own);
+            let emitted = own.emitted();
+            assert!(!emitted.is_empty(), "{name} wrote nothing");
+            assert!(
+                emitted.iter().all(|(stream, _)| *stream == channel),
+                "{name} wrote on another stream: {emitted:?}"
+            );
+            assert!(
+                emitted.iter().any(|(_, line)| styled(line)),
+                "{name} wrote no styling with its stream colored: {emitted:?}"
+            );
+
+            let elsewhere = display_for(other(channel));
+            print(&elsewhere);
+            let emitted = elsewhere.emitted();
+            assert!(
+                emitted.iter().all(|(_, line)| !styled(line)),
+                "{name} wrote styling its stream has no colors for: {emitted:?}"
+            );
+        }
+    }
+
+    // A waiting step's mark is written above the spinners on stderr, so it
+    // follows stderr's colors.
+    #[test]
+    fn a_waiting_steps_mark_follows_stderr() {
+        for (colored, expect_styled) in [(Channel::Stderr, true), (Channel::Stdout, false)] {
+            let dm = DisplayManager::new(true)
+                .drawing_as_a_terminal()
+                .colored(colored);
+            dm.start_waiting(ONE, Name::new("step"));
+            dm.end_waiting(ONE, StepEnding::Succeeded);
+
+            let emitted = dm.emitted();
+            assert_eq!(emitted.len(), 1, "{emitted:?}");
+            assert_eq!(emitted[0].0, Channel::Stderr);
+            assert!(emitted[0].1.contains('✓'), "{emitted:?}");
+            assert_eq!(styled(&emitted[0].1), expect_styled, "{emitted:?}");
+        }
+    }
+
+    // A suggestion's note above the question is written by the guarded writer,
+    // on stderr, with the question's own draw.
+    #[test]
+    fn a_suggestions_note_is_written_on_stderr() {
+        let dm = DisplayManager::new(true)
+            .colored(Channel::Stdout)
+            .answering(vec![answer(String::new())]);
+
+        dm.input(
+            lit!("Environment name"),
+            Suggestion::Keepable("dev\u{1b}".to_string()),
+            Blank::Allowed,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dm.emitted(),
+            [(
+                Channel::Stderr,
+                "  Suggested: dev\\u{1b} (Enter keeps it)".to_string()
+            )]
+        );
+    }
+
+    // A stream gets colors only when the run has them on and console would
+    // give that stream colors.
+    #[test]
+    fn colors_are_on_only_where_the_config_and_the_stream_both_say_so() {
+        for use_colors in [false, true] {
+            for stdout in [false, true] {
+                for stderr in [false, true] {
+                    assert_eq!(
+                        decided(use_colors, StreamColors { stdout, stderr }),
+                        StreamColors {
+                            stdout: use_colors && stdout,
+                            stderr: use_colors && stderr,
+                        },
+                        "use_colors {use_colors}, console {stdout}/{stderr}"
+                    );
+                }
+            }
+        }
+    }
+
+    // The spinner draws on stderr, so its template follows stderr's colors.
+    #[test]
+    fn the_spinner_template_follows_stderr() {
+        let stderr = DisplayManager::new(true).colored(Channel::Stderr);
+        let stdout = DisplayManager::new(true).colored(Channel::Stdout);
+
+        assert!(stderr.spinner_template().contains(":.cyan"));
+        assert!(!stdout.spinner_template().contains(":.cyan"));
+    }
+
+    // console's color answer for stderr is process-wide, and two tests set
+    // it; each holds this while it does.
+    static COLOR_GLOBAL: Mutex<()> = Mutex::new(());
+
+    // console's stderr answer set to `colors` until the guard drops, which
+    // restores it, while the test holds `COLOR_GLOBAL`.
+    struct StderrColors {
+        before: bool,
+        _held: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl StderrColors {
+        fn set(colors: bool) -> Self {
+            let held = COLOR_GLOBAL
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let before = console::colors_enabled_stderr();
+            console::set_colors_enabled_stderr(colors);
+            Self {
+                before,
+                _held: held,
+            }
+        }
+    }
+
+    impl Drop for StderrColors {
+        fn drop(&mut self) {
+            console::set_colors_enabled_stderr(self.before);
+        }
+    }
+
+    // Everything `theme` draws, through every method dialoguer's prompts call,
+    // with each choice a method takes.
+    fn everything_drawn(theme: &dyn dialoguer::theme::Theme) -> Vec<String> {
+        let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+        type Draw<'a> = Box<dyn Fn(&mut String) -> std::fmt::Result + 'a>;
+        let draws: Vec<Draw<'_>> = vec![
+            Box::new(|f| theme.format_prompt(f, "p")),
+            Box::new(|f| theme.format_error(f, "e")),
+            Box::new(|f| theme.format_confirm_prompt(f, "p", Some(true))),
+            Box::new(|f| theme.format_confirm_prompt(f, "p", Some(false))),
+            Box::new(|f| theme.format_confirm_prompt(f, "p", None)),
+            Box::new(|f| theme.format_confirm_prompt_selection(f, "p", Some(true))),
+            Box::new(|f| theme.format_confirm_prompt_selection(f, "p", Some(false))),
+            Box::new(|f| theme.format_confirm_prompt_selection(f, "p", None)),
+            Box::new(|f| theme.format_input_prompt(f, "p", Some("d"))),
+            Box::new(|f| theme.format_input_prompt(f, "", Some("d"))),
+            Box::new(|f| theme.format_input_prompt(f, "p", None)),
+            Box::new(|f| theme.format_input_prompt_selection(f, "p", "s")),
+            Box::new(|f| theme.format_password_prompt(f, "p")),
+            Box::new(|f| theme.format_password_prompt_selection(f, "p")),
+            Box::new(|f| theme.format_select_prompt(f, "p")),
+            Box::new(|f| theme.format_select_prompt_selection(f, "p", "s")),
+            Box::new(|f| theme.format_multi_select_prompt(f, "p")),
+            Box::new(|f| theme.format_multi_select_prompt_selection(f, "p", &["a", "b"])),
+            Box::new(|f| theme.format_sort_prompt(f, "p")),
+            Box::new(|f| theme.format_sort_prompt_selection(f, "p", &["a", "b"])),
+            Box::new(|f| theme.format_fuzzy_select_prompt(f, "p", "ab", 1)),
+        ];
+        let mut drawn: Vec<String> = draws
+            .iter()
+            .map(|draw| {
+                let mut text = String::new();
+                draw(&mut text).unwrap();
+                text
+            })
+            .collect();
+        for one in [true, false] {
+            let mut text = String::new();
+            theme
+                .format_select_prompt_item(&mut text, "t", one)
+                .unwrap();
+            drawn.push(text);
+            for other in [true, false] {
+                let mut text = String::new();
+                theme
+                    .format_multi_select_prompt_item(&mut text, "t", one, other)
+                    .unwrap();
+                theme
+                    .format_sort_prompt_item(&mut text, "t", one, other)
+                    .unwrap();
+                theme
+                    .format_fuzzy_select_prompt_item(&mut text, "abc", one, other, &matcher, "b")
+                    .unwrap();
+                drawn.push(text);
+            }
+        }
+        drawn
+    }
+
+    // The colorful theme draws the same, styled, whatever console's own answer
+    // for stderr is, since the display chose it for a stream it colors. A
+    // style left to console's answer draws plain once that answer is no.
+    #[test]
+    fn the_colorful_theme_styles_whatever_consoles_state_says() {
+        let theme = prompts::colorful_theme();
+        let with = {
+            let _colors = StderrColors::set(true);
+            everything_drawn(&theme)
+        };
+        let without = {
+            let _colors = StderrColors::set(false);
+            everything_drawn(&theme)
+        };
+
+        assert!(with.iter().any(|text| styled(text)), "{with:?}");
+        assert_eq!(with, without);
+    }
+
+    // A fuzzy select bolds its matches only where the display gives stderr
+    // colors: the plain theme would bold them through console's own answer.
+    #[test]
+    fn the_fuzzy_highlight_follows_stderr() {
+        use dialoguer::theme::{SimpleTheme, Theme};
+
+        let plain = DisplayManager::new(true).colored(Channel::Stdout);
+        let mut item = String::new();
+        {
+            let _colors = StderrColors::set(true);
+            SimpleTheme
+                .format_fuzzy_select_prompt_item(
+                    &mut item,
+                    "abc",
+                    true,
+                    plain.fuzzy_highlights(),
+                    &fuzzy_matcher::skim::SkimMatcherV2::default(),
+                    "b",
+                )
+                .unwrap();
+        }
+
+        assert!(!styled(&item), "{item:?}");
+        assert!(
+            DisplayManager::new(true)
+                .colored(Channel::Stderr)
+                .fuzzy_highlights()
         );
     }
 }
