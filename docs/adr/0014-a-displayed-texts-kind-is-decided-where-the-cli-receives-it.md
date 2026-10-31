@@ -154,8 +154,10 @@ when it is pasted.
    `selfie::fs` exports one helper that quotes a word with `shlex::try_quote`, and
    `selfie::fs::shell_quote` calls it for a path after holding a leading `~/` outside the quotes, so
    the shell still expands it. A name argument goes to the word helper, not to `shell_quote`, so a
-   name starting with `~` is quoted whole. `selfie-cli` quotes only through these two and does not
-   depend on `shlex` itself.
+   name starting with `~` is quoted whole. `selfie::fs::shell_operand` calls the word helper for a
+   name passed as a command's operand, after `--` when it starts with a dash, so the library's
+   sentences and the CLI's commands name one operand the same way. `selfie-cli` quotes only through
+   these three and does not depend on `shlex` itself.
 2. `try_quote` (shlex 2.0.1) refuses only a string holding NUL. It leaves a word bare only when
    every byte is ASCII and in its safe set; any byte at or above 0x80 makes it quote, so `café`
    comes back as `'café'`. Inside the quotes it emits every byte other than the quote characters as

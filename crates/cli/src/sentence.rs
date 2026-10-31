@@ -6,7 +6,8 @@ use std::fmt::Display;
 
 use selfie::commands::runner::TimedOut;
 use selfie::config::ConfigLoadError;
-use selfie::dotfile_service::DeployStateWarning;
+use selfie::fs::FileSystemError;
+use selfie::fs::target::StatePathError;
 use selfie::namespace::{NamespaceConflict, NamespaceValidationError};
 use selfie::package::event::{
     CheckFailure, OperationFailure, OperationSuccess, OperationType, SkipReason, SpecStatus,
@@ -44,7 +45,7 @@ macro_rules! sentences {
 sentences!(
     CheckFailure,
     ConfigLoadError,
-    DeployStateWarning,
+    FileSystemError,
     NamespaceConflict,
     NamespaceValidationError,
     OperationFailure,
@@ -57,10 +58,12 @@ sentences!(
     ParseFailure,
     SkipReason,
     SpecStatus,
+    StatePathError,
     SyncError,
     TimedOut,
     UncheckedSource,
     UnknownStatus,
+    selfie::yaml::SerializeFailure,
     std::io::Error,
 );
 

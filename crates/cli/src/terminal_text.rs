@@ -611,12 +611,13 @@ pub(crate) enum Word<'a> {
     /// Holds selfie's own word, such as `mkdir` or `--`, which goes in as
     /// written.
     Literal(Literal),
-    /// Holds a name from outside selfie, which is quoted whole as one shell
-    /// word, a leading `~` included.
-    Name(&'a str),
     /// Holds a path, which is quoted as shell words with a leading `~/` left
     /// outside the quotes, so the shell still expands it.
     Path(&'a std::path::Path),
+    /// Holds a name from outside selfie passed as a command's operand, quoted
+    /// whole as one shell word, a leading `~` included, after `--` when it
+    /// starts with a dash.
+    Operand(&'a str),
 }
 
 impl Word<'_> {
@@ -625,8 +626,8 @@ impl Word<'_> {
     fn quoted(self) -> Option<String> {
         match self {
             Self::Literal(word) => Some(word.as_str().to_string()),
-            Self::Name(name) => selfie::fs::shell_word(name).map(Cow::into_owned),
             Self::Path(path) => selfie::fs::shell_quote(path),
+            Self::Operand(name) => selfie::fs::shell_operand(name),
         }
     }
 }
@@ -1139,16 +1140,16 @@ mod tests {
         let path = |text: &'static str| mkdir(Word::Path(std::path::Path::new(text)));
         let some = |text: &str| Some(text.to_string());
 
-        assert_eq!(mkdir(Word::Name("tool")), some("mkdir tool"));
-        assert_eq!(mkdir(Word::Name("~/x")), some("mkdir '~/x'"));
-        assert_eq!(mkdir(Word::Name("~x")), some("mkdir '~x'"));
-        assert_eq!(mkdir(Word::Name("café")), some("mkdir 'café'"));
-        assert_eq!(mkdir(Word::Name("it's")), some("mkdir \"it's\""));
+        assert_eq!(mkdir(Word::Operand("tool")), some("mkdir tool"));
+        assert_eq!(mkdir(Word::Operand("~/x")), some("mkdir '~/x'"));
+        assert_eq!(mkdir(Word::Operand("~x")), some("mkdir '~x'"));
+        assert_eq!(mkdir(Word::Operand("café")), some("mkdir 'café'"));
+        assert_eq!(mkdir(Word::Operand("it's")), some("mkdir \"it's\""));
         assert_eq!(path("~/x y"), some("mkdir ~/'x y'"));
         assert_eq!(path("/a b"), some("mkdir '/a b'"));
         assert_eq!(path("/a\nb\tc"), some("mkdir '/a\\nb\\tc'"));
         assert_eq!(path("/a\u{200B}b"), some("mkdir '/a\u{200B}b'"));
-        assert_eq!(mkdir(Word::Name("a\0b")), None);
+        assert_eq!(mkdir(Word::Operand("a\0b")), None);
         assert_eq!(path("/a\0b"), None);
     }
 

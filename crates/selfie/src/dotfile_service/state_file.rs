@@ -468,10 +468,10 @@ pub enum DeployStateFailure {
     /// not record the deployment of `target`. `selfie apply <name>` records it.
     #[error(
         "Tracked '{target}': the copy at '{}' and the entry in '{}' are written. The deployment \
-         was not recorded: {error}. Run `selfie apply {name}` once the state file can be \
-         written, and it records the deployment.",
+         was not recorded: {error}.{}",
         .copy.display(),
-        .spec_path.display()
+        .spec_path.display(),
+        apply_remedy(name)
     )]
     TrackUnrecorded {
         error: StateSaveError,
@@ -482,6 +482,17 @@ pub enum DeployStateFailure {
         spec_path: PathBuf,
         copy: PathBuf,
     },
+}
+
+// The `selfie apply` that records a track's deployment, its name an operand as
+// the CLI quotes one. Empty for a name holding NUL, which no shell word can carry.
+fn apply_remedy(name: &str) -> String {
+    crate::fs::shell_operand(name).map_or_else(String::new, |operand| {
+        format!(
+            " Run `selfie apply {operand}` once the state file can be written, and it records \
+             the deployment."
+        )
+    })
 }
 
 /// What selfie makes of a state directory, given what is at its path.
@@ -734,6 +745,40 @@ mod tests {
             assert_eq!(message.matches("the cause").count(), 1, "{message}");
             assert!(error.source().is_none(), "{message} also chains its cause");
         }
+    }
+
+    // Track's remedy is a command that runs as shown: a name the shell would split
+    // is quoted, a leading dash is ended as an option, and a name holding NUL gets
+    // no command at all.
+    #[test]
+    fn a_track_that_could_not_record_names_a_runnable_apply() {
+        let remedy = |name: &str| {
+            DeployStateFailure::TrackUnrecorded {
+                error: StateSaveError::Serialize(crate::yaml::SerializeFailure::Value),
+                name: name.to_string(),
+                target: "~/.apprc".to_string(),
+                spec_path: "/p/app.yml".into(),
+                copy: "/d/apprc".into(),
+            }
+            .to_string()
+        };
+
+        assert!(
+            remedy("my app").contains("Run `selfie apply 'my app'` once"),
+            "{}",
+            remedy("my app")
+        );
+        assert!(
+            remedy("-x").contains("Run `selfie apply -- -x` once"),
+            "{}",
+            remedy("-x")
+        );
+        assert!(
+            remedy("tool").contains("Run `selfie apply tool` once"),
+            "{}",
+            remedy("tool")
+        );
+        assert!(!remedy("a\0b").contains("Run `"), "{}", remedy("a\0b"));
     }
 
     // A filesystem on which the state directory is a directory. Every test whose
