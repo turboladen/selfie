@@ -456,16 +456,10 @@ mod tests {
 
     #[test]
     fn test_handle_edit_nonexistent_package() {
-        // Test behavior when package doesn't exist and no EDITOR is available
+        // A unit test sees no editor, so the editor check fails.
         let temp_dir = TempDir::new().unwrap();
         let package_dir = temp_dir.path().join("packages");
         fs::create_dir_all(&package_dir).unwrap();
-
-        // Remove EDITOR environment variable to force editor check to fail
-        let old_editor = std::env::var("EDITOR").ok();
-        unsafe {
-            std::env::remove_var("EDITOR");
-        }
 
         let service =
             test_common::create_test_service_with_config(test_config_with_dir(&package_dir));
@@ -482,13 +476,6 @@ mod tests {
 
         // Should fail with exit code 1 due to missing EDITOR
         assert_eq!(result, Exit::Failed);
-
-        // Restore EDITOR if it was set
-        if let Some(editor) = old_editor {
-            unsafe {
-                std::env::set_var("EDITOR", editor);
-            }
-        }
     }
 
     #[test]
