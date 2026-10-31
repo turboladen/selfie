@@ -208,7 +208,7 @@ fn report_existing_tracker(
                 "'{}' is tracked in spec '{}', but {}",
                 DisplayPath::new(target),
                 Name::new(spec_name),
-                crate::received::sentence(rejection.message())
+                crate::received::message(rejection.message())
             ));
             // `NoHome` is the machine's state rather than the spec's: that entry
             // is correct and editing it would break a spec that works everywhere
@@ -216,7 +216,7 @@ fn report_existing_tracker(
             // in a file the user can open, and the path to open is what they
             // need rather than advice on choosing a target.
             if matches!(rejection, selfie::fs::TargetRejection::NoHome) {
-                display.print_suggestion(crate::received::sentence(rejection.suggestion()));
+                display.print_suggestion(crate::received::message(rejection.suggestion()));
             } else {
                 display.print_suggestion(shown!(
                     "Edit {} to correct the target.",
@@ -235,7 +235,7 @@ fn report_existing_tracker(
     if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded)
         && warned.insert(warning.clone())
     {
-        display.print_warning(crate::received::sentence(warning));
+        display.print_warning(crate::received::message(warning));
     }
 
     display.print_info(shown!(
@@ -394,7 +394,7 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
                 "The dotfiles directory at {} {}. A standalone dotfile cannot be tracked until \
                  that is fixed.",
                 DisplayPath::of(path),
-                crate::received::sentence(reason.clause())
+                crate::received::message(reason.clause())
             );
             match crate::formatters::mkdir_command(path).filter(|_| reason.creatable()) {
                 Some(mkdir) => crate::terminal_text::noted(

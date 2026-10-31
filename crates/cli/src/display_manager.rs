@@ -2218,7 +2218,7 @@ mod tests {
     #[test]
     fn a_message_ending_in_a_carriage_return_shows_none() {
         let display = DisplayManager::new(false);
-        display.print_info(crate::received::sentence("one\r\n"));
+        display.print_info(crate::received::message("one\r\n"));
 
         assert_eq!(display.printed(), [(Channel::Stdout, "one".to_string())]);
     }

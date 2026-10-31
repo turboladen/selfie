@@ -198,8 +198,8 @@ fn sudo_policy(config: &CliConfig) -> SudoPolicy<RealPrivilege> {
 /// whose answers a refusal afterward would discard.
 pub(crate) fn refuse_under_sudo(config: &CliConfig, display: &DisplayManager) -> Option<Exit> {
     let refusal = sudo_policy(config).refusal(WriteScope::Dotfiles)?;
-    display.print_error(crate::received::sentence(refusal.message()));
-    display.print_suggestion(crate::received::sentence(refusal.suggestion()));
+    display.print_error(crate::received::message(refusal.message()));
+    display.print_suggestion(crate::received::message(refusal.suggestion()));
     Some(Exit::Failed)
 }
 
