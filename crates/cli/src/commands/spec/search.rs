@@ -1,4 +1,4 @@
-use crate::terminal_text::{Prose, shown};
+use crate::terminal_text::{Name, shown};
 use selfie::package::event::{OperationResult, PackageEvent};
 use selfie::package::service::SpecService;
 
@@ -18,7 +18,7 @@ pub(crate) async fn handle_search(
 ) -> Exit {
     tracing::debug!("Running spec search command (pattern={pattern:?})");
 
-    display.print_status(shown!("Searching specs for \"{}\"...", Prose::new(pattern)));
+    display.print_status(shown!("Searching specs for \"{}\"...", Name::new(pattern)));
 
     let event_stream = service.search(pattern).await;
 
@@ -229,5 +229,29 @@ mod tests {
             message: "some debug".to_string(),
         };
         assert!(!handle_spec_list_event(&debug_event, &config, &display));
+    }
+
+    // The pattern is what the user typed, shown as a name: an invisible
+    // character in it shows escaped rather than as nothing.
+    #[tokio::test]
+    async fn the_searched_pattern_shows_an_invisible_character() {
+        use selfie::package::{event::EventStream, service::MockSpecService};
+
+        let mut service = MockSpecService::new();
+        service
+            .expect_search()
+            .return_once(|_| Box::pin(async { Box::pin(stream::iter(Vec::new())) as EventStream }));
+        let display =
+            DisplayManager::new(false).with_verbosity(crate::display_manager::Verbosity::Verbose);
+
+        let _ = handle_search(&service, "rip\u{200b}grep", &test_config(), &display).await;
+
+        let printed = display.printed();
+        assert!(
+            printed
+                .iter()
+                .any(|(_, line)| line == "Searching specs for \"rip\\u{200b}grep\"..."),
+            "{printed:?}"
+        );
     }
 }

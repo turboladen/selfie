@@ -151,7 +151,7 @@ async fn create_for_edit(
                 "'{}' is a standalone dotfile spec, and `spec edit` opens package specs only. \
                  Edit {} directly.",
                 Name::new(package_name),
-                crate::received::sentence(conflict.claimants())
+                crate::received::message(conflict.claimants())
             ),
             namespace::NamespaceValidationError::Conflict(
                 conflict @ namespace::NamespaceConflict {
@@ -162,7 +162,7 @@ async fn create_for_edit(
                 "Several standalone dotfile specs claim '{}', {}, and `spec edit` opens package \
                  specs only. Remove all but one, then edit the one left directly.",
                 Name::new(package_name),
-                crate::received::sentence(conflict.claimants())
+                crate::received::message(conflict.claimants())
             ),
             _ => name_check_refusal(package_name, &error),
         });

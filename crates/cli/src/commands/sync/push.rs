@@ -75,8 +75,8 @@ pub(crate) async fn handle_push(
         // does for the same refusal on the apply path. The `Display` impl joins
         // both halves for callers with nowhere separate to put one.
         Err(SyncError::Privilege(refusal)) => {
-            display.print_error(received::sentence(refusal.message()));
-            display.print_suggestion(received::sentence(refusal.suggestion()));
+            display.print_error(received::message(refusal.message()));
+            display.print_suggestion(received::message(refusal.suggestion()));
             return Exit::Failed;
         }
         Err(e) => {
@@ -86,7 +86,7 @@ pub(crate) async fn handle_push(
     };
 
     for warning in &warnings {
-        display.print_warning(received::sentence(warning));
+        display.print_warning(received::message(warning));
     }
 
     if pending_commits.is_empty() && ahead == 0 {
