@@ -1,5 +1,4 @@
 use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
-use dialoguer::{Confirm, Input, MultiSelect, Select, theme::SimpleTheme};
 use selfie::{
     namespace::{self, NamespaceValidationError},
     package::{
@@ -15,7 +14,7 @@ use crate::formatters::name_argument;
 
 use crate::{
     config::CliConfig,
-    display_manager::{DisplayManager, PromptFailure},
+    display_manager::{Blank, Choice, DisplayManager, PromptFailure, Suggestion},
     event_processor::{EventProcessor, Exit},
 };
 
@@ -103,10 +102,9 @@ pub(crate) async fn handle_create(
         return created_exit;
     }
 
-    let edit_now = display.prompt(
-        Confirm::with_theme(&SimpleTheme)
-            .with_prompt("Would you like to open the package file for editing now?")
-            .default(true),
+    let edit_now = display.confirm(
+        lit!("Would you like to open the package file for editing now?"),
+        true,
     );
 
     let edit_later = || {
@@ -239,6 +237,14 @@ fn refuse_interactive(display: &DisplayManager, failure: &PromptFailure) -> Exit
     )
 }
 
+/// What to do about a package already under the name asked for.
+#[derive(Clone, Copy)]
+enum Existing {
+    Edit,
+    Rename,
+    Cancel,
+}
+
 fn get_valid_package_name(
     initial_name: &str,
     repo: &impl PackageRepository,
@@ -280,27 +286,28 @@ fn get_valid_package_name(
                         crate::received::sentence(&conflict)
                     ));
 
-                    let action = display.prompt(
-                        Select::with_theme(&SimpleTheme)
-                            .with_prompt("What would you like to do?")
-                            .items([
-                                "Edit the existing package",
-                                "Create a new package with a different name",
-                                "Cancel",
-                            ])
-                            .default(0),
+                    let action = display.select(
+                        lit!("What would you like to do?"),
+                        &[
+                            Choice::labeled(lit!("Edit the existing package"), Existing::Edit),
+                            Choice::labeled(
+                                lit!("Create a new package with a different name"),
+                                Existing::Rename,
+                            ),
+                            Choice::labeled(lit!("Cancel"), Existing::Cancel),
+                        ],
                     );
 
                     match action {
-                        Ok(0) => {
+                        Ok(Existing::Edit) => {
                             return Ok(PackageNameResult::EditExisting(
                                 existing_package.file_path().to_path_buf(),
                             ));
                         }
-                        Ok(1) => {
+                        Ok(Existing::Rename) => {
                             // Fall through to prompt for new name below
                         }
-                        Ok(_) => return Ok(PackageNameResult::Canceled),
+                        Ok(Existing::Cancel) => return Ok(PackageNameResult::Canceled),
                         Err(failure) => {
                             return Err(display.refuse_prompt(
                                 &failure,
@@ -340,19 +347,24 @@ fn get_valid_package_name(
                 }
 
                 current_name = loop {
-                    let name: String =
-                        match display.prompt(Input::with_theme(&SimpleTheme).with_prompt(format!(
-                            "Enter a new package name (attempt {retry_count}/{MAX_NAME_RETRIES})"
-                        ))) {
-                            Ok(name) => name,
-                            Err(failure) => {
-                                return Err(display.refuse_prompt(
-                                    &failure,
-                                    lit!("Choosing a different name"),
-                                    lit!("Run 'selfie spec create' again with a different name."),
-                                ));
-                            }
-                        };
+                    let name = match display.input(
+                        shown!(
+                            "Enter a new package name (attempt {}/{})",
+                            retry_count,
+                            MAX_NAME_RETRIES
+                        ),
+                        Suggestion::Nothing,
+                        Blank::Refused(lit!("Package name cannot be empty.")),
+                    ) {
+                        Ok(name) => name,
+                        Err(failure) => {
+                            return Err(display.refuse_prompt(
+                                &failure,
+                                lit!("Choosing a different name"),
+                                lit!("Run 'selfie spec create' again with a different name."),
+                            ));
+                        }
+                    };
                     // As the first name prompt does: a name the rule refuses would
                     // be refused only when the spec is written.
                     match crate::received::invalid_name_refusal(&name) {
@@ -431,10 +443,10 @@ fn create_package_interactive(
 fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<String, Exit> {
     loop {
         let name = display
-            .prompt(
-                Input::with_theme(&SimpleTheme)
-                    .with_prompt("Package name")
-                    .default(default_name.to_string()),
+            .input(
+                lit!("Package name"),
+                crate::received::spec_name_suggestion(default_name),
+                Blank::Refused(lit!("Package name cannot be empty.")),
             )
             .map_err(|failure| refuse_interactive(display, &failure))?;
 
@@ -448,11 +460,11 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
 }
 
 fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, Exit> {
-    let homepage: String = display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("Homepage URL (optional)")
-                .allow_empty(true),
+    let homepage = display
+        .input(
+            lit!("Homepage URL (optional)"),
+            Suggestion::Nothing,
+            Blank::Allowed,
         )
         .map_err(|failure| refuse_interactive(display, &failure))?;
 
@@ -464,11 +476,11 @@ fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, E
 }
 
 fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>, Exit> {
-    let description: String = display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("Description (optional)")
-                .allow_empty(true),
+    let description = display
+        .input(
+            lit!("Description (optional)"),
+            Suggestion::Nothing,
+            Blank::Allowed,
         )
         .map_err(|failure| refuse_interactive(display, &failure))?;
 
@@ -526,12 +538,19 @@ fn prompt_environment_name(
     let default_env = default_environment_name(existing_environments, config);
 
     loop {
-        let mut input = Input::with_theme(&SimpleTheme).with_prompt("Environment name");
-        if let Some(default_env) = default_env {
-            input = input.default(default_env.to_string());
-        }
+        // Keepable: an environment name is any YAML key, and the suggestion is
+        // the configured environment, which the user chose.
+        let suggested = default_env.map_or(Suggestion::Nothing, |name| {
+            Suggestion::Keepable(name.to_string())
+        });
+        // Refused blank: cleared or never filled, the name would key the
+        // environment `""`.
         let name = display
-            .prompt(input)
+            .input(
+                lit!("Environment name"),
+                suggested,
+                Blank::Refused(lit!("Environment name cannot be empty.")),
+            )
             .map_err(|failure| refuse_interactive(display, &failure))?;
 
         // A second entry under one name would replace the first.
@@ -546,30 +565,25 @@ fn prompt_environment_name(
 }
 
 fn prompt_install_command(display: &DisplayManager) -> Result<String, Exit> {
-    loop {
-        let cmd: String = display
-            .prompt(Input::with_theme(&SimpleTheme).with_prompt("Install command (required)"))
-            .map_err(|failure| refuse_interactive(display, &failure))?;
-
-        if !cmd.trim().is_empty() {
-            break Ok(cmd);
-        }
-
-        display.print_error(lit!("Install command cannot be empty."));
-    }
+    display
+        .input(
+            lit!("Install command (required)"),
+            Suggestion::Nothing,
+            Blank::Refused(lit!("Install command cannot be empty.")),
+        )
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 fn prompt_check_command(
     package_name: &str,
     display: &DisplayManager,
 ) -> Result<Option<String>, Exit> {
-    let default_check = format!("command -v {package_name}");
-    let check_cmd: String = display
-        .prompt(
-            Input::with_theme(&SimpleTheme)
-                .with_prompt("Check command (optional)")
-                .default(default_check)
-                .allow_empty(true),
+    // Pre-filled, so clearing it leaves the spec with no check command.
+    let check_cmd = display
+        .input(
+            lit!("Check command (optional)"),
+            Suggestion::Keepable(format!("command -v {package_name}")),
+            Blank::Allowed,
         )
         .map_err(|failure| refuse_interactive(display, &failure))?;
 
@@ -629,36 +643,21 @@ fn prompt_dependencies(config: &CliConfig, display: &DisplayManager) -> Result<V
         return Ok(Vec::new());
     }
 
-    let selected = display
-        .prompt(
-            MultiSelect::with_theme(&SimpleTheme)
-                .with_prompt("Dependencies (select with space, confirm with enter)")
-                .items(dependency_items(&available_packages)),
-        )
-        .map_err(|failure| refuse_interactive(display, &failure))?;
-
-    Ok(selected
-        .into_iter()
-        .map(|i| available_packages[i].clone())
-        .collect())
-}
-
-/// The dependency picker's items as it shows them: each name escaped. The
-/// choice is read back from the raw list by index.
-fn dependency_items(available: &[String]) -> Vec<String> {
-    available
+    let choices: Vec<Choice<String>> = available_packages
         .iter()
-        .map(|name| crate::terminal_text::Name::new(name).to_string())
-        .collect()
+        .map(|name| Choice::named(name, name.clone()))
+        .collect();
+    display
+        .multi_select(
+            lit!("Dependencies (select with space, confirm with enter)"),
+            &choices,
+        )
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 fn prompt_add_another_environment(display: &DisplayManager) -> Result<bool, Exit> {
     display
-        .prompt(
-            Confirm::with_theme(&SimpleTheme)
-                .with_prompt("Add another environment?")
-                .default(false),
-        )
+        .confirm(lit!("Add another environment?"), false)
         .map_err(|failure| refuse_interactive(display, &failure))
 }
 
@@ -667,15 +666,6 @@ mod tests {
     use selfie::package::port::PackageListError;
 
     use super::*;
-
-    // The picker shows a name escaped, so a name holding a filler character
-    // reads differently from the plain one it imitates.
-    #[test]
-    fn the_dependency_picker_shows_names_escaped() {
-        let available = vec!["git".to_string(), "git\u{3164}".to_string()];
-
-        assert_eq!(dependency_items(&available), ["git", "git\\u{3164}"]);
-    }
     use futures::StreamExt;
     use selfie::package::SpecService;
     use selfie::package::event::{OperationResult, OperationSuccess, PackageEvent};
@@ -828,6 +818,149 @@ mod tests {
             "{:?}",
             display.printed()
         );
+    }
+
+    // A configured environment the prompt can only show escaped is noted above
+    // an empty prompt, and Enter keeps its raw bytes.
+    #[test]
+    fn enter_keeps_a_configured_environment_shown_escaped() {
+        use crate::display_manager::answer;
+
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir_and_env(
+            "/nonexistent",
+            "dev\u{1b}",
+        ));
+        let display = DisplayManager::new(false).answering(vec![answer(String::new())]);
+
+        let name = prompt_environment_name(&Environments::new(), &config, &display).unwrap();
+
+        assert_eq!(name, "dev\u{1b}");
+        assert_eq!(
+            lines_containing(&display, r"Suggested: dev\u{1b} (Enter keeps it)"),
+            1
+        );
+    }
+
+    // A configured environment that is blank, such as U+00A0, is shown escaped
+    // and refused on Enter rather than kept as a blank-looking key.
+    #[test]
+    fn a_blank_configured_environment_is_not_kept() {
+        use crate::display_manager::answer;
+
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir_and_env(
+            "/nonexistent",
+            "\u{a0}",
+        ));
+        let display = DisplayManager::new(false)
+            .answering(vec![answer(String::new()), answer("prod".to_string())]);
+
+        let name = prompt_environment_name(&Environments::new(), &config, &display).unwrap();
+
+        assert_eq!(name, "prod");
+        assert_eq!(
+            lines_containing(&display, "Environment name cannot be empty."),
+            1
+        );
+    }
+
+    // An answer holding nothing visible, such as a Hangul filler, is blank at
+    // each required prompt: refused as empty and asked again.
+    #[test]
+    fn an_invisible_answer_is_blank_at_each_required_prompt() {
+        use crate::display_manager::answer;
+
+        let display = DisplayManager::new(false).answering(vec![
+            answer("\u{3164}".to_string()),
+            answer("fresh".to_string()),
+        ]);
+        assert_eq!(prompt_package_name("fresh", &display).unwrap(), "fresh");
+        assert_eq!(
+            lines_containing(&display, "Package name cannot be empty."),
+            1
+        );
+
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir("/nonexistent"));
+        let display = DisplayManager::new(false).answering(vec![
+            answer(" \u{ffa0}".to_string()),
+            answer("prod".to_string()),
+        ]);
+        let name = prompt_environment_name(&Environments::new(), &config, &display).unwrap();
+        assert_eq!(name, "prod");
+        assert_eq!(
+            lines_containing(&display, "Environment name cannot be empty."),
+            1
+        );
+
+        let display = DisplayManager::new(false).answering(vec![
+            answer("\u{115f}\u{200b}".to_string()),
+            answer("true".to_string()),
+        ]);
+        assert_eq!(prompt_install_command(&display).unwrap(), "true");
+        assert_eq!(
+            lines_containing(&display, "Install command cannot be empty."),
+            1
+        );
+    }
+
+    // A pre-filled environment name the user cleared is refused and asked for
+    // again; no environment is keyed `""`.
+    #[test]
+    fn a_cleared_environment_name_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir("/nonexistent"));
+        let display = DisplayManager::new(false)
+            .answering(vec![answer(String::new()), answer("prod".to_string())]);
+
+        let name = prompt_environment_name(&Environments::new(), &config, &display).unwrap();
+
+        assert_eq!(name, "prod");
+        assert_eq!(
+            lines_containing(&display, "Environment name cannot be empty."),
+            1
+        );
+    }
+
+    // An empty package name is refused as empty, not as a name the rule
+    // refuses, at the first prompt and at the "different name" prompt alike.
+    // The first prompt shows a name it cannot pre-fill in its note, each time
+    // it asks.
+    #[tokio::test]
+    async fn an_empty_package_name_is_refused_as_empty() {
+        use crate::display_manager::answer;
+
+        let display = DisplayManager::new(false)
+            .answering(vec![answer(String::new()), answer("fresh".to_string())]);
+
+        let name = prompt_package_name("my\u{200b}app", &display).unwrap();
+
+        assert_eq!(name, "fresh");
+        assert_eq!(
+            lines_containing(&display, "Package name cannot be empty."),
+            1
+        );
+        assert_eq!(lines_containing(&display, "Refusing to create"), 0);
+        assert_eq!(
+            lines_containing(&display, r"Suggested: my\u{200b}app (shown escaped"),
+            2
+        );
+
+        let (_temp, packages, config, service) = packages_holding(&["tool"]);
+        let display = DisplayManager::new(false).answering(vec![
+            answer(1_usize), // a different name
+            answer(String::new()),
+            answer("fresh".to_string()),
+        ]);
+
+        let exit = handle_create(&service, "tool", &config, &display, false).await;
+
+        assert_eq!(exit, Exit::Clean, "{:?}", display.printed());
+        assert!(packages.join("fresh.yml").exists());
+        assert_eq!(
+            lines_containing(&display, "Package name cannot be empty."),
+            1
+        );
+        assert_eq!(lines_containing(&display, "Refusing to create"), 0);
     }
 
     // Answers every prompt of an interactive create, in order, up to and including

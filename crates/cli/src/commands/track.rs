@@ -9,7 +9,6 @@ use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit, shown};
 use selfie::dotfile_service::track::Tracker;
 use std::collections::HashSet;
 
-use dialoguer::{FuzzySelect, Input, theme::ColorfulTheme};
 use selfie::{
     fs::{DirectoryState, real::RealFileSystem},
     namespace,
@@ -25,14 +24,20 @@ use tracing::info;
 use crate::{
     commands::common::{self, create_dotfiles_repository, create_package_repository},
     config::CliConfig,
-    display_manager::{DisplayManager, PromptFailure},
+    display_manager::{Blank, Choice, DisplayManager, PromptFailure, Suggestion},
     event_processor::Exit,
 };
 
-/// Sentinel item appended after real package names in the select list.
-const NEW_STANDALONE: &str = "→ New standalone dotfile";
-/// Sentinel item for free-text name entry.
-const TYPE_A_NAME: &str = "→ Let me type a name";
+/// An entry of the destination picker.
+#[derive(Clone, Debug, PartialEq)]
+enum Destination {
+    /// An existing package, by its raw name.
+    Existing(String),
+    /// A new standalone dotfile, named after the file.
+    NewStandalone,
+    /// A new standalone dotfile under a name the user types.
+    TypeAName,
+}
 
 /// What the user chose in the interactive prompt.
 #[derive(Debug, PartialEq)]
@@ -251,96 +256,79 @@ fn prompt_track_choice(
     file: &str,
     display: &DisplayManager,
 ) -> Result<TrackChoice, PromptFailure> {
-    let (shown, items) = select_items(package_names);
+    let picked = display.fuzzy_select(
+        lit!("Where should this file be tracked?"),
+        &destinations(package_names),
+    )?;
 
-    let selection = display.prompt(
-        FuzzySelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("Where should this file be tracked?")
-            .items(&shown)
-            .default(0),
-    );
-
-    let Some(choice) = selection? else {
+    let Some(destination) = picked else {
         return Ok(TrackChoice::Declined);
     };
 
-    resolve_choice(&items, choice, file, display)
+    resolve_choice(destination, file, display)
 }
 
-/// The selection list, existing packages then the two sentinel options: as the
-/// prompt shows it, escaped, and as the choice is read back, raw.
-// Escaped only where it is shown: the choice is looked up in the raw list, so
-// picking a spec whose name holds an escaped character tracks into that spec,
-// not into one named by its escaped spelling.
-fn select_items(package_names: &[String]) -> (Vec<String>, Vec<String>) {
-    let mut items: Vec<String> = package_names.to_vec();
-    items.push(NEW_STANDALONE.to_string());
-    items.push(TYPE_A_NAME.to_string());
-    let shown = items
+/// The picker's entries: existing packages, then the two ways to make a new
+/// standalone dotfile.
+// A package's entry holds its raw name, so picking a spec whose name the picker
+// shows escaped tracks into that spec, not into one named by its escaped
+// spelling.
+fn destinations(package_names: &[String]) -> Vec<Choice<Destination>> {
+    package_names
         .iter()
-        .map(|item| crate::terminal_text::Name::new(item).to_string())
-        .collect();
-    (shown, items)
+        .map(|name| Choice::named(name, Destination::Existing(name.clone())))
+        .chain([
+            Choice::labeled(lit!("→ New standalone dotfile"), Destination::NewStandalone),
+            Choice::labeled(lit!("→ Let me type a name"), Destination::TypeAName),
+        ])
+        .collect()
 }
 
-/// Given the selection list and the chosen index, determine the action, asking
-/// for a name when the choice needs one.
+/// The action for the picked `destination`, asking for a name when it needs
+/// one.
 ///
 /// # Errors
 ///
 /// [`PromptFailure`] when the name prompt got no answer.
 fn resolve_choice(
-    items: &[String],
-    choice: usize,
+    destination: Destination,
     file: &str,
     display: &DisplayManager,
 ) -> Result<TrackChoice, PromptFailure> {
-    let selected = &items[choice];
-
-    let default = if selected == TYPE_A_NAME {
-        None
-    } else if selected == NEW_STANDALONE {
-        offered_name(file)
-    } else {
-        return Ok(TrackChoice::ExistingPackage(selected.clone()));
+    // A blank answer under the file's own name declines it; asked to type a
+    // name, the user is asked again, so one stray Enter does not end the run.
+    let (suggested, blank) = match destination {
+        Destination::Existing(name) => return Ok(TrackChoice::ExistingPackage(name)),
+        Destination::NewStandalone => (
+            crate::received::spec_name_suggestion(&suggest_name(file)),
+            Blank::Allowed,
+        ),
+        Destination::TypeAName => (
+            Suggestion::Nothing,
+            Blank::Refused(lit!("Spec name cannot be empty.")),
+        ),
     };
 
-    Ok(match prompt_for_name(default, display)? {
+    Ok(match prompt_for_name(suggested, blank, display)? {
         Some(name) => TrackChoice::NewStandalone(name),
         None => TrackChoice::Declined,
     })
 }
 
-/// Prompt for a name for the new dotfile spec, pre-filled with `default` when
-/// there is one. `None` for an empty answer.
+/// Prompt for a name for the new dotfile spec, offering `suggested`, with a
+/// blank answer handled as `blank` says. `None` for a blank answer it allows,
+/// which declines.
 ///
 /// # Errors
 ///
 /// [`PromptFailure`] when the prompt got no answer.
 fn prompt_for_name(
-    default: Option<String>,
+    suggested: Suggestion,
+    blank: Blank,
     display: &DisplayManager,
 ) -> Result<Option<String>, PromptFailure> {
-    let theme = ColorfulTheme::default();
-    let mut input = Input::with_theme(&theme).with_prompt("Name for the new dotfile spec");
-    if let Some(default) = default {
-        input = input.default(default);
-    }
-    let name: String = display.prompt(crate::display_manager::TextLine(input))?;
-    Ok(Some(name).filter(|name| !name.trim().is_empty()))
-}
-
-/// The name the prompt offers for `file`, or `None` when the prompt could only
-/// show it escaped.
-// Accepted, an escaped default would become the spec's name, backslashes and
-// all, so a name holding such a character is typed instead.
-fn offered_name(file: &str) -> Option<String> {
-    // Neither a name the prompt could only draw escaped, nor one the spec-name
-    // rule refuses, which Enter would only send back to be refused.
-    Some(suggest_name(file)).filter(|name| {
-        crate::terminal_text::Name::is_plain(name)
-            && selfie::package::spec_name_refusal(name).is_none()
-    })
+    let name = display.input(lit!("Name for the new dotfile spec"), suggested, blank)?;
+    Ok(Some(name).filter(|name| !Name::is_blank(name)))
 }
 
 /// Derive a suggested spec name from the file path.
@@ -622,37 +610,49 @@ mod tests {
         assert_eq!(count("2 specs track this file"), 1, "{printed:?}");
     }
 
-    // The prompt shows each name escaped, and the choice is read back from the
-    // raw list, so the spec picked is the one whose name holds the character.
-    #[test]
-    fn a_name_the_prompt_could_only_show_escaped_is_not_offered() {
-        assert_eq!(offered_name("~/.batrc").as_deref(), Some("batrc"));
-        assert_eq!(offered_name("~/.bat\u{1b}[2Jrc"), None);
-        assert_eq!(offered_name("~/.bat\u{202E}rc"), None);
+    // A derived name the prompt can only show escaped is noted above the
+    // prompt, and Enter alone declines rather than tracking under it.
+    #[tokio::test]
+    async fn an_escaped_suggestion_is_noted_and_enter_declines() {
+        use crate::display_manager::answer;
+
+        let (temp, _file, config) = untracked_file();
+        let file = temp.path().join(".bat\u{200b}rc");
+        std::fs::write(&file, "x").unwrap();
+        // With no packages, index 0 is "New standalone dotfile".
+        let display = DisplayManager::new(false)
+            .answering(vec![answer(Some(0_usize)), answer(String::new())]);
+
+        let exit = handle_track(
+            file.to_str().unwrap(),
+            &config,
+            &display,
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(exit, Exit::Failed, "{:?}", display.printed());
+        let notes = display
+            .printed()
+            .iter()
+            .filter(|(_, line)| line.contains(r"Suggested: bat\u{200b}rc (shown escaped"))
+            .count();
+        assert_eq!(notes, 1, "{:?}", display.printed());
     }
 
-    // A file stem holding a blank is not suggested: the prompt would draw one
-    // other than a space as a space, and the spec-name rule refuses every
-    // blank. The rule still admits the four Hangul fillers, which slice 4
-    // refuses (selfie-gr8z.73).
+    // Picking a package the picker shows escaped tracks into it by its raw name.
     #[test]
-    fn a_file_stem_with_a_visible_blank_is_not_suggested() {
-        assert_eq!(offered_name("~/.batrc").as_deref(), Some("batrc"));
-        assert_eq!(offered_name("~/.bat rc"), None);
-        assert_eq!(offered_name("~/.bat\u{A0}rc"), None);
-        assert_eq!(offered_name("~/.bat\u{2800}rc"), None);
-    }
-
-    #[test]
-    fn select_items_shows_names_escaped_and_keeps_them_raw() {
+    fn a_picked_package_is_tracked_into_by_its_raw_name() {
         let names = vec!["plain".to_string(), "evil\u{1b}[2J".to_string()];
+        let display = DisplayManager::new(false)
+            .answering(vec![crate::display_manager::answer(Some(1_usize))]);
 
-        let (shown, raw) = select_items(&names);
+        let choice = prompt_track_choice(&names, "~/.batrc", &display).unwrap();
 
-        assert_eq!(shown[1], "evil\\u{1b}[2J");
-        assert_eq!(raw[1], "evil\u{1b}[2J");
-        assert_eq!(shown[0], raw[0]);
-        assert_eq!(shown.len(), raw.len());
+        assert_eq!(
+            choice,
+            TrackChoice::ExistingPackage("evil\u{1b}[2J".to_string())
+        );
     }
 
     #[test]
@@ -1035,20 +1035,54 @@ mod tests {
         assert_eq!(exit, Exit::Failed);
     }
 
-    // A blank name is a decline too. dialoguer asks again on an empty line, so
-    // only blanks reach the check.
+    // A blank answer under the file's own name is a decline too: the track
+    // says it was canceled, and no name reaches the spec-name rule.
     #[tokio::test]
     async fn a_blank_name_fails() {
         use crate::display_manager::answer;
 
-        // With no packages, index 1 is "Let me type a name".
+        // With no packages, index 0 is "New standalone dotfile".
         let (_temp, file, config) = untracked_file();
         let display = DisplayManager::new(false)
-            .answering(vec![answer(Some(1_usize)), answer("  ".to_string())]);
+            .answering(vec![answer(Some(0_usize)), answer("  ".to_string())]);
 
         let exit = handle_track(&file, &config, &display, CancellationToken::new()).await;
 
+        // Declined, not passed on as a name to be refused, which also fails.
         assert_eq!(exit, Exit::Failed);
+        let lines = |needle: &str| {
+            display
+                .printed()
+                .iter()
+                .filter(|(_, line)| line.contains(needle))
+                .count()
+        };
+        assert_eq!(lines("Canceled."), 1, "{:?}", display.printed());
+        assert_eq!(lines("not a valid spec name"), 0, "{:?}", display.printed());
+    }
+
+    // Asked to type a name, a blank answer is asked again rather than
+    // declining the track.
+    #[test]
+    fn a_blank_typed_name_is_asked_again() {
+        use crate::display_manager::answer;
+
+        // After the one package, index 2 is "Let me type a name".
+        let display = DisplayManager::new(false).answering(vec![
+            answer(Some(2_usize)),
+            answer(String::new()),
+            answer("mine".to_string()),
+        ]);
+
+        let choice = prompt_track_choice(&["bat".to_string()], "~/.batrc", &display).unwrap();
+
+        assert_eq!(choice, TrackChoice::NewStandalone("mine".to_string()));
+        let refusals = display
+            .printed()
+            .iter()
+            .filter(|(_, line)| line.contains("Spec name cannot be empty."))
+            .count();
+        assert_eq!(refusals, 1, "{:?}", display.printed());
     }
 
     // Ctrl+C at the destination picker ends the run canceled.
@@ -1076,15 +1110,8 @@ mod tests {
 
     #[test]
     fn resolve_choice_selects_existing_package() {
-        let items = vec![
-            "alacritty".to_string(),
-            "fnm".to_string(),
-            NEW_STANDALONE.to_string(),
-            TYPE_A_NAME.to_string(),
-        ];
         let result = resolve_choice(
-            &items,
-            0,
+            Destination::Existing("alacritty".to_string()),
             "~/.config/test.toml",
             &DisplayManager::new(false),
         );

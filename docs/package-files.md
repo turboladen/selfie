@@ -56,16 +56,24 @@ name: ripgrep # for file ripgrep.yaml
 
 A name uses only letters, digits, `-`, `_`, `.`, `@` and `+`. It may not start or end with a dot,
 and may not itself end in `.yml` or `.yaml`, so `python3.11.yml`, `node@20.yml` and `g++.yml` are
-packages named `python3.11`, `node@20` and `g++`. The same rule covers the `name:` field, which
-`selfie spec validate` reports, and the file name, which selfie checks as it loads the directory. A
-file whose name breaks it, such as `my app.yml` or `.hidden.yml`, is not loaded: every command that
-lists specs reports it as a spec that could not be loaded (the MCP server's `kind` is
-`invalid_name`), and it deploys and installs nothing until it is renamed. `selfie spec create` and
-the MCP server's `selfie_spec_create` refuse such a name rather than write the file. A create judges
-the file it writes the way every later command finds the spec, by its file name: it refuses a file
-name the loader would not read or one outside the package directory, looks up the name the file name
-gives, and reports the created package under that name. `selfie spec create --interactive` asks for
-the package name before anything else, checks that name, and writes the spec to `<name>.yml`.
+packages named `python3.11`, `node@20` and `g++`. The Hangul fillers U+115F, U+1160, U+3164 and
+U+FFA0 count as letters to Unicode but show as nothing, so a name may not hold them. The same rule
+covers the `name:` field, which `selfie spec validate` reports, and the file name, which selfie
+checks as it loads the directory. A file whose name breaks it, such as `my app.yml` or
+`.hidden.yml`, is not loaded: every command that lists specs reports it as a spec that could not be
+loaded (the MCP server's `kind` is `invalid_name`), and it deploys and installs nothing until it is
+renamed. A package that lists it as a dependency reports that dependency as one it cannot use.
+`selfie spec create` and the MCP server's `selfie_spec_create` refuse such a name rather than write
+the file. A create judges the file it writes the way every later command finds the spec, by its file
+name: it refuses a file name the loader would not read or one outside the package directory, looks
+up the name the file name gives, and reports the created package under that name.
+`selfie spec create --interactive` asks for the package name before anything else, checks that name,
+and writes the spec to `<name>.yml`. A suggested answer, such as the configured environment or the
+check command, is filled in ready to edit: clear the check command to leave the spec without one. A
+suggestion holding a character the terminal would not show as written is shown escaped above an
+empty prompt instead: Enter there keeps the configured environment, while a package name shown that
+way can never be valid, so Enter asks for one again. The package name, environment and install
+command cannot be left empty.
 
 Names are compared ignoring case, so `neovim` and `Neovim` are one package: a spec stored as
 `Neovim.yml` answers to either. The extension folds the same way, and does not distinguish one

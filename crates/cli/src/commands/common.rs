@@ -330,7 +330,7 @@ pub(crate) fn open_editor(
     display: &DisplayManager,
     success_message: Option<Shown>,
 ) -> Exit {
-    let Ok(editor) = std::env::var("EDITOR") else {
+    let Some(editor) = configured_editor() else {
         report_missing_editor(display);
         return Exit::Failed;
     };
@@ -365,6 +365,17 @@ pub(crate) fn open_editor(
     }
 }
 
+// The editor `EDITOR` names. A unit test runs in-process with the user's
+// environment, so under test there is none: a test reaching an editor path,
+// or a mutant steering one there, must never launch the user's editor.
+fn configured_editor() -> Option<String> {
+    if cfg!(test) {
+        None
+    } else {
+        std::env::var("EDITOR").ok()
+    }
+}
+
 // The error and its remedy, both on stderr.
 fn report_missing_editor(display: &DisplayManager) {
     display.print_error(lit!("EDITOR environment variable is not set."));
@@ -381,7 +392,7 @@ pub(crate) fn check_editor_available(
     package_exists: bool,
     package_path: Option<&Path>,
 ) -> Option<String> {
-    if let Ok(editor) = std::env::var("EDITOR") {
+    if let Some(editor) = configured_editor() {
         Some(editor)
     } else {
         display.print_error(lit!("EDITOR environment variable is not set."));
@@ -430,6 +441,25 @@ pub(crate) fn create_package_service(
 mod tests {
     use super::*;
     use selfie::package::port::MockPackageRepository;
+
+    // Whatever EDITOR the test process inherits, no unit test can launch it:
+    // a path reaching the editor is refused as if none were set.
+    #[test]
+    fn a_unit_test_reaching_the_editor_is_told_editor_is_not_set() {
+        let temp = tempfile::tempdir().unwrap();
+        let display = DisplayManager::new(false);
+
+        let exit = open_editor(&temp.path().join("spec.yml"), &display, None);
+
+        assert_eq!(configured_editor(), None);
+        assert_eq!(exit, Exit::Failed);
+        let refusals = display
+            .printed()
+            .iter()
+            .filter(|(_, line)| line.contains("EDITOR environment variable is not set."))
+            .count();
+        assert_eq!(refusals, 1, "{:?}", display.printed());
+    }
 
     // A missing editor and its remedy are both on stderr.
     #[test]

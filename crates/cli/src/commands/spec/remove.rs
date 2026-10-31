@@ -1,5 +1,4 @@
-use crate::terminal_text::{DisplayPath, Name, lit, shown};
-use dialoguer::{Confirm, theme::SimpleTheme};
+use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use selfie::package::{
     event::{OperationResult, OperationSuccess, PackageEvent},
     service::SpecService,
@@ -99,14 +98,14 @@ pub(crate) async fn handle_remove(
             "Package '{}' is not a dependency of any other packages.",
             shown_name
         ));
-        (format!("Remove package '{shown_name}'?"), false)
+        (shown!("Remove package '{}'?", shown_name), false)
     } else if dependent_packages.is_empty() {
         display.print_warning(shown!(
             "Nothing selfie could read depends on '{}', but it could not read \
              everything, so this is not a clearance.",
             shown_name
         ));
-        (format!("Remove package '{shown_name}' anyway?"), false)
+        (shown!("Remove package '{}' anyway?", shown_name), false)
     } else {
         display.print_warning(shown!(
             "Package '{}' is a dependency of the following packages:",
@@ -119,17 +118,13 @@ pub(crate) async fn handle_remove(
             ));
         }
         (
-            "Are you sure you want to remove this package?".to_string(),
+            Shown::from(lit!("Are you sure you want to remove this package?")),
             false,
         )
     };
 
     if !skip_confirm {
-        let confirm_removal = display.prompt(
-            Confirm::with_theme(&SimpleTheme)
-                .with_prompt(prompt)
-                .default(default_answer),
-        );
+        let confirm_removal = display.confirm(prompt, default_answer);
 
         match confirm_removal {
             Ok(true) => {}

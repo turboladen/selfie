@@ -24,6 +24,7 @@ use selfie::sync_service::port::PackageValidationIssue;
 use selfie::validation::{ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
 
+use crate::display_manager::Suggestion;
 use crate::terminal_text::{
     DisplayPath, Literal, Name, Output, Prose, Shown, interim_one_line, lit, shown,
 };
@@ -591,6 +592,20 @@ pub(crate) fn invalid_name_refusal(name: &str) -> Option<Shown> {
     selfie::package::spec_name_refusal(name).map(|reason| uncreatable(name, &reason))
 }
 
+/// `name` as a prompt for a spec name suggests it: unkeepable, or nothing at
+/// all when it shows as written and the spec-name rule refuses it.
+// Unkeepable: the rule refuses every character a name's escape changes, so a
+// name the prompt can only show escaped is never a valid answer. A plain name
+// the rule refuses is not suggested: pre-filled, Enter would only send it back
+// to be refused.
+pub(crate) fn spec_name_suggestion(name: &str) -> Suggestion {
+    if Name::is_plain(name) && selfie::package::spec_name_refusal(name).is_some() {
+        Suggestion::Nothing
+    } else {
+        Suggestion::Unkeepable(name.to_string())
+    }
+}
+
 /// `error`'s sentence, each path in it a [`DisplayPath`]. `None` for a
 /// file-system error, which carries causes of its own for the caller to show.
 pub(crate) fn config_load_error(error: &ConfigLoadError) -> Option<Shown> {
@@ -747,6 +762,53 @@ impl From<&SpecListItem> for SpecItem {
 mod tests {
     use super::*;
     use selfie::package::event::UnknownStatus;
+
+    // A name that shows as written is pre-filled; one the prompt can only show
+    // escaped is unkeepable, so it is noted but never returned; a plain name
+    // the spec-name rule refuses is not suggested.
+    #[test]
+    fn a_spec_name_is_suggested_as_the_rule_and_the_escape_allow() {
+        let unkeepable = |name: &str| Suggestion::Unkeepable(name.to_string());
+
+        for (name, suggested) in [
+            ("batrc", unkeepable("batrc")),
+            ("bat\u{1b}[2Jrc", unkeepable("bat\u{1b}[2Jrc")),
+            ("bat\u{202E}rc", unkeepable("bat\u{202E}rc")),
+            ("bat\u{A0}rc", unkeepable("bat\u{A0}rc")),
+            ("bat\u{2800}rc", unkeepable("bat\u{2800}rc")),
+            ("bat rc", Suggestion::Nothing),
+            ("bat#rc", Suggestion::Nothing),
+            ("", Suggestion::Nothing),
+        ] {
+            assert_eq!(spec_name_suggestion(name), suggested, "{name:?}");
+        }
+    }
+
+    // Every name the spec-name rule accepts shows as it is written, so a prompt
+    // can pre-fill any valid name, and a suggestion that would show escaped can
+    // never be a valid one. Every character is tried, not a sample, at the
+    // start, in the middle and at the end of a name. One buffer is reused, and
+    // the escape check, which allocates nothing for a plain name, runs first.
+    #[test]
+    fn every_name_the_rule_accepts_shows_as_written() {
+        let mut name = String::new();
+        let mut shown_escaped = Vec::new();
+        for c in '\0'..=char::MAX {
+            for (before, after) in [("", "ab"), ("a", "b"), ("ab", "")] {
+                name.clear();
+                name.push_str(before);
+                name.push(c);
+                name.push_str(after);
+                if !crate::terminal_text::Name::is_plain(&name)
+                    && selfie::package::spec_name_refusal(&name).is_none()
+                {
+                    shown_escaped.push(name.clone());
+                }
+            }
+        }
+
+        assert_eq!(shown_escaped, Vec::<String>::new());
+    }
 
     fn environment(dependencies: &[&str]) -> EnvironmentStatusData {
         EnvironmentStatusData {

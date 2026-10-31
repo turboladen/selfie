@@ -173,10 +173,18 @@ when it is pasted.
    when there is no terminal, ends the run on Ctrl+C, and keeps a spinner from drawing over the
    question; under test it takes its answer from the display's script, as every prompt does; and
    each returns `Result<_, PromptFailure>`:
-   - `confirm(text: Shown) -> Result<bool, PromptFailure>`;
+   - `confirm(text: Shown, default: bool) -> Result<bool, PromptFailure>`, where `default` is the
+     answer Enter gives, since a confirm without one ignores Enter;
    - `select(text: Shown, choices: &[Choice<T>]) -> Result<T, PromptFailure>`, and a multi-select of
-     the same shape, where a `Choice` pairs the `Name` it shows with the raw value it returns;
-   - `input(text: Shown, suggested: Suggestion) -> Result<String, PromptFailure>`.
+     the same shape, where a `Choice` pairs the text it shows with the raw value it returns;
+   - `fuzzy_select` of the same shape, returning `Result<Option<T>, PromptFailure>`, which is `None`
+     when Esc declines, for a list long enough to filter;
+   - `input(text: Shown, suggested: Suggestion, blank: Blank) -> Result<String, PromptFailure>`,
+     where `Blank::Refused` prints the warning it carries and asks again on a blank answer, a kept
+     suggestion included, and `Blank::Allowed` returns it for the caller to judge.
+
+   A `Choice` shows a `Name` (`Choice::named`) or selfie's own `Literal` (`Choice::labeled`), so no
+   other kind reaches a menu.
 2. `input` decides how a suggestion is offered. When escaping it as a `Name` leaves it unchanged, it
    is pre-filled. Otherwise the prompt starts empty and a note above it shows the suggestion
    escaped. What an empty answer then means depends on whether the suggestion's bytes could be a

@@ -4,7 +4,7 @@
 //! dotfiles defined in package YAML files to their target
 //! locations on the system.
 
-use crate::terminal_text::{Prose, Shown, lit, shown};
+use crate::terminal_text::{Literal, Prose, Shown, lit, shown};
 use std::sync::{Arc, Mutex};
 
 use selfie::package::event::{DotfileSource, PlannedEntry};
@@ -20,7 +20,7 @@ use crate::{
     cli::ApplyArgs,
     commands::common::create_dotfile_service,
     config::CliConfig,
-    display_manager::{Channel, Diff, DisplayManager, PromptFailure, shorten_path},
+    display_manager::{Channel, Choice, Diff, DisplayManager, PromptFailure, shorten_path},
     entry_rows::{EntryOutcome, EntryRow},
     event_processor::{EventProcessor, Exit},
     source_paths::{force_heading, relative_text},
@@ -125,17 +125,27 @@ enum Prompt {
 
 impl Prompt {
     /// What accepting does, including what becomes of the current content.
-    fn accept_label(self) -> &'static str {
+    fn accept_label(self) -> Literal {
         match self {
             // "anything it would destroy" rather than "the current content":
             // `BothChanged` is a conflict even when both sides hold the same
             // content, and then there is nothing to copy.
             Self::RepositoryFile => {
-                "Accept (overwrite target; anything it would destroy is copied aside first)"
+                lit!("Accept (overwrite target; anything it would destroy is copied aside first)")
             }
-            Self::Secret { .. } => "Accept (overwrite target; no copy of the current one is kept)",
+            Self::Secret { .. } => {
+                lit!("Accept (overwrite target; no copy of the current one is kept)")
+            }
         }
     }
+}
+
+/// What the conflict prompt's answer asks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Skip,
+    Accept,
+    Reveal,
 }
 
 impl InteractiveConflictResolver {
@@ -144,19 +154,21 @@ impl InteractiveConflictResolver {
     ///
     /// Accept is never the default, and reveal is never reachable by accepting a
     /// default: both require a deliberate selection.
-    fn prompt(&self, kind: Prompt) -> Option<usize> {
-        let mut items = vec!["Skip (keep target as-is)", kind.accept_label()];
+    fn prompt(&self, kind: Prompt) -> Option<Answer> {
+        let mut choices = vec![
+            Choice::labeled(lit!("Skip (keep target as-is)"), Answer::Skip),
+            Choice::labeled(kind.accept_label(), Answer::Accept),
+        ];
         if matches!(kind, Prompt::Secret { reveal: true }) {
-            items.push("Reveal the two values, then choose");
+            choices.push(Choice::labeled(
+                lit!("Reveal the two values, then choose"),
+                Answer::Reveal,
+            ));
         }
 
         self.answered(
-            self.display.prompt(
-                dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                    .with_prompt("How should this conflict be resolved?")
-                    .items(&items)
-                    .default(0),
-            ),
+            self.display
+                .select(lit!("How should this conflict be resolved?"), &choices),
             |unasked| match kind {
                 Prompt::RepositoryFile => unasked.files += 1,
                 Prompt::Secret { .. } => unasked.secrets += 1,
@@ -208,14 +220,7 @@ impl InteractiveConflictResolver {
 
         // Reveal is offered only on a terminal, so this prompt is never unasked.
         let confirmed = self
-            .answered(
-                self.display.prompt(
-                    dialoguer::Confirm::new()
-                        .with_prompt("Show values?")
-                        .default(false),
-                ),
-                |_| {},
-            )
+            .answered(self.display.confirm(lit!("Show values?"), false), |_| {})
             .unwrap_or(false);
 
         if !confirmed {
@@ -275,7 +280,7 @@ impl ConflictResolver for InteractiveConflictResolver {
                 self.display.print_diff(Diff::new(diff));
 
                 match self.prompt(Prompt::RepositoryFile) {
-                    Some(1) => ConflictResolution::Accept,
+                    Some(Answer::Accept) => ConflictResolution::Accept,
                     _ => ConflictResolution::Skip,
                 }
             }
@@ -295,15 +300,15 @@ impl ConflictResolver for InteractiveConflictResolver {
                 let can_reveal = self.display.is_tty();
 
                 match self.prompt(Prompt::Secret { reveal: can_reveal }) {
-                    Some(1) => ConflictResolution::Accept,
-                    Some(2) => {
+                    Some(Answer::Accept) => ConflictResolution::Accept,
+                    Some(Answer::Reveal) => {
                         self.reveal(incoming, current, target);
                         if self.display.is_canceled() {
                             return ConflictResolution::Skip;
                         }
                         // Ask again, without offering reveal a second time.
                         match self.prompt(Prompt::Secret { reveal: false }) {
-                            Some(1) => ConflictResolution::Accept,
+                            Some(Answer::Accept) => ConflictResolution::Accept,
                             _ => ConflictResolution::Skip,
                         }
                     }
@@ -406,8 +411,8 @@ mod tests {
     // that only checks the prompt appeared cannot see.
     #[test]
     fn each_accept_label_says_what_happens_to_the_current_content() {
-        let repository = Prompt::RepositoryFile.accept_label();
-        let secret = Prompt::Secret { reveal: false }.accept_label();
+        let repository = Prompt::RepositoryFile.accept_label().as_str();
+        let secret = Prompt::Secret { reveal: false }.accept_label().as_str();
 
         assert!(
             repository.contains("copied aside") && !repository.contains("no copy"),
@@ -423,7 +428,7 @@ mod tests {
             "{secret}"
         );
         assert_eq!(
-            Prompt::Secret { reveal: true }.accept_label(),
+            Prompt::Secret { reveal: true }.accept_label().as_str(),
             secret,
             "offering to reveal must not change what accepting costs"
         );

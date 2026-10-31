@@ -1,5 +1,4 @@
 use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
-use dialoguer::{Confirm, theme::SimpleTheme};
 use selfie::{
     namespace,
     package::{SpecService, port::PackageRepository},
@@ -199,13 +198,9 @@ fn occupied_path_refusal(package_name: &str, path: &std::path::Path) -> Shown {
 ///
 /// The [`Exit`] when the user did not confirm.
 fn confirm_new_package(package_name: &str, display: &DisplayManager) -> Result<(), Exit> {
-    let confirm = display.prompt(
-        Confirm::with_theme(&SimpleTheme)
-            .with_prompt(format!(
-                "Create new package '{}'?",
-                crate::terminal_text::Name::new(package_name)
-            ))
-            .default(false),
+    let confirm = display.confirm(
+        shown!("Create new package '{}'?", Name::new(package_name)),
+        false,
     );
 
     match confirm {
@@ -461,16 +456,10 @@ mod tests {
 
     #[test]
     fn test_handle_edit_nonexistent_package() {
-        // Test behavior when package doesn't exist and no EDITOR is available
+        // A unit test sees no editor, so the editor check fails.
         let temp_dir = TempDir::new().unwrap();
         let package_dir = temp_dir.path().join("packages");
         fs::create_dir_all(&package_dir).unwrap();
-
-        // Remove EDITOR environment variable to force editor check to fail
-        let old_editor = std::env::var("EDITOR").ok();
-        unsafe {
-            std::env::remove_var("EDITOR");
-        }
 
         let service =
             test_common::create_test_service_with_config(test_config_with_dir(&package_dir));
@@ -487,26 +476,6 @@ mod tests {
 
         // Should fail with exit code 1 due to missing EDITOR
         assert_eq!(result, Exit::Failed);
-
-        // Restore EDITOR if it was set
-        if let Some(editor) = old_editor {
-            unsafe {
-                std::env::set_var("EDITOR", editor);
-            }
-        }
-    }
-
-    #[test]
-    fn test_confirmation_prompt_structure() {
-        // Test that we can create a confirmation prompt (without actually running it)
-        let package_name = "test-package";
-        let confirm = Confirm::with_theme(&SimpleTheme)
-            .with_prompt(format!("Create new package '{package_name}'?"))
-            .default(false);
-
-        // Just verify we can construct the prompt without panicking
-        // We can't access the default field directly as it's private
-        drop(confirm);
     }
 
     #[test]

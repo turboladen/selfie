@@ -57,7 +57,8 @@ pub(crate) const INDENT: Literal = lit!("   ");
 /// Implemented for each dialoguer prompt the CLI uses. The call that reads the
 /// answer happens inside `prompt`, so nothing else can draw on the terminal
 /// while the user answers.
-pub(crate) trait Prompt {
+// Private, with `prompt`, so a widget built anywhere else cannot be asked.
+trait Prompt {
     /// What the user's answer is.
     type Answer: Send + 'static;
 
@@ -70,23 +71,274 @@ pub(crate) trait Prompt {
     fn ask(self) -> dialoguer::Result<Self::Answer>;
 }
 
-/// A line of text the user types: printable characters only, with
-/// line-editing keys. For free-form input, prompt with a bare
-/// [`dialoguer::Input`].
-pub(crate) struct TextLine<'a>(
-    #[cfg_attr(test, expect(dead_code, reason = "a test answers from a script"))]
-    pub(crate)  dialoguer::Input<'a, String>,
-);
+/// One entry of a menu: the text it shows, and the value picking it returns.
+pub(crate) struct Choice<T> {
+    label: Shown,
+    value: T,
+}
 
-// The one place dialoguer's reading calls are allowed; crates/cli/clippy.toml
-// forbids them everywhere else, so a prompt that bypasses `DisplayManager::prompt`
-// does not build.
+impl<T> Choice<T> {
+    /// A choice showing `name`, escaped as a [`Name`]. Picking it returns
+    /// `value`, which may hold the raw name.
+    pub(crate) fn named(name: &str, value: T) -> Self {
+        Self {
+            label: Name::new(name).into(),
+            value,
+        }
+    }
+
+    /// A choice showing selfie's own `label`.
+    pub(crate) fn labeled(label: Literal, value: T) -> Self {
+        Self {
+            label: label.into(),
+            value,
+        }
+    }
+}
+
+/// What an [`input`](DisplayManager::input) prompt suggests.
+///
+/// Either kind of suggestion is pre-filled when it shows as written, and the
+/// user's edit of it is the answer. The two differ only for a suggestion that
+/// can only be shown escaped, which is noted above an empty prompt instead.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Suggestion {
+    /// Nothing is suggested.
+    Nothing,
+    /// Noted escaped, Enter on the empty prompt returns its bytes.
+    Keepable(String),
+    /// Noted escaped, its bytes are never returned: escaping changed them,
+    /// so they could not be a valid answer.
+    Unkeepable(String),
+}
+
+/// What an [`input`](DisplayManager::input) prompt does with a blank answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Blank {
+    /// Returned, for the caller to say what it means.
+    Allowed,
+    /// Refused with this warning, such as "Install command cannot be
+    /// empty.", and asked again. An answer is blank when nothing in it shows,
+    /// as [`Name::is_blank`] decides; a kept suggestion that is blank is
+    /// refused too.
+    Refused(Literal),
+}
+
+// How `input` offers a suggestion: pre-filled when it shows as written,
+// otherwise escaped in a note above an empty prompt, with the bytes Enter
+// keeps when they could be an answer. No prompt pre-fills escaped text.
+#[derive(Debug, PartialEq, Eq)]
+enum Offer<'a> {
+    Bare,
+    Prefill(&'a str),
+    Note { shown: Name, keep: Option<&'a str> },
+}
+
+fn offer(suggested: &Suggestion) -> Offer<'_> {
+    let (text, keepable) = match suggested {
+        Suggestion::Nothing => return Offer::Bare,
+        Suggestion::Keepable(text) => (text, true),
+        Suggestion::Unkeepable(text) => (text, false),
+    };
+    if Name::is_plain(text) {
+        Offer::Prefill(text)
+    } else {
+        Offer::Note {
+            shown: Name::new(text),
+            keep: keepable.then_some(text.as_str()),
+        }
+    }
+}
+
+// Which dialoguer theme a prompt draws with. An enum so a test can read the
+// decision without drawing.
+#[derive(Debug, PartialEq, Eq)]
+enum PromptTheme {
+    Colorful,
+    Simple,
+}
+
+// The one place dialoguer's widgets are built and asked; crates/cli/clippy.toml
+// forbids their constructors and reading calls everywhere else, so a prompt
+// that bypasses these methods does not build.
 #[expect(
     clippy::disallowed_methods,
-    reason = "every prompt is asked here, inside DisplayManager::prompt"
+    reason = "every prompt is built here and asked inside DisplayManager::prompt"
 )]
-mod ask {
-    use super::{Prompt, TextLine};
+mod prompts {
+    use dialoguer::theme::{ColorfulTheme, SimpleTheme, Theme};
+
+    use super::{
+        Blank, Choice, DisplayManager, Name, Offer, Prompt, PromptFailure, PromptTheme, Shown,
+        Suggestion, lit, offer, shown,
+    };
+
+    impl DisplayManager {
+        /// Ask a yes-or-no question; Enter alone answers `default`.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn confirm(
+            &self,
+            text: impl Into<Shown>,
+            default: bool,
+        ) -> Result<bool, PromptFailure> {
+            let theme = self.theme();
+            self.prompt(
+                dialoguer::Confirm::with_theme(theme.as_ref())
+                    .with_prompt(self.prompt_text(text))
+                    .default(default),
+            )
+        }
+
+        /// Ask for one of `choices`, the first highlighted, and return its
+        /// value.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn select<T: Clone>(
+            &self,
+            text: impl Into<Shown>,
+            choices: &[Choice<T>],
+        ) -> Result<T, PromptFailure> {
+            let theme = self.theme();
+            let picked = self.prompt(
+                dialoguer::Select::with_theme(theme.as_ref())
+                    .with_prompt(self.prompt_text(text))
+                    .items(self.labels(choices))
+                    .default(0),
+            )?;
+            Ok(choices[picked].value.clone())
+        }
+
+        /// Ask for one of `choices`, filtered as the user types, and return
+        /// its value. `None` when the user pressed Esc.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn fuzzy_select<T: Clone>(
+            &self,
+            text: impl Into<Shown>,
+            choices: &[Choice<T>],
+        ) -> Result<Option<T>, PromptFailure> {
+            let theme = self.theme();
+            let picked = self.prompt(
+                dialoguer::FuzzySelect::with_theme(theme.as_ref())
+                    .with_prompt(self.prompt_text(text))
+                    .items(self.labels(choices))
+                    .default(0),
+            )?;
+            Ok(picked.map(|picked| choices[picked].value.clone()))
+        }
+
+        /// Ask for any number of `choices`, none checked at first, and return
+        /// the values of those picked, in the order of `choices`.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn multi_select<T: Clone>(
+            &self,
+            text: impl Into<Shown>,
+            choices: &[Choice<T>],
+        ) -> Result<Vec<T>, PromptFailure> {
+            let theme = self.theme();
+            let picked = self.prompt(
+                dialoguer::MultiSelect::with_theme(theme.as_ref())
+                    .with_prompt(self.prompt_text(text))
+                    .items(self.labels(choices)),
+            )?;
+            Ok(picked
+                .into_iter()
+                .map(|picked| choices[picked].value.clone())
+                .collect())
+        }
+
+        /// Ask for a line of text, offering `suggested` as its rules say, and
+        /// return what the user typed. An empty answer returns a suggestion
+        /// that could only be shown escaped, when it is keepable. Otherwise a
+        /// blank answer is returned or refused as `blank` says.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn input(
+            &self,
+            text: impl Into<Shown>,
+            suggested: Suggestion,
+            blank: Blank,
+        ) -> Result<String, PromptFailure> {
+            let text = self.prompt_text(text);
+            let offered = offer(&suggested);
+            loop {
+                let theme = self.theme();
+                // dialoguer's own empty check would re-ask silently, and never
+                // under a test's script, so a blank is judged below.
+                let mut widget = dialoguer::Input::<String>::with_theme(theme.as_ref())
+                    .with_prompt(text.clone())
+                    .allow_empty(true);
+                let (note, kept) = match &offered {
+                    Offer::Bare => (None, None),
+                    Offer::Prefill(text) => {
+                        widget = widget.with_initial_text(*text);
+                        (None, None)
+                    }
+                    Offer::Note { shown, keep } => {
+                        let hint = match keep {
+                            Some(_) => lit!("Enter keeps it"),
+                            None => lit!("shown escaped; type the answer"),
+                        };
+                        (Some(shown!("  Suggested: {} ({})", shown, hint)), *keep)
+                    }
+                };
+                let typed = self.prompt_under(note, widget)?;
+                let answer = match kept {
+                    Some(kept) if typed.is_empty() => kept.to_string(),
+                    _ => typed,
+                };
+                if let Blank::Refused(warning) = blank
+                    && Name::is_blank(&answer)
+                {
+                    self.print_warning(warning);
+                    continue;
+                }
+                return Ok(answer);
+            }
+        }
+
+        // Prompts draw on stderr, so they follow its color decision.
+        pub(super) fn prompt_theme(&self) -> PromptTheme {
+            if self.stderr_colors() {
+                PromptTheme::Colorful
+            } else {
+                PromptTheme::Simple
+            }
+        }
+
+        fn theme(&self) -> Box<dyn Theme> {
+            match self.prompt_theme() {
+                PromptTheme::Colorful => Box::new(ColorfulTheme::default()),
+                PromptTheme::Simple => Box::new(SimpleTheme),
+            }
+        }
+
+        fn prompt_text(&self, text: impl Into<Shown>) -> String {
+            text.into()
+                .guarded(self.stderr_colors())
+                .as_str()
+                .to_string()
+        }
+
+        fn labels<T>(&self, choices: &[Choice<T>]) -> Vec<String> {
+            choices
+                .iter()
+                .map(|choice| self.prompt_text(choice.label.clone()))
+                .collect()
+        }
+    }
 
     impl Prompt for dialoguer::Confirm<'_> {
         type Answer = bool;
@@ -117,17 +369,12 @@ mod ask {
         }
     }
 
+    // `interact_text`: line-editing keys, and no ASCII control typed into
+    // the answer.
     impl Prompt for dialoguer::Input<'_, String> {
         type Answer = String;
         fn ask(self) -> dialoguer::Result<String> {
-            self.interact()
-        }
-    }
-
-    impl Prompt for TextLine<'_> {
-        type Answer = String;
-        fn ask(self) -> dialoguer::Result<String> {
-            self.0.interact_text()
+            self.interact_text()
         }
     }
 }
@@ -1079,7 +1326,42 @@ impl DisplayManager {
     ///
     /// [`PromptFailure`] when there is no terminal, the user pressed Ctrl+C, or
     /// the terminal failed. [`PromptFailure::exit`] says how the command ends.
-    pub(crate) fn prompt<P: Prompt>(&self, prompt: P) -> Result<P::Answer, PromptFailure> {
+    fn prompt<P: Prompt>(&self, prompt: P) -> Result<P::Answer, PromptFailure> {
+        self.prompt_under(None, prompt)
+    }
+
+    // As `prompt`, with `note` printed on stderr just above the question, in
+    // the same suspension, so no spinner draws over it. The note is written
+    // only once the prompt is ready, so none is left above a question never
+    // asked.
+    fn prompt_under<P: Prompt>(
+        &self,
+        note: Option<Shown>,
+        prompt: P,
+    ) -> Result<P::Answer, PromptFailure> {
+        self.ready()?;
+        let note = note.map(|note| guard(note.as_str(), self.stderr_colors()).into_owned());
+        // Suspended, not cleared: a spinner would redraw over the question while
+        // the user types, but a step still running, or whose end is already on
+        // its way, keeps its line and gets its ✓ or ✗ once the prompt returns.
+        let answer = self
+            .draw(|| {
+                if let Some(note) = &note {
+                    self.record_stderr(note);
+                    eprintln!("{note}");
+                }
+                self.ask(prompt)
+            })
+            .map_err(PromptFailure::from);
+        if let (Err(PromptFailure::Interrupted), Some(token)) = (&answer, &self.cancellation) {
+            token.cancel();
+        }
+        answer
+    }
+
+    // Whether a prompt may be asked now: there is a terminal, and the run is
+    // not canceled.
+    fn ready(&self) -> Result<(), PromptFailure> {
         // Checked here and not left to dialoguer: `FuzzySelect` makes no check of
         // its own, and with no terminal it redraws its menu forever.
         if !self.can_prompt() {
@@ -1090,17 +1372,7 @@ impl DisplayManager {
         if self.is_canceled() {
             return Err(PromptFailure::Interrupted);
         }
-        // Suspended, not cleared: a spinner would redraw over the question while
-        // the user types, but a step still running, or whose end is already on
-        // its way, keeps its line and gets its ✓ or ✗ once the prompt returns.
-        let answer = self
-            .mp
-            .suspend(|| self.ask(prompt))
-            .map_err(PromptFailure::from);
-        if let (Err(PromptFailure::Interrupted), Some(token)) = (&answer, &self.cancellation) {
-            token.cancel();
-        }
-        answer
+        Ok(())
     }
 
     /// Whether a prompt can be asked: stderr, where dialoguer draws and reads
@@ -1240,7 +1512,7 @@ impl DisplayManager {
     pub(crate) fn print_note(&self, message: impl Into<Shown>) {
         let message = guard(message.into().as_str(), self.stderr_colors()).into_owned();
         self.record_stderr(&message);
-        self.mp.suspend(|| eprintln!("{message}"));
+        self.draw(|| eprintln!("{message}"));
     }
 
     /// Print a plain line on `channel`.
@@ -2383,6 +2655,270 @@ mod tests {
         fn ask(self) -> dialoguer::Result<()> {
             Ok(())
         }
+    }
+
+    // A menu answers with the value of the choice at the index picked, so a
+    // name's raw bytes come back even though the menu showed them escaped.
+    #[test]
+    fn select_returns_the_picked_choices_value() {
+        let choices = [
+            Choice::named("plain", "plain".to_string()),
+            Choice::named("evil\u{1b}[2J", "evil\u{1b}[2J".to_string()),
+        ];
+        let dm = DisplayManager::new(false).answering(vec![answer(1_usize)]);
+
+        assert_eq!(
+            dm.select(lit!("Which?"), &choices).unwrap(),
+            "evil\u{1b}[2J"
+        );
+    }
+
+    #[test]
+    fn multi_select_returns_only_the_picked_values() {
+        let choices = [
+            Choice::labeled(lit!("one"), 1),
+            Choice::labeled(lit!("two"), 2),
+            Choice::labeled(lit!("three"), 3),
+        ];
+        let dm = DisplayManager::new(false).answering(vec![answer(vec![0_usize, 2])]);
+
+        assert_eq!(dm.multi_select(lit!("Which?"), &choices).unwrap(), [1, 3]);
+    }
+
+    // Esc at a fuzzy select picks nothing.
+    #[test]
+    fn fuzzy_select_returns_none_for_esc() {
+        let choices = [
+            Choice::labeled(lit!("one"), 1),
+            Choice::labeled(lit!("two"), 2),
+        ];
+        let dm = DisplayManager::new(false)
+            .answering(vec![answer(None::<usize>), answer(Some(1_usize))]);
+
+        assert_eq!(dm.fuzzy_select(lit!("Which?"), &choices).unwrap(), None);
+        assert_eq!(dm.fuzzy_select(lit!("Which?"), &choices).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn confirm_returns_the_answer() {
+        let dm = DisplayManager::new(false).answering(vec![answer(true), answer(false)]);
+
+        assert!(dm.confirm(lit!("Sure?"), false).unwrap());
+        assert!(!dm.confirm(lit!("Sure?"), true).unwrap());
+    }
+
+    // A named choice shows its name escaped; the menu never draws it raw.
+    #[test]
+    fn a_named_choice_shows_its_name_escaped() {
+        let choice = Choice::named("a\u{1b}\u{200b}b", ());
+
+        assert_eq!(choice.label.as_str(), "a\\u{1b}\\u{200b}b");
+    }
+
+    // A suggestion is pre-filled only when it shows as written; otherwise it
+    // is noted escaped, and kept on Enter only when its bytes could be an
+    // answer.
+    #[test]
+    fn a_suggestion_is_offered_as_it_can_be_shown() {
+        let keepable = Suggestion::Keepable("dev\u{1b}".to_string());
+        let unkeepable = Suggestion::Unkeepable("dev\u{1b}".to_string());
+
+        assert_eq!(offer(&Suggestion::Nothing), Offer::Bare);
+        assert_eq!(
+            offer(&Suggestion::Keepable("dev".to_string())),
+            Offer::Prefill("dev")
+        );
+        assert_eq!(
+            offer(&Suggestion::Unkeepable("dev".to_string())),
+            Offer::Prefill("dev")
+        );
+        assert_eq!(
+            offer(&keepable),
+            Offer::Note {
+                shown: Name::new("dev\u{1b}"),
+                keep: Some("dev\u{1b}")
+            }
+        );
+        assert_eq!(
+            offer(&unkeepable),
+            Offer::Note {
+                shown: Name::new("dev\u{1b}"),
+                keep: None
+            }
+        );
+    }
+
+    // Enter under a keepable suggestion's note returns its bytes, and the note
+    // shows them escaped, once.
+    #[test]
+    fn an_empty_answer_keeps_a_keepable_suggestion_shown_escaped() {
+        let dm = DisplayManager::new(false).answering(vec![answer(String::new())]);
+
+        let typed = dm
+            .input(
+                lit!("Environment name"),
+                Suggestion::Keepable("dev\u{1b}".to_string()),
+                Blank::Allowed,
+            )
+            .unwrap();
+
+        assert_eq!(typed, "dev\u{1b}");
+        assert_eq!(
+            dm.printed(),
+            vec![(
+                Channel::Stderr,
+                "  Suggested: dev\\u{1b} (Enter keeps it)".to_string()
+            )]
+        );
+    }
+
+    // An unkeepable suggestion is shown, never returned.
+    #[test]
+    fn an_empty_answer_never_returns_an_unkeepable_suggestion() {
+        let dm = DisplayManager::new(false).answering(vec![answer(String::new())]);
+
+        let typed = dm
+            .input(
+                lit!("Name"),
+                Suggestion::Unkeepable("git\u{200b}".to_string()),
+                Blank::Allowed,
+            )
+            .unwrap();
+
+        assert_eq!(typed, "");
+        assert_eq!(
+            dm.printed(),
+            vec![(
+                Channel::Stderr,
+                "  Suggested: git\\u{200b} (shown escaped; type the answer)".to_string()
+            )]
+        );
+    }
+
+    // What the user types is the answer, whatever was suggested.
+    #[test]
+    fn a_typed_answer_is_returned_as_typed() {
+        let dm = DisplayManager::new(false).answering(vec![answer("prod".to_string())]);
+
+        let typed = dm
+            .input(
+                lit!("Environment name"),
+                Suggestion::Keepable("dev\u{1b}".to_string()),
+                Blank::Allowed,
+            )
+            .unwrap();
+
+        assert_eq!(typed, "prod");
+    }
+
+    // A required prompt asks again on a blank answer, a cleared pre-fill
+    // included, and says why.
+    #[test]
+    fn a_blank_answer_to_a_required_prompt_is_asked_again() {
+        let dm = DisplayManager::new(false).answering(vec![
+            answer(String::new()),
+            answer("  ".to_string()),
+            answer("prod".to_string()),
+        ]);
+
+        let typed = dm
+            .input(
+                lit!("Environment name"),
+                Suggestion::Keepable("dev".to_string()),
+                Blank::Refused(lit!("An answer is required.")),
+            )
+            .unwrap();
+
+        assert_eq!(typed, "prod");
+        let refusals = dm
+            .printed()
+            .iter()
+            .filter(|(_, line)| line.contains("An answer is required."))
+            .count();
+        assert_eq!(refusals, 2, "{:?}", dm.printed());
+    }
+
+    // A kept suggestion that is blank is refused by a required prompt like a
+    // typed blank: U+00A0 is shown escaped, kept on Enter, and still blank.
+    #[test]
+    fn a_blank_kept_suggestion_is_refused_by_a_required_prompt() {
+        let dm = DisplayManager::new(false)
+            .answering(vec![answer(String::new()), answer("prod".to_string())]);
+
+        let typed = dm
+            .input(
+                lit!("Environment name"),
+                Suggestion::Keepable("\u{a0}".to_string()),
+                Blank::Refused(lit!("Environment name cannot be empty.")),
+            )
+            .unwrap();
+
+        assert_eq!(typed, "prod");
+        let refusals = dm
+            .printed()
+            .iter()
+            .filter(|(_, line)| line.contains("Environment name cannot be empty."))
+            .count();
+        assert_eq!(refusals, 1, "{:?}", dm.printed());
+    }
+
+    // The note is written in the prompt's own draw, with every spinner
+    // suspended, not in a draw of its own that a spinner could overwrite
+    // before the question appears.
+    #[test]
+    fn a_suggestions_note_is_written_with_the_question() {
+        let dm = DisplayManager::new(false).answering(vec![answer(String::new())]);
+
+        dm.input(
+            lit!("Environment name"),
+            Suggestion::Keepable("dev\u{1b}".to_string()),
+            Blank::Allowed,
+        )
+        .unwrap();
+
+        assert_eq!(dm.draws.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(dm.printed().len(), 1, "{:?}", dm.printed());
+    }
+
+    // An allowed blank is the caller's to judge.
+    #[test]
+    fn a_blank_answer_to_an_optional_prompt_is_returned() {
+        let dm = DisplayManager::new(false).answering(vec![answer(String::new())]);
+
+        let typed = dm
+            .input(lit!("Description"), Suggestion::Nothing, Blank::Allowed)
+            .unwrap();
+
+        assert_eq!(typed, "");
+        assert!(dm.printed().is_empty(), "{:?}", dm.printed());
+    }
+
+    // With no terminal nothing is asked, so no note is printed above it.
+    #[test]
+    fn an_input_without_a_terminal_prints_no_note() {
+        let dm = DisplayManager::new(false);
+
+        let failure = dm
+            .input(
+                lit!("Environment name"),
+                Suggestion::Keepable("dev\u{1b}".to_string()),
+                Blank::Allowed,
+            )
+            .unwrap_err();
+
+        assert!(matches!(failure, PromptFailure::NoTerminal), "{failure:?}");
+        assert!(dm.printed().is_empty(), "{:?}", dm.printed());
+    }
+
+    // Without colors a prompt draws with the plain theme. The colored half is
+    // tested on a pseudoterminal in prompt_signal_tests.rs, since a unit test
+    // run from a terminal can see one on stderr.
+    #[test]
+    fn a_display_without_colors_prompts_in_the_plain_theme() {
+        assert_eq!(
+            DisplayManager::new(false).prompt_theme(),
+            PromptTheme::Simple
+        );
     }
 
     fn io_error(kind: std::io::ErrorKind) -> Scripted {

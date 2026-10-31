@@ -17,7 +17,7 @@ use crate::{
         validation_display::{ValidationGroup, display_validation_groups},
     },
     config::CliConfig,
-    display_manager::{DisplayManager, PromptFailure},
+    display_manager::{Blank, DisplayManager, PromptFailure, Suggestion},
     event_processor::{EventProcessor, Exit},
 };
 
@@ -168,9 +168,9 @@ fn show_pending_commits(
 }
 
 /// The message a commit gets from its prompt's `answer`: the answer, or the
-/// suggested message when the answer is blank.
+/// suggested message when nothing in the answer shows.
 fn chosen_message(answer: String, suggested: String) -> String {
-    if answer.trim().is_empty() {
+    if Name::is_blank(&answer) {
         suggested
     } else {
         answer
@@ -206,24 +206,13 @@ fn confirm_commits(
     let total = pending.len();
     let mut confirmed = Vec::new();
     for (i, commit) in pending.into_iter().enumerate() {
-        let num = i + 1;
-        let theme = dialoguer::theme::ColorfulTheme::default();
-        let mut input = dialoguer::Input::with_theme(&theme)
-            .with_prompt(format!("Commit message ({num}/{total})"))
-            .allow_empty(true);
-        // The prompt draws a pre-filled message on the terminal as it is, and
-        // what the user accepts is committed. So a message that would need an
-        // escape is shown escaped above an empty prompt instead, and a blank
-        // answer keeps its own bytes, as `--yes` does.
-        if crate::terminal_text::Name::is_plain(&commit.message) {
-            input = input.with_initial_text(&commit.message);
-        } else {
-            display.print_note(shown!(
-                "  Suggested: {} (Enter keeps it)",
-                Name::new(&commit.message)
-            ));
-        }
-        let answer: String = display.prompt(crate::display_manager::TextLine(input))?;
+        // A blank answer keeps the suggested message's own bytes, as `--yes`
+        // does.
+        let answer = display.input(
+            shown!("Commit message ({}/{})", i + 1, total),
+            Suggestion::Keepable(commit.message.clone()),
+            Blank::Allowed,
+        )?;
 
         confirmed.push(ConfirmedCommit {
             files: commit.files,
@@ -297,6 +286,9 @@ fn handle_push_event(event: &PackageEvent, display: &DisplayManager) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use selfie::package::event::{OperationContext, OperationInfo, OperationType, StepCount};
+    use selfie::sync_service::PendingCommit;
+    use std::path::PathBuf;
 
     // A message the prompt could only draw escaped is shown escaped above an
     // empty prompt, and pressing Enter commits its own bytes, as --yes does.
@@ -359,9 +351,19 @@ mod tests {
         );
         assert_eq!(chosen_message("  ".into(), "chore: x".into()), "chore: x");
     }
-    use selfie::package::event::{OperationContext, OperationInfo, OperationType, StepCount};
-    use selfie::sync_service::PendingCommit;
-    use std::path::PathBuf;
+
+    // An answer in which nothing shows, such as a Hangul filler or a zero-width
+    // space, keeps the suggested message rather than committing an invisible one.
+    #[test]
+    fn an_invisible_answer_keeps_the_suggested_message() {
+        for invisible in ["\u{3164}", "\u{200b}", " \u{ffa0} "] {
+            assert_eq!(
+                chosen_message(invisible.into(), "chore: x".into()),
+                "chore: x",
+                "{invisible:?}"
+            );
+        }
+    }
 
     fn make_operation_info() -> OperationInfo {
         OperationInfo {

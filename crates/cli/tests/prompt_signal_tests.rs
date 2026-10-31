@@ -18,7 +18,7 @@ use std::{
 };
 
 use common::{
-    CANCELED, CLEAN, SELFIE_ENV, sandboxed_std_command, setup_default_test_config,
+    CANCELED, CLEAN, FAILED, SELFIE_ENV, sandboxed_std_command, setup_default_test_config,
     setup_test_config_with_state_directory,
 };
 use nix::{
@@ -300,7 +300,10 @@ fn ctrl_c_typed_at_a_question_ends_its_line() {
 
     assert_eq!(finished.code, Some(CANCELED), "{}", finished.output);
     finished.assert_terminal_restored();
-    let (_, after) = finished.output.rsplit_once("[y/N] ").unwrap();
+    let (_, after) = finished
+        .output
+        .rsplit_once("Remove package 'doomed'?")
+        .unwrap();
     assert!(after.contains('\n'), "{:?}", finished.output);
     assert!(exists(&spec), "a canceled remove removed the spec");
 }
@@ -317,6 +320,115 @@ fn an_answered_prompt_still_answers() {
     assert_eq!(finished.code, Some(CLEAN), "{}", finished.output);
     finished.assert_terminal_restored();
     assert!(!exists(&spec), "the answered remove left the spec");
+}
+
+// Enter alone answers a confirm with its default, which for removing a spec is
+// no.
+#[test]
+fn enter_alone_takes_the_confirms_default() {
+    let (temp, spec) = one_spec();
+    let mut run = remove_doomed(&temp);
+
+    run.type_keys(b"\r");
+    let finished = run.finish();
+
+    assert_eq!(finished.code, Some(FAILED), "{}", finished.output);
+    assert!(
+        finished.output.contains("Package removal canceled."),
+        "{}",
+        finished.output
+    );
+    assert!(exists(&spec), "Enter alone removed the spec");
+}
+
+// A prompt draws on stderr and follows its color decision: the colorful theme,
+// whose question ends in `›`, on a terminal with colors on, and the plain
+// theme's `[y/N]` with them off.
+#[test]
+fn a_prompt_follows_stderrs_colors() {
+    let (temp, _spec) = one_spec();
+
+    let mut colored = remove_doomed(&temp);
+    colored.wait_for_text("›");
+    colored.type_keys(b"n");
+    let colored = colored.finish();
+
+    let mut plain = PtyRun::spawn(&temp, &["--no-color", "spec", "remove", "doomed"]);
+    plain.wait_for_text("Remove package 'doomed'? [y/N] ");
+    plain.type_keys(b"n");
+    let plain = plain.finish();
+
+    assert!(!colored.output.contains("[y/N]"), "{}", colored.output);
+    assert!(!plain.output.contains('›'), "{}", plain.output);
+}
+
+// An environment name the prompt can only show escaped is noted escaped above
+// an empty prompt, never drawn raw, and Enter writes its raw bytes.
+#[test]
+fn an_escaped_environment_is_noted_and_enter_keeps_it() {
+    let temp = setup_default_test_config();
+    let mut run = PtyRun::spawn(
+        &temp,
+        &[
+            "--environment",
+            "dev\u{1b}",
+            "spec",
+            "create",
+            "fresh",
+            "--interactive",
+        ],
+    );
+    for (question, keys) in [
+        ("Package name", &b"\r"[..]),
+        ("Homepage URL", b"\r"),
+        ("Description", b"\r"),
+        ("Environment name", b"\r"),
+        ("Install command", b"true\r"),
+        ("Check command", b"\r"),
+        ("Add another environment?", b"\r"),
+        ("open the package file", b"n"),
+    ] {
+        run.wait_for_text(question);
+        run.type_keys(keys);
+    }
+    let finished = run.finish();
+
+    assert_eq!(finished.code, Some(CLEAN), "{}", finished.output);
+    assert!(
+        finished
+            .output
+            .contains(r"Suggested: dev\u{1b} (Enter keeps it)"),
+        "{}",
+        finished.output
+    );
+    assert!(
+        !finished.output.contains("dev\u{1b}"),
+        "{:?}",
+        finished.output
+    );
+    let spec = std::fs::read_to_string(temp.path().join("packages/fresh.yml")).unwrap();
+    let spec: selfie::package::Package = selfie::yaml::parse(&spec).unwrap();
+    assert!(
+        spec.environments().contains_key("dev\u{1b}"),
+        "{:?}",
+        spec.environments().keys().collect::<Vec<_>>()
+    );
+}
+
+// A package name the spec-name rule refuses is not pre-filled at the name
+// prompt, where Enter would only send it back to be refused.
+#[test]
+fn a_refused_package_name_is_not_prefilled() {
+    let temp = setup_default_test_config();
+    let mut run = PtyRun::spawn(&temp, &["spec", "create", "my app", "--interactive"]);
+    run.wait_for_text("Package name");
+
+    // Raw mode starts after any pre-filled text is written.
+    run.type_keys(b"\x03");
+    let finished = run.finish();
+
+    assert_eq!(finished.code, Some(CANCELED), "{}", finished.output);
+    assert!(!finished.output.contains("my app"), "{:?}", finished.output);
 }
 
 // apply asks about a conflict on a thread of its own, which a signal never
