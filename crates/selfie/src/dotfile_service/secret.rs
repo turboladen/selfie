@@ -36,6 +36,7 @@ use super::refusal::{
     Link, TargetState, classify_link, classify_write, read_target_state, readable_or_refusal,
     refusal_for,
 };
+use super::state_file::StateLoadFailure;
 
 /// The program a command runs: its first word after any leading `NAME=value`
 /// assignments, as the shell reads it, or `None` for a command the shell would
@@ -102,8 +103,7 @@ pub(super) enum SecretOutcome {
     /// commands in this run.
     CommandFailed(String),
     /// The caller's write-back before the write failed, so nothing was written.
-    /// Carries why, already worded.
-    StateNotWritable(String),
+    StateNotWritable(StateLoadFailure),
     /// The run was canceled while the entry's commands ran. Neither refused nor
     /// failed, and nothing was reported: the entry was not finished, and the run
     /// ends canceled.
@@ -112,7 +112,7 @@ pub(super) enum SecretOutcome {
 
 /// What [`SecretApply::apply`] calls before it writes a target or asks about a
 /// conflict: `Err` with the reason stops the entry with nothing written.
-pub(super) type BeforeWrite<'g> = dyn FnMut() -> Result<(), String> + Send + 'g;
+pub(super) type BeforeWrite<'g> = dyn FnMut() -> Result<(), StateLoadFailure> + Send + 'g;
 
 /// A phase either lets the apply continue, or ends it with an outcome.
 ///

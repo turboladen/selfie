@@ -6,6 +6,7 @@ use std::fmt::Display;
 
 use selfie::commands::runner::TimedOut;
 use selfie::config::ConfigLoadError;
+use selfie::dotfile_service::DeployStateWarning;
 use selfie::namespace::{NamespaceConflict, NamespaceValidationError};
 use selfie::package::event::{
     CheckFailure, OperationFailure, OperationSuccess, OperationType, SkipReason, SpecStatus,
@@ -43,6 +44,7 @@ macro_rules! sentences {
 sentences!(
     CheckFailure,
     ConfigLoadError,
+    DeployStateWarning,
     NamespaceConflict,
     NamespaceValidationError,
     OperationFailure,

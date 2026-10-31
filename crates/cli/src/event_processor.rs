@@ -267,6 +267,9 @@ impl EventProcessor {
                 self.display.print_warning(received::message(message));
                 // Warnings don't set failure exit code by default
             }
+            PackageEvent::DeployStateWarning { warning, .. } => {
+                self.display.print_warning(received::sentence(&warning));
+            }
 
             // The run's result counts each, so the exit code comes from there.
             PackageEvent::DotfileRefused { refusal, .. } => {

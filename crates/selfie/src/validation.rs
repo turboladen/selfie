@@ -2,7 +2,7 @@
 ///
 /// Provides methods to query and filter validation results, allowing
 /// callers to handle errors and warnings differently based on their needs.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct ValidationIssues(Vec<ValidationIssue>);
 
 impl Extend<ValidationIssue> for ValidationIssues {
@@ -119,7 +119,7 @@ impl From<Vec<ValidationIssue>> for ValidationIssues {
 
 /// A single validation issue (error or warning)
 ///
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ValidationIssue {
     /// The category of the issue
     ///
@@ -143,6 +143,29 @@ pub struct ValidationIssue {
 
     /// Where in the YAML file the issue is, when the file says.
     pub(crate) location: Option<crate::yaml::SourceLocation>,
+
+    /// The deploy state's verdict this issue reports, when it reports one.
+    // Boxed: the notice is large, and most issues have none.
+    pub(crate) deploy_state: Option<Box<DeployStateNotice>>,
+}
+
+/// The deploy state's verdict a configuration issue reports, with the paths
+/// its message names.
+#[derive(Debug, Clone)]
+pub enum DeployStateNotice {
+    /// The state could not be used, or its directory would refuse a write.
+    Failure(crate::dotfile_service::StateLoadFailure),
+    /// Something about the state worth saying that stops nothing.
+    Warning(crate::dotfile_service::DeployStateWarning),
+}
+
+impl std::fmt::Display for DeployStateNotice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failure(failure) => write!(f, "{failure}"),
+            Self::Warning(warning) => write!(f, "{warning}"),
+        }
+    }
 }
 
 impl ValidationIssue {
@@ -161,6 +184,7 @@ impl ValidationIssue {
             level: ValidationLevel::Error,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
+            deploy_state: None,
         }
     }
 
@@ -183,6 +207,7 @@ impl ValidationIssue {
             level: ValidationLevel::Info,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
+            deploy_state: None,
         }
     }
 
@@ -201,6 +226,7 @@ impl ValidationIssue {
             level: ValidationLevel::Error,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location,
+            deploy_state: None,
         }
     }
 
@@ -218,6 +244,7 @@ impl ValidationIssue {
             level: ValidationLevel::Warning,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
+            deploy_state: None,
         }
     }
 
@@ -236,6 +263,7 @@ impl ValidationIssue {
             level: ValidationLevel::Warning,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location,
+            deploy_state: None,
         }
     }
 
@@ -267,6 +295,30 @@ impl ValidationIssue {
     #[must_use]
     pub fn location(&self) -> Option<crate::yaml::SourceLocation> {
         self.location
+    }
+
+    /// The deploy state's verdict this issue reports, whose sentence is
+    /// [`message`](Self::message), or `None` for any other issue.
+    #[must_use]
+    pub fn deploy_state(&self) -> Option<&DeployStateNotice> {
+        self.deploy_state.as_deref()
+    }
+
+    /// An issue at `level` reporting `notice`, worded as the notice is.
+    pub(crate) fn of_deploy_state(
+        level: ValidationLevel,
+        category: ValidationErrorCategory,
+        notice: DeployStateNotice,
+    ) -> Self {
+        Self {
+            category,
+            field: "state_directory".to_string(),
+            message: notice.to_string(),
+            level,
+            suggestion: None,
+            location: None,
+            deploy_state: Some(Box::new(notice)),
+        }
     }
 }
 
@@ -336,6 +388,7 @@ mod tests {
             level,
             suggestion: None,
             location: None,
+            deploy_state: None,
         }
     }
 

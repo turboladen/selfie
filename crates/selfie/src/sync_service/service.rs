@@ -197,6 +197,9 @@ where
             for relayed in summary.relayed {
                 match relayed {
                     RelayedDriftEvent::Warning(message) => sender.send_warning(message).await,
+                    RelayedDriftEvent::DeployState(warning) => {
+                        sender.send_deploy_state_warning(warning).await;
+                    }
                     RelayedDriftEvent::SkippedSpec(error) => {
                         sender.send_spec_skipped(error).await;
                     }
@@ -1393,6 +1396,7 @@ fn remote_label(repo_info: &crate::git::sync_provider::RepoInfo) -> String {
 #[derive(Debug)]
 enum RelayedDriftEvent {
     Warning(String),
+    DeployState(crate::dotfile_service::DeployStateWarning),
     SkippedSpec(crate::package::port::PackageParseError),
     PackagesRefused {
         kind: crate::package::event::RefusalKind,
@@ -1457,6 +1461,12 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
             PackageEvent::Warning { message, .. } => {
                 summary.warned += 1;
                 summary.relayed.push(RelayedDriftEvent::Warning(message));
+            }
+            PackageEvent::DeployStateWarning { warning, .. } => {
+                summary.warned += 1;
+                summary
+                    .relayed
+                    .push(RelayedDriftEvent::DeployState(warning));
             }
             PackageEvent::SpecSkipped { error, .. } => {
                 summary.relayed.push(RelayedDriftEvent::SkippedSpec(error));
@@ -2387,6 +2397,40 @@ mod tests {
                 &summary.relayed[1],
                 RelayedDriftEvent::DotfileRefused { spec_target, refusal, .. }
                     if spec_target == "~/.batrc" && refusal.condition == Condition::Symlink
+            ),
+            "{summary:?}"
+        );
+    }
+
+    // A warning about the deploy state is relayed whole, in its place, and counts
+    // as one warning, so a state drift could not read keeps the summary from
+    // reading as clean.
+    #[tokio::test]
+    async fn collect_drift_summary_relays_a_deploy_state_warning() {
+        use crate::dotfile_service::{DeployStateWarning, StateLoadFailure};
+
+        let warning = DeployStateWarning::ReadingPast(StateLoadFailure::Empty {
+            path: PathBuf::from("/state/deploy-state.yml"),
+        });
+        let events = vec![
+            PackageEvent::Warning {
+                operation_info: test_operation_info(),
+                message: "first warning".to_string(),
+            },
+            PackageEvent::DeployStateWarning {
+                operation_info: test_operation_info(),
+                warning: warning.clone(),
+            },
+        ];
+
+        let summary = collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(summary.warned, 2, "{summary:?}");
+        assert!(
+            matches!(
+                &summary.relayed[1],
+                RelayedDriftEvent::DeployState(relayed)
+                    if relayed.to_string() == warning.to_string()
             ),
             "{summary:?}"
         );

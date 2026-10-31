@@ -48,5 +48,9 @@ pub mod semantic;
 pub mod service;
 pub mod state;
 pub(crate) mod state_file;
+
+pub use state_file::{
+    DeployStateFailure, DeployStateWarning, Recorded, StateLoadFailure, StateSaveError,
+};
 pub(crate) mod template;
 pub mod track;

@@ -26,7 +26,7 @@ use crate::{
 
 use super::refusal::{TargetState, directory_at_target, guard_refusal, read_target_state};
 use super::state_file::{
-    Recorder, StateLoad, StateSaveError, load_deploy_state, save_deploy_state,
+    DeployStateFailure, Recorder, StateLoad, load_deploy_state, save_deploy_state,
 };
 use crate::package::collect::unchecked::{Checking, Others};
 
@@ -341,37 +341,6 @@ fn spec_save_failure(error: &PackageRepoError, copy: &Path, removal: &CopyRemova
         "Cannot save the spec: {}. {}",
         error.strip_suffix('.').unwrap_or(&error),
         copy_fate(copy, removal)
-    )
-}
-
-// Why a track's copy and spec are in place with no deployment recorded, and how
-// to finish it.
-//
-// Nothing is rolled back for this: both writes are correct and only the record is
-// missing, so undoing them would throw away work to tidy a record.
-//
-// Sends the user to `selfie apply`, which finishes the job: the entry is
-// untracked and its target already matches the copy, so apply's in-sync skip arm
-// records it without asking.
-
-// Says nothing about re-running track, which does different things at the two
-// entry points and neither of them useful: with the entry saved, a second
-// `track_for_package` answers "already tracking" and exits 0 having recorded
-// nothing, while a second standalone track is refused by the spec-collision
-// guard. Naming either would be wrong at the other call site.
-fn unrecorded_track_failure(
-    error: &StateSaveError,
-    name: &str,
-    recorded_target: &str,
-    spec_path: &Path,
-    copy: &Path,
-) -> String {
-    format!(
-        "Tracked '{recorded_target}': the copy at '{}' and the entry in '{}' are written. \
-         The deployment was not recorded: {error}. Run `selfie apply {name}` once the state \
-         file can be written, and it records the deployment.",
-        copy.display(),
-        spec_path.display()
     )
 }
 
@@ -714,12 +683,14 @@ where
         match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
             StateLoad::Usable(loaded) => {
                 if let Some(warning) = loaded.directory_warning() {
-                    sender.send_warning(warning.to_string()).await;
+                    sender.send_deploy_state_warning(warning.clone()).await;
                 }
                 Recorder::new(loaded)
             }
             StateLoad::Unusable(failure) => {
-                return OperationResult::Failure(OperationFailure::Generic(failure.to_string()));
+                return OperationResult::Failure(OperationFailure::DeployState(
+                    DeployStateFailure::Unusable(failure),
+                ));
             }
         };
 
@@ -783,9 +754,9 @@ where
     let mut loaded = match recorder.writable(filesystem) {
         Ok(loaded) => loaded,
         Err(failure) => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "Nothing was tracked. {failure}"
-            )));
+            return OperationResult::Failure(OperationFailure::DeployState(
+                DeployStateFailure::NothingTracked(failure),
+            ));
         }
     };
 
@@ -853,15 +824,22 @@ where
     );
     // Last, and nothing is rolled back for it: the copy and the entry are both
     // correct and only the record is missing, so the failure names what exists and
-    // what recovers it rather than undoing two good writes.
-    if let Err(e) = save_deploy_state(filesystem, &loaded) {
-        return OperationResult::Failure(OperationFailure::Generic(unrecorded_track_failure(
-            &e,
-            &spec.name,
-            &recorded_target,
-            &spec.spec_path,
-            &source_path,
-        )));
+    // what recovers it rather than undoing two good writes. It sends the user to
+    // `selfie apply`, whose in-sync skip arm records the entry without asking. It
+    // says nothing about re-running track: with the entry saved, a second
+    // `track_for_package` answers "already tracking" having recorded nothing, and
+    // a second standalone track is refused by the spec-collision guard, so naming
+    // either is wrong at the other entry point.
+    if let Err(error) = save_deploy_state(filesystem, &loaded) {
+        return OperationResult::Failure(OperationFailure::DeployState(
+            DeployStateFailure::TrackUnrecorded {
+                error,
+                name: spec.name.clone(),
+                target: recorded_target.clone(),
+                spec_path: spec.spec_path.clone(),
+                copy: source_path.clone(),
+            },
+        ));
     }
 
     // The recorded form, not the argument: an adapter that echoed the caller's

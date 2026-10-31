@@ -24,7 +24,7 @@ use super::classify::{
     planned_entries, read_repo_file,
 };
 use super::orphan::{self, Catalog};
-use super::state_file::{StateLoad, load_deploy_state, read_only_state_warning};
+use super::state_file::{DeployStateWarning, StateLoad, load_deploy_state};
 
 /// Core logic for checking drift, or `None` if the run was canceled part way.
 ///
@@ -58,12 +58,14 @@ where
     ) {
         StateLoad::Usable(loaded) => {
             if let Some(warning) = loaded.directory_warning() {
-                sender.send_warning(warning.to_string()).await;
+                sender.send_deploy_state_warning(warning.clone()).await;
             }
             loaded.into_state()
         }
         StateLoad::Unusable(failure) => {
-            sender.send_warning(read_only_state_warning(&failure)).await;
+            sender
+                .send_deploy_state_warning(DeployStateWarning::ReadingPast(failure))
+                .await;
             DeployState::empty()
         }
     };

@@ -335,7 +335,7 @@ fn not_posix_sh(field_name: &str, why: &str) -> ValidationIssue {
 }
 
 /// Results of a package validation
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct ValidationResult {
     /// The package that was validated
     ///
@@ -3151,10 +3151,10 @@ dotfiles:
 "#,
         );
 
-        assert_eq!(
-            package.validate_unknown_fields(),
-            vec![],
-            "the documented `_target: &target` anchor must stay legal"
+        let issues = package.validate_unknown_fields();
+        assert!(
+            issues.is_empty(),
+            "the documented `_target: &target` anchor must stay legal: {issues:?}"
         );
     }
 

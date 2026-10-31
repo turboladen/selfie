@@ -34,7 +34,7 @@ const BACKUPS_DIRNAME: &str = "backups";
 pub(crate) struct LoadedState {
     path: TargetPath,
     state: DeployState,
-    directory_warning: Option<String>,
+    directory_warning: Option<DeployStateWarning>,
     // Why the state directory would refuse the first write, judged once at load
     // by its permissions.
     creation_refusal: Option<StateLoadFailure>,
@@ -52,8 +52,8 @@ impl LoadedState {
     /// Present when a configured `state_directory` is not there. Every caller sends
     /// it, because the load succeeds either way and an empty state that arrives
     /// silently is indistinguishable from a machine where nothing is deployed.
-    pub(crate) fn directory_warning(&self) -> Option<&str> {
-        self.directory_warning.as_deref()
+    pub(crate) fn directory_warning(&self) -> Option<&DeployStateWarning> {
+        self.directory_warning.as_ref()
     }
 
     /// Where a deploy keeps a copy of a target it is about to overwrite.
@@ -184,7 +184,7 @@ fn creation_failure<F: FileSystem>(
 // the file is read.
 struct Located {
     path: TargetPath,
-    directory_warning: Option<String>,
+    directory_warning: Option<DeployStateWarning>,
     creation_refusal: Option<StateLoadFailure>,
     configured: bool,
 }
@@ -209,14 +209,14 @@ fn creation_failure_at<F: FileSystem>(
     configured: bool,
 ) -> Option<StateLoadFailure> {
     let refusal = filesystem.file_creation_refusal(directory)?;
-    let (blocked, why) = match refusal {
-        FileSystemError::CannotCreateIn { path, cause } => (path, cause.to_string()),
-        other => (directory.to_path_buf(), other.to_string()),
+    let blocked = match &refusal {
+        FileSystemError::CannotCreateIn { path, .. } => path.clone(),
+        _ => directory.to_path_buf(),
     };
     Some(StateLoadFailure::StateDirectoryNotWritable {
         directory: directory.to_path_buf(),
         blocked,
-        why,
+        cause: Box::new(refusal),
         configured,
     })
 }
@@ -234,17 +234,18 @@ pub(crate) enum StateLoad {
 }
 
 /// Why the deploy state could not be used. Each message names its remedy.
-#[derive(Debug, Error)]
-pub(crate) enum StateLoadFailure {
+#[derive(Debug, Clone, Error)]
+pub enum StateLoadFailure {
     /// The file has no location.
     #[error("Cannot locate the deploy state file: {0}")]
     Locate(StatePathError),
     /// Something that is not a directory occupies the state directory's path.
     #[error(
-        "Cannot use the deploy state: '{}' {what}. Remove it, or point state_directory elsewhere",
-        .path.display()
+        "Cannot use the deploy state: '{}' {}. Remove it, or point state_directory elsewhere",
+        .path.display(),
+        .reason.clause()
     )]
-    StateDirectoryOccupied { path: PathBuf, what: String },
+    StateDirectoryOccupied { path: PathBuf, reason: AbsentReason },
     /// The state directory could not be read or could not be classified, so
     /// selfie cannot tell whether a state it must not overwrite is in there.
     #[error(
@@ -254,13 +255,15 @@ pub(crate) enum StateLoadFailure {
     StateDirectoryUnreadable { path: PathBuf, why: String },
     /// The state directory does not accept a new file, or is not there and
     /// cannot be created, so the deploy state cannot be written.
-    #[error("{}", not_writable_sentence(directory, blocked, why, *configured))]
+    #[error("{}", not_writable_sentence(directory, blocked, cause, *configured))]
     StateDirectoryNotWritable {
         directory: PathBuf,
         /// The directory that refused: `directory` itself, or the nearest of its
         /// ancestors that exists.
         blocked: PathBuf,
-        why: String,
+        /// Why `blocked` refused, as the filesystem refused it.
+        // Boxed: the error is large, and a loaded state carries this failure.
+        cause: Box<FileSystemError>,
         /// Whether the user named `directory`, which makes a typo worth a word.
         configured: bool,
     },
@@ -299,7 +302,17 @@ pub(crate) enum StateLoadFailure {
     Parse { path: PathBuf, cause: ParseFailure },
 }
 
-fn not_writable_sentence(directory: &Path, blocked: &Path, why: &str, configured: bool) -> String {
+fn not_writable_sentence(
+    directory: &Path,
+    blocked: &Path,
+    refusal: &FileSystemError,
+    configured: bool,
+) -> String {
+    // `blocked` names the directory, so a refusal naming it gives only its cause.
+    let why = match refusal {
+        FileSystemError::CannotCreateIn { cause, .. } => cause.to_string(),
+        other => other.to_string(),
+    };
     if directory == blocked {
         return format!(
             "The deploy state cannot be written: the state directory '{}' does not accept a new \
@@ -322,8 +335,8 @@ fn not_writable_sentence(directory: &Path, blocked: &Path, why: &str, configured
 }
 
 /// Why the deploy state could not be written.
-#[derive(Debug, Error)]
-pub(crate) enum StateSaveError {
+#[derive(Debug, Clone, Error)]
+pub enum StateSaveError {
     /// selfie's own state would not serialize: a bug, not a filesystem condition.
     #[error("Cannot serialize the deploy state: {0}")]
     Serialize(crate::yaml::SerializeFailure),
@@ -335,15 +348,140 @@ pub(crate) enum StateSaveError {
     },
 }
 
-/// How apply reports a state its [`Recorder`] could not write back. The
-/// write-back comes before the run's first write, so nothing was written.
-pub(super) fn stopped_before_writing(failure: &StateLoadFailure) -> String {
-    format!("Stopped with nothing written. {failure}")
+/// Something about the deploy state a command goes on past, and tells the user.
+#[derive(Debug, Clone)]
+pub enum DeployStateWarning {
+    /// The configured state directory is not there yet, so nothing shows as
+    /// deployed. `cannot_create` says why the first write could not create it,
+    /// when it could not.
+    NotThereYet {
+        directory: PathBuf,
+        cannot_create: Option<StateLoadFailure>,
+    },
+    /// A command that only reads the state could not use it, and goes on as
+    /// though nothing had been deployed.
+    ReadingPast(StateLoadFailure),
+    /// A dry run found a state a real run could not write.
+    DryRunWouldStop(StateLoadFailure),
+    /// A target was deployed or found in sync, and the state recording it could
+    /// not be written.
+    NotRecorded {
+        recorded: Recorded,
+        target: PathBuf,
+        error: StateSaveError,
+    },
+    /// The state could not be written after the run's housekeeping, which the
+    /// next apply redoes.
+    Untidied(StateSaveError),
 }
 
-/// How a command that only reads the state reports an unusable one.
-pub(super) fn read_only_state_warning(failure: &StateLoadFailure) -> String {
-    format!("{failure}; continuing as though nothing had been deployed")
+impl std::fmt::Display for DeployStateWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotThereYet {
+                directory,
+                cannot_create: None,
+            } => write!(
+                f,
+                "state_directory '{}' is not there yet, so nothing shows as deployed; selfie \
+                 creates it on the first write. Correct the setting if that path is a typo",
+                directory.display()
+            ),
+            Self::NotThereYet {
+                directory,
+                cannot_create: Some(failure),
+            } => write!(
+                f,
+                "state_directory '{}' is not there yet, so nothing shows as deployed. {failure}",
+                directory.display()
+            ),
+            Self::ReadingPast(failure) => {
+                write!(
+                    f,
+                    "{failure}; continuing as though nothing had been deployed"
+                )
+            }
+            Self::DryRunWouldStop(failure) => write!(
+                f,
+                "{failure}. A real run stops before its first write, including recording a file \
+                 already in place"
+            ),
+            // `error` already names the state file, so the sentence does not repeat it.
+            Self::NotRecorded {
+                recorded,
+                target,
+                error,
+            } => write!(
+                f,
+                "{recorded} '{}' but cannot record it: {error}",
+                target.display()
+            ),
+            Self::Untidied(error) => write!(
+                f,
+                "Could not tidy the deploy state after the run, so the next apply tries again: \
+                 {error}"
+            ),
+        }
+    }
+}
+
+/// What a target was when apply recorded it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    /// The target was written.
+    Deployed,
+    /// The target already matched its source and was left alone.
+    InSync,
+}
+
+impl std::fmt::Display for Recorded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Recorded::Deployed => write!(f, "Deployed"),
+            Recorded::InSync => write!(f, "Found in sync"),
+        }
+    }
+}
+
+/// Why a command that records what it writes stopped over the deploy state.
+#[derive(Debug, Clone, Error)]
+pub enum DeployStateFailure {
+    /// The state could not be used, so the command did nothing.
+    #[error("{0}")]
+    Unusable(StateLoadFailure),
+    /// An apply could not write the state back before its first write, so
+    /// nothing was written.
+    #[error("Stopped with nothing written. {0}")]
+    StoppedBeforeWriting(StateLoadFailure),
+    /// An apply wrote `target` and could not record it, and stopped there.
+    #[error(
+        "Stopped after failing to record '{}' in the deploy state; the next run re-evaluates \
+         it once the state can be written",
+        .target.display()
+    )]
+    StoppedAfterRecording { target: PathBuf },
+    /// A track could not write the state back before its first write, so
+    /// nothing was tracked.
+    #[error("Nothing was tracked. {0}")]
+    NothingTracked(StateLoadFailure),
+    /// A track wrote the copy at `copy` and the entry in `spec_path`, and could
+    /// not record the deployment of `target`. `selfie apply <name>` records it.
+    #[error(
+        "Tracked '{target}': the copy at '{}' and the entry in '{}' are written. The deployment \
+         was not recorded: {error}. Run `selfie apply {name}` once the state file can be \
+         written, and it records the deployment.",
+        .copy.display(),
+        .spec_path.display()
+    )]
+    TrackUnrecorded {
+        error: StateSaveError,
+        name: String,
+        /// The target as the spec spells it, such as `~/.bashrc`: the spelling
+        /// as written, not a resolved path.
+        target: String,
+        spec_path: PathBuf,
+        copy: PathBuf,
+    },
 }
 
 /// What selfie makes of a state directory, given what is at its path.
@@ -375,7 +513,7 @@ pub(crate) fn state_directory_verdict(
         DirectoryState::Absent(reason) => {
             StateDirectoryVerdict::Refused(StateLoadFailure::StateDirectoryOccupied {
                 path: directory.to_path_buf(),
-                what: reason.clause(),
+                reason,
             })
         }
         // A path selfie cannot classify may hold a state it must not overwrite, so it
@@ -388,26 +526,6 @@ pub(crate) fn state_directory_verdict(
                 why: format!("could not be checked: {error}"),
             })
         }
-    }
-}
-
-/// The warning for a configured state directory at `directory` that is not
-/// there yet, where `cannot_create` says why it could not be created, if it
-/// could not.
-pub(crate) fn not_there_yet_warning(
-    directory: &Path,
-    cannot_create: Option<&StateLoadFailure>,
-) -> String {
-    match cannot_create {
-        None => format!(
-            "state_directory '{}' is not there yet, so nothing shows as deployed; selfie creates \
-             it on the first write. Correct the setting if that path is a typo",
-            directory.display()
-        ),
-        Some(failure) => format!(
-            "state_directory '{}' is not there yet, so nothing shows as deployed. {failure}",
-            directory.display()
-        ),
     }
 }
 
@@ -449,8 +567,10 @@ fn deploy_state_path<F: FileSystem>(
             // Says it will be created only when it can be: a drift run over an
             // uncreatable path must not promise a first write that will fail.
             let creation_refusal = creation_refusal();
-            let directory_warning =
-                configured.then(|| not_there_yet_warning(&directory, creation_refusal.as_ref()));
+            let directory_warning = configured.then(|| DeployStateWarning::NotThereYet {
+                directory: directory.clone(),
+                cannot_create: creation_refusal.clone(),
+            });
             Ok(Located {
                 path,
                 directory_warning,
@@ -671,7 +791,8 @@ mod tests {
         };
         let warning = loaded
             .directory_warning()
-            .expect("a configured directory that is not there is worth a word");
+            .expect("a configured directory that is not there is worth a word")
+            .to_string();
 
         assert!(
             warning.contains(STATE_DIR) && warning.contains("state_directory"),
@@ -706,7 +827,8 @@ mod tests {
         };
         let warning = loaded
             .directory_warning()
-            .expect("a word about the directory");
+            .expect("a word about the directory")
+            .to_string();
 
         assert!(
             !warning.contains("creates it on the first write"),
@@ -723,7 +845,12 @@ mod tests {
             not_writable_sentence(
                 Path::new("/home/me/.local/state/selfie"),
                 Path::new("/home/me/.local"),
-                "Permission denied",
+                &FileSystemError::CannotCreateIn {
+                    path: "/home/me/.local".into(),
+                    cause: std::sync::Arc::new(std::io::Error::from(
+                        std::io::ErrorKind::PermissionDenied,
+                    )),
+                },
                 configured,
             )
         };
@@ -773,10 +900,10 @@ mod tests {
             panic!("the default is selfie's to create");
         };
 
-        assert_eq!(
-            loaded.directory_warning(),
-            None,
-            "an unset default is silent"
+        assert!(
+            loaded.directory_warning().is_none(),
+            "an unset default is silent: {:?}",
+            loaded.directory_warning()
         );
     }
 

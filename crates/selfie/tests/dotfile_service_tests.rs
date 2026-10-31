@@ -143,6 +143,7 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
         .iter()
         .flat_map(|event| match event {
             PackageEvent::Warning { message, .. } => vec![message.clone()],
+            PackageEvent::DeployStateWarning { warning, .. } => vec![warning.to_string()],
             PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.clone()],
             PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.clone()],
             PackageEvent::PackagesRefused {
@@ -18487,7 +18488,8 @@ mod orphans {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::Warning { message, .. } if message.contains("Could not tidy")
+                PackageEvent::DeployStateWarning { warning, .. }
+                    if warning.to_string().contains("Could not tidy")
             )),
             "{events:#?}"
         );

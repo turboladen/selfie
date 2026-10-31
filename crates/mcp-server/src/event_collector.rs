@@ -652,6 +652,10 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "type": "warning",
             "message": message,
         })),
+        PackageEvent::DeployStateWarning { warning, .. } => Some(serde_json::json!({
+            "type": "warning",
+            "message": warning.to_string(),
+        })),
         // A warning row like any other, so a caller reading warnings reads it.
         PackageEvent::CollisionsUnchecked { sources, .. } => Some(serde_json::json!({
             "type": "warning",
@@ -3279,6 +3283,54 @@ mod tests {
         for event in &events {
             test_common::assert_secret_free(&format!("{event:?}"), SECRET, "an event");
         }
+    }
+
+    // The deploy state's warning and failure travel typed, and the JSON is the
+    // one their sentences gave as a plain warning and a generic failure.
+    #[tokio::test]
+    async fn a_deploy_state_warning_and_failure_collect_as_their_sentences() {
+        use selfie::dotfile_service::{DeployStateFailure, DeployStateWarning, StateLoadFailure};
+
+        let failure = || StateLoadFailure::Empty {
+            path: "/state/deploy-state.yml".into(),
+        };
+        let warning = DeployStateWarning::ReadingPast(failure());
+        let stopped = DeployStateFailure::StoppedBeforeWriting(failure());
+        let typed = vec![
+            PackageEvent::DeployStateWarning {
+                operation_info: test_op_info(),
+                warning: warning.clone(),
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Failure(OperationFailure::DeployState(stopped.clone())),
+            },
+        ];
+        let worded = vec![
+            PackageEvent::Warning {
+                operation_info: test_op_info(),
+                message: warning.to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Failure(OperationFailure::Generic(stopped.to_string())),
+            },
+        ];
+
+        let typed = collect_events(Box::pin(stream::iter(typed))).await;
+        let worded = collect_events(Box::pin(stream::iter(worded))).await;
+
+        assert_eq!(typed.data, worded.data);
+        assert_eq!(typed.success, worded.success);
+        // Control: the rows are there, so the equality is not two empty payloads.
+        assert_eq!(warning_rows(&typed.data).len(), 1, "{}", typed.data);
+        assert!(
+            typed.data["result"]["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("Stopped with nothing written.")),
+            "{}",
+            typed.data
+        );
     }
 
     #[tokio::test]
