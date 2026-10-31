@@ -6,13 +6,10 @@ use crate::terminal_text::{Command, Literal, Shown, Word, lit};
 /// quoted as one shell word, after `--` when it starts with a dash, then
 /// `tail`. Returns `None` when `name` holds NUL, which no shell word can carry.
 pub(crate) fn selfie_command(words: &[Literal], name: &str, tail: &[Literal]) -> Option<Command> {
-    // Quoting does not stop a leading dash reading as an option.
-    let separator = name.starts_with('-').then_some(Word::Literal(lit!("--")));
     Command::composed(
         std::iter::once(Word::Literal(lit!("selfie")))
             .chain(words.iter().copied().map(Word::Literal))
-            .chain(separator)
-            .chain([Word::Name(name)])
+            .chain([Word::Operand(name)])
             .chain(tail.iter().copied().map(Word::Literal)),
     )
 }

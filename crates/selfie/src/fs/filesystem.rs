@@ -207,6 +207,19 @@ pub fn shell_word(word: &str) -> Option<Cow<'_, str>> {
     shlex::try_quote(word).ok()
 }
 
+/// `name` as a command's operand: quoted as one shell word, after `--` when it
+/// starts with a dash, so the command does not read it as an option. Returns
+/// `None` when it holds a NUL byte, which no shell word can carry.
+#[must_use]
+pub fn shell_operand(name: &str) -> Option<String> {
+    let word = shell_word(name)?;
+    Some(if name.starts_with('-') {
+        format!("-- {word}")
+    } else {
+        word.into_owned()
+    })
+}
+
 impl DirectoryState {
     /// The state a failed listing implies, for a caller that has already listed.
     ///

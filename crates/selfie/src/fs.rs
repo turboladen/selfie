@@ -6,7 +6,7 @@ pub use self::filesystem::FileSystem;
 pub use self::filesystem::FileSystemError;
 pub use self::filesystem::{
     AbsentReason, DirectoryState, FileIdentity, IfPresent, OpenRefusal, Placed, Removal,
-    RepositoryRead, TargetRead, shell_quote, shell_word,
+    RepositoryRead, TargetRead, shell_operand, shell_quote, shell_word,
 };
 pub use self::real::RealFileSystem;
 pub use self::target::{

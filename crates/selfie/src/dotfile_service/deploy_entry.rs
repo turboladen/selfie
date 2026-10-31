@@ -24,7 +24,8 @@ use super::refusal::{
     classify_write, guard_refusal, read_target_state, readable_or_refusal, refusal_for,
 };
 use super::state_file::{
-    LoadedState, Recorder, WritableState, save_deploy_state, stopped_before_writing,
+    DeployStateFailure, DeployStateWarning, LoadedState, Recorded, Recorder, WritableState,
+    save_deploy_state,
 };
 
 /// Describes a single config file deployment operation
@@ -131,7 +132,9 @@ pub(super) async fn deploy_and_record<F: FileSystem>(
     // so a state that cannot be written stops the run before this entry writes.
     let mut loaded = match recorder.writable(filesystem) {
         Ok(loaded) => loaded,
-        Err(failure) => return EntryOutcome::Unrecorded(stopped_before_writing(&failure)),
+        Err(failure) => {
+            return EntryOutcome::Unrecorded(DeployStateFailure::StoppedBeforeWriting(failure));
+        }
     };
     match perform_deploy(filesystem, sender, unit, decided, overwrite, backed_up).await {
         Wrote::Written => {
@@ -476,24 +479,6 @@ pub(super) fn write_failure(error: &FileSystemError) -> Failure {
     Failure::new(EntryOperation::Write, "Failed to write", error)
 }
 
-/// What an apply just recorded about a target.
-#[derive(Clone, Copy)]
-pub(super) enum Recorded {
-    /// The target was written.
-    Deployed,
-    /// The target already matched its source and was left alone.
-    InSync,
-}
-
-impl std::fmt::Display for Recorded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Recorded::Deployed => write!(f, "Deployed"),
-            Recorded::InSync => write!(f, "Found in sync"),
-        }
-    }
-}
-
 /// Record `unit` in the loaded state and write the state back. On failure,
 /// warns with what happened to the target and returns the reason the run stops.
 // Only a real run's ledger hands out the state this takes. The state is written
@@ -510,7 +495,7 @@ pub(super) async fn record_and_save<F: FileSystem>(
     sender: &EventSender,
     recorded: Recorded,
     unit: &DeployUnit<'_>,
-) -> Option<String> {
+) -> Option<DeployStateFailure> {
     // With a base, the record holds the path relative to it, which is what the
     // base means; the spec's spelling is relative to the spec file instead.
     let (source, base) = match unit.event_source {
@@ -534,18 +519,15 @@ pub(super) async fn record_and_save<F: FileSystem>(
     let Err(e) = save_deploy_state(filesystem, loaded) else {
         return None;
     };
-    // `e` already names the state file, so the message does not repeat it.
+    let target = unit.target_path.path().to_path_buf();
     sender
-        .send_warning(format!(
-            "{recorded} '{}' but cannot record it: {e}",
-            unit.target_path.display()
-        ))
+        .send_deploy_state_warning(DeployStateWarning::NotRecorded {
+            recorded,
+            target: target.clone(),
+            error: e,
+        })
         .await;
-    Some(format!(
-        "Stopped after failing to record '{}' in the deploy state; the next run re-evaluates \
-         it once the state can be written",
-        unit.target_path.display()
-    ))
+    Some(DeployStateFailure::StoppedAfterRecording { target })
 }
 
 #[cfg(test)]

@@ -12,7 +12,10 @@ use crate::{
     fs::{AbsentReason, DirectoryState, FileSystem},
     package::collect::directory::{UnlistedDotfilesDirectory, absent_warning},
     package::repository::yaml::list_spec_directory,
-    validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues},
+    validation::{
+        DeployStateNotice, ValidationErrorCategory, ValidationIssue, ValidationIssues,
+        ValidationLevel,
+    },
 };
 
 use super::ConfigFile;
@@ -21,7 +24,7 @@ use super::ConfigFile;
 const MAX_RECOMMENDED_TIMEOUT_SECS: u64 = 600;
 
 /// Holds the issues validating a configuration found.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct ValidationResult {
     /// List of validation issues found during validation
     pub(crate) issues: ValidationIssues,
@@ -361,21 +364,20 @@ fn deploy_state_issue(
         // be written into is a warning, not an error: a run that writes nothing is
         // not stopped by it, and one that writes anything stops before it does.
         StateLoad::Usable(loaded) => {
+            let note = loaded
+                .directory_warning()
+                .map(|note| DeployStateNotice::Warning(note.clone()));
             return match loaded.creation_refusal() {
-                Some(refusal) => Some(ValidationIssue::warning(
+                Some(refusal) => Some(ValidationIssue::of_deploy_state(
+                    ValidationLevel::Warning,
                     ValidationErrorCategory::PathFormat,
-                    "state_directory",
-                    &loaded
-                        .directory_warning()
-                        .map_or_else(|| refusal.to_string(), str::to_string),
-                    None,
+                    note.unwrap_or_else(|| DeployStateNotice::Failure(refusal.clone())),
                 )),
-                None => loaded.directory_warning().map(|note| {
-                    ValidationIssue::info(
+                None => note.map(|note| {
+                    ValidationIssue::of_deploy_state(
+                        ValidationLevel::Info,
                         ValidationErrorCategory::Advisory,
-                        "state_directory",
                         note,
-                        None,
                     )
                 }),
             };
@@ -383,11 +385,10 @@ fn deploy_state_issue(
         StateLoad::Unusable(failure) => failure,
     };
     // An error, because every command that records a deploy refuses it.
-    Some(ValidationIssue::error(
+    Some(ValidationIssue::of_deploy_state(
+        ValidationLevel::Error,
         ValidationErrorCategory::PathFormat,
-        "state_directory",
-        &failure.to_string(),
-        None,
+        DeployStateNotice::Failure(failure),
     ))
 }
 
@@ -1124,14 +1125,8 @@ mod tests {
 
     #[test]
     fn a_directory_the_port_reports_is_not_an_issue() {
-        assert_eq!(
-            directory_issue("dotfiles_directory", DirectoryState::Directory),
-            None
-        );
-        assert_eq!(
-            directory_issue("state_directory", DirectoryState::Directory),
-            None
-        );
+        assert!(directory_issue("dotfiles_directory", DirectoryState::Directory).is_none());
+        assert!(directory_issue("state_directory", DirectoryState::Directory).is_none());
     }
 
     // No command can read specs from a file, and none can create the directory
@@ -1625,7 +1620,7 @@ mod tests {
             file_reads,
             "the premise: the state file reads through 0o300"
         );
-        assert_eq!(issue, None);
+        assert!(issue.is_none(), "{issue:?}");
     }
 
     #[test]
@@ -1659,7 +1654,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("deploy-state.yml"), "deployed: {}\n").unwrap();
 
-        assert_eq!(state_issue(dir.path()), None);
+        let issue = state_issue(dir.path());
+        assert!(issue.is_none(), "{issue:?}");
     }
 
     // apply stops before its first write over a state directory that will not

@@ -11,6 +11,11 @@
 use std::fmt::Display;
 
 use selfie::config::ConfigLoadError;
+use selfie::dotfile_service::{
+    DeployStateFailure, DeployStateWarning, Recorded, StateLoadFailure, StateSaveError,
+};
+use selfie::fs::target::StatePathError;
+use selfie::fs::{AbsentReason, FileSystemError};
 use selfie::package::event::{
     AuditResult, AuditResultData, CheckResult, CheckResultData, DependencyStatus,
     EnvironmentStatus, EnvironmentStatusData, LinkAtTarget, OperationInfo, PackageInfoData,
@@ -21,7 +26,7 @@ use selfie::package::event::{
 };
 use selfie::package::port::{PackageError, PackageParseError, PackageParseKind, PackageRepoError};
 use selfie::sync_service::port::PackageValidationIssue;
-use selfie::validation::{ValidationIssue, ValidationLevel};
+use selfie::validation::{DeployStateNotice, ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
 
 use crate::display_manager::Suggestion;
@@ -254,14 +259,22 @@ impl From<&PackageValidationIssue> for Issue {
 
 impl From<&ValidationIssue> for Issue {
     fn from(data: &ValidationIssue) -> Self {
-        Self::of(
+        let mut issue = Self::of(
             data.level(),
             data.category(),
             data.field(),
             data.message(),
             data.suggestion().map(String::as_str),
             data.location(),
-        )
+        );
+        // The deploy state's issue names its paths as paths, as a run does.
+        if let Some(notice) = data.deploy_state() {
+            issue.message = match notice {
+                DeployStateNotice::Failure(failure) => state_load_failure(failure),
+                DeployStateNotice::Warning(warning) => deploy_state_warning(warning),
+            };
+        }
+        issue
     }
 }
 
@@ -414,6 +427,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
             reason,
         } => uncreatable(package_name, reason),
         OperationFailure::Package(error) => package_error(error),
+        OperationFailure::DeployState(failure) => deploy_state_failure(failure),
         OperationFailure::UnreadableSpec {
             package_name,
             reason,
@@ -635,6 +649,269 @@ pub(crate) fn config_load_error(error: &ConfigLoadError) -> Option<Shown> {
         ),
         ConfigLoadError::FileSystemError(_) => return None,
     })
+}
+
+/// What is at a path instead of a directory, as a clause after the path, with
+/// any path it names a [`DisplayPath`].
+fn absent_clause(reason: &AbsentReason) -> Shown {
+    match reason {
+        AbsentReason::DanglingSymlink {
+            points_to: Some(destination),
+        } => shown!(
+            "is a symlink to nothing: it points at {}",
+            DisplayPath::of(destination)
+        ),
+        AbsentReason::ParentNotADirectory { parent } => shown!(
+            "is below {}, which is not a directory",
+            DisplayPath::of(parent)
+        ),
+        // Named rather than caught, so a variant the library adds must choose
+        // here how a path in it is shown.
+        AbsentReason::Empty
+        | AbsentReason::Occupied { .. }
+        | AbsentReason::DanglingSymlink { points_to: None } => message(reason.clause()).into(),
+    }
+}
+
+/// `error`'s sentence, with the path it names a [`DisplayPath`].
+// A cause an io::Error carries is still its own text, which can repeat the
+// path (selfie-puj0).
+fn file_system_error(error: &FileSystemError) -> Shown {
+    match error {
+        FileSystemError::IrregularTarget { path, kind } => shown!(
+            "{}: target resolves to a {} and selfie will not write to it",
+            DisplayPath::of(path),
+            Prose::new(kind)
+        ),
+        FileSystemError::SymlinkedTarget { path, points_to } => {
+            let to = points_to
+                .as_deref()
+                .map_or_else(Shown::default, |destination| {
+                    shown!(" to '{}'", DisplayPath::of(destination))
+                });
+            shown!(
+                "{}: target is a symlink{} and selfie will not write through it",
+                DisplayPath::of(path),
+                to
+            )
+        }
+        FileSystemError::CannotCreateIn { path, cause } => {
+            shown!("{}: {}", DisplayPath::of(path), sentence(&**cause))
+        }
+        // Named rather than caught, so a variant the library adds must choose
+        // here how a path in it is shown. BelowNonDirectory and DirectoryTarget
+        // carry a path their sentence does not show.
+        FileSystemError::IoError(_)
+        | FileSystemError::HomeDirNotFound
+        | FileSystemError::BelowNonDirectory { .. }
+        | FileSystemError::DirectoryTarget { .. } => sentence(error).into(),
+    }
+}
+
+fn state_path_error(error: &StatePathError) -> Shown {
+    match error {
+        StatePathError::NotAbsolute(path) => shown!(
+            "state_directory '{}' is not an absolute path. Use an absolute path; a leading `~` or \
+             `~/` is expanded, but only when the home directory can be determined, and `~user` is \
+             not",
+            DisplayPath::of(path)
+        ),
+        StatePathError::NoHome => sentence(error).into(),
+    }
+}
+
+/// Why the deploy state could not be used, worded as the library words it,
+/// with each path in it a [`DisplayPath`].
+pub(crate) fn state_load_failure(failure: &StateLoadFailure) -> Shown {
+    match failure {
+        StateLoadFailure::Locate(error) => shown!(
+            "Cannot locate the deploy state file: {}",
+            state_path_error(error)
+        ),
+        StateLoadFailure::StateDirectoryOccupied { path, reason } => shown!(
+            "Cannot use the deploy state: '{}' {}. Remove it, or point state_directory elsewhere",
+            DisplayPath::of(path),
+            absent_clause(reason)
+        ),
+        StateLoadFailure::StateDirectoryUnreadable { path, why } => shown!(
+            "Cannot use the deploy state: '{}' {}. Point state_directory at a directory selfie \
+             can read",
+            DisplayPath::of(path),
+            Prose::new(why)
+        ),
+        StateLoadFailure::StateDirectoryNotWritable {
+            directory,
+            blocked,
+            cause,
+            configured,
+        } => {
+            // `blocked` names the directory, so a refusal naming it gives only its cause.
+            let why = match &**cause {
+                FileSystemError::CannotCreateIn { cause, .. } => sentence(&**cause).into(),
+                other => file_system_error(other),
+            };
+            if directory == blocked {
+                return shown!(
+                    "The deploy state cannot be written: the state directory '{}' does not accept \
+                     a new file ({}). Make it writable, or point state_directory elsewhere",
+                    DisplayPath::of(directory),
+                    why
+                );
+            }
+            let typo = if *configured {
+                lit!("Correct state_directory if that path is a typo, or make")
+            } else {
+                lit!("Make")
+            };
+            shown!(
+                "The deploy state cannot be written: the state directory '{}' is not there, and \
+                 selfie cannot create it under '{}' ({}). {} '{}' writable",
+                DisplayPath::of(directory),
+                DisplayPath::of(blocked),
+                why,
+                typo,
+                DisplayPath::of(blocked)
+            )
+        }
+        StateLoadFailure::StateNotWritable(error) => shown!(
+            "The deploy state cannot be written: {}. Free the space or lift the lock that stops \
+             it, or point state_directory elsewhere",
+            state_save_error(error)
+        ),
+        StateLoadFailure::Irregular { path, kind } => shown!(
+            "Cannot read the deploy state: '{}' is a {}. Remove it, or point state_directory \
+             elsewhere",
+            DisplayPath::of(path),
+            Prose::new(kind)
+        ),
+        StateLoadFailure::Read { path, cause } => shown!(
+            "Cannot read deploy state '{}': {}. Fix the file's permissions, or move it aside",
+            DisplayPath::of(path),
+            file_system_error(cause)
+        ),
+        StateLoadFailure::Empty { path } => shown!(
+            "Deploy state '{}' is empty. Delete it to start over, or restore it from a backup",
+            DisplayPath::of(path)
+        ),
+        StateLoadFailure::Parse { path, cause } => shown!(
+            "Cannot parse deploy state '{}': {}. Repair the file, or move it aside to start over",
+            DisplayPath::of(path),
+            sentence(cause)
+        ),
+    }
+}
+
+/// Why the deploy state could not be written, with its path a [`DisplayPath`].
+fn state_save_error(error: &StateSaveError) -> Shown {
+    match error {
+        StateSaveError::Serialize(failure) => {
+            shown!("Cannot serialize the deploy state: {}", sentence(failure))
+        }
+        StateSaveError::Write { path, cause } => shown!(
+            "Cannot write deploy state '{}': {}",
+            DisplayPath::of(path),
+            file_system_error(cause)
+        ),
+    }
+}
+
+/// A warning about the deploy state, worded as the library words it, with
+/// each path in it a [`DisplayPath`].
+pub(crate) fn deploy_state_warning(warning: &DeployStateWarning) -> Shown {
+    match warning {
+        DeployStateWarning::NotThereYet {
+            directory,
+            cannot_create: None,
+        } => shown!(
+            "state_directory '{}' is not there yet, so nothing shows as deployed; selfie creates \
+             it on the first write. Correct the setting if that path is a typo",
+            DisplayPath::of(directory)
+        ),
+        DeployStateWarning::NotThereYet {
+            directory,
+            cannot_create: Some(failure),
+        } => shown!(
+            "state_directory '{}' is not there yet, so nothing shows as deployed. {}",
+            DisplayPath::of(directory),
+            state_load_failure(failure)
+        ),
+        DeployStateWarning::ReadingPast(failure) => shown!(
+            "{}; continuing as though nothing had been deployed",
+            state_load_failure(failure)
+        ),
+        DeployStateWarning::DryRunWouldStop(failure) => shown!(
+            "{}. A real run stops before its first write, including recording a file already in \
+             place",
+            state_load_failure(failure)
+        ),
+        DeployStateWarning::NotRecorded {
+            recorded,
+            target,
+            error,
+        } => {
+            let recorded = match recorded {
+                Recorded::Deployed => lit!("Deployed"),
+                Recorded::InSync => lit!("Found in sync"),
+            };
+            shown!(
+                "{} '{}' but cannot record it: {}",
+                recorded,
+                DisplayPath::of(target),
+                state_save_error(error)
+            )
+        }
+        DeployStateWarning::Untidied(error) => shown!(
+            "Could not tidy the deploy state after the run, so the next apply tries again: {}",
+            state_save_error(error)
+        ),
+    }
+}
+
+/// Why a recording command stopped over the deploy state, worded as the
+/// library words it, with each path in it a [`DisplayPath`] and the command it
+/// names quoted as a [`Command`].
+pub(crate) fn deploy_state_failure(failure: &DeployStateFailure) -> Shown {
+    match failure {
+        DeployStateFailure::Unusable(failure) => state_load_failure(failure),
+        DeployStateFailure::StoppedBeforeWriting(failure) => shown!(
+            "Stopped with nothing written. {}",
+            state_load_failure(failure)
+        ),
+        DeployStateFailure::StoppedAfterRecording { target } => shown!(
+            "Stopped after failing to record '{}' in the deploy state; the next run re-evaluates \
+             it once the state can be written",
+            DisplayPath::of(target)
+        ),
+        DeployStateFailure::NothingTracked(failure) => {
+            shown!("Nothing was tracked. {}", state_load_failure(failure))
+        }
+        DeployStateFailure::TrackUnrecorded {
+            error,
+            name,
+            target,
+            spec_path,
+            copy,
+        } => {
+            // A name holding NUL has no shell word, so no command is offered.
+            let remedy = crate::formatters::selfie_command(&[lit!("apply")], name, &[])
+                .map_or_else(Shown::default, |command| {
+                    shown!(
+                        " Run `{}` once the state file can be written, and it records the \
+                         deployment.",
+                        command
+                    )
+                });
+            shown!(
+                "Tracked '{}': the copy at '{}' and the entry in '{}' are written. The deployment \
+                 was not recorded: {}.{}",
+                DisplayPath::new(target),
+                DisplayPath::of(copy),
+                DisplayPath::of(spec_path),
+                state_save_error(error),
+                remedy
+            )
+        }
+    }
 }
 
 /// What a step of a run is doing, on one line, as a spinner, a progress line
@@ -1135,6 +1412,359 @@ mod tests {
             link: LinkAtTarget::To("/etc/real".into()),
         };
         assert_eq!(skip_reason(&link).as_str(), link.to_string());
+    }
+
+    // One deploy-state value of every shape the CLI composes.
+    enum StateValue {
+        Load(StateLoadFailure),
+        Warning(DeployStateWarning),
+        Failure(DeployStateFailure),
+    }
+
+    impl StateValue {
+        fn composed(&self) -> Shown {
+            match self {
+                Self::Load(failure) => state_load_failure(failure),
+                Self::Warning(warning) => deploy_state_warning(warning),
+                Self::Failure(failure) => deploy_state_failure(failure),
+            }
+        }
+
+        fn library(&self) -> String {
+            match self {
+                Self::Load(failure) => failure.to_string(),
+                Self::Warning(warning) => warning.to_string(),
+                Self::Failure(failure) => failure.to_string(),
+            }
+        }
+
+        // Which shape this is. No match here has a wildcard, so a variant the
+        // library adds to any of these types, a cause included, fails to build
+        // here, and `STATE_SHAPES` counts the arms, so a shape with no fixture
+        // fails the test.
+        fn shape(&self) -> usize {
+            use DeployStateFailure as F;
+            use DeployStateWarning as W;
+            use StateLoadFailure as L;
+            let save = |error: &StateSaveError| match error {
+                StateSaveError::Serialize(_) => 0,
+                StateSaveError::Write { cause, .. } => 1 + cause_shape(cause),
+            };
+            match self {
+                Self::Load(L::Locate(StatePathError::NotAbsolute(_))) => 0,
+                Self::Load(L::Locate(StatePathError::NoHome)) => 1,
+                Self::Load(L::StateDirectoryOccupied { reason, .. }) => match reason {
+                    AbsentReason::Empty => 2,
+                    AbsentReason::Occupied { .. } => 3,
+                    AbsentReason::DanglingSymlink { points_to: Some(_) } => 4,
+                    AbsentReason::DanglingSymlink { points_to: None } => 5,
+                    AbsentReason::ParentNotADirectory { .. } => 6,
+                },
+                Self::Load(L::StateDirectoryUnreadable { .. }) => 7,
+                Self::Load(L::StateDirectoryNotWritable {
+                    directory,
+                    blocked,
+                    cause,
+                    configured,
+                }) => match (&**cause, directory == blocked, configured) {
+                    (FileSystemError::CannotCreateIn { .. }, true, _) => 8,
+                    (FileSystemError::CannotCreateIn { .. }, false, true) => 9,
+                    (FileSystemError::CannotCreateIn { .. }, false, false) => 10,
+                    // Every other refusal, each its own shape.
+                    (refusal, _, _) => 36 + cause_shape(refusal),
+                },
+                Self::Load(L::StateNotWritable(error)) => 11 + save(error),
+                Self::Load(L::Irregular { .. }) => 20,
+                Self::Load(L::Read { .. }) => 21,
+                Self::Load(L::Empty { .. }) => 22,
+                Self::Load(L::Parse { .. }) => 23,
+                Self::Warning(W::NotThereYet {
+                    cannot_create: None,
+                    ..
+                }) => 24,
+                Self::Warning(W::NotThereYet {
+                    cannot_create: Some(_),
+                    ..
+                }) => 25,
+                Self::Warning(W::ReadingPast(_)) => 26,
+                Self::Warning(W::DryRunWouldStop(_)) => 27,
+                Self::Warning(W::NotRecorded {
+                    recorded: Recorded::Deployed,
+                    ..
+                }) => 28,
+                Self::Warning(W::NotRecorded {
+                    recorded: Recorded::InSync,
+                    ..
+                }) => 29,
+                Self::Warning(W::Untidied(_)) => 30,
+                Self::Failure(F::Unusable(_)) => 31,
+                Self::Failure(F::StoppedBeforeWriting(_)) => 32,
+                Self::Failure(F::StoppedAfterRecording { .. }) => 33,
+                Self::Failure(F::NothingTracked(_)) => 34,
+                Self::Failure(F::TrackUnrecorded { .. }) => 35,
+            }
+        }
+    }
+
+    // A cause's shape, one per FileSystemError variant, with CannotCreateIn
+    // last so a directory's other refusals take the shapes below it.
+    fn cause_shape(cause: &FileSystemError) -> usize {
+        match cause {
+            FileSystemError::IoError(_) => 0,
+            FileSystemError::HomeDirNotFound => 1,
+            FileSystemError::SymlinkedTarget {
+                points_to: Some(_), ..
+            } => 2,
+            FileSystemError::SymlinkedTarget {
+                points_to: None, ..
+            } => 3,
+            FileSystemError::IrregularTarget { .. } => 4,
+            FileSystemError::BelowNonDirectory { .. } => 5,
+            FileSystemError::DirectoryTarget { .. } => 6,
+            FileSystemError::CannotCreateIn { .. } => 7,
+        }
+    }
+
+    const STATE_SHAPES: usize = 43;
+
+    // One FileSystemError of each shape, each path in it under `at`.
+    fn every_cause(at: &dyn Fn(&str) -> std::path::PathBuf) -> Vec<FileSystemError> {
+        let io = || std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        vec![
+            FileSystemError::IoError(io()),
+            FileSystemError::HomeDirNotFound,
+            FileSystemError::SymlinkedTarget {
+                path: at("deploy-state.yml"),
+                points_to: Some(at("elsewhere")),
+            },
+            FileSystemError::SymlinkedTarget {
+                path: at("deploy-state.yml"),
+                points_to: None,
+            },
+            FileSystemError::IrregularTarget {
+                path: at("deploy-state.yml"),
+                kind: "fifo",
+            },
+            FileSystemError::BelowNonDirectory {
+                path: at("deploy-state.yml"),
+                parent: Some(at("file")),
+                cause: io(),
+            },
+            FileSystemError::DirectoryTarget {
+                path: at("deploy-state.yml"),
+                cause: io(),
+            },
+            FileSystemError::CannotCreateIn {
+                path: at(""),
+                cause: io(),
+            },
+        ]
+    }
+
+    // Every deploy-state shape, each path in it under `root`. The causes carry
+    // no path of their own. A real write's io::Error names the state file as
+    // text, which no composer reaches (selfie-puj0).
+    fn every_state_value(root: &str) -> Vec<StateValue> {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        let at = |leaf: &str| PathBuf::from(format!("{root}/{leaf}"));
+        let io = || Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let parse = selfie::yaml::parse::<selfie::package::Package>("name: [\n")
+            .expect_err("the fixture must not parse");
+        let write = |cause| StateSaveError::Write {
+            path: at("deploy-state.yml"),
+            cause,
+        };
+        let saves = || {
+            std::iter::once(StateSaveError::Serialize(
+                selfie::yaml::SerializeFailure::Value,
+            ))
+            .chain(every_cause(&at).into_iter().map(write))
+        };
+        let unusable = || StateLoadFailure::Empty {
+            path: at("deploy-state.yml"),
+        };
+        let not_writable =
+            |blocked: &str, configured| StateLoadFailure::StateDirectoryNotWritable {
+                directory: at("state"),
+                blocked: at(blocked),
+                cause: Box::new(FileSystemError::CannotCreateIn {
+                    path: at(blocked),
+                    cause: io(),
+                }),
+                configured,
+            };
+        let mut values = vec![
+            StateLoadFailure::Locate(StatePathError::NotAbsolute(at("state"))),
+            StateLoadFailure::Locate(StatePathError::NoHome),
+        ];
+        values.extend(
+            [
+                AbsentReason::Empty,
+                AbsentReason::Occupied {
+                    kind: "regular file",
+                },
+                AbsentReason::DanglingSymlink {
+                    points_to: Some(at("gone")),
+                },
+                AbsentReason::DanglingSymlink { points_to: None },
+                AbsentReason::ParentNotADirectory { parent: at("file") },
+            ]
+            .into_iter()
+            .map(|reason| StateLoadFailure::StateDirectoryOccupied {
+                path: at("state"),
+                reason,
+            }),
+        );
+        values.extend([
+            StateLoadFailure::StateDirectoryUnreadable {
+                path: at("state"),
+                why: "could not be checked: permission denied".to_string(),
+            },
+            not_writable("state", true),
+            not_writable("", true),
+            not_writable("", false),
+        ]);
+        values.extend(
+            every_cause(&at)
+                .into_iter()
+                .filter(|cause| !matches!(cause, FileSystemError::CannotCreateIn { .. }))
+                .map(|cause| StateLoadFailure::StateDirectoryNotWritable {
+                    directory: at("state"),
+                    blocked: at("state"),
+                    cause: Box::new(cause),
+                    configured: true,
+                }),
+        );
+        values.extend(saves().map(StateLoadFailure::StateNotWritable));
+        values.extend([
+            StateLoadFailure::Irregular {
+                path: at("deploy-state.yml"),
+                kind: "fifo",
+            },
+            StateLoadFailure::Read {
+                path: at("deploy-state.yml"),
+                cause: FileSystemError::IoError(io()),
+            },
+            unusable(),
+            StateLoadFailure::Parse {
+                path: at("deploy-state.yml"),
+                cause: parse,
+            },
+        ]);
+        let mut all: Vec<StateValue> = values.into_iter().map(StateValue::Load).collect();
+        all.extend(
+            [
+                DeployStateWarning::NotThereYet {
+                    directory: at("state"),
+                    cannot_create: None,
+                },
+                DeployStateWarning::NotThereYet {
+                    directory: at("state"),
+                    cannot_create: Some(not_writable("", true)),
+                },
+                DeployStateWarning::ReadingPast(unusable()),
+                DeployStateWarning::DryRunWouldStop(not_writable("state", false)),
+                DeployStateWarning::NotRecorded {
+                    recorded: Recorded::Deployed,
+                    target: at("target"),
+                    error: write(FileSystemError::IoError(io())),
+                },
+                DeployStateWarning::NotRecorded {
+                    recorded: Recorded::InSync,
+                    target: at("target"),
+                    error: write(FileSystemError::IoError(io())),
+                },
+                DeployStateWarning::Untidied(write(FileSystemError::IoError(io()))),
+            ]
+            .into_iter()
+            .map(StateValue::Warning),
+        );
+        all.extend(
+            [
+                DeployStateFailure::Unusable(unusable()),
+                DeployStateFailure::StoppedBeforeWriting(not_writable("state", true)),
+                DeployStateFailure::StoppedAfterRecording {
+                    target: at("target"),
+                },
+                DeployStateFailure::NothingTracked(not_writable("state", true)),
+                DeployStateFailure::TrackUnrecorded {
+                    error: write(FileSystemError::IoError(io())),
+                    name: "tool".to_string(),
+                    target: format!("{root}/target"),
+                    spec_path: at("tool.yml"),
+                    copy: at("copy"),
+                },
+            ]
+            .into_iter()
+            .map(StateValue::Failure),
+        );
+        all
+    }
+
+    // Each deploy-state sentence reads as the library words it for a plain
+    // path, and the fixtures hold every shape.
+    #[test]
+    fn a_deploy_state_sentence_matches_the_library_wording_for_plain_paths() {
+        let values = every_state_value("/s");
+        let mut shapes: Vec<usize> = values.iter().map(StateValue::shape).collect();
+        shapes.sort_unstable();
+        shapes.dedup();
+
+        assert_eq!(shapes, (0..STATE_SHAPES).collect::<Vec<_>>());
+        for value in &values {
+            assert_eq!(value.composed().as_str(), value.library());
+        }
+    }
+
+    // Every path in a deploy-state sentence is a path: a line break and U+200B
+    // in it show as escapes, and the sentence stays one line.
+    #[test]
+    fn a_deploy_state_sentence_names_each_path_escaped() {
+        for value in every_state_value("/s/st\u{200B}a\nte") {
+            let composed = value.composed().into_string();
+            let library = value.library();
+
+            assert!(
+                !composed.contains(['\u{200B}', '\n']),
+                "{composed:?} from {library:?}"
+            );
+            if library.contains("/s/") {
+                assert!(
+                    composed.contains(r"/s/st\u{200b}a\nte"),
+                    "{composed:?} from {library:?}"
+                );
+            }
+        }
+    }
+
+    // Track's unrecorded failure names `selfie apply` as a command, its name
+    // quoted as one shell word, and reads as the library words it whatever the
+    // name, so the CLI and MCP offer the same command or none.
+    #[test]
+    fn a_track_that_could_not_record_quotes_the_name_it_names() {
+        let failure = |name: &str| DeployStateFailure::TrackUnrecorded {
+            error: StateSaveError::Serialize(selfie::yaml::SerializeFailure::Value),
+            name: name.to_string(),
+            target: "~/.apprc".to_string(),
+            spec_path: "/p/my app.yml".into(),
+            copy: "/d/apprc".into(),
+        };
+
+        assert!(
+            deploy_state_failure(&failure("my app"))
+                .as_str()
+                .contains("Run `selfie apply 'my app'` once the state file can be written"),
+            "{}",
+            deploy_state_failure(&failure("my app")).as_str()
+        );
+        for name in ["my app", "-x", "tool", "a\0b"] {
+            assert_eq!(
+                deploy_state_failure(&failure(name)).as_str(),
+                failure(name).to_string(),
+                "{name:?}"
+            );
+        }
     }
 
     // A name in a composed sentence escapes a blank other than a space, as it

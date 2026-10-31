@@ -320,6 +320,17 @@ pub(crate) struct EventSender {
     tx: mpsc::Sender<PackageEvent>,
 }
 
+// The one warning-level record for an event a warning travels in, so a plain
+// warning and a typed one log alike.
+fn log_warning(operation_info: &OperationInfo, message: &str) {
+    tracing::warn!(
+        operation_type = operation_info.operation_type.to_string(),
+        package_name = &operation_info.package_name,
+        environment = &operation_info.environment,
+        message = message,
+    );
+}
+
 impl EventSender {
     /// Create an event sender that stamps every event with this operation's
     /// context.
@@ -487,12 +498,7 @@ impl EventSender {
                 .await;
             }
             LogLevel::Warning => {
-                tracing::warn!(
-                    operation_type = operation_info.operation_type.to_string(),
-                    package_name = &operation_info.package_name,
-                    environment = &operation_info.environment,
-                    message = &message,
-                );
+                log_warning(&operation_info, &message);
                 self.send(PackageEvent::Warning {
                     operation_info,
                     message,
@@ -541,6 +547,21 @@ impl EventSender {
         self.send(PackageEvent::CollisionsUnchecked {
             operation_info,
             sources,
+        })
+        .await;
+    }
+
+    /// Report something about the deploy state the command goes on past, as a
+    /// warning-level log record and the event.
+    pub(crate) async fn send_deploy_state_warning(
+        &self,
+        warning: crate::dotfile_service::DeployStateWarning,
+    ) {
+        let operation_info = self.touch_operation_info();
+        log_warning(&operation_info, &warning.to_string());
+        self.send(PackageEvent::DeployStateWarning {
+            operation_info,
+            warning,
         })
         .await;
     }
@@ -1416,6 +1437,8 @@ pub enum OperationFailure {
         /// package being installed.
         required_by: Option<String>,
     },
+    /// A command that records what it writes stopped over the deploy state.
+    DeployState(crate::dotfile_service::DeployStateFailure),
     /// Generic failure with a freeform message
     Generic(String),
 }
@@ -1682,6 +1705,7 @@ impl std::fmt::Display for OperationFailure {
                     None => Ok(()),
                 }
             }
+            OperationFailure::DeployState(failure) => write!(f, "{failure}"),
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -3225,6 +3249,12 @@ pub enum PackageEvent {
     Warning {
         operation_info: OperationInfo,
         message: String,
+    },
+
+    /// A warning about the deploy state, whose `Display` is its sentence.
+    DeployStateWarning {
+        operation_info: OperationInfo,
+        warning: crate::dotfile_service::DeployStateWarning,
     },
 
     /// Package information loaded

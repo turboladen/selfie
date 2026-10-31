@@ -35,15 +35,14 @@ use super::classify::{
     planned_entries, read_repo_file,
 };
 use super::deploy_entry::{
-    Decided, DeployUnit, Ledger, Overwrite, Recorded, conflict_diff, deploy_and_record,
-    record_and_save,
+    Decided, DeployUnit, Ledger, Overwrite, conflict_diff, deploy_and_record, record_and_save,
 };
 use super::orphan::{self, Catalog};
 use super::port::ApplyOptions;
 use super::secret::{SecretApply, SecretOutcome, programs_of};
 use super::state_file::{
-    LoadedState, Recorder, StateLoad, load_deploy_state, read_only_state_warning,
-    stopped_before_writing,
+    DeployStateFailure, DeployStateWarning, LoadedState, Recorded, Recorder, StateLoad,
+    load_deploy_state,
 };
 use crate::package::collect::warning::CollectionRefusal;
 
@@ -64,8 +63,10 @@ pub(super) const APPLY_CANCELED: &str = "Apply canceled";
 
 /// Why an apply stopped before its last entry.
 ///
-/// Each cause is worded once, in `Display`, so no two sites that stop a run can
-/// describe the same stop differently.
+/// Each stop other than the deploy state's is worded once, in
+/// [`into_failure`](Self::into_failure), so no two sites that stop a run can
+/// describe the same stop differently. The deploy state's stop is a
+/// [`DeployStateFailure`], worded by its own `Display`.
 enum Stop {
     /// The caller canceled the run.
     Canceled,
@@ -78,44 +79,40 @@ enum Stop {
     /// Collecting the packages refused something while `stop_on_error` is on.
     Collection(CollectionRefusal),
     /// The deploy state could not be written, before a write or after one.
-    /// Carries the reason, already worded. Stops the run whatever
-    /// `stop_on_error` says.
-    Unrecorded(String),
+    /// Stops the run whatever `stop_on_error` says.
+    Unrecorded(DeployStateFailure),
 }
 
-impl std::fmt::Display for Stop {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Canceled => f.write_str(APPLY_CANCELED),
-            Self::Entry(target) => write!(
-                f,
+impl Stop {
+    /// The run's failure, or `None` for a canceled run, which reports none.
+    fn into_failure(self) -> Option<OperationFailure> {
+        let sentence = match self {
+            Self::Canceled => return None,
+            Self::Unrecorded(failure) => return Some(OperationFailure::DeployState(failure)),
+            Self::Entry(target) => format!(
                 "Stopped after failing to apply dotfile '{target}' (stop_on_error is enabled)"
             ),
-            Self::Package(name) => write!(
-                f,
+            Self::Package(name) => format!(
                 "Stopped before applying anything: package '{name}' is refused (stop_on_error is \
                  enabled)"
             ),
             Self::Collection(
                 CollectionRefusal::UnlistableDotfilesDirectory(_)
                 | CollectionRefusal::UncheckableDotfilesDirectory(_),
-            ) => f.write_str(
-                "Stopped before applying anything: the standalone dotfiles directory could not \
-                 be read (stop_on_error is enabled)",
-            ),
-            Self::Collection(CollectionRefusal::AmbiguousName { name, .. }) => write!(
-                f,
+            ) => "Stopped before applying anything: the standalone dotfiles directory could not \
+                  be read (stop_on_error is enabled)"
+                .to_string(),
+            Self::Collection(CollectionRefusal::AmbiguousName { name, .. }) => format!(
                 "Stopped before applying anything: several spec files claim the name '{name}' \
                  (stop_on_error is enabled)"
             ),
-            Self::Collection(CollectionRefusal::UnloadableSpec { error, .. }) => write!(
-                f,
+            Self::Collection(CollectionRefusal::UnloadableSpec { error, .. }) => format!(
                 "Stopped before applying anything: spec '{}' could not be loaded (stop_on_error \
                  is enabled)",
                 error.package_path().display()
             ),
-            Self::Unrecorded(reason) => f.write_str(reason),
-        }
+        };
+        Some(OperationFailure::Generic(sentence))
     }
 }
 
@@ -133,7 +130,7 @@ pub(super) enum EntryOutcome {
     Canceled,
     /// The deploy state could not be written, before the entry's write or after
     /// it. Carries why the run stops.
-    Unrecorded(String),
+    Unrecorded(DeployStateFailure),
 }
 
 /// What an apply did with each entry, counted as it goes.
@@ -264,7 +261,7 @@ where
         match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
             StateLoad::Usable(loaded) => {
                 if let Some(warning) = loaded.directory_warning() {
-                    sender.send_warning(warning.to_string()).await;
+                    sender.send_deploy_state_warning(warning.clone()).await;
                 }
                 if options.dry_run {
                     // A missing directory's warning already says why it cannot be
@@ -273,9 +270,8 @@ where
                         && let Some(failure) = loaded.creation_refusal()
                     {
                         sender
-                            .send_warning(format!(
-                                "{failure}. A real run stops before its first write, including \
-                                 recording a file already in place"
+                            .send_deploy_state_warning(DeployStateWarning::DryRunWouldStop(
+                                failure.clone(),
                             ))
                             .await;
                     }
@@ -285,12 +281,14 @@ where
                 }
             }
             StateLoad::Unusable(failure) if options.dry_run => {
-                sender.send_warning(read_only_state_warning(&failure)).await;
+                sender
+                    .send_deploy_state_warning(DeployStateWarning::ReadingPast(failure))
+                    .await;
                 Ledger::Preview(None)
             }
             StateLoad::Unusable(failure) => {
-                return Some(OperationResult::Failure(OperationFailure::Generic(
-                    failure.to_string(),
+                return Some(OperationResult::Failure(OperationFailure::DeployState(
+                    DeployStateFailure::Unusable(failure),
                 )));
             }
         };
@@ -533,10 +531,7 @@ where
                         // A secret-bearing entry records nothing, but its write is a
                         // write, so the state is written back before it as before any.
                         let mut write_back = || match &mut ledger {
-                            Ledger::Record(recorder) => recorder
-                                .writable(filesystem)
-                                .map(|_| ())
-                                .map_err(|failure| stopped_before_writing(&failure)),
+                            Ledger::Record(recorder) => recorder.writable(filesystem).map(|_| ()),
                             Ledger::Preview(_) => Ok(()),
                         };
                         break 'entry match secret_apply.apply(&secret, &mut write_back).await {
@@ -549,9 +544,9 @@ where
                                 failed_programs.insert(program);
                                 EntryOutcome::Failed
                             }
-                            SecretOutcome::StateNotWritable(reason) => {
-                                EntryOutcome::Unrecorded(reason)
-                            }
+                            SecretOutcome::StateNotWritable(failure) => EntryOutcome::Unrecorded(
+                                DeployStateFailure::StoppedBeforeWriting(failure),
+                            ),
                             SecretOutcome::Canceled => EntryOutcome::Canceled,
                         };
                     }
@@ -625,9 +620,9 @@ where
                             let mut loaded = match recorder.writable(filesystem) {
                                 Ok(loaded) => loaded,
                                 Err(failure) => {
-                                    break 'entry EntryOutcome::Unrecorded(stopped_before_writing(
-                                        &failure,
-                                    ));
+                                    break 'entry EntryOutcome::Unrecorded(
+                                        DeployStateFailure::StoppedBeforeWriting(failure),
+                                    );
                                 }
                             };
                             if let Some(reason) = record_and_save(
@@ -706,9 +701,9 @@ where
                             if let Ledger::Record(recorder) = &mut ledger
                                 && let Err(failure) = recorder.writable(filesystem)
                             {
-                                break 'entry EntryOutcome::Unrecorded(stopped_before_writing(
-                                    &failure,
-                                ));
+                                break 'entry EntryOutcome::Unrecorded(
+                                    DeployStateFailure::StoppedBeforeWriting(failure),
+                                );
                             }
                             // The prompt waits on the user, so what the decision read
                             // may no longer be at the target when the write comes.
@@ -813,12 +808,7 @@ where
     }
 
     if let Some(stop) = stopped {
-        return match stop {
-            Stop::Canceled => None,
-            stop => Some(OperationResult::Failure(OperationFailure::Generic(
-                stop.to_string(),
-            ))),
-        };
+        return stop.into_failure().map(OperationResult::Failure);
     }
 
     // Orphans are judged after the entries, so a record this run just wrote is
@@ -852,9 +842,7 @@ where
         // Every deployment is already recorded; only the housekeeping is lost,
         // and the next run redoes it.
         sender
-            .send_warning(format!(
-                "Could not tidy the deploy state after the run, so the next apply tries again: {e}"
-            ))
+            .send_deploy_state_warning(DeployStateWarning::Untidied(e))
             .await;
     }
 
