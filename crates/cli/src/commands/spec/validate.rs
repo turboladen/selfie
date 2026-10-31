@@ -167,7 +167,7 @@ fn print_unlisted_warnings(
             // A directory refusal arrives as a plain warning carrying its
             // sentence, so that sentence is what identifies it.
             PackageEvent::Warning { message, .. } if !listed(&|r| names_directory(r, message)) => {
-                display.print_warning(received::sentence(message));
+                display.print_warning(received::message(message));
             }
             _ => {}
         }
@@ -250,7 +250,7 @@ impl Unvalidated {
                 issues: Some(shown!("{} files", paths.len())),
                 label: Name::new(name).into(),
                 field: None,
-                message: received::sentence(refusal.sentence()).into(),
+                message: received::message(refusal.sentence()).into(),
                 location: None,
             },
             // One class for both, as the summary counts them; the message says
@@ -262,7 +262,7 @@ impl Unvalidated {
                 issues: None,
                 label: DisplayPath::of(error.path()).into(),
                 field: None,
-                message: received::sentence(refusal.sentence()).into(),
+                message: received::message(refusal.sentence()).into(),
                 location: None,
             },
         }

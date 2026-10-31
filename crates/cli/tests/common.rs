@@ -234,11 +234,19 @@ pub fn setup_test_config_with_state_directory() -> TempDir {
 }
 
 /// What a finished `selfie` run printed, and how it exited.
+#[derive(Debug)]
 pub struct RunOutput {
     /// The exit code, or `None` when a signal ended the run.
     pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Whether `text` holds a CSI sequence, such as the SGR selfie writes for
+/// colors.
+#[must_use]
+pub fn styled(text: &str) -> bool {
+    text.contains("\u{1b}[")
 }
 
 /// Run `selfie` with `args` in `temp_dir`'s sandbox (see [`sandboxed_command`])

@@ -126,12 +126,6 @@ impl EventProcessor {
         Self { display }
     }
 
-    /// Get a reference to the display manager
-    #[allow(dead_code)]
-    pub(crate) fn display(&self) -> &DisplayManager {
-        &self.display
-    }
-
     /// Process events from the stream with a custom event handler
     ///
     /// This allows commands to provide custom handling for specific event types
@@ -270,18 +264,17 @@ impl EventProcessor {
             }
 
             PackageEvent::Warning { message, .. } => {
-                self.display.print_warning(received::sentence(message));
+                self.display.print_warning(received::message(message));
                 // Warnings don't set failure exit code by default
             }
 
             // The run's result counts each, so the exit code comes from there.
             PackageEvent::DotfileRefused { refusal, .. } => {
                 self.display
-                    .print_warning(received::sentence(refusal.message));
+                    .print_warning(received::message(refusal.message));
             }
             PackageEvent::DotfileFailed { failure, .. } => {
-                self.display
-                    .print_error(received::sentence(failure.message));
+                self.display.print_error(received::message(failure.message));
             }
 
             PackageEvent::Completed {
@@ -350,7 +343,7 @@ impl EventProcessor {
                             self.display.print_error(shown!(
                                 "Package directory at {} {}",
                                 DisplayPath::of(listing.path()),
-                                received::sentence(listing.clause())
+                                received::message(listing.clause())
                             ));
                             // `selfie config` requires a subcommand and has only
                             // one, `validate`, so it is not a way to set the
@@ -392,9 +385,9 @@ impl EventProcessor {
                         }
                         OperationFailure::Privilege(refusal) => {
                             self.display
-                                .print_error(received::sentence(refusal.message()));
+                                .print_error(received::message(refusal.message()));
                             self.display
-                                .print_suggestion(received::sentence(refusal.suggestion()));
+                                .print_suggestion(received::message(refusal.suggestion()));
                         }
                         // A parse failure reaches only this arm. The three
                         // commands that render a failure themselves --
@@ -417,7 +410,7 @@ impl EventProcessor {
                                     self.display.print_error(shown!(
                                         "Parse error in package `{}`: {}",
                                         Name::new(&name),
-                                        received::sentence(failure.reason())
+                                        received::message(failure.reason())
                                     ));
 
                                     if let Some(at) = failure.location() {
@@ -474,7 +467,7 @@ impl EventProcessor {
 
             PackageEvent::Canceled { reason, .. } => {
                 self.display
-                    .print_warning(shown!("Operation canceled: {}", received::sentence(reason)));
+                    .print_warning(shown!("Operation canceled: {}", received::message(reason)));
             }
 
             // The recommended package's install command is its own waiting step,
@@ -500,7 +493,7 @@ impl EventProcessor {
                 self.display.print_warning(shown!(
                     "{} failed: {}",
                     Name::new(&recommend_name),
-                    received::sentence(error)
+                    received::message(error)
                 ));
             }
 
@@ -629,7 +622,7 @@ impl EventProcessor {
             PackageEvent::PostInstallNote { note, .. } => {
                 self.display.println(lit!(""));
                 self.display
-                    .print_info(shown!("📋 {}", received::sentence(note)));
+                    .print_info(shown!("📋 {}", received::message(note)));
             }
 
             PackageEvent::DotfileCleanupInfo {
@@ -757,7 +750,7 @@ pub(crate) fn refused_packages_lines(
     packages: &[RefusedPackage],
     verbose: bool,
 ) -> Vec<Shown> {
-    let reason = received::sentence(reason);
+    let reason = received::message(reason);
     let one = |package: &RefusedPackage| {
         shown!(
             "Skipping package '{}': {}",

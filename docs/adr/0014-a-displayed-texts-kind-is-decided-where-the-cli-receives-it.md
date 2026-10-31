@@ -219,7 +219,24 @@ when it is pasted.
    other item's tokens, macro arguments included, for a `.display()` call outside `DisplayPath`.
    String literals are single tokens and comments are not tokens, so neither can hide or fake a
    call. A clippy ban does not fit: it fires on the paths tests format into fixtures, and an
-   `#[expect]` over a test module silences the CLI's other method bans along with it.
+   `#[expect]` over a test module silences the CLI's other method bans along with it. The same walk
+   holds the rest of this decision where no type can:
+   - only the layout modules call `Shown::hang`, and no `lit!` or `shown!` literal outside them
+     indents the line after a line break (§3);
+   - the hidden constructors are called only in `terminal_text.rs`, test code included (§7.3), and
+     only `tables.rs` builds a comfy-table table (§4.1);
+   - a kind is built from one value, never from a string composed by `format!` or a join (§1.7);
+   - `Prose`, `Output`, `Content` and a written `Command`, which escape less than a `Name`, are
+     built only where the CLI receives a value or lays one out (§2.1);
+   - a library value's sentence goes through `sentence`, which accepts only the library's own
+     values, and a sentence the library hands over as a string goes through `message`, whose
+     argument must be read from a field named as a sentence, such as a message or a reason (§2.2);
+   - no printer, cell or choice takes a string or an `impl Display` (§1.1);
+   - nothing sets `console`'s color state or styles through it, only `DisplayManager`'s guarded
+     writers write to a stream, and only `display_manager.rs` uses indicatif, whose bars also write
+     (§8).
+
+   An exemption names its file and enclosing function, and must match, so a stale one fails.
 5. `to_string_lossy` is not gated. It also converts file names for completion and for name
    suggestions, which no syntax tells apart from display, and its result is a `String`, which no
    printer accepts (§1.1).
@@ -232,7 +249,9 @@ with that stream's answer forced. It never sets `console`'s process-wide color s
 build a display with colors forced on and see them. The spinner and the prompts, which draw on
 stderr and are styled by indicatif and dialoguer, take stderr's answer through what they are given:
 a styled spinner template and `ColorfulTheme` when stderr gets colors, a plain template and
-`SimpleTheme` when it does not.
+`SimpleTheme` when it does not. A source rule (§7.4) keeps every write behind the writer that
+applies the stream's answer, and keeps `console`'s process-wide state from being set or styled
+through.
 
 ## Consequences
 

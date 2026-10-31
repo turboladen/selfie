@@ -13,6 +13,7 @@ mod event_processor;
 mod formatters;
 mod git_style;
 mod received;
+mod sentence;
 mod snippet;
 mod source_paths;
 mod status_style;
@@ -35,14 +36,16 @@ use tracing::debug;
 
 use crate::{cli::ClapCli, commands::dispatch_command};
 
-/// Install the tracing subscriber: DEBUG to stderr when `verbose`, nothing
+/// Install the tracing subscriber: DEBUG to stderr when `verbose`, colored
+/// when stderr gets colors in a run whose colors are `use_colors`, and nothing
 /// otherwise.
-fn init_tracing(verbose: bool) {
+fn init_tracing(verbose: bool, use_colors: bool) {
     if verbose {
         // stderr, so a verbose run's stdout holds only the command's answer.
         tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
             .with_writer(std::io::stderr)
+            .with_ansi(display_manager::stderr_colors(use_colors))
             .init();
     } else {
         // Use a no-op subscriber to disable output while keeping trace calls
@@ -126,7 +129,8 @@ fn report_startup_error(display: &DisplayManager, error: &anyhow::Error) {
     }
     let text = format!("{error:#}");
     let mut lines = text.lines();
-    display.print_error(crate::received::sentence(lines.next().unwrap_or_default()));
+    let message = lines.next().unwrap_or_default();
+    display.print_error(crate::received::message(message));
     let rest: Vec<&str> = lines.collect();
     if !rest.is_empty() {
         display.print_error_context(crate::display_manager::content_lines(&rest.join("\n")));
@@ -167,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
             .map(|loaded| crate::config::cli_section(&loaded).section);
         let use_colors = !args.no_color && section.as_ref().is_none_or(|s| s.use_colors);
         let verbose = args.verbose || section.as_ref().is_some_and(|s| s.verbose);
-        init_tracing(verbose);
+        init_tracing(verbose, use_colors);
         debug!("CLI arguments: {:#?}", &args);
         let display = DisplayManager::new(use_colors).with_verbosity(Verbosity::from(verbose));
         process::exit(commands::config::handle_validate(&display, &fs).code());
@@ -235,12 +239,16 @@ async fn main() -> anyhow::Result<()> {
         ))
     })();
 
-    // A config that failed to load cannot say whether to be verbose, so the flag
-    // alone decides, and a verbose run still logs what it knows before failing.
+    // A config that failed to load cannot say whether to be verbose or to use
+    // colors, so the flags alone decide, and a verbose run still logs what it
+    // knows before failing.
     init_tracing(
         loaded
             .as_ref()
             .map_or(args.verbose, |(config, _)| config.verbose()),
+        loaded
+            .as_ref()
+            .map_or(!args.no_color, |(config, _)| config.use_colors()),
     );
     debug!("CLI arguments: {:#?}", &args);
     if let Some(line) = config_debug {
