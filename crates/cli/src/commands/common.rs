@@ -3,7 +3,7 @@
 //! helpers, and opening the user's editor. How a command lays out its output is
 //! in [`presentation`](super::presentation).
 
-use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit, shown};
+use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use selfie::{
     commands::ShellCommandRunner,
     dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
@@ -360,14 +360,20 @@ pub(crate) fn open_editor(
             Exit::Failed
         }
         Err(e) => {
-            display.print_error(shown!(
-                "Failed to start editor '{}': {}",
-                Prose::new(&editor),
-                crate::received::sentence(e)
-            ));
+            display.print_error(editor_failed(&editor, &e));
             Exit::Failed
         }
     }
+}
+
+// Why `editor` did not start. The editor is what `EDITOR` names, a program
+// the user acts on, so it shows as a name: an invisible character in it shows.
+fn editor_failed(editor: &str, error: &std::io::Error) -> Shown {
+    shown!(
+        "Failed to start editor '{}': {}",
+        Name::new(editor),
+        crate::received::sentence(error)
+    )
 }
 
 // The editor `EDITOR` names. A unit test runs in-process with the user's
@@ -493,6 +499,20 @@ mod tests {
             .filter(|(_, line)| line.contains("EDITOR environment variable is not set."))
             .count();
         assert_eq!(refusals, 1, "{:?}", display.printed());
+    }
+
+    // An editor that would not start is named as a name, so an invisible
+    // character in `EDITOR` shows escaped.
+    #[test]
+    fn an_editor_that_did_not_start_shows_an_invisible_character() {
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+
+        let shown = editor_failed("/opt/vi\u{200b}m", &error);
+
+        assert!(
+            shown.starts_with("Failed to start editor '/opt/vi\\u{200b}m': "),
+            "{shown}"
+        );
     }
 
     // A missing editor and its remedy are both on stderr.
