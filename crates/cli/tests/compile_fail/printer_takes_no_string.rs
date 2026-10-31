@@ -9,8 +9,8 @@ use terminal_text::{Literal, Shown, lit, shown};
 
 // Stands in for a printer: the CLI's printers and cells take `impl Into<Shown>`,
 // which a kind satisfies and a String does not. This pins what that bound
-// refuses, not that every printer keeps it: a case cannot include
-// display_manager.rs, which needs the whole CLI to build.
+// refuses. A case cannot include display_manager.rs, which needs the whole CLI
+// to build, so tests/source_rules.rs is what holds every printer to the bound.
 fn print(_: impl Into<Shown>) {}
 
 fn main() {
