@@ -16,7 +16,7 @@ use crate::{
             EnvironmentStatus, EventSender, Gap, OperationResult, OperationSuccess,
             PackageListData, PackageListItem, RefusedSpec, StepEnding, UnknownStatus,
         },
-        port::{LookupFailure, PackageRepository},
+        port::PackageRepository,
         service::ProgressTracker,
     },
 };
@@ -302,25 +302,10 @@ fn listing_gaps(
     package_directory: &std::path::Path,
 ) -> Vec<Gap> {
     let valid_rows = valid.iter().map(|item| item.status.gap(&item.name));
-    let invalid_rows = invalid.iter().map(|failure| {
-        let name = failure.display_name();
-        let lookup = LookupFailure::unloadable(
-            &name,
-            package_directory,
-            failure.package_path(),
-            failure.clone(),
-        );
-        Gap::new(&name, UnknownStatus::LookupFailed(lookup))
-    });
-    let refused_rows = refused.iter().map(|spec| {
-        Gap::new(
-            &spec.package_name,
-            UnknownStatus::Refused {
-                kind: spec.kind,
-                reason: spec.reason.clone(),
-            },
-        )
-    });
+    let invalid_rows = invalid
+        .iter()
+        .map(|failure| Gap::unparsable(&failure.display_name(), failure, package_directory));
+    let refused_rows = refused.iter().map(RefusedSpec::gap);
     valid_rows
         .chain(invalid_rows)
         .chain(refused_rows)

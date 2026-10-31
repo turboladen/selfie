@@ -1183,6 +1183,14 @@ pub enum OperationSuccess {
         environment: String,
         steps_completed: StepCount,
     },
+    /// The dotfile listing completed.
+    DotfilesListed {
+        /// How many packages the table lists.
+        package_count: usize,
+        /// The specs the listing could not read, one per package: a refused spec,
+        /// or a file that does not parse.
+        gaps: Vec<Gap>,
+    },
     /// Package creation operation completed
     PackageCreated {
         package_name: String,
@@ -2195,6 +2203,16 @@ impl std::fmt::Display for OperationSuccess {
             OperationSuccess::SyncNothingToPush { .. } => {
                 write!(f, "Nothing to push — working tree is clean")
             }
+            OperationSuccess::DotfilesListed {
+                package_count,
+                gaps,
+            } => {
+                write!(
+                    f,
+                    "Listed dotfiles across {package_count} package(s){}",
+                    gap_clauses(gaps)
+                )
+            }
             OperationSuccess::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -2502,6 +2520,7 @@ impl OperationSuccess {
             OperationSuccess::DotfileTracked { name, .. } => Some(name),
             OperationSuccess::PackagesAudited { .. }
             | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::DotfilesListed { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::DotfilesApplied { .. }
@@ -2568,6 +2587,7 @@ impl OperationSuccess {
             | OperationSuccess::SyncNothingToPush { .. }
             | OperationSuccess::Generic(_)
             | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::DotfilesListed { .. }
             | OperationSuccess::SpecListGenerated { .. } => None,
         }
     }
@@ -2613,6 +2633,7 @@ impl OperationSuccess {
             // it as a gap, and `spec list` shows it. Counting it here would fail a
             // listing for showing a broken file.
             OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::DotfilesListed { .. }
             | OperationSuccess::SpecListGenerated { .. } => None,
         }
     }
@@ -2639,6 +2660,7 @@ impl OperationSuccess {
             | OperationSuccess::SpecInfoRetrieved { .. }
             | OperationSuccess::PackageStatusChecked { .. }
             | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::DotfilesListed { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::PackageUpdated { .. }
@@ -2670,6 +2692,7 @@ impl OperationSuccess {
             | OperationSuccess::SpecInfoRetrieved { .. }
             | OperationSuccess::PackageStatusChecked { .. }
             | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::DotfilesListed { .. }
             | OperationSuccess::SpecListGenerated { .. }
             | OperationSuccess::SpecsValidated { .. }
             | OperationSuccess::PackageUpdated { .. }
@@ -2708,6 +2731,7 @@ impl OperationSuccess {
             | OperationSuccess::Generic(_) => None,
             OperationSuccess::PackageStatusChecked { gaps, .. }
             | OperationSuccess::PackageListGenerated { gaps, .. }
+            | OperationSuccess::DotfilesListed { gaps, .. }
             | OperationSuccess::PackageInstalled { gaps, .. } => Some(gaps),
         }
     }
@@ -2812,6 +2836,7 @@ impl OperationSuccess {
             | OperationSuccess::SpecInfoRetrieved { .. }
             | OperationSuccess::PackageStatusChecked { .. }
             | OperationSuccess::PackageListGenerated { .. }
+            | OperationSuccess::DotfilesListed { .. }
             | OperationSuccess::PackageCreated { .. }
             | OperationSuccess::PackageUpdated { .. }
             | OperationSuccess::PackageRemoved { .. }
@@ -2845,7 +2870,8 @@ impl OperationSuccess {
             | OperationSuccess::DotfilesApplied { environment, .. }
             | OperationSuccess::DotfileDriftChecked { environment, .. }
             | OperationSuccess::DotfileTracked { environment, .. } => Some(environment),
-            OperationSuccess::SyncPushComplete { .. }
+            OperationSuccess::DotfilesListed { .. }
+            | OperationSuccess::SyncPushComplete { .. }
             | OperationSuccess::SyncPullComplete { .. }
             | OperationSuccess::SyncPullUpToDate { .. }
             | OperationSuccess::SyncNothingToPush { .. }
@@ -2917,7 +2943,7 @@ impl OperationSuccess {
             | OperationSuccess::SyncNothingToPush {
                 steps_completed, ..
             } => Some(*steps_completed),
-            OperationSuccess::Generic(_) => None,
+            OperationSuccess::DotfilesListed { .. } | OperationSuccess::Generic(_) => None,
         }
     }
 }
@@ -3690,6 +3716,22 @@ impl Gap {
         })
     }
 
+    /// The gap a spec file that does not parse leaves for the package `name`.
+    /// `directory` is the one the file was read from.
+    pub(crate) fn unparsable(
+        name: &str,
+        failure: &crate::package::port::PackageParseError,
+        directory: &std::path::Path,
+    ) -> Option<Self> {
+        let lookup = crate::package::port::LookupFailure::unloadable(
+            name,
+            directory,
+            failure.package_path(),
+            failure.clone(),
+        );
+        Self::new(name, UnknownStatus::LookupFailed(lookup))
+    }
+
     /// The package selfie did not answer for.
     #[must_use]
     pub fn package_name(&self) -> &str {
@@ -3971,6 +4013,17 @@ impl RefusedSpec {
             reason: crate::package::port::ambiguous_files_sentence(name, files),
             claimants: files.to_vec(),
         }
+    }
+
+    /// The gap this refusal leaves in a listing's coverage.
+    pub(crate) fn gap(&self) -> Option<Gap> {
+        Gap::new(
+            &self.package_name,
+            UnknownStatus::Refused {
+                kind: self.kind,
+                reason: self.reason.clone(),
+            },
+        )
     }
 
     pub(crate) fn new(

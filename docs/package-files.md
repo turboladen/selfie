@@ -310,8 +310,10 @@ package spec that declares no environment at all, since apply refuses that one i
 - `selfie spec search` shows every environment, so it takes the second rule, and lists a refused
   package when its file name matches.
 - `selfie dotfiles list` shows every environment, so it takes the second rule too: such a package is
-  a refused row, with the reason, in place of its entries, and the listing exits `0`. A standalone
-  dotfile spec declares no environment by design and is listed.
+  a refused row, with the reason, in place of its entries, and the listing exits `3` like
+  `selfie package list`, as it does for a file that does not parse, while still listing every entry
+  it could read. An invalid entry inside a spec it can read is shown as a row and leaves the exit at
+  `0`. A standalone dotfile spec declares no environment by design and is listed.
 - `selfie package status` fails on a package apply would refuse and exits `1`. It reports a
   dependency apply would refuse as unknown, with the reason, and exits `3`
   ([ADR 0010](adr/0010-a-package-selfie-could-not-answer-for-makes-the-run-found.md)).

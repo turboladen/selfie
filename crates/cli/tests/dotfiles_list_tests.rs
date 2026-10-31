@@ -9,7 +9,7 @@
 
 pub mod common;
 
-use common::{CLEAN, FAILED, SELFIE_ENV, sandboxed_command, setup_default_test_config};
+use common::{CLEAN, FAILED, FOUND, SELFIE_ENV, sandboxed_command, setup_default_test_config};
 
 // Write a package whose single dotfile is refused, and one that is not.
 fn write_packages(base: &tempfile::TempDir) {
@@ -33,14 +33,7 @@ fn write_packages(base: &tempfile::TempDir) {
     .unwrap();
 
     // A perfectly ordinary entry, so the listing is not empty for another reason.
-    std::fs::write(
-        packages.join("bat.yaml"),
-        format!(
-            "name: bat\nenvironments:\n  {SELFIE_ENV}:\n    install: \"echo i\"\ndotfiles:\n  \
-             - source: \"bat/config\"\n    target: \"~/.config/bat/config\"\n"
-        ),
-    )
-    .unwrap();
+    write_readable_sibling(base);
 }
 
 #[test]
@@ -54,6 +47,9 @@ fn a_refused_entry_is_listed_with_the_reason_it_was_refused() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
 
+    // An invalid entry inside a readable spec is shown as a row and stays Clean;
+    // only a spec the listing could not read makes it Found.
+    assert_eq!(output.status.code(), Some(CLEAN), "{stdout}");
     assert!(
         stdout.contains("~/.gem/credentials"),
         "the refused entry must still be listed, got:\n{stdout}"
@@ -178,15 +174,123 @@ fn a_shadowing_key_s_cell_gives_the_message_without_the_advice() {
 }
 
 // A package spec declaring no environment is a refused row with apply's
-// reason, in place of its entries, and the listing still exits 0.
+// reason, in place of its entries, and the listing exits 3 like `package list`.
 #[test]
 fn a_package_spec_declaring_no_environment_is_a_refused_row() {
-    let base = setup_default_test_config();
+    let spec = "name: noenv\ndotfiles:\n  - source: \"odd.conf\"\n    target: \"~/.odd.conf\"\n";
+    assert_refusal_exits_found(
+        &[("noenv.yaml", spec.to_string())],
+        "noenv",
+        "At least one environment must be defined",
+    );
+}
+
+// A readable package beside a refused spec, so each test below can tell a
+// listing that carried on from one that stopped.
+fn write_readable_sibling(base: &tempfile::TempDir) {
     let packages = base.path().join("packages");
     std::fs::create_dir_all(&packages).unwrap();
     std::fs::write(
-        packages.join("noenv.yaml"),
-        "name: noenv\ndotfiles:\n  - source: \"noenv.conf\"\n    target: \"~/.noenv.conf\"\n",
+        packages.join("bat.yaml"),
+        format!(
+            "name: bat\nenvironments:\n  {SELFIE_ENV}:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"bat/config\"\n    target: \"~/.config/bat/config\"\n"
+        ),
+    )
+    .unwrap();
+}
+
+// Lists with `files` (name, content) beside a readable package, and asserts the
+// listing exits 3, warns about `refused` with a message containing `reason`, lists
+// the readable entry, and lists none of the refused spec's `~/.odd.conf`.
+fn assert_refusal_exits_found(files: &[(&str, String)], refused: &str, reason: &str) -> String {
+    let base = setup_default_test_config();
+    write_readable_sibling(&base);
+    for (name, content) in files {
+        std::fs::write(base.path().join("packages").join(name), content).unwrap();
+    }
+
+    let output = sandboxed_command(&base)
+        .args(["dotfiles", "list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(FOUND), "{stdout}{stderr}");
+    assert!(
+        stderr.contains(&format!("Cannot read the dotfiles in '{refused}'")),
+        "{stderr}"
+    );
+    assert!(stderr.contains(reason), "{stderr}");
+    // The closing line names what the exit code found.
+    assert!(
+        format!("{stdout}{stderr}").contains(&format!("could not answer for: {refused}")),
+        "{stdout}{stderr}"
+    );
+    assert!(stdout.contains("~/.config/bat/config"), "{stdout}");
+    assert!(!stdout.contains("~/.odd.conf"), "{stdout}");
+    format!("{stdout}{stderr}")
+}
+
+fn spec_with(extra_top: &str, extra_env: &str) -> String {
+    format!(
+        "name: odd\n{extra_top}environments:\n  {SELFIE_ENV}:\n    install: \"echo i\"\n{extra_env}\
+         dotfiles:\n  - source: \"odd.conf\"\n    target: \"~/.odd.conf\"\n"
+    )
+}
+
+#[test]
+fn an_unknown_top_level_key_exits_found() {
+    assert_refusal_exits_found(
+        &[("odd.yaml", spec_with("bogus: 1\n", ""))],
+        "odd",
+        "unknown field 'bogus'; expected one of: name, homepage",
+    );
+}
+
+#[test]
+fn an_unknown_environment_key_exits_found() {
+    assert_refusal_exits_found(
+        &[("odd.yaml", spec_with("", "    bogus: 1\n"))],
+        "odd",
+        "in environment 'test-env': unknown field 'bogus'",
+    );
+}
+
+#[test]
+fn an_unchecked_top_level_exits_found() {
+    assert_refusal_exits_found(
+        &[("odd.yaml", spec_with("extra:\n  ? [a, b]\n  : v\n", ""))],
+        "odd",
+        "its top-level keys could not be checked",
+    );
+}
+
+#[test]
+fn an_ambiguous_name_exits_found() {
+    let spec = spec_with("", "");
+    let stderr = assert_refusal_exits_found(
+        &[("odd.yaml", spec.clone()), ("odd.yml", spec)],
+        "odd",
+        "Multiple packages found with name `odd`",
+    );
+    // Both files are named, one warning each.
+    assert_eq!(
+        stderr.matches("Cannot read the dotfiles in 'odd'").count(),
+        2,
+        "{stderr}"
+    );
+}
+
+// A spec that does not parse is as unread as a refused one.
+#[test]
+fn a_spec_that_does_not_parse_exits_found() {
+    let base = setup_default_test_config();
+    write_readable_sibling(&base);
+    std::fs::write(
+        base.path().join("packages/broken.yaml"),
+        "name: [unterminated\n",
     )
     .unwrap();
 
@@ -197,11 +301,51 @@ fn a_package_spec_declaring_no_environment_is_a_refused_row() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert_eq!(output.status.code(), Some(CLEAN), "{stdout}{stderr}");
+    assert_eq!(output.status.code(), Some(FOUND), "{stdout}{stderr}");
+    assert!(stderr.contains("broken"), "{stderr}");
     assert!(
-        stderr.contains("Cannot read the dotfiles in 'noenv'")
-            && stderr.contains("At least one environment must be defined"),
+        format!("{stdout}{stderr}").contains("could not answer for: broken"),
+        "{stdout}{stderr}"
+    );
+    assert!(stdout.contains("~/.config/bat/config"), "{stdout}");
+}
+
+// The control: nothing refused, so the listing is clean.
+#[test]
+fn a_listing_that_refused_nothing_exits_clean() {
+    let base = setup_default_test_config();
+    write_readable_sibling(&base);
+
+    let output = sandboxed_command(&base)
+        .args(["dotfiles", "list"])
+        .assert()
+        .code(CLEAN)
+        .get_output()
+        .clone();
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The row is there, so the absence below is not a listing that printed nothing.
+    assert!(both.contains("~/.config/bat/config"), "{both}");
+    assert!(!both.contains("Listed dotfiles across"), "{both}");
+}
+
+// Two install-only files claiming one name are refused rows too, though neither
+// declares a dotfile.
+#[test]
+fn an_install_only_ambiguous_pair_exits_found() {
+    let install_only = format!("name: nv\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n");
+    let stderr = assert_refusal_exits_found(
+        &[("nv.yml", install_only.clone()), ("nv.yaml", install_only)],
+        "nv",
+        "Multiple packages found with name `nv`",
+    );
+    assert_eq!(
+        stderr.matches("could not answer for: nv (refused)").count(),
+        1,
         "{stderr}"
     );
-    assert!(!stdout.contains("~/.noenv.conf"), "{stdout}");
 }

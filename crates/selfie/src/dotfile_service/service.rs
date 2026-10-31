@@ -16,7 +16,7 @@ use crate::{
         event::metadata::OperationType,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
-            OperationSuccess, PackageEvent,
+            OperationSuccess, PackageEvent, RefusedSpec,
         },
         port::PackageRepository,
     },
@@ -28,6 +28,7 @@ use super::drift::handle_check_drift;
 use super::orphan::Catalog;
 use super::port::{ApplyOptions, DotfileService};
 use super::track::{handle_track_for_package, handle_track_standalone};
+use super::unread::Unread;
 use crate::package::collect::unchecked::collect_others;
 use crate::package::collect::warning::{CollectionRefusal, Finding, no_such_package};
 use crate::package::collect::{Collected, collect_all_packages};
@@ -382,7 +383,7 @@ where
                     // events in order has the caveats in hand before the answer
                     // they qualify. An ambiguous name is not sent: its files are
                     // refused rows of the listing itself.
-                    let mut refused = Vec::new();
+                    let mut unread = Unread::default();
                     let unloadable: Vec<&std::path::Path> = findings
                         .iter()
                         .filter_map(|finding| match finding {
@@ -393,18 +394,15 @@ where
                         })
                         .collect();
                     // A file that did not parse keeps its own row.
-                    let mut refuse_name = |name: &str, paths: &[std::path::PathBuf]| {
-                        refused.extend(
-                            paths
+                    let refuse_name =
+                        |unread: &mut Unread, name: &str, paths: &[std::path::PathBuf]| {
+                            for path in paths
                                 .iter()
                                 .filter(|path| !unloadable.contains(&path.as_path()))
-                                .map(|path| {
-                                    crate::package::event::RefusedSpec::ambiguous_file(
-                                        name, path, paths,
-                                    )
-                                }),
-                        );
-                    };
+                            {
+                                unread.refuse(RefusedSpec::ambiguous_file(name, path, paths));
+                            }
+                        };
                     for finding in &findings {
                         match finding {
                             Finding::Refusal(CollectionRefusal::AmbiguousName {
@@ -412,7 +410,11 @@ where
                                 paths,
                                 ..
                             }) => {
-                                refuse_name(name, paths);
+                                refuse_name(&mut unread, name, paths);
+                            }
+                            Finding::Refusal(CollectionRefusal::UnloadableSpec { error, base }) => {
+                                unread.unparsable(error, &config.directory_of(*base));
+                                finding.send(&sender).await;
                             }
                             _ => finding.send(&sender).await,
                         }
@@ -421,7 +423,7 @@ where
                     // unmentioned here, its files declaring no dotfiles in this
                     // one, is refused rows too.
                     for (name, paths, _) in &unrefused_ambiguities {
-                        refuse_name(name, paths);
+                        refuse_name(&mut unread, name, paths);
                     }
 
                     if unreadable {
@@ -443,8 +445,7 @@ where
                     let mut listable = Vec::new();
                     for package in packages {
                         if let Some(reason) = package.every_environment_refusal() {
-                            refused
-                                .push(crate::package::event::RefusedSpec::new(&package, &reason));
+                            unread.refuse(RefusedSpec::new(&package, &reason));
                         } else if !package.dotfiles_with_scope().is_empty() {
                             listable.push(package);
                         }
@@ -452,6 +453,7 @@ where
 
                     let packages = listable;
                     let count = packages.len();
+                    let (refused, gaps) = unread.finish();
 
                     sender
                         .send_dotfile_list(crate::package::event::DotfileListData {
@@ -462,9 +464,10 @@ where
                         })
                         .await;
 
-                    OperationResult::Success(OperationSuccess::Generic(format!(
-                        "Listed dotfiles across {count} package(s)"
-                    )))
+                    OperationResult::Success(OperationSuccess::DotfilesListed {
+                        package_count: count,
+                        gaps,
+                    })
                 }
                 Err(e) => OperationResult::Failure(
                     crate::package::event::OperationFailure::PackageList(e),
