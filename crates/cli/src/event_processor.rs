@@ -126,12 +126,6 @@ impl EventProcessor {
         Self { display }
     }
 
-    /// Get a reference to the display manager
-    #[allow(dead_code)]
-    pub(crate) fn display(&self) -> &DisplayManager {
-        &self.display
-    }
-
     /// Process events from the stream with a custom event handler
     ///
     /// This allows commands to provide custom handling for specific event types
