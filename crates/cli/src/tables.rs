@@ -31,8 +31,12 @@ impl Cell {
     // comfy-table wraps to fit the terminal starts at the cell's edge, and so
     // does a continued line wider than its cell, whose leading spaces the wrap
     // drops (selfie-bh34).
+    //
+    // A tab is expanded here, because comfy-table counts it as one column where
+    // the terminal moves to the next tab stop, which pushes that row's right
+    // border out of line.
     fn laid_out(self) -> String {
-        self.0.hang(2).into_string()
+        self.0.hang(2).tabs_expanded().into_string()
     }
 }
 
@@ -194,5 +198,36 @@ mod tests {
             1 + 2 + 1 + 2 + 2 + 1,
             "{rendered}"
         );
+    }
+
+    // A tab moves to the next tab stop on a terminal, and comfy-table counts it
+    // as one column, so a cell holding one would push its row's border out of
+    // line. Every line of the table is one width, wherever in its cell the tab
+    // sits, a continued line's included, and no tab reaches the terminal.
+    #[test]
+    fn a_tab_in_a_cell_keeps_every_row_the_same_width() {
+        let mut table = SafeTable::new();
+        table.set_header([lit!("key"), lit!("value")]);
+        for text in [
+            "\tat0",
+            "abc\tat3",
+            "abcdefg\tat7",
+            "first\n\tafter-hang",
+            "x\t\ty",
+        ] {
+            table.add_row([Cell::from(lit!("k")), Content::new(text).into()]);
+        }
+
+        let rendered = table.to_string();
+
+        assert!(!rendered.contains('\t'), "{rendered}");
+        let widths: Vec<usize> = rendered.lines().map(console::measure_text_width).collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "{widths:?}\n{rendered}"
+        );
+        let (_, at3) = find(&rendered, "at3");
+        let (_, abc) = find(&rendered, "abc\u{20}");
+        assert_eq!(at3 - abc, 8, "{rendered}");
     }
 }

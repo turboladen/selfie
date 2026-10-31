@@ -246,6 +246,32 @@ impl Shown {
         Self(hung)
     }
 
+    /// Returns `self` with each tab replaced by the spaces that reach the next
+    /// tab stop, every eight columns from the start of the tab's line. Columns
+    /// are counted as a terminal shows them, so styling takes none.
+    // A layout that measures text to place it calls this, since a raw tab
+    // takes one column in a measurement and up to eight on the terminal.
+    #[must_use]
+    pub(crate) fn tabs_expanded(self) -> Self {
+        const TAB_STOP: usize = 8;
+        if !self.0.contains('\t') {
+            return self;
+        }
+        let mut expanded = String::with_capacity(self.0.len() + TAB_STOP);
+        let mut line_start = 0;
+        for (index, part) in self.0.split('\t').enumerate() {
+            if index > 0 {
+                let column = console::measure_text_width(&expanded[line_start..]);
+                expanded.push_str(&" ".repeat(TAB_STOP - column % TAB_STOP));
+            }
+            if let Some(at) = part.rfind('\n') {
+                line_start = expanded.len() + at + 1;
+            }
+            expanded.push_str(part);
+        }
+        Self(expanded)
+    }
+
     /// `self` styled by `paint` when `use_colors`.
     ///
     /// The styling is written whatever the stream; the printer removes it when
@@ -1006,6 +1032,21 @@ mod tests {
     #[test]
     fn prose_keeps_its_own_layout() {
         assert_eq!(Prose::new("  a\n  b\u{1b}").to_string(), "  a\n  b\\u{1b}");
+    }
+
+    // Each tab reaches the next multiple of eight columns from its line's
+    // start, and styling takes no columns.
+    #[test]
+    fn a_tab_reaches_the_next_tab_stop() {
+        let expand = |text: &str| Shown(text.to_string()).tabs_expanded().into_string();
+        assert_eq!(expand("a\tb"), format!("a{}b", " ".repeat(7)));
+        assert_eq!(expand("abcdefgh\tb"), format!("abcdefgh{}b", " ".repeat(8)));
+        assert_eq!(expand("x\n  \tb"), format!("x\n  {}b", " ".repeat(6)));
+        assert_eq!(
+            expand("\u{1b}[31mab\u{1b}[0m\tc"),
+            format!("\u{1b}[31mab\u{1b}[0m{}c", " ".repeat(6))
+        );
+        assert_eq!(expand("plain"), "plain");
     }
 
     // A hang starts every line after the first at the column it is given, and
