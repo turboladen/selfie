@@ -354,6 +354,12 @@ cli:
   use_colors: false
 ```
 
+With it on, stdout and stderr are each colored only while that stream is a terminal, so a redirected
+stream gets no color codes while the other keeps its colors. `CLICOLOR_FORCE` set to anything but
+`0` colors both streams, terminal or not, and wins over `NO_COLOR`. Otherwise `NO_COLOR` set to any
+value, or `CLICOLOR=0`, turns colors off. `--no-color`, or `use_colors: false`, turns them off
+whatever the environment says.
+
 #### `command_timeout`
 
 Default timeout for package operations in seconds. Also bounds every dotfile provider command and

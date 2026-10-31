@@ -125,14 +125,14 @@ impl fmt::Display for SafeTable {
 
 pub(crate) struct ValidationTableReporter {
     table: SafeTable,
-    use_colors: bool,
 }
 
 impl ValidationTableReporter {
-    pub(crate) fn new(use_colors: bool) -> Self {
+    /// A table of validation issues, each category colored; the printer
+    /// removes the color where the stream has none.
+    pub(crate) fn new() -> Self {
         Self {
             table: SafeTable::new(),
-            use_colors,
         }
     }
 
@@ -162,7 +162,7 @@ impl ValidationTableReporter {
     fn add_issue(&mut self, issue: &ValidationIssue, color: Paint) {
         let issue = crate::received::Issue::from(issue);
         self.table.add_row([
-            Cell::painted(issue.category, self.use_colors, color),
+            Cell::from(issue.category.painted(color)),
             issue.field.into(),
             issue.message.into(),
             issue

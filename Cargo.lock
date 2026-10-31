@@ -2672,6 +2672,7 @@ dependencies = [
  "dialoguer",
  "etcetera",
  "futures",
+ "fuzzy-matcher",
  "human-panic",
  "icu_properties",
  "indicatif",

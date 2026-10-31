@@ -60,7 +60,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
     if outcome == Outcome::Failed {
         display.print_result(outcome, lit!("Validation failed."));
 
-        let mut table_reporter = ValidationTableReporter::new(display.use_colors());
+        let mut table_reporter = ValidationTableReporter::new();
         table_reporter
             .setup([
                 lit!("Category"),
@@ -75,7 +75,7 @@ pub(crate) fn handle_validate(display: &DisplayManager, fs: &impl FileSystem) ->
         Exit::Failed
     } else {
         if result.issues().has_warnings() {
-            let mut table_reporter = ValidationTableReporter::new(display.use_colors());
+            let mut table_reporter = ValidationTableReporter::new();
             table_reporter
                 .setup([
                     lit!("Category"),
