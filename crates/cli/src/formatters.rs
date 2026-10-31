@@ -1,19 +1,33 @@
 //! Shared text formatting utilities for consistent styling
 
-use crate::terminal_text::{Literal, Prose, Shown, lit, shown};
+use crate::terminal_text::{Command, Literal, Shown, Word, lit};
 
-/// A spec name as the last argument of a command shown to the user: quoted
-/// where the shell would split it, and after `--` when it starts with a dash.
-pub(crate) fn name_argument(name: &str) -> Shown {
-    // A name holding NUL cannot be quoted, and goes out escaped as prose.
-    let quoted = selfie::fs::shell_word(name).map_or_else(|| name.to_string(), Into::into);
-    // Quoting does not stop a leading dash reading as an option. The command is
-    // escaped as prose until slice 5's Command kind takes it.
-    if name.starts_with('-') {
-        shown!("-- {}", Prose::new(&quoted))
-    } else {
-        Prose::new(&quoted).into()
-    }
+/// Returns the selfie command naming a spec: `selfie` and `words`, then `name`
+/// quoted as one shell word, after `--` when it starts with a dash, then
+/// `tail`. Returns `None` when `name` holds NUL, which no shell word can carry.
+pub(crate) fn selfie_command(words: &[Literal], name: &str, tail: &[Literal]) -> Option<Command> {
+    // Quoting does not stop a leading dash reading as an option.
+    let separator = name.starts_with('-').then_some(Word::Literal(lit!("--")));
+    Command::composed(
+        std::iter::once(Word::Literal(lit!("selfie")))
+            .chain(words.iter().copied().map(Word::Literal))
+            .chain(separator)
+            .chain([Word::Name(name)])
+            .chain(tail.iter().copied().map(Word::Literal)),
+    )
+}
+
+/// Returns the command that creates the directory at `path` and every
+/// directory above it, for a path that names nothing. A `--` ends the options
+/// first, so a path starting with a dash is not read as one. Returns `None`
+/// when `path` holds NUL, as the library's remedy does.
+pub(crate) fn mkdir_command(path: &std::path::Path) -> Option<Command> {
+    Command::composed([
+        Word::Literal(lit!("mkdir")),
+        Word::Literal(lit!("-p")),
+        Word::Literal(lit!("--")),
+        Word::Path(path),
+    ])
 }
 
 /// `items`, each shown as it is, joined by commas.
@@ -45,9 +59,55 @@ mod tests {
     // A name is quoted where the shell would split it, and a leading dash is
     // ended as an option, so the command shown runs as shown.
     #[test]
-    fn a_name_argument_runs_as_shown() {
-        assert_eq!(name_argument("tool"), "tool");
-        assert_eq!(name_argument("my app"), "'my app'");
-        assert_eq!(name_argument("-tool"), "-- -tool");
+    fn a_selfie_command_runs_as_shown() {
+        let edit = |name| {
+            selfie_command(&[lit!("spec"), lit!("edit")], name, &[])
+                .expect("no NUL")
+                .to_string()
+        };
+        assert_eq!(edit("tool"), "selfie spec edit tool");
+        assert_eq!(edit("café"), "selfie spec edit 'café'");
+        assert_eq!(edit("-tool"), "selfie spec edit -- -tool");
+        assert!(selfie_command(&[lit!("spec"), lit!("edit")], "a\0b", &[]).is_none());
+        assert_eq!(
+            selfie_command(
+                &[lit!("package"), lit!("track-dotfile")],
+                "x",
+                &[lit!("<file>")]
+            )
+            .expect("no NUL")
+            .to_string(),
+            "selfie package track-dotfile x <file>"
+        );
+    }
+
+    // The library words the same remedy in its own sentences, so the two
+    // spellings of the command cannot drift apart.
+    #[test]
+    fn a_composed_mkdir_matches_the_library_remedy() {
+        for path in [
+            "/home/me/dotfiles",
+            "/home/me/my dotfiles",
+            "~/my dir",
+            "-foo",
+        ] {
+            let path = std::path::Path::new(path);
+            let remedy = selfie::fs::AbsentReason::Empty
+                .remedy(path)
+                .expect("an empty path has a remedy");
+            let (_, library) = remedy
+                .split_once("with: ")
+                .expect("a command after `with: `");
+            assert_eq!(
+                mkdir_command(path)
+                    .map(|mkdir| mkdir.to_string())
+                    .as_deref(),
+                Some(library)
+            );
+        }
+        // A path no shell word can carry has no remedy here or in the library.
+        let nul = std::path::Path::new("/a\0b");
+        assert_eq!(selfie::fs::AbsentReason::Empty.remedy(nul), None);
+        assert!(mkdir_command(nul).is_none());
     }
 }

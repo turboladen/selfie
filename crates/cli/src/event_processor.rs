@@ -5,8 +5,9 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
+use crate::formatters::mkdir_command;
 use crate::received;
-use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
+use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, noted, shown};
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -357,31 +358,34 @@ impl EventProcessor {
                             // directory is already missing to a usage error.
                             // The global flag is per-run and the file is the
                             // durable fix, so both are named.
-                            let mut suggestion = String::from(
-                                "Edit 'package_directory' in your config file, or name another for this run with the global flag 'selfie --package-directory <path> …'",
+                            let settings = lit!(
+                                "Edit 'package_directory' in your config file, or name another for this run with the global flag 'selfie --package-directory <path> …'"
                             );
                             // `mkdir -p` answers an empty path and nothing else, so
                             // the remedy comes from the reason rather than being
                             // offered for every state. The two settings are named
                             // either way, since they are the fix when no command is.
-                            // Same quoter and same `--` as the dotfiles directory's
-                            // remedy, because this sentence is pasted too: a path
-                            // holding a space breaks the command, and one beginning
-                            // with a dash is read by mkdir as options.
-                            if let selfie::fs::DirectoryState::Absent(reason) = listing.state()
-                                && let Some(command) = reason.remedy(listing.path())
-                            {
-                                // The command ends the sentence, and nothing may follow
-                                // it. A shell word ends at whitespace, so a comma or a
-                                // period touching the closing quote is inside the word,
-                                // and the pasted command creates a directory whose name
-                                // carries it.
-                                suggestion.push_str(". Or ");
-                                suggestion.push_str(&command[..1].to_lowercase());
-                                suggestion.push_str(&command[1..]);
-                            }
-                            self.display
-                                .print_suggestion(received::sentence(suggestion));
+                            let mkdir = match listing.state() {
+                                selfie::fs::DirectoryState::Absent(reason)
+                                    if reason.creatable() =>
+                                {
+                                    mkdir_command(listing.path())
+                                }
+                                _ => None,
+                            };
+                            let suggestion = match mkdir {
+                                // The command ends the sentence, and nothing may
+                                // follow it on its line. A shell word ends at
+                                // whitespace, so a comma or a period touching the
+                                // closing quote is inside the word, and the pasted
+                                // command creates a directory whose name carries it.
+                                Some(mkdir) => noted(
+                                    shown!("{}. Or create it with: {}", settings, mkdir),
+                                    &mkdir,
+                                ),
+                                None => settings.into(),
+                            };
+                            self.display.print_suggestion(suggestion);
                         }
                         OperationFailure::Uncreatable { .. } => {
                             self.display.print_error(message.clone());

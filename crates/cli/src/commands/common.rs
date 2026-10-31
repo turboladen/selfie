@@ -218,13 +218,18 @@ pub(crate) fn name_check_message(
                 "{} Remove it first or choose a different name.",
                 crate::received::sentence(conflict)
             ),
-            // The name is an argument of a command, escaped as prose until
-            // slice 5's Command kind takes it.
-            selfie::namespace::NameLocation::Packages => shown!(
-                "{} To track a file for that package, use 'selfie package track-dotfile {} \
-                 <file>', or choose a different name.",
-                crate::received::sentence(conflict),
-                Prose::new(name)
+            selfie::namespace::NameLocation::Packages => crate::terminal_text::then_command(
+                shown!(
+                    "{} To track a file for that package, use `selfie package track-dotfile`, or \
+                     choose a different name.",
+                    crate::received::sentence(conflict)
+                ),
+                crate::formatters::selfie_command(
+                    &[lit!("package"), lit!("track-dotfile")],
+                    name,
+                    &[lit!("<file>")],
+                )
+                .as_ref(),
             ),
         },
         // A package or dotfiles directory that would not read says nothing about the
@@ -441,6 +446,35 @@ pub(crate) fn create_package_service(
 mod tests {
     use super::*;
     use selfie::package::port::MockPackageRepository;
+
+    // A package's name in the track-dotfile command is one shell word, after
+    // `--` when it starts with a dash. The command has a line of its own, so a
+    // backtick inside a quoted name cannot end a quotation in the sentence.
+    #[test]
+    fn a_package_conflict_offers_a_track_command_that_runs_as_shown() {
+        let message = |name: &str| {
+            let conflict = selfie::namespace::NamespaceConflict::new(
+                name,
+                selfie::namespace::NameLocation::Packages,
+                vec![std::path::PathBuf::from("/p/x.yml")],
+            )
+            .expect("a claimant");
+            name_check_message(name, &conflict.into()).into_string()
+        };
+
+        for (name, command) in [
+            ("tool", "selfie package track-dotfile tool <file>"),
+            ("-tool", "selfie package track-dotfile -- -tool <file>"),
+            ("café", "selfie package track-dotfile 'café' <file>"),
+            ("a`b", "selfie package track-dotfile 'a`b' <file>"),
+        ] {
+            let shown = message(name);
+            let lines: Vec<&str> = shown.lines().collect();
+            assert_eq!(lines.len(), 2, "{shown}");
+            assert!(lines[0].ends_with("or choose a different name."), "{shown}");
+            assert_eq!(lines[1], command, "{shown}");
+        }
+    }
 
     // Whatever EDITOR the test process inherits, no unit test can launch it:
     // a path reaching the editor is refused as if none were set.

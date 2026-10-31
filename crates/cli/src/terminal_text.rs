@@ -578,7 +578,44 @@ impl Output {
     }
 }
 
+/// Each variant is one word of a command selfie composes.
+pub(crate) enum Word<'a> {
+    /// Holds selfie's own word, such as `mkdir` or `--`, which goes in as
+    /// written.
+    Literal(Literal),
+    /// Holds a name from outside selfie, which is quoted whole as one shell
+    /// word, a leading `~` included.
+    Name(&'a str),
+    /// Holds a path, which is quoted as shell words with a leading `~/` left
+    /// outside the quotes, so the shell still expands it.
+    Path(&'a std::path::Path),
+}
+
+impl Word<'_> {
+    // Renders the word as the shell reads it, or returns `None` for a word no
+    // shell word can carry, one holding NUL.
+    fn quoted(self) -> Option<String> {
+        match self {
+            Self::Literal(word) => Some(word.as_str().to_string()),
+            Self::Name(name) => selfie::fs::shell_word(name).map(Cow::into_owned),
+            Self::Path(path) => selfie::fs::shell_quote(path),
+        }
+    }
+}
+
 impl Command {
+    /// Builds a command selfie composes from `words`, joined by spaces on one
+    /// line. Each argument from outside selfie is quoted as one shell word, and
+    /// a line break or a tab in one shows as an escape. Returns `None` when an
+    /// argument holds NUL, which no shell word can carry, so no command is the
+    /// remedy.
+    pub(crate) fn composed<'a>(words: impl IntoIterator<Item = Word<'a>>) -> Option<Self> {
+        let words: Vec<String> = words.into_iter().map(Word::quoted).collect::<Option<_>>()?;
+        Some(Self(
+            escape(&words.join(" "), Policy::CommandLine).into_owned(),
+        ))
+    }
+
     /// Shows a command a spec's author wrote as written, keeping its line
     /// breaks and tabs for the layout to place.
     pub(crate) fn written(text: &str) -> Self {
@@ -618,6 +655,17 @@ impl Command {
 
 /// Labels the note under a command that reads as another.
 pub(crate) const ESCAPED: Literal = lit!("Escaped");
+
+/// Returns `text`, followed by `command` on a line of its own and the
+/// command's note under it, or `text` alone when there is no command.
+// The command gets a line of its own because a quoted word may hold any
+// delimiter a sentence could put around it, a backtick included.
+pub(crate) fn then_command(text: Shown, command: Option<&Command>) -> Shown {
+    match command {
+        Some(command) => noted(shown!("{}\n{}", text, command), command),
+        None => text,
+    }
+}
 
 /// Returns `text`, followed by `command`'s note on a line of its own after
 /// `Escaped: `, or `text` alone when the command has no note.
@@ -1047,6 +1095,33 @@ mod tests {
             note(Command::one_line("echo a\u{2800}\nb")).as_deref(),
             Some("echo a\\u{2800}\\nb")
         );
+    }
+
+    // Each argument from outside selfie is one shell word, quoted only where
+    // the shell would split or expand it. A path keeps a leading `~/` outside
+    // the quotes so the shell expands it; a name is quoted whole. A line break
+    // or a tab in an argument shows as an escape. An argument holding NUL,
+    // which no shell word can carry, leaves no command at all.
+    #[test]
+    fn a_composed_command_quotes_each_argument() {
+        let mkdir = |word: Word<'_>| {
+            Command::composed([Word::Literal(lit!("mkdir")), word])
+                .map(|command| command.to_string())
+        };
+        let path = |text: &'static str| mkdir(Word::Path(std::path::Path::new(text)));
+        let some = |text: &str| Some(text.to_string());
+
+        assert_eq!(mkdir(Word::Name("tool")), some("mkdir tool"));
+        assert_eq!(mkdir(Word::Name("~/x")), some("mkdir '~/x'"));
+        assert_eq!(mkdir(Word::Name("~x")), some("mkdir '~x'"));
+        assert_eq!(mkdir(Word::Name("café")), some("mkdir 'café'"));
+        assert_eq!(mkdir(Word::Name("it's")), some("mkdir \"it's\""));
+        assert_eq!(path("~/x y"), some("mkdir ~/'x y'"));
+        assert_eq!(path("/a b"), some("mkdir '/a b'"));
+        assert_eq!(path("/a\nb\tc"), some("mkdir '/a\\nb\\tc'"));
+        assert_eq!(path("/a\u{200B}b"), some("mkdir '/a\u{200B}b'"));
+        assert_eq!(mkdir(Word::Name("a\0b")), None);
+        assert_eq!(path("/a\0b"), None);
     }
 
     // A note goes on a line of its own under the text naming the command, and
