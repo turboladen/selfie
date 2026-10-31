@@ -5,7 +5,8 @@ use crate::terminal_text::{Literal, Prose, Shown, lit, shown};
 /// A spec name as the last argument of a command shown to the user: quoted
 /// where the shell would split it, and after `--` when it starts with a dash.
 pub(crate) fn name_argument(name: &str) -> Shown {
-    let quoted = selfie::fs::shell_quote(std::path::Path::new(name));
+    // A name holding NUL cannot be quoted, and goes out escaped as prose.
+    let quoted = selfie::fs::shell_word(name).map_or_else(|| name.to_string(), Into::into);
     // Quoting does not stop a leading dash reading as an option. The command is
     // escaped as prose until slice 5's Command kind takes it.
     if name.starts_with('-') {
