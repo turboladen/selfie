@@ -452,6 +452,47 @@ fn the_verbose_log_shows_a_spec_value_escaped_with_color() {
     check_the_log_escapes_a_spec_value(true);
 }
 
+// A check command over several lines is logged as one message, which keeps its
+// line breaks. Each line after the first is indented, so none can pass for a
+// log line of its own or start at the left margin with selfie's result mark.
+#[test]
+fn a_logged_value_on_several_lines_starts_no_line_of_its_own() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("lines.yml"),
+        format!(
+            "name: lines\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    check: \": '\\n✓ fake \
+             line\\u202E\\U000E0041\\rz\\n2026-10-31T00:00:00.000000Z  INFO forged\\n'\"\n"
+        ),
+    )
+    .unwrap();
+    let run = run(&temp, &["--verbose", "package", "check", "lines"], false);
+    let forged: Vec<&str> = run
+        .log
+        .lines()
+        .filter(|line| line.contains("forged"))
+        .collect();
+    assert!(forged.is_empty(), "{forged:#?}");
+    let fake: Vec<&str> = run
+        .both
+        .lines()
+        .filter(|line| line.starts_with("✓ fake"))
+        .collect();
+    assert!(fake.is_empty(), "{fake:#?}");
+    // A later line of an event is guarded as its first is.
+    let leaks = raw_leaks(&run.both, false, false);
+    assert!(leaks.is_empty(), "{leaks:#?}");
+    // Control: the command's lines reached the log, indented under its first,
+    // its override, tag character and carriage return escaped.
+    assert!(
+        run.both.contains(
+            "\n    ✓ fake line\\u{202e}\\u{e0041}\\rz\n    2026-10-31T00:00:00.000000Z  INFO forged\n"
+        ),
+        "{}",
+        run.both
+    );
+}
+
 // The log is plain on a colored stderr: it holds no escape sequence, raw or
 // escaped, while the printers' own lines on the same stream are colored.
 #[test]

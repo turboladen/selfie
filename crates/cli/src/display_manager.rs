@@ -18,7 +18,7 @@ use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
     Command, Content, ESCAPED, Literal, Name, Output, Paint, Prose, Shown, guard, guard_unstyled,
-    lit, shown,
+    hang_text, lit, shown,
 };
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
@@ -729,6 +729,11 @@ fn console_colors() -> StreamColors {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct VerboseLog;
 
+// The verbose log indents an event's lines after its first by this many
+// columns, so a line break in a logged value cannot start a line that passes
+// for a log line of its own or for selfie's result line.
+const LOG_HANG: usize = 4;
+
 impl tracing_subscriber::fmt::MakeWriter<'_> for VerboseLog {
     type Writer = LogEvent<std::io::Stderr>;
 
@@ -738,7 +743,8 @@ impl tracing_subscriber::fmt::MakeWriter<'_> for VerboseLog {
 }
 
 /// One event of the verbose log. Nothing written to it reaches its stream
-/// until it is dropped. Then the whole event is escaped and written at once.
+/// until it is dropped. Then the whole event is escaped and written at once,
+/// each line after the first indented.
 pub(crate) struct LogEvent<W: std::io::Write> {
     sink: W,
     text: Vec<u8>,
@@ -759,7 +765,8 @@ impl<W: std::io::Write> LogEvent<W> {
         let text = std::mem::take(&mut self.text);
         let text = String::from_utf8_lossy(&text);
         // This runs in `drop`, so a failed write has nowhere to be reported.
-        let _ = self.sink.write_all(guard_unstyled(&text).as_bytes());
+        let shown = hang_text(&guard_unstyled(&text), LOG_HANG);
+        let _ = self.sink.write_all(shown.as_bytes());
     }
 }
 
@@ -2178,7 +2185,7 @@ mod tests {
 
     // An escape sequence in a log event shows as text, even one in selfie's own
     // palette, and an event split inside it, inside a character and at a line
-    // break is written as it is when written whole.
+    // break is written as it is when written whole, its second line indented.
     #[test]
     fn a_log_event_is_escaped_whole_however_it_is_written() {
         let event = "DEBUG \u{1b}[31ma\u{202e}b\nnext\n".as_bytes();
@@ -2192,7 +2199,7 @@ mod tests {
             &event[line_break..],
         ];
         let whole = logged(&[event]);
-        assert_eq!(whole, "DEBUG \\u{1b}[31ma\\u{202e}b\nnext\n");
+        assert_eq!(whole, "DEBUG \\u{1b}[31ma\\u{202e}b\n    next\n");
         assert_eq!(logged(&pieces), whole);
     }
 

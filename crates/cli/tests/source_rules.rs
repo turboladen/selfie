@@ -649,7 +649,7 @@ fn findings(source: &Source) -> Vec<Finding> {
                 && !punct_is(trees.get(index + 1), ':'))
     }));
     found.extend(find(&HANG, source, &shipped, |trees, index| {
-        method_call(trees, index, "hang")
+        method_call(trees, index, "hang") || ident_is(trees.get(index), "hang_text")
     }));
     // This walks test code too: a test has no more business skipping the
     // checks `shown!` and `lit!` make than shipped code does.
@@ -1297,17 +1297,18 @@ fn b(#[cfg(test)] t: [u8; { p().display(); 1 }], s: [u8; { p().display(); 1 }]) 
     assert_eq!(lines, [5, 10, 16, 21, 24]);
 }
 
-// `.hang(` is seen chained over a line break, and only outside the layout
-// modules.
+// `.hang(` is seen chained over a line break, and `hang_text` called on its
+// own, only outside the layout modules.
 #[test]
 fn the_hang_rule_sees_a_call_outside_the_layout() {
     let text = "fn a(s: Shown) -> Shown { s.hang(2) }\n\
                 fn b(s: Shown) -> Shown { s.paint(true, red)\n    .hang(4) }\n\
-                fn c(s: Shown) -> Shown { s.change(2) }\n";
+                fn c(s: Shown) -> Shown { s.change(2) }\n\
+                fn d(t: &str) -> String { terminal_text::hang_text(t, 2) }\n";
 
     assert_eq!(
         found_in("commands/x.rs", text),
-        [(HANG.name, 1), (HANG.name, 3)]
+        [(HANG.name, 1), (HANG.name, 3), (HANG.name, 5)]
     );
     assert_eq!(found_in("entry_rows.rs", text), []);
 }

@@ -124,6 +124,10 @@ Options considered:
    the layout adds only its column. Printed at column 0, it is unchanged.
 4. A block whose lines must stay together, such as a diff, is rendered whole and then written in one
    draw, so no other line lands between two of its rows and a spinner does not redraw inside it.
+5. The verbose log hangs each event's lines after its first by four columns, so a line break in a
+   logged value cannot start a line that passes for a log line or for selfie's result line. It uses
+   `hang_text`, the `&str` loop `Shown::hang` calls, which the same source rule confines to the
+   layout modules (§7.4).
 
 ### 4. One table style
 
@@ -227,8 +231,8 @@ when it is pasted.
    call. A clippy ban does not fit: it fires on the paths tests format into fixtures, and an
    `#[expect]` over a test module silences the CLI's other method bans along with it. The same walk
    holds the rest of this decision where no type can:
-   - only the layout modules call `Shown::hang`, and no `lit!` or `shown!` literal outside them
-     indents the line after a line break (§3);
+   - only the layout modules call `Shown::hang` or `hang_text`, and no `lit!` or `shown!` literal
+     outside them indents the line after a line break (§3);
    - the hidden constructors are called only in `terminal_text.rs`, test code included (§7.3), and
      only `tables.rs` builds a comfy-table table (§4.1);
    - a kind is built from one value, never from a string composed by `format!` or a join (§1.7);
