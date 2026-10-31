@@ -546,7 +546,7 @@ impl DisplayPath {
     /// Shows `path`'s text as [`DisplayPath::new`] does.
     pub(crate) fn of(path: &std::path::Path) -> Self {
         // The one place outside tests a path's text is taken for display; the
-        // gate in tests/no_raw_path_display.rs holds every other one to it.
+        // rule in tests/source_rules.rs holds every other one to it.
         Self::new(&path.display().to_string())
     }
 }

@@ -52,6 +52,11 @@ selfie = { path = "../selfie/", features = ["with_mocks"] }
 tempfile.workspace = true
 test-common = { path = "../test-common/" }
 tokio-test = "0.4"
+# The source rules in tests/source_rules.rs parse the CLI's source and walk its
+# tokens; "span-locations" gives each token its line outside a proc macro.
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+quote = "1.0.47"
+syn = { version = "3.0.3", features = ["full", "visit-mut", "printing"] }
 # Compile-fail checks for terminal_text.rs: what must not compile is the
 # guarantee, so a case that starts compiling fails the test.
 trybuild = "1.0.122"
