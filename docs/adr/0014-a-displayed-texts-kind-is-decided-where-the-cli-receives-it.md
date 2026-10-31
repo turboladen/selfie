@@ -94,6 +94,12 @@ Options considered:
    reference. It is implemented for nothing else.
 7. A list of names is shown by joining `Name` values with a `Literal` separator. No function escapes
    and joins in one step.
+8. The verbose log is the one writer whose input is not a `Shown`. tracing formats each event
+   itself, so `VerboseLog` holds the whole event and writes it through `guard_unstyled`, which
+   escapes every escape sequence along with the rest of the guard set. The log is never colored
+   (§8), so no styling has to survive, and nothing of an event that passes through the writer
+   reaches the terminal raw, whichever field it came from. The MCP server's own log is outside this
+   decision.
 
 ### 2. The kind is decided where the CLI receives a value
 
@@ -251,7 +257,8 @@ stderr and are styled by indicatif and dialoguer, take stderr's answer through w
 a styled spinner template and `ColorfulTheme` when stderr gets colors, a plain template and
 `SimpleTheme` when it does not. A source rule (§7.4) keeps every write behind the writer that
 applies the stream's answer, and keeps `console`'s process-wide state from being set or styled
-through.
+through. The verbose log is the exception: it is never colored, whatever stderr's answer, since its
+writer escapes every escape sequence (§1.8).
 
 ## Consequences
 

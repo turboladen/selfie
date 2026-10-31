@@ -216,18 +216,20 @@ fn clicolor_force_styles_a_pipe_unless_colors_are_off() {
     assert!(!styled(&refused_plain.stderr), "{refused_plain:?}");
 }
 
-// The `--verbose` log is written by tracing on stderr, and follows stderr's
-// colors: none on a pipe, or with `--no-color` on a terminal, and tracing's
-// own on a terminal.
+// The `--verbose` log is written on stderr and is never colored: not on a pipe,
+// not with `--no-color`, and not on a terminal that gets colors.
 #[test]
-fn the_verbose_log_follows_stderrs_colors() {
+fn the_verbose_log_is_never_colored() {
     let temp = sandbox();
     let verbose: Vec<&str> = ["--verbose"].iter().chain(ANSWER).copied().collect();
     let mut plain: Vec<&str> = vec!["--no-color"];
     plain.extend_from_slice(&verbose);
 
+    let refused: Vec<&str> = ["--verbose"].iter().chain(REFUSAL).copied().collect();
+
     let piped = run(&temp, &verbose, Stream::Stdout, &[]);
-    let terminal = run(&temp, &verbose, Stream::Stderr, &[]);
+    // A refusal, so the printers write a styled line on the same stderr.
+    let terminal = run(&temp, &refused, Stream::Stderr, &[]);
     let off = run(&temp, &plain, Stream::Stderr, &[]);
 
     // Whether any of the log's own lines carries color.
@@ -239,6 +241,11 @@ fn the_verbose_log_follows_stderrs_colors() {
             .any(|line| line.contains("DEBUG") && styled(line))
     };
     assert!(!log_styled(&piped), "{piped:?}");
-    assert!(log_styled(&terminal), "{terminal:?}");
+    assert!(!log_styled(&terminal), "{terminal:?}");
     assert!(!log_styled(&off), "{off:?}");
+    // Control: the terminal run had colors, which only the log went without.
+    assert!(
+        terminal.stderr.contains('✗') && styled(&terminal.stderr),
+        "{terminal:?}"
+    );
 }

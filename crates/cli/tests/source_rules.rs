@@ -143,11 +143,10 @@ const EXEMPT: &[(&str, &str, &str)] = &[
         "display_manager.rs",
         "DisplayManager::put_above_spinners",
     ),
+    (WRITER.name, "display_manager.rs", "VerboseLog::make_writer"),
     // The first signal's notice is written from the signal task, where no
     // display is in reach. It is selfie's own unstyled text.
     (WRITER.name, "main.rs", "until_force_quit"),
-    // tracing writes the verbose log itself, with stderr's color decision.
-    (WRITER.name, "main.rs", "init_tracing"),
     // A completion script is for the shell to read, not text to show.
     (WRITER.name, "commands/completion.rs", "generate_completion"),
 ];
