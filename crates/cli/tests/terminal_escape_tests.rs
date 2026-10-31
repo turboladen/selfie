@@ -208,12 +208,6 @@ fn run(temp: &tempfile::TempDir, args: &[&str], colored: bool) -> Run {
     // Colors forced on whatever the stream is, so `--no-color` alone has to
     // keep every escape sequence off it.
     command.env("CLICOLOR_FORCE", "1").env_remove("NO_COLOR");
-    // A verbose run's log lines are tracing's, colored by tracing, which reads
-    // NO_COLOR. console ignores NO_COLOR under CLICOLOR_FORCE, so selfie's own
-    // output keeps the color state the pass asks for.
-    if args.first() == Some(&"--verbose") {
-        command.env("NO_COLOR", "1");
-    }
     if !colored {
         command.arg("--no-color");
     }
@@ -230,11 +224,14 @@ fn run(temp: &tempfile::TempDir, args: &[&str], colored: bool) -> Run {
 
 // `output` without a verbose run's log lines, which tracing writes and escapes
 // by its own rules; this file checks what selfie's printers write. Each log line
-// starts with its timestamp.
+// starts with its timestamp, after tracing's own color when stderr has colors.
 fn without_log_lines(output: &str) -> String {
     output
         .split_inclusive('\n')
-        .filter(|line| !(line.starts_with("20") && line.get(10..11) == Some("T")))
+        .filter(|line| {
+            let line = console::strip_ansi_codes(line);
+            !(line.starts_with("20") && line.get(10..11) == Some("T"))
+        })
         .collect()
 }
 

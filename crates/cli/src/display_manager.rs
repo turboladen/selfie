@@ -721,6 +721,13 @@ fn console_colors() -> StreamColors {
     }
 }
 
+/// Whether stderr gets selfie's styling in a run whose colors are
+/// `use_colors`, as a display built for that run decides, for a writer that is
+/// not a display, such as the verbose log.
+pub(crate) fn stderr_colors(use_colors: bool) -> bool {
+    decided(use_colors, console_colors()).stderr
+}
+
 // A test's action while a prompt is open, run before the scripted answer, has
 // this type.
 #[cfg(test)]
