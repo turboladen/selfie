@@ -57,8 +57,8 @@ pub(crate) struct ConfigNotice {
 impl ConfigNotice {
     fn from_ignored_key(ignored: &IgnoredKey) -> Self {
         Self {
-            message: crate::received::sentence(ignored.message()).into(),
-            suggestion: crate::received::sentence(ignored.suggestion()).into(),
+            message: crate::received::message(ignored.message()).into(),
+            suggestion: crate::received::message(ignored.suggestion()).into(),
         }
     }
 
@@ -83,7 +83,7 @@ impl ConfigNotice {
     ///
     /// Not fatal: the library loaded the file, so the run is usable with default
     /// CLI settings.
-    fn unreadable_cli_section(error: &impl std::fmt::Display) -> Self {
+    fn unreadable_cli_section(error: &impl crate::sentence::Sentence) -> Self {
         Self {
             message: shown!(
                 "The `cli:` section could not be read ({}). Selfie used the default CLI settings.",

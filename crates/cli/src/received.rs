@@ -27,11 +27,7 @@ use selfie::yaml::SourceLocation;
 use crate::display_manager::Suggestion;
 use crate::terminal_text::{Command, DisplayPath, Literal, Name, Output, Prose, Shown, lit, shown};
 
-/// `value`'s sentence, as the library words it, without a trailing line
-/// break.
-pub(crate) fn sentence(value: impl Display) -> Prose {
-    Prose::new(value.to_string().trim_end_matches(['\r', '\n']))
-}
+pub(crate) use crate::sentence::{message, sentence};
 
 /// `first`, or `second` when `first` is blank, as a tool's output; `None` when
 /// both are blank.
@@ -221,8 +217,10 @@ impl Issue {
             level,
             category: Name::new(&category.to_string()).into(),
             field: Name::new(field).into(),
-            message: sentence(message).into(),
-            suggestion: suggestion.map(|suggestion| sentence(suggestion).into()),
+            // `message` is also a parameter here, so the function is named
+            // by its path.
+            message: crate::sentence::message(message).into(),
+            suggestion: suggestion.map(|suggestion| crate::sentence::message(suggestion).into()),
             location: location(at),
         }
     }
@@ -289,7 +287,7 @@ fn parse_kind(kind: &PackageParseKind) -> Shown {
 /// Why a spec file did not load, without where in it.
 pub(crate) fn parse_reason(error: &PackageParseError) -> Shown {
     match error.kind() {
-        PackageParseKind::Yaml { .. } => sentence(error.reason()).into(),
+        PackageParseKind::Yaml { .. } => message(error.reason()).into(),
         other => parse_kind(other),
     }
 }
@@ -324,7 +322,7 @@ pub(crate) fn refusal_reason(row: &RefusedSpec) -> Shown {
             first.parent().unwrap_or_else(|| std::path::Path::new(".")),
             &row.claimants,
         ),
-        _ => sentence(&row.reason).into(),
+        _ => message(&row.reason).into(),
     }
 }
 
@@ -375,12 +373,15 @@ pub(crate) fn package_error(error: &PackageError) -> Shown {
             packages_path,
             declared_by,
             ..
-        } => shown!(
-            "Package `{}` not found in path {}{}",
-            Name::new(name),
-            DisplayPath::of(packages_path),
-            sentence(selfie::package::port::name_field_hint(declared_by))
-        ),
+        } => {
+            let hint = selfie::package::port::name_field_hint(declared_by);
+            shown!(
+                "Package `{}` not found in path {}{}",
+                Name::new(name),
+                DisplayPath::of(packages_path),
+                message(&hint)
+            )
+        }
         other => sentence(other).into(),
     }
 }
@@ -419,7 +420,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         } => shown!(
             "Cannot use package `{}`: {}",
             Name::new(package_name),
-            sentence(reason)
+            message(reason)
         ),
         other => sentence(other).into(),
     }
@@ -693,8 +694,8 @@ impl From<&PackageInfoData> for Info {
             name: Name::new(&data.name),
             description: data.description.as_deref().map(Prose::new),
             homepage: data.homepage.as_deref().map(Name::new),
-            refusal: data.refusal.as_deref().map(sentence),
-            refusal_elsewhere: data.refusal_elsewhere.as_deref().map(sentence),
+            refusal: data.refusal.as_deref().map(message),
+            refusal_elsewhere: data.refusal_elsewhere.as_deref().map(message),
             current_environment: Name::new(&data.current_environment),
         }
     }
