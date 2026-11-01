@@ -6,7 +6,9 @@ use std::{
 use crate::{
     fs::{
         DirectoryState, FileSystem,
-        filesystem::{FileSystemError, IfPresent, Placed, Removal, repository_read_refusal},
+        filesystem::{
+            FileSystemError, IfPresent, IoFailure, Placed, Removal, repository_read_refusal,
+        },
         target::repository_path,
     },
     package::{
@@ -47,7 +49,7 @@ pub struct YamlPackageRepository<F: FileSystem> {
 /// directory, so every listing failure in this file converts through here.
 fn preserving_kind(error: FileSystemError) -> std::io::Error {
     match &error {
-        FileSystemError::IoError(io) => std::io::Error::new(io.kind(), error.to_string()),
+        FileSystemError::IoError(io) => std::io::Error::new(io.error.kind(), error.to_string()),
         _ => std::io::Error::other(error.to_string()),
     }
 }
@@ -398,11 +400,13 @@ impl<F: FileSystem> YamlPackageRepository<F> {
 // a sentence meant for elsewhere.
 fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError {
     let kind = match failure {
-        FileSystemError::IoError(source)
-        | FileSystemError::BelowNonDirectory { cause: source, .. }
-        | FileSystemError::DirectoryTarget { cause: source, .. } => {
-            PackageParseKind::Io { cause: source }
-        }
+        FileSystemError::IoError(cause) => PackageParseKind::Io { cause },
+        FileSystemError::BelowNonDirectory { path, cause, .. } => PackageParseKind::Io {
+            cause: IoFailure::at(FileSystemError::uncreatable_directory(&path), cause),
+        },
+        FileSystemError::DirectoryTarget { path, cause } => PackageParseKind::Io {
+            cause: IoFailure::at(&path, cause),
+        },
         FileSystemError::IrregularTarget { kind, .. } => PackageParseKind::IrregularFile { kind },
         FileSystemError::SymlinkedTarget { points_to, .. } => PackageParseKind::Refused {
             reason: match points_to {
@@ -449,10 +453,13 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
         // Lexical, so it rules out a written traversal and not a symlink planted
         // inside the package directory — see `crate::paths::is_within`.
         if !crate::paths::is_within(&resolved, base_dir) {
-            return Err(FileSystemError::IoError(Arc::new(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("'{relative_path}' escapes the package directory"),
-            ))));
+            return Err(FileSystemError::IoError(
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("'{relative_path}' escapes the package directory"),
+                )
+                .into(),
+            ));
         }
 
         // `spec validate` reads templates through here, and reading a fifo blocks
@@ -463,12 +470,13 @@ impl<F: FileSystem> PackageRepository for YamlPackageRepository<F> {
             .fs
             .irregular_target_refusal(&repository_path(&resolved))
         {
-            return Err(FileSystemError::IoError(Arc::new(std::io::Error::other(
-                format!(
+            return Err(FileSystemError::IoError(
+                std::io::Error::other(format!(
                     "{}. Replace it with a regular file.",
                     repository_read_refusal(&refusal)
-                ),
-            ))));
+                ))
+                .into(),
+            ));
         }
 
         self.fs.read_file(&resolved)
@@ -1745,9 +1753,9 @@ mod tests {
         fs.mock_list_directory(&package_dir, &[&ghost]);
         fs.expect_irregular_target_refusal().returning(|_| None);
         fs.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(Arc::new(std::io::Error::other(
-                "permission denied",
-            ))))
+            Err(FileSystemError::IoError(
+                std::io::Error::other("permission denied").into(),
+            ))
         });
 
         let error = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
@@ -1773,6 +1781,38 @@ mod tests {
         assert!(message.contains("could not be read"), "got: {message}");
         assert!(!message.contains("will not read"), "got: {message}");
         assert_eq!(message.matches("ghost.yml").count(), 0, "got: {message}");
+    }
+
+    // A read failure is an IO error of the package file, labeled `io`, whether
+    // or not its error names a path, and a path it names stays in its message.
+    #[test]
+    fn a_read_failure_is_an_io_error_naming_any_path_it_carries() {
+        let spec = Path::new("/test/packages/ghost.yml");
+        let error = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+
+        let named = spec_read_failure(
+            spec,
+            FileSystemError::IoError(IoFailure::at(Path::new("/elsewhere/tpl"), error())),
+        );
+        let bare = spec_read_failure(spec, FileSystemError::IoError(error().into()));
+
+        for (failure, text) in [
+            (
+                &named,
+                "I/O error reading the package file: /elsewhere/tpl: permission denied",
+            ),
+            (
+                &bare,
+                "I/O error reading the package file: permission denied",
+            ),
+        ] {
+            assert_eq!(failure.kind().label(), "io");
+            assert_eq!(failure.kind().to_string(), text);
+            let PackageParseKind::Io { cause } = failure.kind() else {
+                panic!("expected an IO error, got {failure:?}");
+            };
+            assert_eq!(cause.error.kind(), std::io::ErrorKind::PermissionDenied);
+        }
     }
 
     // The two tests below use a real fifo because `MockFileSystem` cannot block:
@@ -2952,9 +2992,10 @@ environments:
         fs.expect_write_file_no_follow()
             .withf(move |target, _, _| target.path() == expected)
             .returning(|_, _, _| {
-                Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
-                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
-                )))
+                Err(crate::fs::filesystem::FileSystemError::IoError(
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")
+                        .into(),
+                ))
             });
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);
@@ -3103,9 +3144,9 @@ environments:
     // every write error into one rephrased variant.
     #[test]
     fn a_package_write_failure_that_is_not_a_refusal_is_passed_through() {
-        let message = save_package_refused_with(FileSystemError::IoError(Arc::new(
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
-        )));
+        let message = save_package_refused_with(FileSystemError::IoError(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied").into(),
+        ));
         assert!(message.contains("Permission denied"), "got: {message}");
     }
 
@@ -3196,9 +3237,10 @@ environments:
 
         // The removal fails.
         fs.expect_remove_file_if_holding().returning(|_, _| {
-            Err(crate::fs::filesystem::FileSystemError::IoError(Arc::new(
-                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
-            )))
+            Err(crate::fs::filesystem::FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")
+                    .into(),
+            ))
         });
 
         let repo = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory);

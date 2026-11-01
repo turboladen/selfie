@@ -1321,7 +1321,7 @@ pub enum PackageParseKind {
 
     /// IO error occurred while reading the package file
     #[error("I/O error reading the package file: {cause}")]
-    Io { cause: Arc<std::io::Error> },
+    Io { cause: crate::fs::IoFailure },
 
     /// The package file could not be read, for a reason that is nobody's mistake
     ///
@@ -1622,7 +1622,7 @@ mod tests {
                 "the cause",
             )))),
             Box::new(PackageRepoError::FileSystemError(FileSystemError::IoError(
-                Arc::new(std::io::Error::other("the cause")),
+                std::io::Error::other("the cause").into(),
             ))),
         ];
         for error in errors {

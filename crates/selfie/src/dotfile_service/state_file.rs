@@ -632,7 +632,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         // A file that is not there is the ordinary first run. Only that one
         // condition is absence; a permission failure on the file or any parent
         // is a file selfie cannot read.
-        Err(FileSystemError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(FileSystemError::IoError(e)) if e.error.kind() == std::io::ErrorKind::NotFound => {
             return StateLoad::Usable(located.holding(DeployState::empty()));
         }
         Err(source) => {
@@ -724,8 +724,7 @@ mod tests {
     // A state error that names its cause in its message does not also chain it.
     #[test]
     fn every_state_error_names_its_cause_once() {
-        let cause =
-            || FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other("the cause")));
+        let cause = || FileSystemError::IoError(std::io::Error::other("the cause").into());
         let errors: Vec<Box<dyn std::error::Error>> = vec![
             Box::new(StateLoadFailure::Read {
                 path: STATE_FILE.into(),
@@ -802,9 +801,9 @@ mod tests {
         fs.mock_creatable_directories();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file").into(),
+            ))
         });
 
         let state = state_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
@@ -826,9 +825,9 @@ mod tests {
         fs.mock_creatable_directories();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file").into(),
+            ))
         });
 
         let StateLoad::Usable(loaded) = load_deploy_state(&fs, Some(Path::new(STATE_DIR))) else {
@@ -862,9 +861,9 @@ mod tests {
         });
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file").into(),
+            ))
         });
 
         let StateLoad::Usable(loaded) = load_deploy_state(&fs, Some(Path::new(STATE_DIR))) else {
@@ -927,9 +926,9 @@ mod tests {
         fs.mock_creatable_directories();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file").into(),
+            ))
         });
         fs.expect_expand_path()
             .returning(|_| Ok(PathBuf::from("/home/me")));
@@ -960,9 +959,9 @@ mod tests {
         fs.mock_creatable_directories();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file").into(),
+            ))
         });
         fs.expect_expand_path()
             .returning(|_| Ok(PathBuf::from("/home/me")));
@@ -1026,9 +1025,9 @@ mod tests {
         let mut fs = under_a_state_directory();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::NotFound, "No such file").into(),
+            ))
         });
         fs
     }
@@ -1126,9 +1125,10 @@ mod tests {
         let mut fs = under_a_state_directory();
         fs.mock_no_irregular_files();
         fs.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")
+                    .into(),
+            ))
         });
 
         let message = failure_of(load_deploy_state(&fs, Some(Path::new(STATE_DIR))));
@@ -1196,9 +1196,9 @@ mod tests {
         let mut unreadable = under_a_state_directory();
         unreadable.mock_no_irregular_files();
         unreadable.expect_read_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("permission denied"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::other("permission denied").into(),
+            ))
         });
         let unreadable_message =
             failure_of(load_deploy_state(&unreadable, Some(Path::new(STATE_DIR))));
@@ -1254,9 +1254,9 @@ mod tests {
     fn a_state_file_whose_location_cannot_be_resolved_names_the_fix() {
         let mut fs = MockFileSystem::default();
         fs.expect_expand_path().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("no home"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::other("no home").into(),
+            ))
         });
         let config = SelfieConfigBuilder::default()
             .environment("test")
@@ -1549,9 +1549,9 @@ mod tests {
     fn a_failed_write_names_the_file_in_its_own_words() {
         let mut fs = filesystem_without_the_state_file();
         fs.expect_write_file_private().returning(|_, _, _| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("disk full"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::other("disk full").into(),
+            ))
         });
         let mut loaded = match load_deploy_state(&fs, Some(Path::new(STATE_DIR))) {
             StateLoad::Usable(loaded) => loaded,

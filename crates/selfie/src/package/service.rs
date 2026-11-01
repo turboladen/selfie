@@ -776,7 +776,6 @@ where
 mod tests {
     use super::skipped_spec_warning;
     use crate::package::port::{PackageParseError, PackageParseKind};
-    use std::sync::Arc;
 
     // Every kind, not just the one an end-to-end test happens to reach.
     //
@@ -800,7 +799,7 @@ mod tests {
             (
                 "Io",
                 PackageParseKind::Io {
-                    cause: Arc::new(std::io::Error::other("permission denied")),
+                    cause: std::io::Error::other("permission denied").into(),
                 },
             ),
             (
@@ -853,10 +852,10 @@ mod tests {
             (
                 "Io",
                 PackageParseKind::Io {
-                    cause: Arc::new(std::io::Error::other(format!(
-                        "{}: permission denied",
-                        path.display()
-                    ))),
+                    cause: crate::fs::IoFailure::at(
+                        &path,
+                        std::io::Error::other("permission denied"),
+                    ),
                 },
             ),
             (

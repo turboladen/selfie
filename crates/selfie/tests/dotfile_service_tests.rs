@@ -1615,9 +1615,9 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
                 .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
                 .is_err()
         {
-            return Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("state directory is not writable"),
-            )));
+            return Err(selfie::fs::FileSystemError::IoError(
+                std::io::Error::other("state directory is not writable").into(),
+            ));
         }
         self.inner.write_file_private(path, data, if_present)
     }
@@ -8069,7 +8069,7 @@ mod symlinked_targets {
             ) -> Result<selfie::fs::TargetRead, FileSystemError> {
                 std::fs::read(path.path())
                     .map(selfie::fs::TargetRead::Bytes)
-                    .map_err(|e| FileSystemError::IoError(Arc::new(e)))
+                    .map_err(|e| FileSystemError::IoError(e.into()))
             }
             fn write_file_private(
                 &self,

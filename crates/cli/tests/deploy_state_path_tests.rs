@@ -3,8 +3,7 @@ pub mod common;
 // Every route that reports the deploy state names its directory or its file. A
 // state_directory holding a line break and U+200B must show as one escaped path
 // on each of them, the same way, and the sentence naming it must stay on one
-// line. Each fixture's failure carries no cause from the filesystem that repeats
-// the path as text.
+// line, including where a failed write's cause names the path again.
 
 use std::fs;
 
@@ -251,5 +250,108 @@ fn a_dangling_state_directory_names_its_destination_by_its_path() {
 
     assert_shows_the_state_path(&run, "is a symlink to nothing");
     assert!(run.stderr.contains(r"g\u{200b}one"), "{run:?}");
+    assert_eq!(run.code, Some(FAILED), "{run:?}");
+}
+
+// The line holding `opening` names the deploy state file's path, escaped, right
+// after "IO error: ", once.
+fn assert_names_the_failed_write(run: &RunOutput, home: &std::path::Path, opening: &str) {
+    assert_shows_the_state_path(run, opening);
+    let both = format!("{}{}", run.stdout, run.stderr);
+    let line = both.lines().find(|line| line.contains(opening)).unwrap();
+    let cause = format!("IO error: {}/{SHOWN}/deploy-state.yml: ", home.display());
+    assert_eq!(line.matches(&cause).count(), 1, "{both}");
+}
+
+// A state file whose write fails after the directory's checks pass names the
+// file, and the error's own path, escaped on one line, for apply and for
+// track. An immutable file refuses the rename over it; only macOS lets its
+// owner set that flag.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_state_file_selfie_cannot_replace_is_named_by_its_path() {
+    // Clears the flag when dropped, so a failed test still leaves a sandbox
+    // that can be removed.
+    struct Immutable(std::path::PathBuf);
+    impl Drop for Immutable {
+        fn drop(&mut self) {
+            let _ = nix::unistd::chflags(&self.0, nix::sys::stat::FileFlag::empty());
+        }
+    }
+
+    let sandbox = Sandbox::new(State::Absent);
+    let home = sandbox.temp.path();
+    let deployed = sandbox.run(&["apply"]);
+    assert_eq!(deployed.code, Some(CLEAN), "{deployed:?}");
+    fs::write(home.join("packages/bat.conf"), "theme = y\n").unwrap();
+    let immutable = Immutable(home.join("st\u{200B}a\nte/deploy-state.yml"));
+    nix::unistd::chflags(&immutable.0, nix::sys::stat::FileFlag::UF_IMMUTABLE).unwrap();
+
+    let apply = sandbox.run(&["apply"]);
+    let track = sandbox.run(&["dotfiles", "track", "rc", "~/.trackme"]);
+    drop(immutable);
+
+    assert_names_the_failed_write(&apply, home, "The deploy state cannot be written");
+    assert_names_the_failed_write(&track, home, "The deploy state cannot be written");
+    assert_eq!(apply.code, Some(FAILED), "{apply:?}");
+    assert_eq!(track.code, Some(FAILED), "{track:?}");
+}
+
+// A state directory that stops accepting files partway through apply names
+// the state file, and the error's own path, escaped on one line. The second
+// entry's command locks the directory after the first entry is recorded, so
+// the third entry's record fails. Track runs nothing between its first write
+// and its record, so only the macOS test above reaches it.
+#[test]
+fn apply_names_a_state_it_could_not_record_by_its_path() {
+    // Unlocks the directory when dropped, so a failed test still leaves a
+    // sandbox that can be removed.
+    struct Unlock(std::path::PathBuf);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let sandbox = Sandbox::new(State::Absent);
+    let home = sandbox.temp.path();
+    let probe = test_common::LockedDir::create(&home.join("probe"), 0o500);
+    if !probe.refuses_new_files() {
+        eprintln!(
+            "SKIP apply_names_a_state_it_could_not_record_by_its_path: this user can write into \
+             a 0o500 directory"
+        );
+        return;
+    }
+    let state = home.join("st\u{200B}a\nte");
+    let lock = home.join("lock.sh");
+    fs::write(
+        &lock,
+        format!("#!/bin/sh\n/bin/chmod 500 '{}'\necho c\n", state.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&lock, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    fs::write(home.join("packages/b.conf"), "b\n").unwrap();
+    let spec = [
+        "name: bat",
+        "dotfiles:",
+        "  - source: bat.conf",
+        "    target: \"~/.batrc\"",
+        &format!("  - command: {}", lock.display()),
+        "    target: \"~/.c\"",
+        "  - source: b.conf",
+        "    target: \"~/.b\"",
+        "environments:",
+        &format!("  {SELFIE_ENV}:"),
+        "    install: \"true\"",
+    ];
+    fs::write(home.join("packages/bat.yml"), spec.join("\n") + "\n").unwrap();
+    let unlock = Unlock(state);
+
+    let run = sandbox.run(&["apply"]);
+    drop(unlock);
+
+    assert_names_the_failed_write(&run, home, "but cannot record it");
     assert_eq!(run.code, Some(FAILED), "{run:?}");
 }

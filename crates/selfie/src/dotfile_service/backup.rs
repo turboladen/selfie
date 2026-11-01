@@ -327,9 +327,9 @@ mod tests {
         fs.expect_list_directory()
             .returning(|dir| Ok(vec![dir.join("earlier"), dir.join("earlier-still")]));
         fs.expect_remove_file().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("Permission denied"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::other("Permission denied").into(),
+            ))
         });
 
         let kept = keep(&fs, Path::new("/state/backups"), "/home/u/.npmrc", b"old").expect("kept");
@@ -474,9 +474,9 @@ mod tests {
     // as the target write having failed -- the target is untouched.
     #[test]
     fn the_failure_names_the_target_and_an_escape() {
-        let error = FileSystemError::IoError(std::sync::Arc::new(std::io::Error::other(
-            "/state/backups: No space left on device",
-        )));
+        let error = FileSystemError::IoError(
+            std::io::Error::other("/state/backups: No space left on device").into(),
+        );
         let failure = failure(Path::new("/home/u/.config/app.toml"), &error);
         let message = &failure.message;
 
