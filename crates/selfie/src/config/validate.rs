@@ -430,9 +430,9 @@ mod tests {
         fs.mock_creatable_directories();
         fs.expect_irregular_target_refusal().returning(|_| None);
         fs.expect_read_file().returning(|_| {
-            Err(crate::fs::FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::from(std::io::ErrorKind::NotFound),
-            )))
+            Err(crate::fs::FileSystemError::IoError(
+                std::io::Error::from(std::io::ErrorKind::NotFound).into(),
+            ))
         });
     }
 
@@ -1221,9 +1221,9 @@ mod tests {
         fs.mock_directories_exist();
         no_deploy_state(&mut fs);
         fs.expect_list_directory().returning(|_| {
-            Err(crate::fs::FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-            )))
+            Err(crate::fs::FileSystemError::IoError(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied).into(),
+            ))
         });
         let config = SelfieConfigBuilder::default()
             .environment("linux")

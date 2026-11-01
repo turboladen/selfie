@@ -1,8 +1,5 @@
 use std::path::{Component, Path, PathBuf};
 
-#[cfg(test)]
-use std::sync::Arc;
-
 use crate::{
     config::ConfigFile,
     fs::{FileSystem, FileSystemError},
@@ -585,10 +582,13 @@ mod tests {
             fs.expect_read_file()
                 .with(mockall::predicate::eq(config_path.clone()))
                 .return_once(|_| {
-                    Err(FileSystemError::IoError(Arc::new(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "Permission denied",
-                    ))))
+                    Err(FileSystemError::IoError(
+                        std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "Permission denied",
+                        )
+                        .into(),
+                    ))
                 });
 
             let loader = YamlLoader::new(&fs);
@@ -597,7 +597,7 @@ mod tests {
             assert!(result.is_err());
             match result.unwrap_err() {
                 ConfigLoadError::FileSystemError(FileSystemError::IoError(e)) => {
-                    assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+                    assert_eq!(e.error.kind(), std::io::ErrorKind::PermissionDenied);
                 }
                 other => panic!("Expected FileSystemError::IoError, got: {other:?}"),
             }

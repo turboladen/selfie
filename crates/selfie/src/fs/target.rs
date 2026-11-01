@@ -533,9 +533,9 @@ mod tests {
     fn no_home() -> MockFileSystem {
         let mut fs = MockFileSystem::default();
         fs.expect_expand_path().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("no home"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::other("no home").into(),
+            ))
         });
         fs
     }
@@ -731,9 +731,9 @@ mod tests {
     fn a_target_is_recorded_as_given_when_there_is_no_home() {
         let mut fs = MockFileSystem::default();
         fs.expect_expand_path().returning(|_| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("no home"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::other("no home").into(),
+            ))
         });
         assert_eq!(
             portable_target(&fs, &expand_target_path(&fs, "/Users/sloveless/.gemrc")),

@@ -666,7 +666,7 @@ where
         TargetState::Unreadable(e) => {
             return OperationResult::Failure(OperationFailure::Generic(format!(
                 "Cannot read target file: {}",
-                FileSystemError::IoError(e)
+                FileSystemError::IoError(e.into())
             )));
         }
         TargetState::Undetermined(e) => {
@@ -985,9 +985,9 @@ mod tests {
         let copy = Path::new("/dotfiles/gemrc/gemrc");
         let mut fs = MockFileSystem::default();
         fs.expect_remove_file_if_holding().returning(|_, _| {
-            Err(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other("/dotfiles/gemrc/gemrc: permission denied"),
-            )))
+            Err(FileSystemError::IoError(
+                std::io::Error::other("/dotfiles/gemrc/gemrc: permission denied").into(),
+            ))
         });
         fs.expect_remove_file().never();
 
@@ -1064,10 +1064,9 @@ mod tests {
     #[test]
     fn a_failed_spec_save_names_the_spec_exactly_once() {
         let spec = "/dotfiles/gemrc.yml";
-        let error =
-            PackageRepoError::FileSystemError(FileSystemError::IoError(std::sync::Arc::new(
-                std::io::Error::other(format!("{spec}: Permission denied (os error 13)")),
-            )));
+        let error = PackageRepoError::FileSystemError(FileSystemError::IoError(
+            std::io::Error::other(format!("{spec}: Permission denied (os error 13)")).into(),
+        ));
 
         let message = spec_save_failure(
             &error,
@@ -1127,10 +1126,9 @@ mod tests {
             path: PathBuf::from("/packages/creds.yml"),
             fields: "dotfiles[0].var".to_string(),
         };
-        let removal = FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "Permission denied",
-        )));
+        let removal = FileSystemError::IoError(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied").into(),
+        );
 
         let survived = spec_save_failure(
             &error,
@@ -1164,7 +1162,7 @@ mod tests {
     #[test]
     fn a_failed_spec_save_keeps_an_ellipsis_the_error_ends_with() {
         let error = PackageRepoError::FileSystemError(FileSystemError::IoError(
-            std::sync::Arc::new(std::io::Error::other("the disk filled up...")),
+            std::io::Error::other("the disk filled up...").into(),
         ));
 
         let message = spec_save_failure(
@@ -1186,10 +1184,10 @@ mod tests {
     fn a_repository_write_failure_that_is_not_a_refusal_is_passed_through() {
         let message = repository_write_refusal(
             Path::new("/dotfiles/gemrc/.gemrc"),
-            &FileSystemError::IoError(std::sync::Arc::new(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "Permission denied",
-            ))),
+            &FileSystemError::IoError(
+                std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")
+                    .into(),
+            ),
         );
         assert!(message.contains("Permission denied"), "got: {message}");
     }

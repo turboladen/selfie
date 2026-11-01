@@ -330,7 +330,7 @@ pub(super) fn readable_or_refusal(
         }
         TargetState::Unreadable(error) => (
             Condition::Unreadable,
-            unreadable_message(source, target, &FileSystemError::IoError(error)),
+            unreadable_message(source, target, &FileSystemError::IoError(error.into())),
         ),
         TargetState::Undetermined(error) => (
             Condition::Undetermined,
@@ -413,7 +413,7 @@ fn path_refusal(source: &str, target: &TargetPath, found: &InTheWay<'_>, extra: 
         InTheWay::Undetermined(error) => format!(
             "Skipping '{source}': selfie could not determine what is at the target{unwritten}.\
              {unrun} The check failed with: {}",
-            FileSystemError::IoError(Arc::clone(error))
+            FileSystemError::IoError(Arc::clone(error).into())
         ),
     };
     Refusal::found(located(found.condition(), Location::Target), message)

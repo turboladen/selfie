@@ -1531,7 +1531,7 @@ mod tests {
     fn every_cause(at: &dyn Fn(&str) -> std::path::PathBuf) -> Vec<FileSystemError> {
         let io = || std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
         vec![
-            FileSystemError::IoError(io()),
+            FileSystemError::IoError(io().into()),
             FileSystemError::HomeDirNotFound,
             FileSystemError::SymlinkedTarget {
                 path: at("deploy-state.yml"),
@@ -1644,7 +1644,7 @@ mod tests {
             },
             StateLoadFailure::Read {
                 path: at("deploy-state.yml"),
-                cause: FileSystemError::IoError(io()),
+                cause: FileSystemError::IoError(io().into()),
             },
             unusable(),
             StateLoadFailure::Parse {
@@ -1668,14 +1668,14 @@ mod tests {
                 DeployStateWarning::NotRecorded {
                     recorded: Recorded::Deployed,
                     target: at("target"),
-                    error: write(FileSystemError::IoError(io())),
+                    error: write(FileSystemError::IoError(io().into())),
                 },
                 DeployStateWarning::NotRecorded {
                     recorded: Recorded::InSync,
                     target: at("target"),
-                    error: write(FileSystemError::IoError(io())),
+                    error: write(FileSystemError::IoError(io().into())),
                 },
-                DeployStateWarning::Untidied(write(FileSystemError::IoError(io()))),
+                DeployStateWarning::Untidied(write(FileSystemError::IoError(io().into()))),
             ]
             .into_iter()
             .map(StateValue::Warning),
@@ -1689,7 +1689,7 @@ mod tests {
                 },
                 DeployStateFailure::NothingTracked(not_writable("state", true)),
                 DeployStateFailure::TrackUnrecorded {
-                    error: write(FileSystemError::IoError(io())),
+                    error: write(FileSystemError::IoError(io().into())),
                     name: "tool".to_string(),
                     target: format!("{root}/target"),
                     spec_path: at("tool.yml"),

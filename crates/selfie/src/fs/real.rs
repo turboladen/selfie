@@ -10,7 +10,7 @@ use std::{
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
 use super::filesystem::{
-    AbsentReason, DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent,
+    AbsentReason, DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent, IoFailure,
     OpenRefusal, Placed, Removal, RepositoryRead, TargetRead, parent_dir,
 };
 use super::target::TargetPath;
@@ -132,7 +132,14 @@ fn write_by_rename_with(
 ) -> Result<Placed, FileSystemError> {
     use std::io::Write as _;
 
-    let target_err = |e: io::Error| FileSystemError::IoError(tagged(path, &e));
+    // An IO error from the steps below names the target through
+    // `IoFailure::at`, since the rename, the fsync and the chmod carry no path.
+    // tempfile's create and write errors also name the temporary file, which
+    // the operator never chose, so those name two paths (selfie-c2lb). A
+    // directory that cannot be created is named instead, and one blocked by a
+    // non-directory is `BelowNonDirectory`, whose message names it through
+    // `parent_dir`.
+    let target_err = |e: io::Error| FileSystemError::IoError(IoFailure::at(path, e));
 
     // A target whose directory does not exist yet is created rather than refused.
     // See `parent_dir` for why the bare-relative-name case needs normalizing.
@@ -142,10 +149,6 @@ fn write_by_rename_with(
     // never touched.
     fs::create_dir_all(parent).map_err(|e| {
         let kind = e.kind();
-        let cause = Arc::new(std::io::Error::new(
-            kind,
-            format!("{}: {e}", parent.display()),
-        ));
         // `ENOTDIR` for a non-directory deeper up, `EEXIST` when the parent itself
         // is a file or a dangling link: `create_dir_all` reports that it found
         // something, not that it found a directory.
@@ -155,10 +158,10 @@ fn write_by_rename_with(
             FileSystemError::BelowNonDirectory {
                 path: path.to_path_buf(),
                 parent: non_directory_ancestor(path),
-                cause,
+                cause: Arc::new(e),
             }
         } else {
-            FileSystemError::IoError(cause)
+            FileSystemError::IoError(IoFailure::at(parent, e))
         }
     })?;
 
@@ -347,7 +350,7 @@ fn remove_if_holding_with(
         Err(e) => match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.is_dir() => Ok(Removal::Kept),
             Err(stat) if gone(&stat) => Ok(Removal::Kept),
-            _ => Err(FileSystemError::IoError(tagged(path, &e))),
+            _ => Err(FileSystemError::IoError(IoFailure::at(path, e))),
         },
     }
 }
@@ -387,18 +390,18 @@ fn holds(
     links: Links,
     read: impl FnOnce(&Path, Links) -> Result<TargetRead, FileSystemError>,
 ) -> Result<bool, FileSystemError> {
-    let tagged_error = |e: &io::Error| FileSystemError::IoError(tagged(path, e));
+    let tagged_error = |e: Arc<io::Error>| FileSystemError::IoError(IoFailure::at(path, e));
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() && links == Links::Followed => {
             match fs::metadata(path) {
                 Ok(followed) => followed,
                 Err(e) if gone(&e) => return Ok(false),
-                Err(e) => return Err(tagged_error(&e)),
+                Err(e) => return Err(tagged_error(e.into())),
             }
         }
         Ok(metadata) => metadata,
         Err(e) if gone(&e) => return Ok(false),
-        Err(e) => return Err(tagged_error(&e)),
+        Err(e) => return Err(tagged_error(e.into())),
     };
     if !metadata.is_file() || metadata.len() != expected.len() as u64 {
         return Ok(false);
@@ -412,35 +415,26 @@ fn holds(
             | TargetRead::Link { .. }
             | TargetRead::Irregular { .. },
         ) => Ok(false),
-        Ok(TargetRead::Unreadable(e)) => Err(tagged_error(&e)),
-        Err(FileSystemError::IoError(e)) => Err(tagged_error(&e)),
+        Ok(TargetRead::Unreadable(e)) => Err(tagged_error(e)),
+        // A failure `read` already names a path for keeps it; one naming none
+        // is named for `path`.
+        Err(FileSystemError::IoError(e)) if e.path.is_some() => Err(FileSystemError::IoError(e)),
+        Err(FileSystemError::IoError(e)) => Err(tagged_error(e.error)),
         Err(e) => Err(e),
     }
 }
 
-/// `error`, worded to name `path`, keeping its kind.
-// The temporary file's name is random and the rename carries no path at all, so
-// a failure would otherwise name a file the operator never chose, or nothing.
-// Only the raw OS error number is lost, which nothing here consumes.
-fn tagged(path: &Path, error: &io::Error) -> Arc<io::Error> {
-    Arc::new(io::Error::new(
-        error.kind(),
-        format!("{}: {error}", path.display()),
-    ))
-}
-
 /// The error for a rename into `path` that failed with `error`.
 fn rename_failure(path: &Path, error: io::Error) -> FileSystemError {
-    let cause = tagged(path, &error);
     // `EISDIR`: a directory took the target's place after the checks, and a file
     // cannot be renamed over one.
     if error.kind() == io::ErrorKind::IsADirectory {
         FileSystemError::DirectoryTarget {
             path: path.to_path_buf(),
-            cause,
+            cause: Arc::new(error),
         }
     } else {
-        FileSystemError::IoError(cause)
+        FileSystemError::IoError(IoFailure::at(path, error))
     }
 }
 
@@ -704,7 +698,7 @@ fn read_target(path: &Path, links: Links) -> Result<TargetRead, FileSystemError>
     use nix::fcntl::{FcntlArg, OFlag, fcntl};
     use std::io::Read as _;
 
-    let io_error = |e: io::Error| FileSystemError::IoError(Arc::new(e));
+    let io_error = |e: io::Error| FileSystemError::IoError(e.into());
 
     let mut file = match open_for_reading(path, links).map_err(io_error)? {
         Ok(file) => file,
@@ -819,7 +813,7 @@ fn open_for_reading(path: &Path, links: Links) -> io::Result<Result<fs::File, Ta
 
 impl FileSystem for RealFileSystem {
     fn read_file(&self, path: &Path) -> Result<String, FileSystemError> {
-        fs::read_to_string(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
+        fs::read_to_string(path).map_err(|e| FileSystemError::IoError(e.into()))
     }
 
     // From the errno, with a following stat only where the errno cannot tell:
@@ -922,7 +916,7 @@ impl FileSystem for RealFileSystem {
     // it was read must not lend the file that replaces it its destination's mode.
     fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
         let metadata =
-            fs::symlink_metadata(path.path()).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
+            fs::symlink_metadata(path.path()).map_err(|e| FileSystemError::IoError(e.into()))?;
         if metadata.file_type().is_symlink() {
             return Err(FileSystemError::SymlinkedTarget {
                 path: path.path().to_path_buf(),
@@ -935,7 +929,7 @@ impl FileSystem for RealFileSystem {
     }
 
     fn remove_file(&self, path: &Path) -> Result<(), FileSystemError> {
-        fs::remove_file(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))
+        fs::remove_file(path).map_err(|e| FileSystemError::IoError(e.into()))
     }
 
     // A stat comes first and opens nothing, so a fifo is never waited on and
@@ -1024,15 +1018,15 @@ impl FileSystem for RealFileSystem {
 
         PathBuf::from(expanded.as_ref())
             .canonicalize()
-            .map_err(|e| FileSystemError::IoError(Arc::new(e)))
+            .map_err(|e| FileSystemError::IoError(e.into()))
     }
 
     fn list_directory(&self, path: &Path) -> Result<Vec<PathBuf>, FileSystemError> {
-        let entries = fs::read_dir(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
+        let entries = fs::read_dir(path).map_err(|e| FileSystemError::IoError(e.into()))?;
 
         let mut paths = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
+            let entry = entry.map_err(|e| FileSystemError::IoError(e.into()))?;
             paths.push(entry.path());
         }
 
@@ -1041,7 +1035,7 @@ impl FileSystem for RealFileSystem {
 
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
         path.canonicalize()
-            .map_err(|e| FileSystemError::IoError(Arc::new(e)))
+            .map_err(|e| FileSystemError::IoError(e.into()))
     }
 
     // Device and inode rather than a resolved path: resolving links does not
@@ -1050,7 +1044,7 @@ impl FileSystem for RealFileSystem {
     fn identity(&self, path: &Path) -> Result<crate::fs::FileIdentity, FileSystemError> {
         use std::os::unix::fs::MetadataExt as _;
 
-        let metadata = fs::metadata(path).map_err(|e| FileSystemError::IoError(Arc::new(e)))?;
+        let metadata = fs::metadata(path).map_err(|e| FileSystemError::IoError(e.into()))?;
         Ok(crate::fs::FileIdentity::of(metadata.dev(), metadata.ino()))
     }
 
@@ -1295,7 +1289,7 @@ mod tests {
 
         match result.unwrap_err() {
             FileSystemError::IoError(io_error) => {
-                assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(io_error.error.kind(), std::io::ErrorKind::NotFound);
             }
             other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
@@ -1311,7 +1305,7 @@ mod tests {
 
         match result.unwrap_err() {
             FileSystemError::IoError(io_error) => {
-                assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(io_error.error.kind(), std::io::ErrorKind::NotFound);
             }
             other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
@@ -1327,7 +1321,7 @@ mod tests {
 
         match result.unwrap_err() {
             FileSystemError::IoError(io_error) => {
-                assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(io_error.error.kind(), std::io::ErrorKind::NotFound);
             }
             other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
@@ -1336,7 +1330,7 @@ mod tests {
     #[test]
     fn test_filesystem_error_display() {
         let io_error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access denied");
-        let fs_error = FileSystemError::IoError(Arc::new(io_error));
+        let fs_error = FileSystemError::IoError(io_error.into());
 
         assert_eq!(fs_error.to_string(), "IO error: Access denied");
 
@@ -1347,12 +1341,12 @@ mod tests {
     #[test]
     fn test_filesystem_error_from_io_error() {
         let io_error = std::io::Error::other("test error");
-        let fs_error = FileSystemError::IoError(Arc::new(io_error));
+        let fs_error = FileSystemError::IoError(io_error.into());
 
         match fs_error {
             FileSystemError::IoError(inner) => {
-                assert_eq!(inner.kind(), std::io::ErrorKind::Other);
-                assert_eq!(inner.to_string(), "test error");
+                assert_eq!(inner.error.kind(), std::io::ErrorKind::Other);
+                assert_eq!(inner.error.to_string(), "test error");
             }
             other => panic!("Expected IoError variant, got {other:?}"),
         }
@@ -3350,6 +3344,55 @@ mod typed_failure_tests {
         );
     }
 
+    // A failed write names the path it failed on: the target, or the directory
+    // it could not create.
+    #[test]
+    fn a_failed_write_names_the_path_it_failed_on() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("file");
+        fs::write(&file, "x").unwrap();
+        let occupied = dir.path().join("occupied");
+        fs::create_dir(&occupied).unwrap();
+        let write = |path: &Path| {
+            RealFileSystem
+                .write_file_private(&target(path), b"x", IfPresent::Replace)
+                .unwrap_err()
+        };
+
+        let below = write(&file.join("sub").join("config"));
+        let FileSystemError::BelowNonDirectory { cause, .. } = &below else {
+            panic!("expected a non-directory above, got {below:?}");
+        };
+        assert_eq!(
+            below.to_string(),
+            format!("IO error: {}: {cause}", file.join("sub").display())
+        );
+        match write(&occupied) {
+            FileSystemError::DirectoryTarget { path, .. } => assert_eq!(path, occupied),
+            other => panic!("expected a directory at the target, got {other:?}"),
+        }
+
+        let locked = test_common::LockedDir::create(&dir.path().join("locked"), 0o500);
+        if !locked.refuses_new_files() {
+            eprintln!("SKIP the 0o500 cases: this user can write into a 0o500 directory");
+            return;
+        }
+        let into_locked = write(&dir.path().join("locked").join("config"));
+        let below_locked = write(&dir.path().join("locked").join("sub").join("config"));
+        drop(locked);
+        for (error, named) in [
+            (into_locked, dir.path().join("locked").join("config")),
+            (below_locked, dir.path().join("locked").join("sub")),
+        ] {
+            match error {
+                FileSystemError::IoError(failure) => {
+                    assert_eq!(failure.path.as_deref(), Some(named.as_path()));
+                }
+                other => panic!("expected a plain IO error, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn a_repository_read_says_what_it_found() {
         let dir = tempdir().unwrap();
@@ -3735,7 +3778,7 @@ mod replace_if_holding_tests {
         fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
         match result {
             Err(FileSystemError::IoError(e)) => {
-                assert!(e.to_string().contains(target.to_str().unwrap()), "{e}");
+                assert_eq!(e.path.as_deref(), Some(target.as_path()), "{e:?}");
             }
             other => panic!("expected a read failure naming the file, got {other:?}"),
         }
@@ -3797,6 +3840,51 @@ mod replace_if_holding_tests {
         });
         assert!(matches!(held, Ok(true)), "{held:?}");
         assert!(opened, "the regular file was not read");
+    }
+
+    // A read that fails names the file it read, once.
+    #[test]
+    fn a_failed_read_names_the_file_it_read() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("config");
+        fs::write(&file, b"as loaded").unwrap();
+
+        let held = still_holds_with(&file, b"as loaded", |_, _| {
+            Err(FileSystemError::IoError(
+                io::Error::other("the read failed").into(),
+            ))
+        });
+
+        match held {
+            Err(FileSystemError::IoError(e)) => {
+                assert_eq!(e.path.as_deref(), Some(file.as_path()));
+                assert_eq!(e.error.to_string(), "the read failed");
+            }
+            other => panic!("expected the read failure, got {other:?}"),
+        }
+    }
+
+    // A read failure that already names a path keeps it.
+    #[test]
+    fn a_read_failure_naming_its_own_path_keeps_it() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("config");
+        fs::write(&file, b"as loaded").unwrap();
+        let other = dir.path().join("other");
+
+        let held = still_holds_with(&file, b"as loaded", |_, _| {
+            Err(FileSystemError::IoError(IoFailure::at(
+                &other,
+                io::Error::other("the read failed"),
+            )))
+        });
+
+        match held {
+            Err(FileSystemError::IoError(e)) => {
+                assert_eq!(e.path.as_deref(), Some(other.as_path()))
+            }
+            other => panic!("expected the read failure, got {other:?}"),
+        }
     }
 
     // A file of another length has changed whatever its mode, so one selfie may
@@ -4080,7 +4168,7 @@ mod remove_if_holding_tests {
         });
         match unlink_refused {
             Err(FileSystemError::IoError(e)) => {
-                assert!(e.to_string().contains(file.to_str().unwrap()), "{e}");
+                assert_eq!(e.path.as_deref(), Some(file.as_path()), "{e:?}");
             }
             other => panic!("expected the unlink failure, got {other:?}"),
         }
@@ -4093,7 +4181,7 @@ mod remove_if_holding_tests {
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
         match unreadable {
             Err(FileSystemError::IoError(e)) => {
-                assert!(e.to_string().contains(file.to_str().unwrap()), "{e}");
+                assert_eq!(e.path.as_deref(), Some(file.as_path()), "{e:?}");
             }
             other => panic!("expected the read failure, got {other:?}"),
         }

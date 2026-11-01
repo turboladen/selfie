@@ -754,12 +754,53 @@ impl FileIdentity {
     }
 }
 
+/// Holds an IO error and, when the operation that failed names one, the path
+/// the error is about.
+#[derive(Debug, Clone)]
+pub struct IoFailure {
+    /// Names the path the error is about, or is `None` when the operation
+    /// names no path.
+    pub path: Option<PathBuf>,
+    /// Holds the error the operation returned.
+    pub error: Arc<io::Error>,
+}
+
+impl IoFailure {
+    /// Wraps `error` together with the `path` it is about.
+    pub fn at(path: &Path, error: impl Into<Arc<io::Error>>) -> Self {
+        Self {
+            path: Some(path.to_path_buf()),
+            error: error.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for IoFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&io_text(self.path.as_deref(), &self.error))
+    }
+}
+
+impl From<io::Error> for IoFailure {
+    fn from(error: io::Error) -> Self {
+        Arc::new(error).into()
+    }
+}
+
+impl From<Arc<io::Error>> for IoFailure {
+    fn from(error: Arc<io::Error>) -> Self {
+        Self { path: None, error }
+    }
+}
+
 /// Every way a file system operation here can fail.
+// No variant has a source: a CLI error with a chain longer than one prints the
+// chain, so a source here would print the cause twice.
 #[derive(Error, Debug, Clone)]
 pub enum FileSystemError {
     /// General IO error occurred during file system operation
     #[error("IO error: {0}")]
-    IoError(Arc<io::Error>),
+    IoError(IoFailure),
 
     /// Home directory could not be determined (needed for path expansion)
     #[error("Home directory not found")]
@@ -812,7 +853,7 @@ pub enum FileSystemError {
 
     /// A write could not create the target because a component above it is not a
     /// directory. `parent` is the first such component, when it could be found.
-    #[error("IO error: {cause}")]
+    #[error("IO error: {}", io_text(Some(Self::uncreatable_directory(.path)), .cause))]
     BelowNonDirectory {
         path: PathBuf,
         parent: Option<PathBuf>,
@@ -820,11 +861,30 @@ pub enum FileSystemError {
     },
 
     /// A write could not replace the target because a directory is there.
-    #[error("IO error: {cause}")]
+    #[error("IO error: {}", io_text(Some(.path), .cause))]
     DirectoryTarget {
         path: PathBuf,
         cause: Arc<io::Error>,
     },
+}
+
+impl FileSystemError {
+    /// Returns the directory that a write to `path`, blocked by
+    /// [`BelowNonDirectory`](Self::BelowNonDirectory), could not create, which
+    /// is the directory that variant's message names.
+    #[must_use]
+    pub fn uncreatable_directory(path: &Path) -> &Path {
+        parent_dir(path)
+    }
+}
+
+// An IO error's text after "IO error: ": the path it names, if any, then the
+// error.
+fn io_text(path: Option<&Path>, error: &io::Error) -> String {
+    match path {
+        Some(path) => format!("{}: {error}", path.display()),
+        None => error.to_string(),
+    }
 }
 
 /// What a failed read of a repository file found at the path.
@@ -1083,6 +1143,46 @@ mod tests {
         let message = error.to_string();
         assert_eq!(message.matches("the cause").count(), 1, "{message}");
         assert!(error.source().is_none(), "{message} also chains its cause");
+
+        let error = FileSystemError::IoError(IoFailure::at(
+            Path::new("/state/file"),
+            io::Error::other("the cause"),
+        ));
+        assert!(error.source().is_none(), "{error} also chains its cause");
+    }
+
+    // An IO failure's message is its path, then its error, as the variants that
+    // carry one show it.
+    #[test]
+    fn an_io_failure_names_its_path_before_its_error() {
+        let error = || io::Error::other("denied");
+        let path = Path::new("/state/deploy-state.yml");
+
+        assert_eq!(
+            FileSystemError::IoError(IoFailure::at(path, error())).to_string(),
+            "IO error: /state/deploy-state.yml: denied"
+        );
+        assert_eq!(
+            FileSystemError::IoError(error().into()).to_string(),
+            "IO error: denied"
+        );
+        assert_eq!(
+            FileSystemError::BelowNonDirectory {
+                path: path.to_path_buf(),
+                parent: None,
+                cause: Arc::new(error()),
+            }
+            .to_string(),
+            "IO error: /state: denied"
+        );
+        assert_eq!(
+            FileSystemError::DirectoryTarget {
+                path: path.to_path_buf(),
+                cause: Arc::new(error()),
+            }
+            .to_string(),
+            "IO error: /state/deploy-state.yml: denied"
+        );
     }
 
     // The `other` arm fails closed. Nothing returns a non-`IrregularTarget`

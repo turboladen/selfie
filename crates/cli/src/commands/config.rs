@@ -172,9 +172,9 @@ mod tests {
         fs.expect_read_file()
             .withf(|path| path.ends_with("deploy-state.yml"))
             .returning(|_| {
-                Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
-                    std::io::Error::from(std::io::ErrorKind::NotFound),
-                )))
+                Err(selfie::fs::FileSystemError::IoError(
+                    std::io::Error::from(std::io::ErrorKind::NotFound).into(),
+                ))
             });
         // The report and the validation both resolve the default state
         // directory under the home directory when the file names none.
@@ -239,9 +239,9 @@ mod tests {
         fs.expect_read_file()
             .withf(|path| path.ends_with("deploy-state.yml"))
             .returning(|_| {
-                Err(selfie::fs::FileSystemError::IoError(std::sync::Arc::new(
-                    std::io::Error::from(std::io::ErrorKind::NotFound),
-                )))
+                Err(selfie::fs::FileSystemError::IoError(
+                    std::io::Error::from(std::io::ErrorKind::NotFound).into(),
+                ))
             });
 
         let result = handle_validate(&display, &fs);
