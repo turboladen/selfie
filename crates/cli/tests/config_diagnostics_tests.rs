@@ -10,25 +10,7 @@ use std::time::Duration;
 
 pub mod common;
 
-use common::{CLEAN, FAILED, FOUND, sandboxed_command};
-
-/// A fifo at the configuration path, which every command reads before doing
-/// anything else.
-fn config_dir_with_fifo() -> tempfile::TempDir {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let config_dir = temp_dir.path().join(".config").join("selfie");
-    std::fs::create_dir_all(&config_dir).unwrap();
-
-    // Shelling out rather than taking a `nix` dev-dependency for one call in one
-    // test. `mkfifo` is POSIX and this test is unix-only anyway.
-    let status = std::process::Command::new("mkfifo")
-        .arg(config_dir.join("config.yaml"))
-        .status()
-        .unwrap();
-    assert!(status.success(), "mkfifo failed to create the test fixture");
-
-    temp_dir
-}
+use common::{CLEAN, FAILED, FOUND, config_dir_with_fifo, sandboxed_command};
 
 // The deadline is what turns a regression into a failure rather than a wedged
 // suite: without the guard this command never returns, and a test that simply

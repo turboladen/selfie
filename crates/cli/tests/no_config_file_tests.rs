@@ -11,7 +11,7 @@ use std::time::Duration;
 
 pub mod common;
 
-use common::{CLEAN, FAILED, sandboxed_command};
+use common::{CLEAN, FAILED, config_dir_with_fifo, sandboxed_command};
 use tempfile::TempDir;
 
 /// A sandbox with a package directory and deliberately **no** config file.
@@ -105,18 +105,9 @@ fn only_the_missing_setting_is_named() {
 // configuration file that is really there.
 #[test]
 fn a_fifo_config_is_still_fatal_when_every_flag_is_supplied() {
-    let temp = sandbox_without_config();
+    let temp = config_dir_with_fifo();
     let packages = temp.path().join("packages");
-    let status = std::process::Command::new("mkfifo")
-        .arg(
-            temp.path()
-                .join(".config")
-                .join("selfie")
-                .join("config.yaml"),
-        )
-        .status()
-        .unwrap();
-    assert!(status.success(), "mkfifo failed to create the test fixture");
+    std::fs::create_dir_all(&packages).unwrap();
 
     let (code, combined) = run(
         &temp,
