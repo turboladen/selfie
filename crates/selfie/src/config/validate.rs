@@ -1123,6 +1123,61 @@ mod tests {
         )))
     }
 
+    // The message of each directory issue, whole, for every state either
+    // directory can be in.
+    #[test]
+    fn every_directory_issue_is_worded_as_pinned() {
+        let states = || {
+            [
+                DirectoryState::Absent(AbsentReason::Empty),
+                DirectoryState::Absent(AbsentReason::Occupied {
+                    kind: "regular file",
+                }),
+                dangling(),
+                DirectoryState::Absent(AbsentReason::ParentNotADirectory {
+                    parent: PathBuf::from("/nowhere/file"),
+                }),
+                unknown(),
+            ]
+        };
+        let mut shown = Vec::new();
+        for field in ["package_directory", "dotfiles_directory"] {
+            for state in states() {
+                shown.push(
+                    directory_issue(field, state)
+                        .expect("an issue")
+                        .message()
+                        .into_owned(),
+                );
+            }
+            shown.push(
+                unlistable_issue(field)
+                    .expect("an issue")
+                    .message()
+                    .into_owned(),
+            );
+        }
+
+        let expected = [
+            "The `package_directory` path /nowhere/packages does not exist",
+            "The `package_directory` path /nowhere/packages is not a directory, it is a regular file",
+            "The `package_directory` path /nowhere/packages is a symlink to nothing: it points at /gone",
+            "The `package_directory` path /nowhere/packages is below /nowhere/file, which is not a directory",
+            "The `package_directory` path /nowhere/packages could not be checked: permission denied",
+            "The `package_directory` path /nowhere/packages could not be listed: IO error: permission denied",
+            "Dotfiles directory /nowhere/dotfiles does not exist — standalone dotfiles will not be read. Create it with: mkdir -p -- /nowhere/dotfiles",
+            "Dotfiles directory /nowhere/dotfiles is not a directory, it is a regular file — standalone dotfiles will not be read.",
+            "Dotfiles directory /nowhere/dotfiles is a symlink to nothing: it points at /gone — standalone dotfiles will not be read.",
+            "Dotfiles directory /nowhere/dotfiles is below /nowhere/file, which is not a directory — standalone dotfiles will not be read.",
+            "The `dotfiles_directory` path /nowhere/dotfiles could not be checked: permission denied",
+            "The `dotfiles_directory` path /nowhere/dotfiles could not be listed: IO error: permission denied",
+        ];
+        assert_eq!(shown.len(), expected.len(), "{shown:#?}");
+        for (shown, expected) in shown.iter().zip(expected) {
+            assert_eq!(shown, expected);
+        }
+    }
+
     #[test]
     fn a_directory_the_port_reports_is_not_an_issue() {
         assert!(directory_issue("dotfiles_directory", DirectoryState::Directory).is_none());

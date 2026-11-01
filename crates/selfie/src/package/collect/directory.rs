@@ -476,6 +476,65 @@ mod tests {
         }
     }
 
+    // Each sentence about a dotfiles directory a command cannot use, whole, for
+    // every state the directory can be in.
+    #[test]
+    fn every_directory_sentence_is_worded_as_pinned() {
+        let denied = || Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let errors: Vec<PackageListError> = [
+            DirectoryState::Directory,
+            DirectoryState::Absent(AbsentReason::Empty),
+            DirectoryState::Absent(AbsentReason::Occupied {
+                kind: "regular file",
+            }),
+            DirectoryState::Absent(AbsentReason::DanglingSymlink {
+                points_to: Some("/d/gone".into()),
+            }),
+            DirectoryState::Absent(AbsentReason::DanglingSymlink { points_to: None }),
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory {
+                parent: "/d/file".into(),
+            }),
+            DirectoryState::Unlistable(denied()),
+            DirectoryState::Unknown(denied()),
+        ]
+        .into_iter()
+        .map(|state| PackageListError::new("/d/dots".into(), state))
+        .collect();
+        let mut shown = Vec::new();
+        for error in &errors {
+            if let DirectoryState::Absent(reason) = error.state() {
+                shown.push(absent_warning(error.path(), reason));
+                shown.push(absent_track_refusal(error.path(), reason));
+            }
+        }
+        shown.extend(errors.iter().map(track_listing_refusal));
+
+        let expected = [
+            "Dotfiles directory /d/dots does not exist — standalone dotfiles will not be read. Create it with: mkdir -p -- /d/dots",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots does not exist Create it with: mkdir -p -- /d/dots",
+            "Dotfiles directory /d/dots is not a directory, it is a regular file — standalone dotfiles will not be read.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is not a directory, it is a regular file",
+            "Dotfiles directory /d/dots is a symlink to nothing: it points at /d/gone — standalone dotfiles will not be read.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is a symlink to nothing: it points at /d/gone",
+            "Dotfiles directory /d/dots is a symlink to nothing — standalone dotfiles will not be read.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is a symlink to nothing",
+            "Dotfiles directory /d/dots is below /d/file, which is not a directory — standalone dotfiles will not be read.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is below /d/file, which is not a directory",
+            "Cannot track a standalone dotfile: the dotfiles directory at /d/dots could not be listed, so it may already hold this name — /d/dots could not be listed",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots does not exist Create it with: mkdir -p -- /d/dots",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is not a directory, it is a regular file",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is a symlink to nothing: it points at /d/gone",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is a symlink to nothing",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is below /d/file, which is not a directory",
+            "Cannot track a standalone dotfile: the dotfiles directory at /d/dots could not be listed, so it may already hold this name — /d/dots could not be listed: permission denied",
+            "Cannot track a standalone dotfile: the dotfiles directory at /d/dots could not be checked — /d/dots could not be checked: permission denied",
+        ];
+        assert_eq!(shown.len(), expected.len(), "{shown:#?}");
+        for (shown, expected) in shown.iter().zip(expected) {
+            assert_eq!(shown, expected);
+        }
+    }
+
     // Apply warns and track refuses about the same directory in one session, so
     // the two must say different things while naming the same fix.
     #[test]
