@@ -329,9 +329,9 @@ treating it as one offered to create a template over the file the user opened th
 
 A file with unrecognized keys at more than one level is refused once, naming every one, so it is
 fixed in one pass. The top level comes first, then each environment in name order, then a top level
-selfie could not read back, whose parse failure ends the message. A command about the current
-environment names only that environment. The MCP tools' `refused[].kind` is the first reason's kind,
-and `reason` names them all.
+selfie could not read back, whose parse failure ends the message. A rewrite names dotfile entries
+first, ahead of all of these. A command about the current environment names only that environment.
+The MCP tools' `refused[].kind` is the first reason's kind, and `reason` names them all.
 
 `selfie spec create` and the MCP server's `selfie_spec_create` check a new spec as
 `selfie spec validate` checks it, before writing it. The check against other specs for a shared

@@ -13,10 +13,10 @@ use crate::{
         target::repository_path,
     },
     package::{
-        GetPackage, Package, RefusalReason, SpecOrigin,
+        GetPackage, Package, SpecOrigin,
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
-            PackageParseKind, PackageRepoError, PackageRepository, RefusedChange,
+            PackageParseKind, PackageRepoError, PackageRepository, RefusedChange, UntrustedLevel,
         },
     },
 };
@@ -303,13 +303,14 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         //
         // `unknown_entry_keys` walks every scope, so these paths are the ones
         // `selfie spec validate` reports for the same file.
-        let unknown = package.unknown_entry_keys();
-        if !unknown.is_empty() {
-            let fields: Vec<&str> = unknown.iter().map(|u| u.field.as_str()).collect();
-            return Err(PackageRepoError::UnknownDotfileFields {
-                path: path.to_path_buf(),
-                fields: fields.join(", "),
-            });
+        let entries: Vec<String> = package
+            .unknown_entry_keys()
+            .into_iter()
+            .map(|unknown| unknown.field)
+            .collect();
+        let mut levels = Vec::new();
+        if !entries.is_empty() {
+            levels.push(UntrustedLevel::DotfileFields(entries));
         }
 
         // The same refusal above the entries. `_dotfiles:` takes every entry under
@@ -317,50 +318,18 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         // not read back may hide either (selfie-ebvx).
         //
         // Asked of `untrusted_keys_refusal`, so a writer and apply cannot reach
-        // different conclusions about one key. Field names rather than the
-        // rendered sentence, because this error names the file and the caller
-        // needs the keys.
-        match package
-            .untrusted_keys_refusal()
-            .map(|refusal| refusal.reasons()[0].clone())
-        {
-            Some(RefusalReason::UnknownTopLevelKeys(unknown)) => {
-                let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
-                return Err(PackageRepoError::UnknownTopLevelFields {
-                    path: path.to_path_buf(),
-                    fields: fields.join(", "),
-                });
-            }
-            Some(RefusalReason::UnknownEnvironmentKeys(environments)) => {
-                let fields: Vec<String> = environments
-                    .iter()
-                    .flat_map(|(environment, keys)| {
-                        keys.iter()
-                            .map(|key| crate::package::environment_field(environment, &key.key))
-                    })
-                    .collect();
-                return Err(PackageRepoError::UnknownEnvironmentFields {
-                    path: path.to_path_buf(),
-                    fields: fields.join(", "),
-                });
-            }
-            Some(RefusalReason::UncheckedTopLevel(error)) => {
-                return Err(PackageRepoError::UncheckedTopLevel {
-                    path: path.to_path_buf(),
-                    error,
-                });
-            }
-            // Unreachable while `untrusted_keys_refusal` composes only the three
-            // rules above. A missing environment is a deployment rule, not a
-            // writing one: a spec declaring none is still the user's text.
-            //
-            // Named rather than left to a catch-all, so a new `RefusalReason`
-            // variant fails to compile here. Widening `untrusted_keys_refusal` to
-            // return a variant already named here is NOT caught: it must never
-            // return `NoEnvironments`, or a save proceeds past this arm silently.
-            // The listings' rule, which does refuse a missing environment, is
-            // `every_environment_refusal`.
-            Some(RefusalReason::NoEnvironments(_)) | None => {}
+        // different conclusions about one key, and every level is reported in one
+        // error in the order it gives. Field names rather than the rendered
+        // sentence, because this error names the file and the caller needs the
+        // keys.
+        if let Some(refusal) = package.untrusted_keys_refusal() {
+            levels.extend(refusal.reasons().iter().filter_map(UntrustedLevel::of));
+        }
+        if !levels.is_empty() {
+            return Err(PackageRepoError::UntrustedKeys {
+                path: path.to_path_buf(),
+                levels,
+            });
         }
 
         // Serialize the package to YAML
@@ -769,6 +738,23 @@ mod tests {
     use crate::package::Environments;
     use crate::package::port::PackageRepoError;
     use tempfile::TempDir;
+
+    // The levels an `UntrustedKeys` refusal names, in order; empty for any other
+    // error.
+    fn level_kinds(err: &PackageRepoError) -> Vec<&'static str> {
+        let PackageRepoError::UntrustedKeys { levels, .. } = err else {
+            return Vec::new();
+        };
+        levels
+            .iter()
+            .map(|level| match level {
+                UntrustedLevel::DotfileFields(_) => "entries",
+                UntrustedLevel::TopLevelFields(_) => "top level",
+                UntrustedLevel::EnvironmentFields(_) => "environments",
+                UntrustedLevel::UncheckedTopLevel(_) => "unread",
+            })
+            .collect()
+    }
 
     #[test]
     fn test_get_package_success() {
@@ -2603,10 +2589,7 @@ environments:
             .save_package(&package, &package_path)
             .expect_err("an unknown key must refuse the save");
 
-        assert!(
-            matches!(&err, PackageRepoError::UnknownDotfileFields { .. }),
-            "got: {err:?}"
-        );
+        assert_eq!(level_kinds(&err), ["entries"], "got: {err:?}");
     }
 
     // A real file, and a real directory, at the path a new spec would take: both
@@ -2694,10 +2677,7 @@ environments:
             .create_package(&package_with_typo(), &package_path)
             .expect_err("a package with an unrecognized dotfile key must not be written");
 
-        assert!(
-            matches!(err, PackageRepoError::UnknownDotfileFields { .. }),
-            "got: {err:?}"
-        );
+        assert_eq!(level_kinds(&err), ["entries"], "got: {err:?}");
     }
 
     // A package YAML with one well-formed dotfile and one carrying `var:`.
@@ -2745,10 +2725,7 @@ environments:
             .save_package(&package, &package_dir.join("creds.yml"))
             .expect_err("a file selfie could not read back must not be rewritten");
 
-        assert!(
-            matches!(err, PackageRepoError::UncheckedTopLevel { .. }),
-            "got: {err:?}"
-        );
+        assert_eq!(level_kinds(&err), ["unread"], "got: {err:?}");
         // Not the found-keys variant: that one names keys, and here there are
         // none to name -- claiming otherwise would send the user looking.
         let rendered = err.to_string();
@@ -2796,10 +2773,7 @@ environments:
             .save_package(&package, &package_dir.join("creds.yml"))
             .expect_err("a package with an unrecognized top-level key must not be rewritten");
 
-        assert!(
-            matches!(err, PackageRepoError::UnknownTopLevelFields { .. }),
-            "got: {err:?}"
-        );
+        assert_eq!(level_kinds(&err), ["top level"], "got: {err:?}");
         assert!(
             err.to_string().contains("_dotfiles"),
             "the refusal must name the key, got: {err}"
@@ -2849,10 +2823,7 @@ environments:
             .save_package(&package, &package_path)
             .expect_err("a package with an unrecognized environment key must not be rewritten");
 
-        assert!(
-            matches!(err, PackageRepoError::UnknownEnvironmentFields { .. }),
-            "got: {err:?}"
-        );
+        assert_eq!(level_kinds(&err), ["environments"], "got: {err:?}");
         // Not the dotfile-entry variant: that one says the rewrite would make an
         // entry deployable, which is not what is at stake for a setting.
         assert!(
@@ -2915,9 +2886,9 @@ environments:
     }
 
     // A file that is both unreadable at the top level and carrying an
-    // environment's own key reports the key. That is the reason a reader can act
-    // on: renaming `audt:` is a change they can make, while "the top level could
-    // not be read" leaves them guessing which construct to simplify.
+    // environment's own key reports both, the key first: renaming `audt:` is a
+    // change a reader can make at once, and the unread top level's parse failure
+    // has to end the message.
     #[test]
     fn save_package_reports_an_environment_key_ahead_of_an_unread_top_level() {
         let package = loaded(
@@ -2930,14 +2901,172 @@ environments:
             .save_package(&package, &package_path)
             .expect_err("both rules refuse the rewrite");
 
-        assert!(
-            matches!(err, PackageRepoError::UnknownEnvironmentFields { .. }),
-            "the environment's own key must be reported first, got: {err:?}"
+        assert_eq!(
+            level_kinds(&err),
+            ["environments", "unread"],
+            "both levels, the environment's own key first, got: {err:?}"
         );
         assert!(
             err.to_string().contains("environments.work.audt"),
             "the diagnostic must name the key to fix, got: {err}"
         );
+    }
+
+    // An entry key, a top-level key and an environment key are all named in one
+    // refusal, each with the harm its own level does, under one remedy.
+    #[test]
+    fn save_package_names_every_level_carrying_an_unknown_key() {
+        let package = loaded(
+            "name: creds\nconfigs: []\nenvironments:\n  work:\n    install: \"echo i\"\n    \
+             audt: \"brew audit myapp\"\ndotfiles:\n  - source: a.tpl\n    target: ~/.a\n    \
+             var:\n      k: v\n",
+        );
+        let (repo, package_path) = refusing_repo();
+
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("unknown keys at three levels must refuse the rewrite");
+        let message = err.to_string();
+
+        assert_eq!(
+            level_kinds(&err),
+            ["entries", "top level", "environments"],
+            "got: {err:?}"
+        );
+        crate::package::assert_in_order(
+            &message,
+            &[
+                "unrecognized dotfiles[0].var",
+                "silently make the entry deployable",
+                ". Unrecognized configs",
+                "everything under it",
+                ". Unrecognized environments.work.audt",
+                "whatever it was set to",
+            ],
+        );
+        let path = package_path.display().to_string();
+        assert!(
+            message.ends_with(&format!(
+                "Edit {path} directly to correct or remove the keys."
+            )),
+            "got: {message}"
+        );
+        assert_eq!(
+            message.matches("refusing to rewrite").count(),
+            1,
+            "{message}"
+        );
+        assert_eq!(message.matches("Edit ").count(), 1, "{message}");
+        assert_eq!(message.matches(path.as_str()).count(), 2, "{message}");
+    }
+
+    // An entry key beside a top level selfie could not read: both are named, and
+    // the remedy covers both while the parse failure still ends the message.
+    #[test]
+    fn save_package_names_entry_keys_and_an_unread_top_level() {
+        let package = loaded(
+            "name: creds\nextra:\n  ? [a, b]\n  : v\nenvironments:\n  work:\n    install: \
+             \"echo i\"\ndotfiles:\n  - source: a.tpl\n    target: ~/.a\n    var:\n      k: v\n",
+        );
+        let (repo, package_path) = refusing_repo();
+
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("both levels refuse the rewrite");
+        let message = err.to_string();
+
+        assert_eq!(level_kinds(&err), ["entries", "unread"], "got: {err:?}");
+        crate::package::assert_in_order(
+            &message,
+            &[
+                "unrecognized dotfiles[0].var",
+                ". Its top level could not be read back",
+                "to correct or remove the keys, and simplify it until selfie can read it.",
+                "The read failed with:",
+            ],
+        );
+        assert_eq!(message.matches("Edit ").count(), 1, "{message}");
+    }
+
+    // The remedy counts the keys the message names, not the levels: two entry
+    // keys at one level ask for both to be fixed.
+    #[test]
+    fn a_rewrite_refusal_naming_several_keys_says_keys() {
+        let (repo, package_path) = refusing_repo();
+        let package = loaded(
+            "name: creds\nenvironments:\n  work:\n    install: \"echo i\"\ndotfiles:\n  - source: \
+             a\n    target: ~/.a\n    var: x\n    vrs: y\n",
+        );
+
+        let err = repo
+            .save_package(&package, &package_path)
+            .expect_err("two entry keys refuse the rewrite");
+        let message = err.to_string();
+
+        assert_eq!(level_kinds(&err), ["entries"], "got: {err:?}");
+        assert!(
+            message.ends_with(&format!(
+                "Edit {} directly to correct or remove the keys.",
+                package_path.display()
+            )),
+            "got: {message}"
+        );
+    }
+
+    // A single level with one key renders in exactly these words, each sentence
+    // written out.
+    #[test]
+    fn a_single_level_rewrite_refusal_keeps_its_wording() {
+        let env = "environments:\n  work:\n    install: \"echo i\"\n";
+        let path = "/test/packages/creds.yml";
+        let cases = [
+            (
+                format!(
+                    "name: creds\n{env}dotfiles:\n  - source: a\n    target: ~/.a\n    var: x\n"
+                ),
+                format!(
+                    "refusing to rewrite {path}: unrecognized dotfiles[0].var. Saving would \
+                     delete the key and silently make the entry deployable. Edit {path} \
+                     directly to correct or remove the key."
+                ),
+            ),
+            (
+                format!("name: creds\nconfigs: []\n{env}"),
+                format!(
+                    "refusing to rewrite {path}: unrecognized configs. Saving would delete the \
+                     key and everything under it. Edit {path} directly to correct or remove \
+                     the key."
+                ),
+            ),
+            (
+                format!("name: creds\n{env}    audt: x\n"),
+                format!(
+                    "refusing to rewrite {path}: unrecognized environments.work.audt. Saving \
+                     would delete the key and whatever it was set to. Edit {path} directly to \
+                     correct or remove the key."
+                ),
+            ),
+        ];
+        for (yaml, expected) in cases {
+            let (repo, package_path) = refusing_repo();
+            let err = repo
+                .save_package(&loaded(&yaml), &package_path)
+                .expect_err(&yaml);
+            assert_eq!(err.to_string(), expected);
+        }
+
+        let unread = loaded(&format!("name: creds\nextra:\n  ? [a, b]\n  : v\n{env}"));
+        let (repo, package_path) = refusing_repo();
+        let message = repo
+            .save_package(&unread, &package_path)
+            .expect_err("an unread top level refuses the rewrite")
+            .to_string();
+        let prefix = format!(
+            "refusing to rewrite {path}: its top level could not be read back, so any key \
+             selfie does not model would be dropped without warning. Edit {path} directly, or \
+             simplify it until selfie can read it. The read failed with: "
+        );
+        assert!(message.starts_with(&prefix), "got: {message}");
     }
 
     #[test]
@@ -2959,10 +3088,7 @@ environments:
             .save_package(&package_with_typo(), &package_path)
             .expect_err("a package with an unrecognized dotfile key must not be rewritten");
 
-        assert!(
-            matches!(err, PackageRepoError::UnknownDotfileFields { .. }),
-            "got: {err:?}"
-        );
+        assert_eq!(level_kinds(&err), ["entries"], "got: {err:?}");
         assert!(
             err.to_string().contains("dotfiles[0].var"),
             "the diagnostic must name the offending key, got: {err}"
