@@ -907,7 +907,10 @@ whose target exactly one package deploys to, which an orphan's never is: it fill
 and replaces the name of a package that no longer deploys there. `selfie apply <name>` does this
 only for its own package's targets. An older version of selfie that rewrites the state file drops
 every record's package; the next apply names it again only where exactly one package deploys to the
-target.
+target. The warning names the source, directory and package the target was last deployed or found in
+sync from. An apply that finds the target in sync after its spec moves between the package and
+dotfiles directories, or is renamed, updates all three, while a dry run and `selfie dotfiles drift`
+leave them as they were.
 
 Once the file is gone, `selfie apply` drops selfie's record of it and says nothing. A dry run and
 `selfie dotfiles drift` change nothing, and a run that stops part way drops nothing. A target selfie

@@ -49,7 +49,7 @@ pub struct DeployEntry {
     package: Option<String>,
     /// The directory `source` is relative to, when the record names one.
     // Optional because a state file may hold records without it, which must still
-    // parse. Apply fills it in when it finds such a target in sync.
+    // parse. Apply sets it, or corrects it, whenever it finds the target in sync.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base: Option<BaseKind>,
 }
@@ -107,14 +107,27 @@ impl DeployState {
         }
     }
 
-    /// Record that `target`'s source is `source`, relative to `base`, keeping
-    /// the rest of its record. Returns whether the record changed; a target
-    /// with no record gains none.
-    pub fn place(&mut self, target: &str, source: &str, base: BaseKind) -> bool {
+    /// Record that `target`'s source is `source`, relative to `base`, in the
+    /// package named `package`, keeping its checksum and deploy time. Returns
+    /// whether the record changed; a target with no record gains none.
+    ///
+    /// `package` is named as in [`record_deployment`](Self::record_deployment).
+    pub fn place(
+        &mut self,
+        target: &str,
+        source: &str,
+        base: BaseKind,
+        package: Option<&str>,
+    ) -> bool {
         match self.deployed.get_mut(target) {
-            Some(entry) if entry.base != Some(base) || entry.source != source => {
+            Some(entry)
+                if entry.base != Some(base)
+                    || entry.source != source
+                    || entry.package.as_deref() != package =>
+            {
                 entry.source = source.to_string();
                 entry.base = Some(base);
+                entry.package = package.map(str::to_string);
                 true
             }
             _ => false,
@@ -356,6 +369,58 @@ mod tests {
         assert_eq!(state.get("/t/legacy").unwrap().package(), Some("second"));
         assert_eq!(state.get("/t/owned").unwrap().package(), Some("second"));
         assert!(state.get("/t/absent").is_none());
+    }
+
+    // Placing a record corrects its base, its source and its package, each on
+    // its own, and reports a change only when one of them differed.
+    #[test]
+    fn placing_corrects_the_base_and_the_source_and_keeps_the_rest() {
+        let mut state = DeployState::empty();
+        state.record_deployment(
+            "/t/rc",
+            "zsh/rc",
+            "h",
+            Some("zsh"),
+            Some(BaseKind::PackageDirectory),
+        );
+        let deployed_at = state.get("/t/rc").unwrap().deployed_at.clone();
+
+        assert!(state.place("/t/rc", "zsh/rc", BaseKind::DotfilesDirectory, Some("zsh")));
+        assert_eq!(
+            state.get("/t/rc").unwrap().base(),
+            Some(BaseKind::DotfilesDirectory)
+        );
+        assert!(state.place(
+            "/t/rc",
+            "zsh/zshrc",
+            BaseKind::DotfilesDirectory,
+            Some("zsh")
+        ));
+        assert_eq!(state.get("/t/rc").unwrap().source(), "zsh/zshrc");
+        assert!(state.place(
+            "/t/rc",
+            "zsh/zshrc",
+            BaseKind::DotfilesDirectory,
+            Some("shell")
+        ));
+        assert_eq!(state.get("/t/rc").unwrap().package(), Some("shell"));
+        assert!(!state.place(
+            "/t/rc",
+            "zsh/zshrc",
+            BaseKind::DotfilesDirectory,
+            Some("shell")
+        ));
+        assert!(!state.place(
+            "/t/absent",
+            "zsh/zshrc",
+            BaseKind::DotfilesDirectory,
+            Some("shell")
+        ));
+        assert!(state.get("/t/absent").is_none());
+
+        let entry = state.get("/t/rc").unwrap();
+        assert_eq!(entry.checksum(), "h");
+        assert_eq!(entry.deployed_at, deployed_at);
     }
 
     #[test]
