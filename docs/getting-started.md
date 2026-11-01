@@ -33,7 +33,9 @@ Enable tab completion for selfie commands. Selfie supports two completion modes:
 #### Dynamic Completions (Recommended)
 
 Dynamic completions call back into the selfie binary on each TAB press, so they can complete package
-names from your configured `package_directory`. Add one of these lines to your shell config:
+names from your configured `package_directory`. They come from the configuration file every command
+reads, in `SELFIE_CONFIG_DIR` when it is set; a `--package-directory` given on the same command line
+does not reach completion. Add one of these lines to your shell config:
 
 ```bash
 # Bash — add to ~/.bashrc
