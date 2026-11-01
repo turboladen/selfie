@@ -751,9 +751,9 @@ impl PackageListError {
 
     /// Why the listing produced nothing, as a clause that follows the path.
     ///
-    /// The absent reasons come from
-    /// [`AbsentReason::clause`](crate::fs::AbsentReason::clause), so a listing failure
-    /// and a directory warning about one path describe it in the same words.
+    /// The absent reasons are worded by
+    /// [`AbsentReason`](crate::fs::AbsentReason)'s `Display`, so a listing failure and
+    /// a directory warning about one path describe it in the same words.
     #[must_use]
     pub fn clause(&self) -> String {
         match &self.state {

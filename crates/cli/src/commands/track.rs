@@ -394,7 +394,7 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
                 "The dotfiles directory at {} {}. A standalone dotfile cannot be tracked until \
                  that is fixed.",
                 DisplayPath::of(path),
-                crate::received::message(reason.clause())
+                crate::received::composed(&reason)
             );
             match crate::formatters::mkdir_command(path).filter(|_| reason.creatable()) {
                 Some(mkdir) => crate::terminal_text::noted(

@@ -517,7 +517,7 @@ mod tests {
             ValidationErrorCategory::RequiredField
         );
         assert!(
-            env_issues[0].message.contains("is missing"),
+            env_issues[0].message().contains("is missing"),
             "{:?}",
             env_issues[0]
         );
@@ -608,7 +608,7 @@ mod tests {
             .collect();
 
         assert_eq!(path_issues.len(), 1);
-        assert!(path_issues[0].message.contains("relative"));
+        assert!(path_issues[0].message().contains("relative"));
     }
 
     #[test]
@@ -661,7 +661,7 @@ mod tests {
 
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].category, ValidationErrorCategory::PathFormat);
-        assert!(errors[0].message.contains("does not exist"));
+        assert!(errors[0].message().contains("does not exist"));
         assert!(
             errors[0]
                 .suggestion
@@ -693,7 +693,7 @@ mod tests {
 
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].category, ValidationErrorCategory::PathFormat);
-        assert!(errors[0].message.contains("not a directory"));
+        assert!(errors[0].message().contains("not a directory"));
     }
 
     // --- validate_dotfiles_directory tests ---
@@ -776,7 +776,7 @@ mod tests {
 
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].category, ValidationErrorCategory::PathFormat);
-        assert!(warnings[0].message.contains("does not exist"));
+        assert!(warnings[0].message().contains("does not exist"));
     }
 
     // An empty value is unset, as it is to a run, so the default is checked.
@@ -806,7 +806,7 @@ mod tests {
         assert_ne!(issues[0].category, ValidationErrorCategory::RequiredField);
         assert!(
             issues[0]
-                .message
+                .message()
                 .contains(&dir.path().join("dotfiles").display().to_string()),
             "{issues:?}"
         );
@@ -914,7 +914,7 @@ mod tests {
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!(issues[0].level, ValidationLevel::Info, "{issues:?}");
         assert_eq!(issues[0].category, ValidationErrorCategory::Advisory);
-        assert!(issues[0].message.contains("not there yet"), "{issues:?}");
+        assert!(issues[0].message().contains("not there yet"), "{issues:?}");
         assert!(!result.issues().has_warnings(), "{:?}", result.issues());
     }
 
@@ -956,7 +956,7 @@ mod tests {
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_ne!(issues[0].category, ValidationErrorCategory::RequiredField);
         assert!(
-            issues[0].message.contains("/home/me/.local/state/selfie"),
+            issues[0].message().contains("/home/me/.local/state/selfie"),
             "{issues:?}"
         );
     }
@@ -1143,7 +1143,10 @@ mod tests {
 
         assert_eq!(issue.level, ValidationLevel::Error);
         assert_eq!(issue.category, ValidationErrorCategory::PathFormat);
-        assert!(issue.message.contains("it is a regular file"), "{issue:?}");
+        assert!(
+            issue.message().contains("it is a regular file"),
+            "{issue:?}"
+        );
     }
 
     // The reading commands warn about a file at the dotfiles directory and carry
@@ -1159,10 +1162,13 @@ mod tests {
         .expect("an issue");
 
         assert_eq!(issue.level, ValidationLevel::Warning);
-        assert!(issue.message.contains("it is a regular file"), "{issue:?}");
+        assert!(
+            issue.message().contains("it is a regular file"),
+            "{issue:?}"
+        );
         assert!(
             issue
-                .message
+                .message()
                 .contains("standalone dotfiles will not be read"),
             "{issue:?}"
         );
@@ -1176,7 +1182,7 @@ mod tests {
         let issue = directory_issue("dotfiles_directory", dangling()).expect("an issue");
 
         assert_eq!(issue.level, ValidationLevel::Warning);
-        assert!(issue.message.contains("symlink to nothing"), "{issue:?}");
+        assert!(issue.message().contains("symlink to nothing"), "{issue:?}");
         assert!(!suggestion(&issue).contains("mkdir"), "{issue:?}");
     }
 
@@ -1190,8 +1196,8 @@ mod tests {
 
         assert_eq!(issue.level, ValidationLevel::Warning);
         assert_eq!(issue.category, ValidationErrorCategory::PathFormat);
-        assert!(issue.message.contains("does not exist"), "{issue:?}");
-        assert!(issue.message.contains("mkdir -p --"), "{issue:?}");
+        assert!(issue.message().contains("does not exist"), "{issue:?}");
+        assert!(issue.message().contains("mkdir -p --"), "{issue:?}");
         // Said once, in the message: the suggestion adds only the correction.
         assert_eq!(
             suggestion(&issue),
@@ -1207,7 +1213,10 @@ mod tests {
         let issue = directory_issue("dotfiles_directory", unknown()).expect("an issue");
 
         assert_eq!(issue.level, ValidationLevel::Error);
-        assert!(issue.message.contains("could not be checked"), "{issue:?}");
+        assert!(
+            issue.message().contains("could not be checked"),
+            "{issue:?}"
+        );
         assert_eq!(
             suggestion(&issue),
             "Check the path and each directory above it"
@@ -1246,7 +1255,7 @@ mod tests {
         let issue = unlistable_issue("package_directory").expect("an issue");
 
         assert_eq!(issue.level, ValidationLevel::Error);
-        assert!(issue.message.contains("could not be listed"), "{issue:?}");
+        assert!(issue.message().contains("could not be listed"), "{issue:?}");
     }
 
     #[test]
@@ -1254,7 +1263,7 @@ mod tests {
         let issue = unlistable_issue("dotfiles_directory").expect("an issue");
 
         assert_eq!(issue.level, ValidationLevel::Error);
-        assert!(issue.message.contains("could not be listed"), "{issue:?}");
+        assert!(issue.message().contains("could not be listed"), "{issue:?}");
     }
 
     // The state directory gets the verdict a run reaches over the same path. A
@@ -1270,8 +1279,8 @@ mod tests {
 
         assert_eq!(issue.level, ValidationLevel::Info);
         assert_eq!(issue.category, ValidationErrorCategory::Advisory);
-        assert!(issue.message.contains("is not there yet"), "{issue:?}");
-        assert!(issue.message.contains("typo"), "{issue:?}");
+        assert!(issue.message().contains("is not there yet"), "{issue:?}");
+        assert!(issue.message().contains("typo"), "{issue:?}");
         assert!(!suggestion(&issue).contains("mkdir"), "{issue:?}");
     }
 
@@ -1293,7 +1302,7 @@ mod tests {
 
             assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
             assert!(
-                issue.message.contains("Cannot use the deploy state"),
+                issue.message().contains("Cannot use the deploy state"),
                 "{issue:?}"
             );
         }
@@ -1355,7 +1364,7 @@ mod tests {
                     .issues()
                     .errors()
                     .iter()
-                    .any(|i| i.field == "dotfiles_directory" && i.message.contains("relative")),
+                    .any(|i| i.field == "dotfiles_directory" && i.message().contains("relative")),
                 "{setting}: {:?}",
                 result.issues()
             );
@@ -1388,7 +1397,7 @@ mod tests {
             .find(|i| i.field == "dotfiles_directory")
             .expect("an issue");
         assert_eq!(issue.level, ValidationLevel::Warning);
-        assert!(issue.message.contains("could not resolve ~"), "{issue:?}");
+        assert!(issue.message().contains("could not resolve ~"), "{issue:?}");
     }
 
     // A run keeps a `~` it cannot resolve as written and refuses the relative
@@ -1415,7 +1424,7 @@ mod tests {
             .find(|i| i.field == "state_directory")
             .expect("an issue");
         assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
-        assert!(issue.message.contains("could not resolve ~"), "{issue:?}");
+        assert!(issue.message().contains("could not resolve ~"), "{issue:?}");
     }
 
     #[test]
@@ -1486,7 +1495,7 @@ mod tests {
         assert_eq!(issues[0].field, "dotfiles_directory");
         assert_eq!(issues[0].level, ValidationLevel::Warning);
         assert!(
-            issues[0].message.contains("/nowhere/dotfiles"),
+            issues[0].message().contains("/nowhere/dotfiles"),
             "{issues:?}"
         );
     }
@@ -1499,7 +1508,7 @@ mod tests {
         assert_eq!(issues[0].field, "state_directory");
         assert_eq!(issues[0].level, ValidationLevel::Error);
         assert!(
-            issues[0].message.contains("Cannot use the deploy state"),
+            issues[0].message().contains("Cannot use the deploy state"),
             "{issues:?}"
         );
     }
@@ -1538,7 +1547,7 @@ mod tests {
             .cloned()
             .expect("an issue");
         assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
-        assert!(issue.message.contains("Cannot locate"), "{issue:?}");
+        assert!(issue.message().contains("Cannot locate"), "{issue:?}");
     }
 
     // --- the deploy state a run loads, on a real file system ---
@@ -1590,7 +1599,7 @@ mod tests {
         let issue = issue.expect("an issue");
         assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
         assert!(
-            issue.message.contains("Cannot read deploy state"),
+            issue.message().contains("Cannot read deploy state"),
             "{issue:?}"
         );
     }
@@ -1632,7 +1641,7 @@ mod tests {
 
         assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
         assert!(
-            issue.message.contains("Cannot parse deploy state"),
+            issue.message().contains("Cannot parse deploy state"),
             "{issue:?}"
         );
     }
@@ -1645,7 +1654,7 @@ mod tests {
         let issue = state_issue(dir.path()).expect("an issue");
 
         assert_eq!(issue.level, ValidationLevel::Error, "{issue:?}");
-        assert!(issue.message.contains("is empty"), "{issue:?}");
+        assert!(issue.message().contains("is empty"), "{issue:?}");
     }
 
     // Its control: a state that loads is no issue.
@@ -1677,7 +1686,7 @@ mod tests {
 
         assert_eq!(issue.level, ValidationLevel::Warning, "{issue:?}");
         assert!(
-            issue.message.contains("does not accept a new file"),
+            issue.message().contains("does not accept a new file"),
             "{issue:?}"
         );
     }
@@ -1698,11 +1707,11 @@ mod tests {
 
         assert_eq!(issue.level, ValidationLevel::Warning, "{issue:?}");
         assert!(
-            issue.message.contains("cannot create it under") && issue.message.contains("typo"),
+            issue.message().contains("cannot create it under") && issue.message().contains("typo"),
             "{issue:?}"
         );
         assert!(
-            !issue.message.contains("creates it on the first write"),
+            !issue.message().contains("creates it on the first write"),
             "{issue:?}"
         );
     }
@@ -1717,7 +1726,7 @@ mod tests {
 
         assert_eq!(issue.level, ValidationLevel::Info, "{issue:?}");
         assert!(
-            issue.message.contains("creates it on the first write"),
+            issue.message().contains("creates it on the first write"),
             "{issue:?}"
         );
     }

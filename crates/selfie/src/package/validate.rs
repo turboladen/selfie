@@ -1207,7 +1207,7 @@ mod tests {
         package_from_yaml(yaml)
             .validate_unknown_dotfile_fields()
             .into_iter()
-            .map(|i| (i.field.clone(), i.message.clone()))
+            .map(|i| (i.field.clone(), i.message().into_owned()))
             .collect()
     }
 
@@ -1233,7 +1233,7 @@ mod tests {
         let issues = package.validate_unknown_dotfile_fields();
         assert_eq!(issues.len(), 1, "got: {issues:?}");
         assert_eq!(issues[0].field, "dotfiles[0].var");
-        assert!(issues[0].message.contains("var"), "got: {issues:?}");
+        assert!(issues[0].message().contains("var"), "got: {issues:?}");
     }
 
     #[test]
@@ -2325,7 +2325,7 @@ dotfiles:
         let issues = package.validate_urls();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].level(), ValidationLevel::Warning);
-        assert!(issues[0].message.contains("scheme"));
+        assert!(issues[0].message().contains("scheme"));
 
         // Test valid URL with correct scheme
         let package = PackageBuilder::default()
@@ -2367,7 +2367,7 @@ dotfiles:
         let issues = package.validate_environments_contents("test-env");
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].level(), ValidationLevel::Warning);
-        assert!(issues[0].message.contains("not configured"));
+        assert!(issues[0].message().contains("not configured"));
 
         // Test empty install command
         let mut package = PackageBuilder::default().name("test-package").build();
@@ -2390,7 +2390,7 @@ dotfiles:
         let issues = package.validate_environments_contents("test-env");
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].level(), ValidationLevel::Warning);
-        assert!(issues[0].message.contains("install command is blank"));
+        assert!(issues[0].message().contains("install command is blank"));
     }
 
     // Every blank spelling of a command is reported, never as an error: the spec
@@ -2461,8 +2461,8 @@ dotfiles:
             .build()
             .validate_command_syntax()
             .into_iter()
-            .filter(|issue| issue.message.contains("POSIX sh"))
-            .map(|issue| (issue.level(), issue.message))
+            .filter(|issue| issue.message().contains("POSIX sh"))
+            .map(|issue| (issue.level(), issue.message().into_owned()))
             .collect()
     }
 
@@ -2544,7 +2544,7 @@ dotfiles:
         let issues = package.validate_command_syntax();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].level(), ValidationLevel::Warning);
-        assert!(issues[0].message.contains("backticks"));
+        assert!(issues[0].message().contains("backticks"));
     }
 
     #[test]
@@ -2878,7 +2878,7 @@ environments:
         // ones: the level is a turbofish at the call site, so the wrong one still
         // compiles, reads as a plausible message and changes no field path.
         assert_eq!(
-            issues[0].message,
+            issues[0].message(),
             "unknown field 'audt'; expected one of: install, check, audit, dependencies, \
              recommends, dotfiles"
         );
@@ -2915,7 +2915,7 @@ environments:
         );
         assert!(
             issues.iter().any(|i| i.field == "package"
-                && i.message.contains("could not be checked")
+                && i.message().contains("could not be checked")
                 && i.level == crate::validation::ValidationLevel::Error),
             "the unread top level must still be reported: {issues:?}"
         );
@@ -2953,7 +2953,7 @@ environments:
         // Both readings, and the remedy for each. Saying the field is unset would
         // be false of a genuine anchor aliased by `check: *c`.
         assert_eq!(
-            issues[0].message,
+            issues[0].message(),
             "'_check' cannot be told apart from a misspelling of the 'check' field; rename it, \
              or correct it to 'check'"
         );
@@ -3006,14 +3006,14 @@ environments:
         };
         let clause = SpecRefusal::UncheckedTopLevel(error.clone()).to_string();
         assert!(
-            issues[0].message.contains(&clause),
+            issues[0].message().contains(&clause),
             "the validator must carry the refusal's clause verbatim, got: {}",
             issues[0].message
         );
         // A clause opens with "its", so a table row carrying it alone has a pronoun
         // and no antecedent. The subject comes first, as apply's warning does.
         assert!(
-            issues[0].message.starts_with("package 'myapp':"),
+            issues[0].message().starts_with("package 'myapp':"),
             "the message must name what it is about, got: {}",
             issues[0].message
         );
@@ -3289,8 +3289,8 @@ environments:
         let issues = package.validate_filename_consistency();
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].level(), ValidationLevel::Warning);
-        assert!(issues[0].message.contains("fisher"));
-        assert!(issues[0].message.contains("fish-fisher.yml"));
+        assert!(issues[0].message().contains("fisher"));
+        assert!(issues[0].message().contains("fish-fisher.yml"));
     }
 
     // `Neovim.yml` resolves to the name `neovim`, so the two agree and there is

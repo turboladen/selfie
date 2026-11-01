@@ -398,20 +398,31 @@ fn collapse_home(home: &Path, expanded: &Path) -> String {
 }
 
 /// Why the deploy state has no directory. Each message names the fix.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatePathError {
     /// No `state_directory` is configured and the home directory cannot be
     /// determined, so neither route to a path is open.
-    #[error(
-        "no state_directory is configured and the home directory cannot be determined. Set state_directory in the config, or fix HOME"
-    )]
     NoHome,
     /// The configured `state_directory` is not an absolute path.
-    #[error(
-        "state_directory '{}' is not an absolute path. Use an absolute path; a leading `~` or `~/` is expanded, but only when the home directory can be determined, and `~user` is not",
-        .0.display()
-    )]
     NotAbsolute(PathBuf),
+}
+
+crate::parts::display_from_parts!(error StatePathError);
+
+impl crate::parts::Composed for StatePathError {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        let parts = crate::parts::Parts::new();
+        match self {
+            Self::NoHome => parts.text(
+                "no state_directory is configured and the home directory cannot be determined. \
+                 Set state_directory in the config, or fix HOME",
+            ),
+            Self::NotAbsolute(path) => parts.text("state_directory '").path(path).text(
+                "' is not an absolute path. Use an absolute path; a leading `~` or `~/` is \
+                 expanded, but only when the home directory can be determined, and `~user` is not",
+            ),
+        }
+    }
 }
 
 /// The directory the deploy state lives in: `configured` as given, or the

@@ -402,7 +402,7 @@ fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError
     let kind = match failure {
         FileSystemError::IoError(cause) => PackageParseKind::Io { cause },
         FileSystemError::BelowNonDirectory { path, cause, .. } => PackageParseKind::Io {
-            cause: IoFailure::at(FileSystemError::uncreatable_directory(&path), cause),
+            cause: IoFailure::at(crate::fs::filesystem::parent_dir(&path), cause),
         },
         FileSystemError::DirectoryTarget { path, cause } => PackageParseKind::Io {
             cause: IoFailure::at(&path, cause),
@@ -1795,6 +1795,21 @@ mod tests {
             FileSystemError::IoError(IoFailure::at(Path::new("/elsewhere/tpl"), error())),
         );
         let bare = spec_read_failure(spec, FileSystemError::IoError(error().into()));
+        let directory = spec_read_failure(
+            spec,
+            FileSystemError::DirectoryTarget {
+                path: spec.to_path_buf(),
+                cause: error().into(),
+            },
+        );
+        let below = spec_read_failure(
+            spec,
+            FileSystemError::BelowNonDirectory {
+                path: Path::new("/test/file/ghost.yml").to_path_buf(),
+                parent: Some(Path::new("/test/file").to_path_buf()),
+                cause: error().into(),
+            },
+        );
 
         for (failure, text) in [
             (
@@ -1804,6 +1819,14 @@ mod tests {
             (
                 &bare,
                 "I/O error reading the package file: permission denied",
+            ),
+            (
+                &directory,
+                "I/O error reading the package file: /test/packages/ghost.yml: permission denied",
+            ),
+            (
+                &below,
+                "I/O error reading the package file: /test/file: permission denied",
             ),
         ] {
             assert_eq!(failure.kind().label(), "io");
