@@ -128,6 +128,36 @@ fn spec_info_names_a_refusal_in_another_environment() {
     assert!(text.contains("work (refused)"), "{text}");
 }
 
+// A package spec that declares no environment is refused in every one, this one
+// included, so the reason stands in for the environments and nothing is said
+// about another environment.
+#[test]
+fn spec_info_refuses_a_package_spec_that_declares_no_environment() {
+    let temp_dir = setup_default_test_config();
+    fs::write(
+        temp_dir.path().join("packages").join("noenv.yml"),
+        "name: noenv\ndescription: x\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["spec", "info", "noenv"])
+        .output()
+        .unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout).to_string()
+        + &String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(CLEAN), "{text}");
+    assert!(
+        text.contains(
+            "selfie apply would refuse this spec here: At least one environment must be defined."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Environments"), "{text}");
+    assert!(!text.contains("in another environment"), "{text}");
+}
+
 // Environments print in the order the spec file gives them, as the MCP server
 // reports them, with the current one marked where it stands. The names are in
 // neither sorted nor reverse order, so a sort anywhere would move them.

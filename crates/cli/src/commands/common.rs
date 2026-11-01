@@ -209,16 +209,20 @@ pub(crate) fn name_check_message(
     name: &str,
     error: &selfie::namespace::NamespaceValidationError,
 ) -> Shown {
-    use selfie::namespace::NamespaceValidationError as Invalid;
+    use selfie::namespace::{NamespaceValidationError as Invalid, Remedy};
 
     match error {
         // The fact, then what a track can do about it.
-        Invalid::Conflict(conflict) => match conflict.found_in {
-            selfie::namespace::NameLocation::Dotfiles => shown!(
+        Invalid::Conflict(conflict) => match conflict.remedy() {
+            Remedy::ChooseAnotherName => shown!(
+                "{} Choose a different name.",
+                crate::received::sentence(conflict)
+            ),
+            Remedy::RemoveTheDotfileSpec => shown!(
                 "{} Remove it first or choose a different name.",
                 crate::received::sentence(conflict)
             ),
-            selfie::namespace::NameLocation::Packages => crate::terminal_text::then_command(
+            Remedy::UseThePackage => crate::terminal_text::then_command(
                 shown!(
                     "{} To track a file for that package, use `selfie package track-dotfile`, or \
                      choose a different name.",
@@ -480,6 +484,36 @@ mod tests {
             assert!(lines[0].ends_with("or choose a different name."), "{shown}");
             assert_eq!(lines[1], command, "{shown}");
         }
+    }
+
+    // A name several files claim gets one remedy wherever they are: the sentence
+    // already says the extra files must go, and track-dotfile refuses the name
+    // until they do. One claimant keeps the remedy for its kind.
+    #[test]
+    fn a_name_several_specs_claim_gets_one_remedy() {
+        use selfie::namespace::{NameLocation, NamespaceConflict};
+
+        let message = |found_in: NameLocation, paths: &[&str]| {
+            let paths = paths.iter().map(std::path::PathBuf::from).collect();
+            let conflict = NamespaceConflict::new("dup", found_in, paths).expect("a claimant");
+            name_check_message("dup", &conflict.into()).into_string()
+        };
+
+        for found_in in [NameLocation::Packages, NameLocation::Dotfiles] {
+            let shown = message(found_in, &["/s/dup.yaml", "/s/dup.yml"]);
+            assert!(
+                shown.ends_with("all but one must be removed. Choose a different name."),
+                "{shown}"
+            );
+            for wrong in ["Remove it", "track-dotfile"] {
+                assert!(!shown.contains(wrong), "{wrong}: {shown}");
+            }
+        }
+        let shown = message(NameLocation::Dotfiles, &["/s/dup.yml"]);
+        assert!(
+            shown.ends_with("Remove it first or choose a different name."),
+            "{shown}"
+        );
     }
 
     // Whatever EDITOR the test process inherits, no unit test can launch it:
