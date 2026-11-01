@@ -13454,6 +13454,98 @@ environments:
     // cost the caller the rest.
     assert_eq!(listed.packages.len(), 1);
     assert_eq!(listed.packages[0].name(), "bat");
+
+    // A refused spec leaves part of what the listing covers unanswered.
+    let result = get_operation_result(&events).expect("no Completed event");
+    assert_eq!(result.outcome(), selfie::package::event::Outcome::Found);
+}
+
+// Two files claiming one name are two refused rows and one unanswered package,
+// and the summary names it.
+#[tokio::test]
+async fn list_counts_an_ambiguous_name_as_one_unanswered_package() {
+    let dirs = TestDirs::new();
+    let spec = "name: odd\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  \
+                - source: a\n    target: ~/.a\n";
+    std::fs::write(dirs.package_dir.join("odd.yaml"), spec).unwrap();
+    std::fs::write(dirs.package_dir.join("odd.yml"), spec).unwrap();
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let listed = events
+        .iter()
+        .find_map(|e| match e {
+            PackageEvent::DotfileListLoaded { dotfile_list, .. } => Some(dotfile_list),
+            _ => None,
+        })
+        .expect("the listing must be emitted");
+    assert_eq!(listed.refused.len(), 2);
+    let OperationResult::Success(success) = get_operation_result(&events).unwrap() else {
+        panic!("the listing must complete");
+    };
+    assert_eq!(success.gaps().map(<[_]>::len), Some(1));
+    assert_eq!(
+        success.to_string(),
+        "Listed dotfiles across 0 package(s); could not answer for: odd (refused)"
+    );
+}
+
+// Files of one claimed name leave one gap even when one of them does not parse
+// and the case of its stem differs from the other's.
+#[tokio::test]
+async fn list_gives_an_unparsable_file_and_its_namesake_one_gap() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.package_dir.join("Odd.yaml"), "name: [unterminated\n").unwrap();
+    std::fs::write(
+        dirs.package_dir.join("odd.yml"),
+        "name: odd\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  \
+         - source: a\n    target: ~/.a\n",
+    )
+    .unwrap();
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let OperationResult::Success(success) = get_operation_result(&events).unwrap() else {
+        panic!("the listing must complete");
+    };
+    let gaps = success.gaps().unwrap();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].package_name(), "odd");
+}
+
+// A standalone spec that does not parse is a gap whose error names the dotfiles
+// directory, not the package directory.
+#[tokio::test]
+async fn list_names_the_dotfiles_directory_for_an_unparsable_standalone_spec() {
+    let dirs = TestDirs::new();
+    std::fs::write(dirs.dotfiles_dir.join("vim.yml"), "name: [unterminated\n").unwrap();
+
+    let events = collect_events(dirs.service_with_dotfiles().list().await).await;
+
+    let OperationResult::Success(success) = get_operation_result(&events).unwrap() else {
+        panic!("the listing must complete");
+    };
+    assert_eq!(success.outcome(), selfie::package::event::Outcome::Found);
+    let gaps = success.gaps().unwrap();
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert_eq!(gaps[0].package_name(), "vim");
+    let reason = gaps[0].reason().to_string();
+    assert!(
+        reason.contains(&dirs.dotfiles_dir.display().to_string()),
+        "{reason}"
+    );
+    // The directory the error records is the one the file was read from.
+    let selfie::package::event::UnknownStatus::LookupFailed(failure) = gaps[0].reason() else {
+        panic!("an unparsable spec is a failed lookup: {:?}", gaps[0]);
+    };
+    let selfie::package::port::PackageRepoError::PackageError(error) = failure.clone().into_error()
+    else {
+        panic!("the lookup failure carries a package error");
+    };
+    let selfie::package::port::PackageError::ParseError { packages_path, .. } = *error else {
+        panic!("a YAML failure is a parse error");
+    };
+    assert_eq!(packages_path, dirs.dotfiles_dir);
 }
 
 // A name in both directories is listed as apply would use it: the packages/

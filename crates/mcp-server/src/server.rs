@@ -698,7 +698,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List the dotfile mappings `selfie apply` would use, with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec whose top level or any environment selfie will not trust, or a package spec that declares no environment, is left out of the entries and listed in the row's `refused` array with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim, since none of them deploys; branch on it) and `reason`. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "List the dotfile mappings `selfie apply` would use, with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec whose top level or any environment selfie will not trust, or a package spec that declares no environment, is left out of the entries and listed in the row's `refused` array with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim, since none of them deploys; branch on it) and `reason`. A listing with any `refused` row, or a spec that does not parse, is a successful call with status 'found' and `outcome` \"found\", with the package in `unanswered`, and it still lists everything it could read. An invalid entry in a spec it could read stays a row with status 'success'. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -2498,6 +2498,60 @@ mod tests {
         assert!(
             json.to_string().contains("Anchors are legal here"),
             "got: {json}"
+        );
+    }
+
+    // A refused spec is a gap, so the listing is a successful call with status
+    // 'found', and the readable package is still listed.
+    #[tokio::test]
+    async fn the_list_tool_is_found_when_it_refused_a_spec() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(
+            packages.join("noenv.yml"),
+            "name: noenv\ndotfiles:\n  - source: a.conf\n    target: ~/.a.conf\n",
+        )
+        .unwrap();
+        std::fs::write(
+            packages.join("bat.yml"),
+            "name: bat\nenvironments:\n  test:\n    install: \"true\"\ndotfiles:\n  \
+             - source: b.conf\n    target: ~/.b.conf\n",
+        )
+        .unwrap();
+
+        let server = server_over(&packages, None);
+        let json = tool_json(&server.selfie_dotfiles_list().await.unwrap());
+
+        assert_eq!(json["result"]["status"], "found", "{json}");
+        assert_eq!(json["result"]["outcome"], "found", "{json}");
+        assert_eq!(
+            json["result"]["unanswered"][0]["package"], "noenv",
+            "{json}"
+        );
+        assert_eq!(json["result"]["unanswered"][0]["kind"], "refused", "{json}");
+        assert!(json.to_string().contains("\"bat\""), "{json}");
+    }
+
+    // A spec that does not parse is as unread as a refused one.
+    #[tokio::test]
+    async fn the_list_tool_is_found_when_a_spec_does_not_parse() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(packages.join("broken.yml"), "name: [unterminated\n").unwrap();
+
+        let server = server_over(&packages, None);
+        let json = tool_json(&server.selfie_dotfiles_list().await.unwrap());
+
+        assert_eq!(json["result"]["status"], "found", "{json}");
+        assert_eq!(
+            json["result"]["unanswered"][0]["package"], "broken",
+            "{json}"
+        );
+        assert_eq!(
+            json["result"]["unanswered"][0]["kind"], "unloadable",
+            "{json}"
         );
     }
 

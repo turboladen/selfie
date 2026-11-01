@@ -48,15 +48,14 @@ pub(crate) async fn handle_list(
                 render_listing(dotfile_list, &config_for_handler, &display_for_handler);
                 true
             }
-            // The completion line repeats the count the table just gave. `spec
-            // search` suppresses its own for the same reason.
-            //
-            // Only a SUCCESSFUL completion: a failure must still print, and only
-            // the default handler renders one.
+            // A clean completion is not printed: it repeats the count the table
+            // just gave, and `spec search` suppresses its own for the same
+            // reason. A completion that names what it could not read, or a
+            // failure, still prints.
             PackageEvent::Completed {
-                result: OperationResult::Success(_),
+                result: OperationResult::Success(success),
                 ..
-            } => true,
+            } if success.gaps().is_none_or(<[_]>::is_empty) => true,
             _ => false,
         })
         .await;

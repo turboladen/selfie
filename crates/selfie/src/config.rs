@@ -83,6 +83,15 @@ impl SelfieConfig {
             .unwrap_or_else(|| default_dotfiles_directory(&self.package_directory))
     }
 
+    /// The configured directory that `base` names.
+    #[must_use]
+    pub(crate) fn directory_of(&self, base: crate::package::event::BaseKind) -> PathBuf {
+        match base {
+            crate::package::event::BaseKind::PackageDirectory => self.package_directory.clone(),
+            crate::package::event::BaseKind::DotfilesDirectory => self.dotfiles_directory(),
+        }
+    }
+
     /// Whether a dotfiles directory that is not there is worth reporting.
     ///
     /// True when the user named the path: a configured directory that is not there

@@ -87,12 +87,14 @@ What a command does with each answer is its own verdict, decided from the one cl
 | `package audit --all`                      | refused once, counted as refused; no audit runs                                                                                  | not a package; not shown                | Failed, as a spec left out is (0006)                  |
 | the dependents lookup                      | its files are reported among the specs selfie could not rely on, and still checked                                               | not a package                           | unchanged                                             |
 | the interactive pickers                    | not offered                                                                                                                      | not offered                             | not applicable                                        |
-| `dotfiles list`                            | each file a refused row, as in `package list`                                                                                    | not listed; apply's warning is printed  | Clean                                                 |
+| `dotfiles list`                            | each file a refused row, as in `package list`                                                                                    | not listed; apply's warning is printed  | Found, exit 3 (0006)                                  |
 | `sync push`                                | refused, whether or not it deploys anything                                                                                      | not validated, as apply does not use it | Failed                                                |
 
-`spec list`, `spec search` and `dotfiles list` already show other refused specs as rows and stay
-Clean, which 0006 decides for every listing but `package list`. An ambiguous name is one more
-refused row, so their verdict does not change.
+`spec list` and `spec search` already show other refused specs as rows and stay Clean, which 0006
+decides for every listing but `package list` and `dotfiles list`. An ambiguous name is one more
+refused row, so their verdict does not change. `dotfiles list` is Found when it refused a spec, like
+`package list`, so a script that runs it to check every spec is readable does not get a false
+success.
 
 Apply does not mention an install-only ambiguity because neither file deploys anything here, and
 every command that would use one refuses the name itself. Push refuses every one because the machine

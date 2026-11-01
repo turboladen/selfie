@@ -1237,6 +1237,10 @@ mod tests {
                 gaps: Vec::new(),
                 steps_completed: StepCount::new(1, 1),
             },
+            OperationSuccess::DotfilesListed {
+                package_count: 2,
+                gaps: Vec::new(),
+            },
             OperationSuccess::PackageListGenerated {
                 valid_count: 2,
                 invalid_count: 1,

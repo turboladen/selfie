@@ -179,10 +179,7 @@ impl DeployEntry {
             Some(kind) => DotfileSource::File(RepoPath {
                 base: Some(SourceBase {
                     kind,
-                    directory: match kind {
-                        BaseKind::PackageDirectory => config.package_directory().clone(),
-                        BaseKind::DotfilesDirectory => config.dotfiles_directory(),
-                    },
+                    directory: config.directory_of(kind),
                 }),
                 path: self.source.clone().into(),
             }),
