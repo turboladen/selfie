@@ -12,7 +12,7 @@ use selfie::package::event::{
     UnknownStatus,
 };
 use selfie::package::port::{PackageError, PackageParseKind, PackageRepoError};
-use selfie::parts::{Composed, Part, Parts, Subcommand};
+use selfie::parts::{Composed, Part, Parts, Program, Subcommand, SuggestedCommand};
 use selfie::sync_service::port::SyncError;
 use selfie::yaml::ParseFailure;
 
@@ -99,16 +99,28 @@ pub(crate) fn rendered(parts: &Parts) -> Shown {
             Part::Text(clause) => Prose::new(clause).into(),
             Part::Name(name) => Name::new(name).into(),
             Part::Path(path) => DisplayPath::of(path).into(),
-            // The library quoted the operand when it built the command, so
-            // the word is shown as it is and never quoted again.
-            Part::Command(command) => Command::with_quoted(
-                &[lit!("selfie"), subcommand_word(command.subcommand())],
-                command.word(),
-            )
-            .into(),
+            Part::Command(command) => suggested(command).into(),
         });
     }
     Shown::join(shown, lit!(""))
+}
+
+/// `command`, a command the library suggests, as the CLI shows it: its
+/// program's words, then its operand's.
+pub(crate) fn suggested(command: &SuggestedCommand) -> Command {
+    // The library quoted the operand when it built the command, so the word is
+    // shown as it is and never quoted again.
+    // No catch-all, so a program the library adds fails to compile here until
+    // the CLI says how to show it.
+    match command.program() {
+        Program::Selfie(subcommand) => Command::with_quoted(
+            &[lit!("selfie"), subcommand_word(subcommand)],
+            command.word(),
+        ),
+        Program::MakeDirectory => {
+            Command::with_quoted(&[lit!("mkdir"), lit!("-p"), lit!("--")], command.word())
+        }
+    }
 }
 
 // The word that names `subcommand` on a command line.

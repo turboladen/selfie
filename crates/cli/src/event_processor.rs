@@ -5,7 +5,6 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
-use crate::formatters::mkdir_command;
 use crate::received;
 use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, noted, shown};
 use futures::StreamExt;
@@ -16,6 +15,7 @@ use selfie::package::{
     },
     port::{PackageError, PackageParseKind},
 };
+use selfie::parts::SuggestedCommand;
 
 use crate::display_manager::Channel;
 use crate::display_manager::{Diff, DisplayManager, ErrorDetail};
@@ -364,7 +364,9 @@ impl EventProcessor {
                                 selfie::fs::DirectoryState::Absent(reason)
                                     if reason.creatable() =>
                                 {
-                                    mkdir_command(listing.path())
+                                    SuggestedCommand::make_directory(listing.path())
+                                        .as_ref()
+                                        .map(received::suggested)
                                 }
                                 _ => None,
                             };

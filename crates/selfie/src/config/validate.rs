@@ -329,11 +329,9 @@ fn dotfiles_directory_issue(
 fn directory_suggestion(path: &Path, state: &DirectoryState) -> String {
     match state {
         DirectoryState::Absent(AbsentReason::Empty)
-            if let Some(quoted) = crate::fs::shell_quote(path) =>
+            if let Some(mkdir) = crate::parts::SuggestedCommand::make_directory(path) =>
         {
-            format!(
-                "Correct the setting if the path is a typo, or create it with: mkdir -p -- {quoted}"
-            )
+            format!("Correct the setting if the path is a typo, or create it with: {mkdir}")
         }
         DirectoryState::Absent(AbsentReason::Occupied { .. }) => {
             "Provide a path to a directory, not a file".to_string()

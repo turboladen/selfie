@@ -27,7 +27,7 @@ use selfie::yaml::SourceLocation;
 use crate::display_manager::Suggestion;
 use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
 
-pub(crate) use crate::sentence::{composed, message, sentence};
+pub(crate) use crate::sentence::{composed, message, sentence, suggested};
 
 /// `first`, or `second` when `first` is blank, as a tool's output; `None` when
 /// both are blank.
@@ -1276,6 +1276,36 @@ mod tests {
                 "{name:?}"
             );
         }
+    }
+
+    // A suggested command reads as the library writes it, so the CLI and the
+    // MCP server offer the same command. A line break or a tab in its operand
+    // shows as an escape, and an invisible character stays, for the note under
+    // the command to show.
+    #[test]
+    fn a_suggested_command_reads_as_the_library_writes_it() {
+        use selfie::parts::{Subcommand, SuggestedCommand};
+        use std::path::Path;
+
+        let mut commands: Vec<SuggestedCommand> = ["/a", "/a b", "~/x y", "-foo"]
+            .into_iter()
+            .filter_map(|path| SuggestedCommand::make_directory(Path::new(path)))
+            .collect();
+        commands.extend(
+            ["tool", "my app", "-x", "~t"]
+                .into_iter()
+                .filter_map(|name| SuggestedCommand::selfie(Subcommand::Apply, name)),
+        );
+        assert_eq!(commands.len(), 8);
+        for command in &commands {
+            assert_eq!(suggested(command).to_string(), command.to_string());
+        }
+        let mkdir = |path: &str| {
+            suggested(&SuggestedCommand::make_directory(Path::new(path)).expect("no NUL"))
+                .to_string()
+        };
+        assert_eq!(mkdir("/a\nb\tc"), r"mkdir -p -- '/a\nb\tc'");
+        assert_eq!(mkdir("/a\u{200B}b"), "mkdir -p -- '/a\u{200B}b'");
     }
 
     // A listing error and the name check's refusal over one read as the

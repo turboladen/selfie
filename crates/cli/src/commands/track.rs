@@ -7,6 +7,7 @@
 
 use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use selfie::dotfile_service::track::Tracker;
+use selfie::parts::SuggestedCommand;
 use std::collections::HashSet;
 
 use selfie::{
@@ -397,7 +398,10 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
                 DisplayPath::of(path),
                 crate::received::composed(&reason)
             );
-            match crate::formatters::mkdir_command(path).filter(|_| reason.creatable()) {
+            let mkdir = SuggestedCommand::make_directory(path)
+                .filter(|_| reason.creatable())
+                .map(|mkdir| crate::received::suggested(&mkdir));
+            match mkdir {
                 Some(mkdir) => crate::terminal_text::noted(
                     shown!("{} Create it with: {}", sentence, mkdir),
                     &mkdir,

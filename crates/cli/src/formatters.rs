@@ -14,19 +14,6 @@ pub(crate) fn selfie_command(words: &[Literal], name: &str, tail: &[Literal]) ->
     )
 }
 
-/// Returns the command that creates the directory at `path` and every
-/// directory above it, for a path that names nothing. A `--` ends the options
-/// first, so a path starting with a dash is not read as one. Returns `None`
-/// when `path` holds NUL, as the library's remedy does.
-pub(crate) fn mkdir_command(path: &std::path::Path) -> Option<Command> {
-    Command::composed([
-        Word::Literal(lit!("mkdir")),
-        Word::Literal(lit!("-p")),
-        Word::Literal(lit!("--")),
-        Word::Path(path),
-    ])
-}
-
 /// `items`, each shown as it is, joined by commas.
 pub(crate) fn comma_joined(items: impl IntoIterator<Item = impl Into<Shown>>) -> Shown {
     Shown::join(items, lit!(", "))
@@ -76,35 +63,5 @@ mod tests {
             .to_string(),
             "selfie package track-dotfile x <file>"
         );
-    }
-
-    // The library words the same remedy in its own sentences, so the two
-    // spellings of the command cannot drift apart.
-    #[test]
-    fn a_composed_mkdir_matches_the_library_remedy() {
-        for path in [
-            "/home/me/dotfiles",
-            "/home/me/my dotfiles",
-            "~/my dir",
-            "-foo",
-        ] {
-            let path = std::path::Path::new(path);
-            let remedy = selfie::fs::AbsentReason::Empty
-                .remedy(path)
-                .expect("an empty path has a remedy");
-            let (_, library) = remedy
-                .split_once("with: ")
-                .expect("a command after `with: `");
-            assert_eq!(
-                mkdir_command(path)
-                    .map(|mkdir| mkdir.to_string())
-                    .as_deref(),
-                Some(library)
-            );
-        }
-        // A path no shell word can carry has no remedy here or in the library.
-        let nul = std::path::Path::new("/a\0b");
-        assert_eq!(selfie::fs::AbsentReason::Empty.remedy(nul), None);
-        assert!(mkdir_command(nul).is_none());
     }
 }

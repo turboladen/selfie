@@ -149,13 +149,11 @@ impl AbsentReason {
     /// work. The path is shell-quoted, because the sentence exists to be pasted.
     #[must_use]
     pub fn remedy(&self, path: &Path) -> Option<String> {
-        // `--` ends the option list. Without it a dotfiles directory named `-p` or
-        // `-foo` is read by mkdir as options, so the command fails or creates
-        // something the user did not ask for.
         if !self.creatable() {
             return None;
         }
-        shell_quote(path).map(|path| format!("Create it with: mkdir -p -- {path}"))
+        crate::parts::SuggestedCommand::make_directory(path)
+            .map(|command| format!("Create it with: {command}"))
     }
 
     /// Reports whether `mkdir -p` creates the directory, which it does only when
