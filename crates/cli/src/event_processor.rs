@@ -6,7 +6,7 @@
 //! take the default rendering.
 
 use crate::received;
-use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, noted, shown};
+use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -365,8 +365,6 @@ impl EventProcessor {
                                     if reason.creatable() =>
                                 {
                                     SuggestedCommand::make_directory(listing.path())
-                                        .as_ref()
-                                        .map(received::suggested)
                                 }
                                 _ => None,
                             };
@@ -376,8 +374,12 @@ impl EventProcessor {
                                 // whitespace, so a comma or a period touching the
                                 // closing quote is inside the word, and the pasted
                                 // command creates a directory whose name carries it.
-                                Some(mkdir) => noted(
-                                    shown!("{}. Or create it with: {}", settings, mkdir),
+                                Some(mkdir) => received::noted_suggestion(
+                                    shown!(
+                                        "{}. Or create it with: {}",
+                                        settings,
+                                        received::suggested(&mkdir)
+                                    ),
                                     &mkdir,
                                 ),
                                 None => settings.into(),

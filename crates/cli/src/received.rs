@@ -27,7 +27,7 @@ use selfie::yaml::SourceLocation;
 use crate::display_manager::Suggestion;
 use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
 
-pub(crate) use crate::sentence::{composed, message, sentence, suggested};
+pub(crate) use crate::sentence::{composed, message, noted_suggestion, sentence, suggested};
 
 /// `first`, or `second` when `first` is blank, as a tool's output; `None` when
 /// both are blank.
@@ -1308,6 +1308,32 @@ mod tests {
         assert_eq!(mkdir("/a\u{200B}b"), "mkdir -p -- '/a\u{200B}b'");
     }
 
+    // A command whose operand holds a line feed or a tab shows it escaped, so
+    // the line as shown does not run as written, and the note under it says
+    // so. A plain operand takes no note.
+    #[test]
+    fn a_command_showing_a_control_character_escaped_is_noted() {
+        use selfie::parts::SuggestedCommand;
+
+        let shown = |path: &str| {
+            let mkdir =
+                SuggestedCommand::make_directory(std::path::Path::new(path)).expect("no NUL");
+            noted_suggestion(shown!("Create it with: {}", suggested(&mkdir)), &mkdir).into_string()
+        };
+
+        for (path, escaped) in [("/d/a\nb", r"/d/a\nb"), ("/d/a\tb", r"/d/a\tb")] {
+            let lines: Vec<String> = shown(path).lines().map(str::to_string).collect();
+            assert_eq!(
+                lines,
+                [
+                    format!("Create it with: mkdir -p -- '{escaped}'"),
+                    format!("Escaped: mkdir -p -- '{escaped}'"),
+                ]
+            );
+        }
+        assert_eq!(shown("/d/ab"), "Create it with: mkdir -p -- /d/ab");
+    }
+
     // A listing error and the name check's refusal over one read as the
     // library words them, in every state.
     #[test]
@@ -1351,6 +1377,32 @@ mod tests {
                 assert_eq!(shown.matches(r"/d/g\u{200b}one\nx").count(), 1, "{shown:?}");
             }
         }
+    }
+
+    // A command in a composed sentence holding a character that reads as
+    // another is followed by a line showing it escaped, as a command the CLI
+    // composes is, and one holding none is not. The note stays under the line
+    // when the sentence ends a longer one.
+    #[test]
+    fn a_composed_command_carries_its_escaped_note() {
+        let failure = |name: &str| DeployStateFailure::TrackUnrecorded {
+            error: StateSaveError::Serialize(selfie::yaml::SerializeFailure::Value),
+            name: name.to_string(),
+            target: "~/.apprc".to_string(),
+            spec_path: "/p/app.yml".into(),
+            copy: "/d/apprc".into(),
+        };
+
+        let plain = composed(&failure("app")).into_string();
+        assert!(!plain.contains('\n'), "{plain:?}");
+        let hidden = shown!("Error: {}", composed(&failure("a\u{200B}b"))).into_string();
+        let lines: Vec<&str> = hidden.lines().collect();
+        assert_eq!(lines.len(), 2, "{hidden:?}");
+        assert!(
+            lines[0].starts_with("Error: ") && lines[0].contains("selfie apply 'a\u{200B}b'"),
+            "{hidden:?}"
+        );
+        assert_eq!(lines[1], r"Escaped: selfie apply 'a\u{200b}b'");
     }
 
     // A name in a composed sentence escapes a blank other than a space, as it

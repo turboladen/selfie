@@ -398,12 +398,13 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
                 DisplayPath::of(path),
                 crate::received::composed(&reason)
             );
-            let mkdir = SuggestedCommand::make_directory(path)
-                .filter(|_| reason.creatable())
-                .map(|mkdir| crate::received::suggested(&mkdir));
-            match mkdir {
-                Some(mkdir) => crate::terminal_text::noted(
-                    shown!("{} Create it with: {}", sentence, mkdir),
+            match SuggestedCommand::make_directory(path).filter(|_| reason.creatable()) {
+                Some(mkdir) => crate::received::noted_suggestion(
+                    shown!(
+                        "{} Create it with: {}",
+                        sentence,
+                        crate::received::suggested(&mkdir)
+                    ),
                     &mkdir,
                 ),
                 None => sentence,
