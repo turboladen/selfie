@@ -953,7 +953,6 @@ impl From<&SpecListItem> for SpecItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::fs::IoFailure;
     use selfie::package::event::UnknownStatus;
 
     // A name that shows as written is pre-filled; one the prompt can only show
@@ -1353,310 +1352,23 @@ mod tests {
         assert_eq!(skip_reason(&link).as_str(), link.to_string());
     }
 
-    // One deploy-state value of every shape the CLI composes.
-    enum StateValue {
-        Load(StateLoadFailure),
-        Warning(DeployStateWarning),
-        Failure(DeployStateFailure),
-    }
+    use test_common::{StateValue, every_state_value};
 
-    impl StateValue {
-        fn composed(&self) -> Shown {
-            match self {
-                Self::Load(failure) => state_load_failure(failure),
-                Self::Warning(warning) => deploy_state_warning(warning),
-                Self::Failure(failure) => deploy_state_failure(failure),
-            }
+    // A deploy-state value, as the CLI composes it.
+    fn composed_state(value: &StateValue) -> Shown {
+        match value {
+            StateValue::Load(failure) => state_load_failure(failure),
+            StateValue::Warning(warning) => deploy_state_warning(warning),
+            StateValue::Failure(failure) => deploy_state_failure(failure),
         }
-
-        fn library(&self) -> String {
-            match self {
-                Self::Load(failure) => failure.to_string(),
-                Self::Warning(warning) => warning.to_string(),
-                Self::Failure(failure) => failure.to_string(),
-            }
-        }
-
-        // Which shape this is. No match here has a wildcard, so a variant the
-        // library adds to any of these types, a cause included, fails to build
-        // here, and `STATE_SHAPES` counts the arms, so a shape with no fixture
-        // fails the test.
-        fn shape(&self) -> usize {
-            use DeployStateFailure as F;
-            use DeployStateWarning as W;
-            use StateLoadFailure as L;
-            let save = |error: &StateSaveError| match error {
-                StateSaveError::Serialize(_) => 0,
-                StateSaveError::Write { cause, .. } => 1 + cause_shape(cause),
-            };
-            match self {
-                Self::Load(L::Locate(StatePathError::NotAbsolute(_))) => 0,
-                Self::Load(L::Locate(StatePathError::NoHome)) => 1,
-                Self::Load(L::StateDirectoryOccupied { reason, .. }) => match reason {
-                    AbsentReason::Empty => 2,
-                    AbsentReason::Occupied { .. } => 3,
-                    AbsentReason::DanglingSymlink { points_to: Some(_) } => 4,
-                    AbsentReason::DanglingSymlink { points_to: None } => 5,
-                    AbsentReason::ParentNotADirectory { .. } => 6,
-                },
-                Self::Load(L::StateDirectoryUnreadable { .. }) => 7,
-                Self::Load(L::StateDirectoryNotWritable {
-                    directory,
-                    blocked,
-                    cause,
-                    configured,
-                }) => match (&**cause, directory == blocked, configured) {
-                    (FileSystemError::CannotCreateIn { .. }, true, _) => 8,
-                    (FileSystemError::CannotCreateIn { .. }, false, true) => 9,
-                    (FileSystemError::CannotCreateIn { .. }, false, false) => 10,
-                    // Every other refusal, each its own shape.
-                    (refusal, _, _) => 37 + cause_shape(refusal),
-                },
-                Self::Load(L::StateNotWritable(error)) => 11 + save(error),
-                Self::Load(L::Irregular { .. }) => 21,
-                Self::Load(L::Read { .. }) => 22,
-                Self::Load(L::Empty { .. }) => 23,
-                Self::Load(L::Parse { .. }) => 24,
-                Self::Warning(W::NotThereYet {
-                    cannot_create: None,
-                    ..
-                }) => 25,
-                Self::Warning(W::NotThereYet {
-                    cannot_create: Some(_),
-                    ..
-                }) => 26,
-                Self::Warning(W::ReadingPast(_)) => 27,
-                Self::Warning(W::DryRunWouldStop(_)) => 28,
-                Self::Warning(W::NotRecorded {
-                    recorded: Recorded::Deployed,
-                    ..
-                }) => 29,
-                Self::Warning(W::NotRecorded {
-                    recorded: Recorded::InSync,
-                    ..
-                }) => 30,
-                Self::Warning(W::Untidied(_)) => 31,
-                Self::Failure(F::Unusable(_)) => 32,
-                Self::Failure(F::StoppedBeforeWriting(_)) => 33,
-                Self::Failure(F::StoppedAfterRecording { .. }) => 34,
-                Self::Failure(F::NothingTracked(_)) => 35,
-                Self::Failure(F::TrackUnrecorded { .. }) => 36,
-            }
-        }
-    }
-
-    // A cause's shape, one per FileSystemError variant and per whether an IO
-    // error names a path, with CannotCreateIn last so a directory's other
-    // refusals take the shapes below it.
-    fn cause_shape(cause: &FileSystemError) -> usize {
-        match cause {
-            FileSystemError::IoError(IoFailure { path: None, .. }) => 0,
-            FileSystemError::IoError(IoFailure { path: Some(_), .. }) => 1,
-            FileSystemError::HomeDirNotFound => 2,
-            FileSystemError::SymlinkedTarget {
-                points_to: Some(_), ..
-            } => 3,
-            FileSystemError::SymlinkedTarget {
-                points_to: None, ..
-            } => 4,
-            FileSystemError::IrregularTarget { .. } => 5,
-            FileSystemError::BelowNonDirectory { .. } => 6,
-            FileSystemError::DirectoryTarget { .. } => 7,
-            FileSystemError::CannotCreateIn { .. } => 8,
-        }
-    }
-
-    const STATE_SHAPES: usize = 45;
-
-    // One FileSystemError of each shape, each path in it under `at`.
-    fn every_cause(at: &dyn Fn(&str) -> std::path::PathBuf) -> Vec<FileSystemError> {
-        let io = || std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
-        vec![
-            FileSystemError::IoError(io().into()),
-            FileSystemError::IoError(IoFailure::at(&at("deploy-state.yml"), io())),
-            FileSystemError::HomeDirNotFound,
-            FileSystemError::SymlinkedTarget {
-                path: at("deploy-state.yml"),
-                points_to: Some(at("elsewhere")),
-            },
-            FileSystemError::SymlinkedTarget {
-                path: at("deploy-state.yml"),
-                points_to: None,
-            },
-            FileSystemError::IrregularTarget {
-                path: at("deploy-state.yml"),
-                kind: "fifo",
-            },
-            FileSystemError::BelowNonDirectory {
-                path: at("deploy-state.yml"),
-                parent: Some(at("file")),
-                cause: io(),
-            },
-            FileSystemError::DirectoryTarget {
-                path: at("deploy-state.yml"),
-                cause: io(),
-            },
-            FileSystemError::CannotCreateIn {
-                path: at(""),
-                cause: io(),
-            },
-        ]
-    }
-
-    // Every deploy-state shape, each path in it under `root`.
-    fn every_state_value(root: &str) -> Vec<StateValue> {
-        use std::path::PathBuf;
-        use std::sync::Arc;
-        let at = |leaf: &str| PathBuf::from(format!("{root}/{leaf}"));
-        let io = || Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
-        // A failed write's error, naming the state file as a real one does.
-        let failed_write =
-            || FileSystemError::IoError(IoFailure::at(&at("deploy-state.yml"), io()));
-        let parse = selfie::yaml::parse::<selfie::package::Package>("name: [\n")
-            .expect_err("the fixture must not parse");
-        let write = |cause| StateSaveError::Write {
-            path: at("deploy-state.yml"),
-            cause,
-        };
-        let saves = || {
-            std::iter::once(StateSaveError::Serialize(
-                selfie::yaml::SerializeFailure::Value,
-            ))
-            .chain(every_cause(&at).into_iter().map(write))
-        };
-        let unusable = || StateLoadFailure::Empty {
-            path: at("deploy-state.yml"),
-        };
-        let not_writable =
-            |blocked: &str, configured| StateLoadFailure::StateDirectoryNotWritable {
-                directory: at("state"),
-                blocked: at(blocked),
-                cause: Box::new(FileSystemError::CannotCreateIn {
-                    path: at(blocked),
-                    cause: io(),
-                }),
-                configured,
-            };
-        let mut values = vec![
-            StateLoadFailure::Locate(StatePathError::NotAbsolute(at("state"))),
-            StateLoadFailure::Locate(StatePathError::NoHome),
-        ];
-        values.extend(
-            [
-                AbsentReason::Empty,
-                AbsentReason::Occupied {
-                    kind: "regular file",
-                },
-                AbsentReason::DanglingSymlink {
-                    points_to: Some(at("gone")),
-                },
-                AbsentReason::DanglingSymlink { points_to: None },
-                AbsentReason::ParentNotADirectory { parent: at("file") },
-            ]
-            .into_iter()
-            .map(|reason| StateLoadFailure::StateDirectoryOccupied {
-                path: at("state"),
-                reason,
-            }),
-        );
-        values.extend([
-            StateLoadFailure::StateDirectoryUnreadable {
-                path: at("state"),
-                why: "could not be checked: permission denied".to_string(),
-            },
-            not_writable("state", true),
-            not_writable("", true),
-            not_writable("", false),
-        ]);
-        values.extend(
-            every_cause(&at)
-                .into_iter()
-                .filter(|cause| !matches!(cause, FileSystemError::CannotCreateIn { .. }))
-                .map(|cause| StateLoadFailure::StateDirectoryNotWritable {
-                    directory: at("state"),
-                    blocked: at("state"),
-                    cause: Box::new(cause),
-                    configured: true,
-                }),
-        );
-        values.extend(saves().map(StateLoadFailure::StateNotWritable));
-        values.extend([
-            StateLoadFailure::Irregular {
-                path: at("deploy-state.yml"),
-                kind: "fifo",
-            },
-            StateLoadFailure::Read {
-                path: at("deploy-state.yml"),
-                cause: failed_write(),
-            },
-            unusable(),
-            StateLoadFailure::Parse {
-                path: at("deploy-state.yml"),
-                cause: parse,
-            },
-        ]);
-        let mut all: Vec<StateValue> = values.into_iter().map(StateValue::Load).collect();
-        all.extend(
-            [
-                DeployStateWarning::NotThereYet {
-                    directory: at("state"),
-                    cannot_create: None,
-                },
-                DeployStateWarning::NotThereYet {
-                    directory: at("state"),
-                    cannot_create: Some(not_writable("", true)),
-                },
-                DeployStateWarning::ReadingPast(unusable()),
-                DeployStateWarning::DryRunWouldStop(not_writable("state", false)),
-                DeployStateWarning::NotRecorded {
-                    recorded: Recorded::Deployed,
-                    target: at("target"),
-                    error: write(failed_write()),
-                },
-                DeployStateWarning::NotRecorded {
-                    recorded: Recorded::InSync,
-                    target: at("target"),
-                    error: write(failed_write()),
-                },
-                DeployStateWarning::Untidied(write(failed_write())),
-            ]
-            .into_iter()
-            .map(StateValue::Warning),
-        );
-        all.extend(
-            [
-                DeployStateFailure::Unusable(unusable()),
-                DeployStateFailure::StoppedBeforeWriting(not_writable("state", true)),
-                DeployStateFailure::StoppedAfterRecording {
-                    target: at("target"),
-                },
-                DeployStateFailure::NothingTracked(not_writable("state", true)),
-                DeployStateFailure::TrackUnrecorded {
-                    error: write(failed_write()),
-                    name: "tool".to_string(),
-                    target: format!("{root}/target"),
-                    spec_path: at("tool.yml"),
-                    copy: at("copy"),
-                },
-            ]
-            .into_iter()
-            .map(StateValue::Failure),
-        );
-        all
     }
 
     // Each deploy-state sentence reads as the library words it for a plain
-    // path, and the fixtures hold every shape.
+    // path, over a value of every shape.
     #[test]
     fn a_deploy_state_sentence_matches_the_library_wording_for_plain_paths() {
-        let values = every_state_value("/s");
-        let mut shapes: Vec<usize> = values.iter().map(StateValue::shape).collect();
-        shapes.sort_unstable();
-        shapes.dedup();
-
-        assert_eq!(shapes, (0..STATE_SHAPES).collect::<Vec<_>>());
-        for value in &values {
-            assert_eq!(value.composed().as_str(), value.library());
+        for value in &every_state_value("/s") {
+            assert_eq!(composed_state(value).as_str(), value.library());
         }
     }
 
@@ -1667,7 +1379,7 @@ mod tests {
     fn a_deploy_state_sentence_names_each_path_escaped() {
         let root = "/s/st\u{200B}a\nte";
         for value in every_state_value(root) {
-            let composed = value.composed().into_string();
+            let composed = composed_state(&value).into_string();
             let library = value.library();
 
             assert!(
@@ -1705,7 +1417,7 @@ mod tests {
                 )
                 .unwrap_err()
         };
-        // Each failed write, and the path its error names.
+        // Each entry holds a failed write and the path its error names.
         let mut failures = vec![
             (write(&dir.join("file/sub/state.yml")), dir.join("file/sub")),
             (write(&dir.join("occupied")), dir.join("occupied")),
