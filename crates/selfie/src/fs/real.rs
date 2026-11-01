@@ -1070,6 +1070,33 @@ mod tests {
     use std::fs::File;
     use tempfile::tempdir;
 
+    // A failed rename names the target it was renaming onto, whether a
+    // directory took the target's place or the rename failed for another
+    // reason. It is tested on the helper, so it runs on every platform.
+    #[test]
+    fn a_failed_rename_names_its_target_either_way() {
+        let path = Path::new("/s/deploy-state.yml");
+        let refused = rename_failure(path, io::Error::from(io::ErrorKind::PermissionDenied));
+        let directory = rename_failure(path, io::Error::from(io::ErrorKind::IsADirectory));
+
+        assert!(
+            matches!(&refused, FileSystemError::IoError(failure) if failure.path.as_deref() == Some(path)),
+            "{refused:?}"
+        );
+        assert_eq!(
+            refused.to_string(),
+            "IO error: /s/deploy-state.yml: permission denied"
+        );
+        assert!(
+            matches!(&directory, FileSystemError::DirectoryTarget { path: at, .. } if at == path),
+            "{directory:?}"
+        );
+        assert_eq!(
+            directory.to_string(),
+            "IO error: /s/deploy-state.yml: is a directory"
+        );
+    }
+
     // Tested on the helper, not through a write: reaching this case through
     // `write_file_no_follow` needs a relative path, and that needs
     // `set_current_dir`, which is process-global and would race the suite.
