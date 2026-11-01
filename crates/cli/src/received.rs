@@ -674,8 +674,8 @@ fn absent_clause(reason: &AbsentReason) -> Shown {
 }
 
 /// `error`'s sentence, with the path it names a [`DisplayPath`].
-// A cause an io::Error carries is still its own text, which can repeat the
-// path (selfie-puj0).
+// A cause from tempfile can still name its temporary file as text
+// (selfie-c2lb).
 fn file_system_error(error: &FileSystemError) -> Shown {
     match error {
         FileSystemError::IrregularTarget { path, kind } => shown!(
@@ -699,12 +699,21 @@ fn file_system_error(error: &FileSystemError) -> Shown {
             shown!("{}: {}", DisplayPath::of(path), sentence(&**cause))
         }
         // Named rather than caught, so a variant the library adds must choose
-        // here how a path in it is shown. BelowNonDirectory and DirectoryTarget
-        // carry a path their sentence does not show.
-        FileSystemError::IoError(_)
-        | FileSystemError::HomeDirNotFound
-        | FileSystemError::BelowNonDirectory { .. }
-        | FileSystemError::DirectoryTarget { .. } => sentence(error).into(),
+        // here how a path in it is shown.
+        FileSystemError::IoError(failure) => io_error(failure.path.as_deref(), &failure.error),
+        FileSystemError::BelowNonDirectory { path, cause, .. } => {
+            io_error(Some(FileSystemError::uncreatable_directory(path)), cause)
+        }
+        FileSystemError::DirectoryTarget { path, cause } => io_error(Some(path), cause),
+        FileSystemError::HomeDirNotFound => sentence(error).into(),
+    }
+}
+
+/// An IO error's sentence, with the path it names a [`DisplayPath`].
+fn io_error(path: Option<&std::path::Path>, cause: &std::io::Error) -> Shown {
+    match path {
+        Some(path) => shown!("IO error: {}: {}", DisplayPath::of(path), sentence(cause)),
+        None => shown!("IO error: {}", sentence(cause)),
     }
 }
 
@@ -1036,6 +1045,7 @@ impl From<&SpecListItem> for SpecItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use selfie::fs::IoFailure;
     use selfie::package::event::UnknownStatus;
 
     // A name that shows as written is pre-filled; one the prompt can only show
@@ -1471,67 +1481,70 @@ mod tests {
                     (FileSystemError::CannotCreateIn { .. }, false, true) => 9,
                     (FileSystemError::CannotCreateIn { .. }, false, false) => 10,
                     // Every other refusal, each its own shape.
-                    (refusal, _, _) => 36 + cause_shape(refusal),
+                    (refusal, _, _) => 37 + cause_shape(refusal),
                 },
                 Self::Load(L::StateNotWritable(error)) => 11 + save(error),
-                Self::Load(L::Irregular { .. }) => 20,
-                Self::Load(L::Read { .. }) => 21,
-                Self::Load(L::Empty { .. }) => 22,
-                Self::Load(L::Parse { .. }) => 23,
+                Self::Load(L::Irregular { .. }) => 21,
+                Self::Load(L::Read { .. }) => 22,
+                Self::Load(L::Empty { .. }) => 23,
+                Self::Load(L::Parse { .. }) => 24,
                 Self::Warning(W::NotThereYet {
                     cannot_create: None,
                     ..
-                }) => 24,
+                }) => 25,
                 Self::Warning(W::NotThereYet {
                     cannot_create: Some(_),
                     ..
-                }) => 25,
-                Self::Warning(W::ReadingPast(_)) => 26,
-                Self::Warning(W::DryRunWouldStop(_)) => 27,
+                }) => 26,
+                Self::Warning(W::ReadingPast(_)) => 27,
+                Self::Warning(W::DryRunWouldStop(_)) => 28,
                 Self::Warning(W::NotRecorded {
                     recorded: Recorded::Deployed,
                     ..
-                }) => 28,
+                }) => 29,
                 Self::Warning(W::NotRecorded {
                     recorded: Recorded::InSync,
                     ..
-                }) => 29,
-                Self::Warning(W::Untidied(_)) => 30,
-                Self::Failure(F::Unusable(_)) => 31,
-                Self::Failure(F::StoppedBeforeWriting(_)) => 32,
-                Self::Failure(F::StoppedAfterRecording { .. }) => 33,
-                Self::Failure(F::NothingTracked(_)) => 34,
-                Self::Failure(F::TrackUnrecorded { .. }) => 35,
+                }) => 30,
+                Self::Warning(W::Untidied(_)) => 31,
+                Self::Failure(F::Unusable(_)) => 32,
+                Self::Failure(F::StoppedBeforeWriting(_)) => 33,
+                Self::Failure(F::StoppedAfterRecording { .. }) => 34,
+                Self::Failure(F::NothingTracked(_)) => 35,
+                Self::Failure(F::TrackUnrecorded { .. }) => 36,
             }
         }
     }
 
-    // A cause's shape, one per FileSystemError variant, with CannotCreateIn
-    // last so a directory's other refusals take the shapes below it.
+    // A cause's shape, one per FileSystemError variant and per whether an IO
+    // error names a path, with CannotCreateIn last so a directory's other
+    // refusals take the shapes below it.
     fn cause_shape(cause: &FileSystemError) -> usize {
         match cause {
-            FileSystemError::IoError(_) => 0,
-            FileSystemError::HomeDirNotFound => 1,
+            FileSystemError::IoError(IoFailure { path: None, .. }) => 0,
+            FileSystemError::IoError(IoFailure { path: Some(_), .. }) => 1,
+            FileSystemError::HomeDirNotFound => 2,
             FileSystemError::SymlinkedTarget {
                 points_to: Some(_), ..
-            } => 2,
+            } => 3,
             FileSystemError::SymlinkedTarget {
                 points_to: None, ..
-            } => 3,
-            FileSystemError::IrregularTarget { .. } => 4,
-            FileSystemError::BelowNonDirectory { .. } => 5,
-            FileSystemError::DirectoryTarget { .. } => 6,
-            FileSystemError::CannotCreateIn { .. } => 7,
+            } => 4,
+            FileSystemError::IrregularTarget { .. } => 5,
+            FileSystemError::BelowNonDirectory { .. } => 6,
+            FileSystemError::DirectoryTarget { .. } => 7,
+            FileSystemError::CannotCreateIn { .. } => 8,
         }
     }
 
-    const STATE_SHAPES: usize = 43;
+    const STATE_SHAPES: usize = 45;
 
     // One FileSystemError of each shape, each path in it under `at`.
     fn every_cause(at: &dyn Fn(&str) -> std::path::PathBuf) -> Vec<FileSystemError> {
         let io = || std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
         vec![
             FileSystemError::IoError(io().into()),
+            FileSystemError::IoError(IoFailure::at(&at("deploy-state.yml"), io())),
             FileSystemError::HomeDirNotFound,
             FileSystemError::SymlinkedTarget {
                 path: at("deploy-state.yml"),
@@ -1561,14 +1574,15 @@ mod tests {
         ]
     }
 
-    // Every deploy-state shape, each path in it under `root`. The causes carry
-    // no path of their own. A real write's io::Error names the state file as
-    // text, which no composer reaches (selfie-puj0).
+    // Every deploy-state shape, each path in it under `root`.
     fn every_state_value(root: &str) -> Vec<StateValue> {
         use std::path::PathBuf;
         use std::sync::Arc;
         let at = |leaf: &str| PathBuf::from(format!("{root}/{leaf}"));
         let io = || Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        // A failed write's error, naming the state file as a real one does.
+        let failed_write =
+            || FileSystemError::IoError(IoFailure::at(&at("deploy-state.yml"), io()));
         let parse = selfie::yaml::parse::<selfie::package::Package>("name: [\n")
             .expect_err("the fixture must not parse");
         let write = |cause| StateSaveError::Write {
@@ -1644,7 +1658,7 @@ mod tests {
             },
             StateLoadFailure::Read {
                 path: at("deploy-state.yml"),
-                cause: FileSystemError::IoError(io().into()),
+                cause: failed_write(),
             },
             unusable(),
             StateLoadFailure::Parse {
@@ -1668,14 +1682,14 @@ mod tests {
                 DeployStateWarning::NotRecorded {
                     recorded: Recorded::Deployed,
                     target: at("target"),
-                    error: write(FileSystemError::IoError(io().into())),
+                    error: write(failed_write()),
                 },
                 DeployStateWarning::NotRecorded {
                     recorded: Recorded::InSync,
                     target: at("target"),
-                    error: write(FileSystemError::IoError(io().into())),
+                    error: write(failed_write()),
                 },
-                DeployStateWarning::Untidied(write(FileSystemError::IoError(io().into()))),
+                DeployStateWarning::Untidied(write(failed_write())),
             ]
             .into_iter()
             .map(StateValue::Warning),
@@ -1689,7 +1703,7 @@ mod tests {
                 },
                 DeployStateFailure::NothingTracked(not_writable("state", true)),
                 DeployStateFailure::TrackUnrecorded {
-                    error: write(FileSystemError::IoError(io().into())),
+                    error: write(failed_write()),
                     name: "tool".to_string(),
                     target: format!("{root}/target"),
                     spec_path: at("tool.yml"),
@@ -1718,10 +1732,12 @@ mod tests {
     }
 
     // Every path in a deploy-state sentence is a path: a line break and U+200B
-    // in it show as escapes, and the sentence stays one line.
+    // in it show as escapes, each path the library names is named once escaped,
+    // and the sentence stays one line.
     #[test]
     fn a_deploy_state_sentence_names_each_path_escaped() {
-        for value in every_state_value("/s/st\u{200B}a\nte") {
+        let root = "/s/st\u{200B}a\nte";
+        for value in every_state_value(root) {
             let composed = value.composed().into_string();
             let library = value.library();
 
@@ -1729,11 +1745,83 @@ mod tests {
                 !composed.contains(['\u{200B}', '\n']),
                 "{composed:?} from {library:?}"
             );
-            if library.contains("/s/") {
-                assert!(
-                    composed.contains(r"/s/st\u{200b}a\nte"),
-                    "{composed:?} from {library:?}"
-                );
+            assert_eq!(
+                composed.matches(r"/s/st\u{200b}a\nte").count(),
+                library.matches(root).count(),
+                "{composed:?} from {library:?}"
+            );
+        }
+    }
+
+    // A filesystem error a real write returns names the path it failed on as a
+    // path, right after "IO error: ", on every route that reports a failed
+    // state write. The write into an unwritable directory also carries
+    // tempfile's own copy of its temporary path, which this does not count.
+    #[test]
+    fn a_real_write_failure_names_its_path_escaped() {
+        use selfie::fs::FileSystem as _;
+        use selfie::fs::{IfPresent, RealFileSystem, expand_target_path};
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path().join("st\u{200B}a\nte");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("file"), "x").unwrap();
+        std::fs::create_dir(dir.join("occupied")).unwrap();
+        let write = |path: &std::path::Path| {
+            RealFileSystem
+                .write_file_private(
+                    &expand_target_path(&RealFileSystem, path.to_str().unwrap()),
+                    b"x",
+                    IfPresent::Replace,
+                )
+                .unwrap_err()
+        };
+        // Each failed write, and the path its error names.
+        let mut failures = vec![
+            (write(&dir.join("file/sub/state.yml")), dir.join("file/sub")),
+            (write(&dir.join("occupied")), dir.join("occupied")),
+        ];
+        let locked = test_common::LockedDir::create(&dir.join("locked"), 0o500);
+        if locked.refuses_new_files() {
+            failures.push((
+                write(&dir.join("locked/state.yml")),
+                dir.join("locked/state.yml"),
+            ));
+            failures.push((
+                write(&dir.join("locked/sub/state.yml")),
+                dir.join("locked/sub"),
+            ));
+        } else {
+            eprintln!("SKIP the 0o500 cases: this user can write into a 0o500 directory");
+        }
+        drop(locked);
+
+        for (cause, named) in failures {
+            let write = || StateSaveError::Write {
+                path: dir.join("state.yml"),
+                cause: cause.clone(),
+            };
+            let routes = [
+                state_load_failure(&StateLoadFailure::StateNotWritable(write())),
+                deploy_state_warning(&DeployStateWarning::NotRecorded {
+                    recorded: Recorded::Deployed,
+                    target: dir.join("target"),
+                    error: write(),
+                }),
+                deploy_state_warning(&DeployStateWarning::Untidied(write())),
+                deploy_state_failure(&DeployStateFailure::TrackUnrecorded {
+                    error: write(),
+                    name: "tool".to_string(),
+                    target: "~/.toolrc".to_string(),
+                    spec_path: dir.join("tool.yml"),
+                    copy: dir.join("copy"),
+                }),
+            ];
+            let at = format!("IO error: {}: ", DisplayPath::of(&named));
+            for composed in routes {
+                let composed = composed.into_string();
+                assert!(!composed.contains(['\u{200B}', '\n']), "{composed:?}");
+                assert_eq!(composed.matches(&at).count(), 1, "{at:?} in {composed:?}");
             }
         }
     }
