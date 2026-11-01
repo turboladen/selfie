@@ -927,14 +927,14 @@ fn apply_refusal_issue(
             issue.level == crate::validation::ValidationLevel::Error && issue.field == *field
         })
     };
-    if refusal.fields().iter().all(reported) {
-        return None;
-    }
+    // Per reason, so a reason the validator already reported is left out while
+    // one it did not is still said.
+    let unreported = refusal.retain(|reason| !reason.fields().iter().all(reported))?;
     Some(super::port::PackageValidationIssue {
         level: crate::validation::ValidationLevel::Error,
         category: super::port::PushIssueCategory::ApplyRefusal,
         field: "-".to_string(),
-        message: format!("'selfie apply' would refuse this package: {refusal}"),
+        message: format!("'selfie apply' would refuse this package: {unreported}"),
         location: None,
         // A refusal carries its remedy in its message.
         suggestion: None,
@@ -4095,6 +4095,71 @@ environments:
         );
     }
 
+    // A refusal with two reasons, one of them reported by the validator, appends
+    // only the other, so the reported key is not said twice.
+    #[test]
+    fn a_refusal_appends_only_the_reasons_the_validator_did_not_report() {
+        let yaml = "name: myapp\nconfigs: []\nenvironments:\n  test-env:\n    install: \"true\"\n    \
+                    audt: x\n";
+        let mut package: crate::package::Package = crate::yaml::parse(yaml).unwrap();
+        package.set_source(
+            std::path::PathBuf::from("/packages/myapp.yml"),
+            yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
+        );
+        let refusal = package
+            .spec_refusal("test-env")
+            .expect("configs and audt are refused");
+        let reported = super::super::port::PackageValidationIssue {
+            level: crate::validation::ValidationLevel::Error,
+            category: crate::sync_service::PushIssueCategory::Validation(
+                crate::validation::ValidationErrorCategory::InvalidValue,
+            ),
+            field: "configs".to_string(),
+            message: "m".to_string(),
+            location: None,
+            suggestion: None,
+        };
+
+        let issue = super::apply_refusal_issue(&refusal, &[reported])
+            .expect("the environment's key was not reported");
+        assert!(
+            issue.message.contains("unknown field 'audt'"),
+            "{}",
+            issue.message
+        );
+        assert!(!issue.message.contains("configs"), "{}", issue.message);
+    }
+
+    // With nothing reported, every reason of a refusal is appended, the last one
+    // included.
+    #[test]
+    fn a_refusal_appends_every_reason_the_validator_did_not_report() {
+        let yaml = "name: myapp\nconfigs: []\nenvironments:\n  test-env:\n    install: \"true\"\n    \
+                    audt: x\n";
+        let mut package: crate::package::Package = crate::yaml::parse(yaml).unwrap();
+        package.set_source(
+            std::path::PathBuf::from("/packages/myapp.yml"),
+            yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
+        );
+        let refusal = package
+            .spec_refusal("test-env")
+            .expect("configs and audt are refused");
+
+        let issue = super::apply_refusal_issue(&refusal, &[]).expect("nothing reported either");
+        assert!(
+            issue.message.contains("unknown field 'configs'"),
+            "{}",
+            issue.message
+        );
+        assert!(
+            issue.message.contains("unknown field 'audt'"),
+            "{}",
+            issue.message
+        );
+    }
+
     // Only an error at the refusal's field reports it: a warning there names a
     // lesser problem, so the refusal is still appended. An error at the same
     // field is the control.
@@ -4115,7 +4180,7 @@ environments:
             category: crate::sync_service::PushIssueCategory::Validation(
                 crate::validation::ValidationErrorCategory::InvalidValue,
             ),
-            field: refusal.fields()[0].clone(),
+            field: refusal.reasons()[0].fields()[0].clone(),
             message: "m".to_string(),
             location: None,
             suggestion: None,
