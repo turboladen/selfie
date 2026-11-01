@@ -390,11 +390,12 @@ pub(crate) fn package_error(error: &PackageError) -> Shown {
     }
 }
 
-/// A repository's error, a package error composed as [`package_error`]
-/// composes it.
+/// A repository's error: a package error composed as [`package_error`]
+/// composes it, and a listing error from its parts.
 pub(crate) fn repo_error(error: &PackageRepoError) -> Shown {
     match error {
         PackageRepoError::PackageError(error) => package_error(error),
+        PackageRepoError::PackageListError(error) => composed(error),
         other => sentence(other).into(),
     }
 }
@@ -419,6 +420,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         } => uncreatable(package_name, reason),
         OperationFailure::Package(error) => package_error(error),
         OperationFailure::DeployState(failure) => composed(failure),
+        OperationFailure::PackageList(error) => composed(error),
         OperationFailure::UnreadableSpec {
             package_name,
             reason,
@@ -1273,6 +1275,51 @@ mod tests {
                 failure(name).to_string(),
                 "{name:?}"
             );
+        }
+    }
+
+    // A listing error and the name check's refusal over one read as the
+    // library words them, in every state.
+    #[test]
+    fn a_listing_error_reads_as_the_library_words_it() {
+        use selfie::namespace::NamespaceValidationError as Invalid;
+
+        let errors = test_common::every_listing_error("/d");
+        assert_renders_as_its_display(&errors);
+        let refusals: Vec<Invalid> = errors
+            .iter()
+            .flat_map(|error| {
+                [
+                    Invalid::PackageDirectoryUnreadable(error.clone()),
+                    Invalid::DotfilesDirectoryUnreadable(error.clone()),
+                ]
+            })
+            .collect();
+        assert_renders_as_its_display(&refusals);
+    }
+
+    // A listing error names its directory as a path, once, on every route the
+    // CLI shows it by: on its own, as an operation's failure, as a
+    // repository's error and inside the name check's refusal.
+    #[test]
+    fn a_listing_error_names_its_directory_once_as_a_path() {
+        use selfie::namespace::NamespaceValidationError as Invalid;
+        use selfie::package::port::PackageRepoError;
+
+        let directory = "/d/g\u{200B}one\nx";
+        for state in test_common::every_directory_state("/d") {
+            let error = selfie::package::port::PackageListError::new(directory.into(), state);
+            let routes = [
+                composed(&error),
+                failure(&OperationFailure::PackageList(error.clone())),
+                repo_error(&PackageRepoError::PackageListError(error.clone())),
+                composed(&Invalid::DotfilesDirectoryUnreadable(error.clone())),
+            ];
+            for shown in routes {
+                let shown = shown.into_string();
+                assert!(!shown.contains(['\u{200B}', '\n']), "{shown:?}");
+                assert_eq!(shown.matches(r"/d/g\u{200b}one\nx").count(), 1, "{shown:?}");
+            }
         }
     }
 

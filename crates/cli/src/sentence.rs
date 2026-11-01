@@ -6,12 +6,12 @@ use std::fmt::Display;
 
 use selfie::commands::runner::TimedOut;
 use selfie::config::ConfigLoadError;
-use selfie::namespace::{NamespaceConflict, NamespaceValidationError};
+use selfie::namespace::NamespaceConflict;
 use selfie::package::event::{
     CheckFailure, OperationFailure, OperationType, SkipReason, SpecStatus, UncheckedSource,
     UnknownStatus,
 };
-use selfie::package::port::{PackageError, PackageListError, PackageParseKind, PackageRepoError};
+use selfie::package::port::{PackageError, PackageParseKind, PackageRepoError};
 use selfie::parts::{Composed, Part, Parts, Subcommand};
 use selfie::sync_service::port::SyncError;
 use selfie::yaml::ParseFailure;
@@ -46,11 +46,9 @@ sentences!(
     CheckFailure,
     ConfigLoadError,
     NamespaceConflict,
-    NamespaceValidationError,
     OperationFailure,
     OperationType,
     PackageError,
-    PackageListError,
     PackageParseKind,
     PackageRepoError,
     ParseFailure,

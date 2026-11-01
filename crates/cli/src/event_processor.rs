@@ -344,9 +344,8 @@ impl EventProcessor {
                             // repository classified the path once and the error carries
                             // the answer, so this renders it rather than looking again.
                             self.display.print_error(shown!(
-                                "Package directory at {} {}",
-                                DisplayPath::of(listing.path()),
-                                received::message(listing.clause())
+                                "Package directory at {}",
+                                received::composed(&listing)
                             ));
                             // `selfie config` requires a subcommand and has only
                             // one, `validate`, so it is not a way to set the

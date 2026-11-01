@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::{
     fs::{DirectoryState, FileSystem, filesystem::FileSystemError},
     package::{GetPackage, Package},
+    parts::{Composed, Parts},
 };
 
 /// Port for package storage: discovering, loading, saving and removing package
@@ -684,8 +685,7 @@ impl From<PackageError> for PackageRepoError {
 /// consumer that re-derived it from an error kind reached a different answer for the
 /// same path: that is how an unreadable directory came out as "not found" and was
 /// offered a `mkdir -p` that cannot work.
-#[derive(Error, Debug, Clone)]
-#[error("{} {}", self.path.display(), self.clause())]
+#[derive(Debug, Clone)]
 pub struct PackageListError {
     path: PathBuf,
     state: DirectoryState,
@@ -748,19 +748,21 @@ impl PackageListError {
             DirectoryState::Absent(crate::fs::AbsentReason::Empty)
         )
     }
+}
 
-    /// Why the listing produced nothing, as a clause that follows the path.
-    ///
-    /// The absent reasons are worded by
-    /// [`AbsentReason`](crate::fs::AbsentReason)'s `Display`, so a listing failure and
-    /// a directory warning about one path describe it in the same words.
-    #[must_use]
-    pub fn clause(&self) -> String {
+// The path, then why the listing produced nothing, in the words the directory's
+// state gives it, so a listing failure and a directory warning about one path
+// describe it in the same words.
+crate::parts::display_from_parts!(error PackageListError);
+
+impl Composed for PackageListError {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new().path(&self.path).text(" ");
         match &self.state {
             // A path the port calls a directory whose listing still failed. The
             // listing is the more recent answer, so it may be hiding entries.
-            DirectoryState::Directory => "could not be listed".to_string(),
-            state => state.clause(),
+            DirectoryState::Directory => parts.text("could not be listed"),
+            state => parts.append(state.parts()),
         }
     }
 }

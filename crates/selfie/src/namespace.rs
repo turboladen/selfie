@@ -8,6 +8,7 @@
 use std::fmt;
 
 use crate::package::port::{PackageListError, PackageRepository};
+use crate::parts::{Composed, Parts};
 
 /// Location where a name was found during namespace validation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,19 +168,25 @@ pub enum NamespaceValidationError {
     DotfilesDirectoryUnreadable(PackageListError),
 }
 
-impl fmt::Display for NamespaceValidationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+crate::parts::display_from_parts!(NamespaceValidationError);
+
+impl Composed for NamespaceValidationError {
+    fn parts(&self) -> Parts<'_> {
         match self {
-            Self::Conflict(c) => write!(f, "{c}"),
+            // The conflict's sentence is not built from parts, so it enters as
+            // one text.
+            Self::Conflict(conflict) => Parts::new().text(conflict.to_string()),
             // `error` leads with the directory's own path, so no noun goes in front
             // of it: "the dotfiles directory /home/me/dots could not be listed" reads
             // as two subjects.
             // Something that is not a directory holds no names, so the listing's own
             // sentence is the whole answer. Only a path selfie could not look into
             // leaves the name's status unknown.
-            Self::PackageDirectoryUnreadable(error) if error.is_absent() => write!(f, "{error}"),
+            Self::PackageDirectoryUnreadable(error) if error.is_absent() => error.parts(),
             Self::PackageDirectoryUnreadable(error) | Self::DotfilesDirectoryUnreadable(error) => {
-                write!(f, "cannot tell whether the name is already taken: {error}")
+                Parts::new()
+                    .text("cannot tell whether the name is already taken: ")
+                    .append(error.parts())
             }
         }
     }
