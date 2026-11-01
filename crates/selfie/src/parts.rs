@@ -185,6 +185,15 @@ impl<'a> Parts<'a> {
     }
 }
 
+// Only tests collect parts: the CLI renders a library value's parts and never
+// composes a sentence of its own from them.
+#[cfg(any(test, feature = "with_mocks"))]
+impl<'a> FromIterator<Part<'a>> for Parts<'a> {
+    fn from_iter<I: IntoIterator<Item = Part<'a>>>(parts: I) -> Self {
+        Self(parts.into_iter().collect())
+    }
+}
+
 impl<'p, 'a> IntoIterator for &'p Parts<'a> {
     type Item = &'p Part<'a>;
     type IntoIter = std::slice::Iter<'p, Part<'a>>;
