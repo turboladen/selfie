@@ -13,7 +13,7 @@ use crate::{
         target::repository_path,
     },
     package::{
-        GetPackage, Package, SpecOrigin, SpecRefusal,
+        GetPackage, Package, RefusalReason, SpecOrigin,
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
             PackageParseKind, PackageRepoError, PackageRepository, RefusedChange,
@@ -320,15 +320,18 @@ impl<F: FileSystem> YamlPackageRepository<F> {
         // different conclusions about one key. Field names rather than the
         // rendered sentence, because this error names the file and the caller
         // needs the keys.
-        match package.untrusted_keys_refusal() {
-            Some(SpecRefusal::UnknownTopLevelKeys(unknown)) => {
+        match package
+            .untrusted_keys_refusal()
+            .map(|refusal| refusal.reasons()[0].clone())
+        {
+            Some(RefusalReason::UnknownTopLevelKeys(unknown)) => {
                 let fields: Vec<&str> = unknown.iter().map(|u| u.key.as_str()).collect();
                 return Err(PackageRepoError::UnknownTopLevelFields {
                     path: path.to_path_buf(),
                     fields: fields.join(", "),
                 });
             }
-            Some(SpecRefusal::UnknownEnvironmentKeys(environments)) => {
+            Some(RefusalReason::UnknownEnvironmentKeys(environments)) => {
                 let fields: Vec<String> = environments
                     .iter()
                     .flat_map(|(environment, keys)| {
@@ -341,7 +344,7 @@ impl<F: FileSystem> YamlPackageRepository<F> {
                     fields: fields.join(", "),
                 });
             }
-            Some(SpecRefusal::UncheckedTopLevel(error)) => {
+            Some(RefusalReason::UncheckedTopLevel(error)) => {
                 return Err(PackageRepoError::UncheckedTopLevel {
                     path: path.to_path_buf(),
                     error,
@@ -351,13 +354,13 @@ impl<F: FileSystem> YamlPackageRepository<F> {
             // rules above. A missing environment is a deployment rule, not a
             // writing one: a spec declaring none is still the user's text.
             //
-            // Named rather than left to a catch-all, so a new `SpecRefusal`
+            // Named rather than left to a catch-all, so a new `RefusalReason`
             // variant fails to compile here. Widening `untrusted_keys_refusal` to
             // return a variant already named here is NOT caught: it must never
             // return `NoEnvironments`, or a save proceeds past this arm silently.
             // The listings' rule, which does refuse a missing environment, is
             // `every_environment_refusal`.
-            Some(SpecRefusal::NoEnvironments(_)) | None => {}
+            Some(RefusalReason::NoEnvironments(_)) | None => {}
         }
 
         // Serialize the package to YAML

@@ -6,9 +6,9 @@ use crate::yaml::SourceLocation;
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
-    DotfileEntry, DotfileField, EnvironmentField, KnownFields, Package, PackageField, ScopedEntry,
-    SpecRefusal, TargetCollision, TopLevelKeys, UnknownEntryKey, UnknownKey, dotfile_field,
-    environment_field,
+    DotfileEntry, DotfileField, EnvironmentField, KnownFields, Package, PackageField,
+    RefusalReason, ScopedEntry, TargetCollision, TopLevelKeys, UnknownEntryKey, UnknownKey,
+    dotfile_field, environment_field,
 };
 use super::{Override, overrides, seen_in};
 
@@ -472,14 +472,14 @@ impl Package {
             //
             // Worded by the refusal itself, so the two commands say the same thing.
             // `sync push` skips apply's refusal when an error is reported at the
-            // field `SpecRefusal::fields` names for it, `package`.
+            // field `RefusalReason::fields` names for it, `package`.
             TopLevelKeys::Unchecked(error) => issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 "package",
                 &format!(
                     "package '{}': {}",
                     self.name(),
-                    SpecRefusal::UncheckedTopLevel(error.clone())
+                    RefusalReason::UncheckedTopLevel(error.clone())
                 ),
                 Some("Edit the file directly, or simplify it until selfie can read it."),
             )),
@@ -3004,7 +3004,7 @@ environments:
         let TopLevelKeys::Unchecked(error) = package.top_level_keys() else {
             panic!("the fixture's top level must be the unreadable kind");
         };
-        let clause = SpecRefusal::UncheckedTopLevel(error.clone()).to_string();
+        let clause = RefusalReason::UncheckedTopLevel(error.clone()).to_string();
         assert!(
             issues[0].message().contains(&clause),
             "the validator must carry the refusal's clause verbatim, got: {}",

@@ -258,6 +258,20 @@ fn an_unknown_environment_key_exits_found() {
     );
 }
 
+// One run names both levels, so the user fixes the file in one pass.
+#[test]
+fn unknown_keys_at_two_levels_are_named_together() {
+    let output = assert_refusal_exits_found(
+        &[("odd.yaml", spec_with("bogus: 1\n", "    bogus2: 1\n"))],
+        "odd",
+        "unknown field 'bogus'; expected one of: name, homepage",
+    );
+    assert!(
+        output.contains(". In environment 'test-env': unknown field 'bogus2'"),
+        "{output}"
+    );
+}
+
 #[test]
 fn an_unchecked_top_level_exits_found() {
     assert_refusal_exits_found(
