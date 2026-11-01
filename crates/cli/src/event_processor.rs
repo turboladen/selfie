@@ -270,6 +270,9 @@ impl EventProcessor {
             PackageEvent::DeployStateWarning { warning, .. } => {
                 self.display.print_warning(received::composed(&warning));
             }
+            PackageEvent::DotfilesDirectoryWarning { warning, .. } => {
+                self.display.print_warning(received::composed(&warning));
+            }
 
             // The run's result counts each, so the exit code comes from there.
             PackageEvent::DotfileRefused { refusal, .. } => {

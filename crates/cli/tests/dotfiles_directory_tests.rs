@@ -683,3 +683,76 @@ fn dotfiles_track_with_a_file_at_the_package_directory_names_the_directory() {
     );
     assert!(!spec_exists(&dotfiles, "rc"), "stderr:\n{stderr}");
 }
+
+// A dotfiles directory that is a dangling symlink is named as a path on every
+// command that warns or refuses over it, and so is the link's destination:
+// U+200B in either shows escaped and never raw.
+#[cfg(unix)]
+#[test]
+fn a_dangling_dotfiles_directory_is_named_as_a_path_by_every_command() {
+    // The path is not known until the sandbox exists, so the config is
+    // written over once it does.
+    let config = config_with_explicit_dotfiles_dir("/unused");
+    let dotfiles = config.path().join("d\u{200B}ots");
+    std::os::unix::fs::symlink(config.path().join("g\u{200B}one"), &dotfiles).unwrap();
+    std::fs::write(
+        config.path().join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            config.path().join("packages").display(),
+            dotfiles.display(),
+        ),
+    )
+    .unwrap();
+    let untracked = config.path().join("untracked.conf");
+    std::fs::write(&untracked, "x").unwrap();
+
+    for args in [
+        &["apply"][..],
+        &["dotfiles", "drift"],
+        &["config", "validate"],
+        &["spec", "validate", "--all"],
+        &["dotfiles", "track", "n", untracked.to_str().unwrap()],
+    ] {
+        let output = common::run_sandboxed(&config, &[&["--no-color"][..], args].concat());
+        let both = format!("{}{}", output.stdout, output.stderr);
+        assert!(
+            !both.contains('\u{200B}'),
+            "{args:?}: a raw U+200B: {both:?}"
+        );
+        assert!(
+            both.contains(r"d\u{200b}ots is a symlink to nothing: it points at ")
+                && both.contains(r"g\u{200b}one"),
+            "{args:?}: {both}"
+        );
+    }
+}
+
+// A dotfiles directory that is not there is offered `mkdir -p`, with the
+// path in the command as the shell reads it and a note under the command
+// spelling out what it holds.
+#[cfg(unix)]
+#[test]
+fn an_absent_dotfiles_directory_offers_mkdir_with_its_note() {
+    let config = config_with_explicit_dotfiles_dir("/nonexistent-selfie/d\u{200B}ots");
+
+    let output = common::run_sandboxed(&config, &["--no-color", "apply"]);
+    let both = format!("{}{}", output.stdout, output.stderr);
+
+    let warning = both
+        .lines()
+        .find(|line| line.contains("standalone dotfiles will not be read"))
+        .unwrap_or_else(|| panic!("no warning about the dotfiles directory: {both}"));
+    assert!(
+        warning.contains(r"Dotfiles directory /nonexistent-selfie/d\u{200b}ots does not exist"),
+        "{warning}"
+    );
+    assert!(
+        warning.ends_with("Create it with: mkdir -p -- '/nonexistent-selfie/d\u{200B}ots'"),
+        "{warning}"
+    );
+    assert!(
+        both.contains(r"Escaped: mkdir -p -- '/nonexistent-selfie/d\u{200b}ots'"),
+        "{both}"
+    );
+}

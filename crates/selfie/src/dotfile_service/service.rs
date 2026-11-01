@@ -507,14 +507,11 @@ where
             let result = match refusal {
                 Some(refusal) => OperationResult::Failure(OperationFailure::Privilege(refusal)),
                 None if shared_directory => {
-                    OperationResult::Failure(OperationFailure::Generic(format!(
-                        "Cannot track a standalone dotfile: the dotfiles directory {} is the \
-                         package directory, so selfie reads a spec there as a package spec, and \
-                         `selfie apply` refuses one that declares no environment. Track the file \
-                         into a package with `selfie track` or `selfie package track-dotfile`, or \
-                         set `dotfiles_directory` to a directory of its own.",
-                        config.dotfiles_directory().display()
-                    )))
+                    OperationResult::Failure(OperationFailure::UnusableDotfilesDirectory(
+                        crate::package::event::TrackDirectoryRefusal::SharedWithPackages(
+                            config.dotfiles_directory().to_path_buf(),
+                        ),
+                    ))
                 }
                 None => {
                     handle_track_standalone(

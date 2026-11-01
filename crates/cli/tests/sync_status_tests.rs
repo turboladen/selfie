@@ -135,7 +135,7 @@ fn sync_status_does_not_report_success_over_an_unparsable_deploy_state() {
 // only finding is the directory warning, which reaches this check only
 // because the dotfiles repository is now attached whether or not its
 // directory exists.
-fn sandbox_with_a_missing_dotfiles_directory_in_a_git_repo() -> tempfile::TempDir {
+fn sandbox_with_a_missing_dotfiles_directory_in_a_git_repo(leaf: &str) -> tempfile::TempDir {
     let temp_dir = setup_default_test_config();
     let packages_dir = temp_dir.path().join("packages");
     fs::write(
@@ -152,7 +152,7 @@ fn sandbox_with_a_missing_dotfiles_directory_in_a_git_repo() -> tempfile::TempDi
         format!(
             "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
             packages_dir.display(),
-            temp_dir.path().join("missing-dots").display(),
+            temp_dir.path().join(leaf).display(),
         ),
     )
     .unwrap();
@@ -172,7 +172,7 @@ fn sandbox_with_a_missing_dotfiles_directory_in_a_git_repo() -> tempfile::TempDi
 // status` still printed "No dotfile drift" directly under it.
 #[test]
 fn sync_status_does_not_report_success_over_a_missing_dotfiles_directory() {
-    let temp_dir = sandbox_with_a_missing_dotfiles_directory_in_a_git_repo();
+    let temp_dir = sandbox_with_a_missing_dotfiles_directory_in_a_git_repo("missing-dots");
 
     let output = sandboxed_command(&temp_dir)
         .args(["sync", "status"])
@@ -196,4 +196,33 @@ fn sync_status_does_not_report_success_over_a_missing_dotfiles_directory() {
     // does not fail the command. This asserts the exit code selfie actually
     // returns rather than a code chosen to fit an assumption.
     assert_eq!(output.status.code(), Some(CLEAN), "output was: {text}");
+}
+
+// The relayed warning names the directory as a path, as drift itself does:
+// U+200B in it shows escaped in the sentence, and the `mkdir -p` it offers
+// has the note that spells the command out.
+#[test]
+fn sync_status_names_a_missing_dotfiles_directory_as_a_path() {
+    let temp_dir = sandbox_with_a_missing_dotfiles_directory_in_a_git_repo("missing-d\u{200B}ots");
+
+    let output = sandboxed_command(&temp_dir)
+        .args(["--no-color", "sync", "status"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    assert!(
+        text.contains(r"missing-d\u{200b}ots does not exist"),
+        "must name the directory escaped: {text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.contains("Escaped: mkdir -p -- ")
+                && line.contains(r"missing-d\u{200b}ots")),
+        "must spell the command out under it: {text}"
+    );
 }

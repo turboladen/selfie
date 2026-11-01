@@ -8,6 +8,9 @@
 pub mod metadata;
 
 pub use self::metadata::OperationType;
+pub use crate::package::collect::directory::{
+    DotfilesDirectoryWarning, TrackDirectoryRefusal, UnreadableDotfilesDirectory,
+};
 pub use crate::package::collect::warning::CollectionRefusal;
 
 /// Represents the completion status of steps in an operation
@@ -561,6 +564,18 @@ impl EventSender {
         let operation_info = self.touch_operation_info();
         log_warning(&operation_info, &warning.to_string());
         self.send(PackageEvent::DeployStateWarning {
+            operation_info,
+            warning,
+        })
+        .await;
+    }
+
+    /// Report a standalone dotfiles directory the command could not use, as a
+    /// warning-level log record and the event.
+    pub(crate) async fn send_dotfiles_directory_warning(&self, warning: DotfilesDirectoryWarning) {
+        let operation_info = self.touch_operation_info();
+        log_warning(&operation_info, &warning.to_string());
+        self.send(PackageEvent::DotfilesDirectoryWarning {
             operation_info,
             warning,
         })
@@ -1448,6 +1463,9 @@ pub enum OperationFailure {
     },
     /// A command that records what it writes stopped over the deploy state.
     DeployState(crate::dotfile_service::DeployStateFailure),
+    /// A standalone dotfile could not be tracked into a dotfiles directory
+    /// selfie could not read.
+    UnusableDotfilesDirectory(TrackDirectoryRefusal),
     /// Generic failure with a freeform message
     Generic(String),
 }
@@ -1715,6 +1733,7 @@ impl std::fmt::Display for OperationFailure {
                 }
             }
             OperationFailure::DeployState(failure) => write!(f, "{failure}"),
+            OperationFailure::UnusableDotfilesDirectory(refusal) => write!(f, "{refusal}"),
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -3293,6 +3312,13 @@ pub enum PackageEvent {
     DeployStateWarning {
         operation_info: OperationInfo,
         warning: crate::dotfile_service::DeployStateWarning,
+    },
+
+    /// A warning about a standalone dotfiles directory the command could not
+    /// use, whose `Display` is its sentence.
+    DotfilesDirectoryWarning {
+        operation_info: OperationInfo,
+        warning: DotfilesDirectoryWarning,
     },
 
     /// Package information loaded
@@ -5660,11 +5686,13 @@ mod tests {
     }
 
     fn unlistable_directory() -> CollectionRefusal {
-        CollectionRefusal::UnlistableDotfilesDirectory(crate::package::port::PackageListError::new(
-            "/d".into(),
-            crate::fs::DirectoryState::Unlistable(std::sync::Arc::new(std::io::Error::from(
-                std::io::ErrorKind::PermissionDenied,
-            ))),
+        CollectionRefusal::UnreadableDotfilesDirectory(UnreadableDotfilesDirectory::Unlistable(
+            crate::package::port::PackageListError::new(
+                "/d".into(),
+                crate::fs::DirectoryState::Unlistable(std::sync::Arc::new(std::io::Error::from(
+                    std::io::ErrorKind::PermissionDenied,
+                ))),
+            ),
         ))
     }
 

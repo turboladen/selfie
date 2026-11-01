@@ -53,10 +53,9 @@ impl std::fmt::Display for Shortfall {
             Self::Refused(CollectionRefusal::AmbiguousName { name, .. }) => {
                 write!(f, "several spec files claim the name '{name}'")
             }
-            Self::Refused(
-                CollectionRefusal::UnlistableDotfilesDirectory(_)
-                | CollectionRefusal::UncheckableDotfilesDirectory(_),
-            ) => f.write_str("the dotfiles directory could not be read"),
+            Self::Refused(CollectionRefusal::UnreadableDotfilesDirectory(_)) => {
+                f.write_str("the dotfiles directory could not be read")
+            }
             Self::SetAside(name) => write!(
                 f,
                 "dotfiles/ spec '{name}' is unused because packages/ claims its name"
