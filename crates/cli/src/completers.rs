@@ -8,95 +8,57 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use clap_complete::engine::CompletionCandidate;
-use etcetera::AppStrategy;
+use selfie::config::{YamlLoader, loader::ConfigLoader};
+use selfie::fs::{FileSystem, RealFileSystem};
 
 /// Complete package names from the configured package directory.
 ///
-/// Loads config, lists YAML files, strips extensions, filters by prefix.
-/// Returns empty vec on any error (completion errors must be silent).
+/// The directory is the one the configuration file names, found as every
+/// command finds it. A `--package-directory` on the same command line does not
+/// reach completion. Returns empty vec on any error (completion errors must be
+/// silent).
 pub(crate) fn complete_package_names(current: &OsStr) -> Vec<CompletionCandidate> {
-    let current_str = current.to_string_lossy();
-    let Some(package_dir) = resolve_package_directory() else {
+    // Folded as the names are, so `Neo` finds `neovim`.
+    let typed = current.to_string_lossy().to_lowercase();
+    let fs = RealFileSystem;
+    let Some(package_dir) = resolve_package_directory(&fs) else {
         return vec![];
     };
 
-    list_package_names(&package_dir)
+    list_package_names(&fs, &package_dir)
         .into_iter()
-        .filter(|name| name.starts_with(current_str.as_ref()))
+        .filter(|name| name.starts_with(&typed))
         .map(CompletionCandidate::new)
         .collect()
 }
 
-/// The one config setting a completion needs.
-// Only the one setting, because the file holds more than strings. `cli:` is a
-// mapping, so reading the file as a map of strings refuses it whole and every
-// completion comes back empty for anyone who set `verbose` or `use_colors`.
-// Unknown keys are ignored, so nothing else has to be modeled here.
-#[derive(serde::Deserialize)]
-struct PackageDirectory {
-    package_directory: String,
+/// The package directory the configuration file names, or `None` when there is
+/// no file, it does not load, or it names none.
+fn resolve_package_directory(fs: &impl FileSystem) -> Option<PathBuf> {
+    let loaded = YamlLoader::new(fs).load_config().ok()?;
+    // The file's value alone, not `resolve`, which also requires `environment`:
+    // a user who passes `--environment` on every command would get nothing.
+    loaded.config().package_directory(fs)
 }
 
-/// Resolve the package directory from the selfie config file.
-///
-/// Uses the same config-dir strategy as `RealFileSystem` (`etcetera`)
-/// so the completer finds the same config the app does.
-fn resolve_package_directory() -> Option<PathBuf> {
-    let strategy = etcetera::choose_app_strategy(etcetera::AppStrategyArgs {
-        top_level_domain: "com".to_string(),
-        author: "selfie".to_string(),
-        app_name: "selfie".to_string(),
-    })
-    .ok()?;
-
-    let config_dir = strategy.config_dir();
-    let config_path = ["config.yml", "config.yaml"]
-        .iter()
-        .map(|name| config_dir.join(name))
-        .find(|p: &PathBuf| p.exists())?;
-
-    let contents = std::fs::read_to_string(config_path).ok()?;
-    let config: PackageDirectory = selfie::yaml::parse(&contents).ok()?;
-    let expanded = shellexpand::tilde(config.package_directory.as_str());
-    let path = PathBuf::from(expanded.as_ref());
-
-    if path.is_dir() { Some(path) } else { None }
-}
-
-/// List package names (file stems of `.yml`/`.yaml` files) in a directory.
+/// The package names in `dir`, empty when it cannot be listed.
 ///
 /// A name a [`Name`](crate::terminal_text::Name) would show escaped is left
 /// out: one holding a character the terminal would act on, one that renders as
 /// nothing, or a blank other than a space. The shell inserts a candidate as
 /// written, so it cannot be shown escaped, and a newline would split it into
 /// two candidates.
-fn list_package_names(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-
-    entries
-        .filter_map(|e| e.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let ext = path.extension()?.to_str()?;
-            if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") {
-                path.file_stem()?
-                    .to_str()
-                    .filter(|name| crate::terminal_text::Name::is_plain(name))
-                    .map(String::from)
-            } else {
-                None
-            }
-        })
+fn list_package_names(fs: &impl FileSystem, dir: &Path) -> Vec<String> {
+    selfie::package::repository::yaml::package_names(fs, dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| crate::terminal_text::Name::is_plain(name))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::ffi::OsString;
 
     use tempfile::TempDir;
 
@@ -117,45 +79,15 @@ mod tests {
             std::fs::write(dir.path().join(format!("{name}.yml")), "").unwrap();
         }
 
-        assert_eq!(list_package_names(dir.path()), ["plain"]);
-    }
-
-    #[test]
-    fn list_package_names_finds_yaml_files() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("node.yml"), "").unwrap();
-        std::fs::write(dir.path().join("rust.yaml"), "").unwrap();
-        std::fs::write(dir.path().join("readme.md"), "").unwrap();
-
-        let mut names = list_package_names(dir.path());
-        names.sort();
-        assert_eq!(names, vec!["node", "rust"]);
+        assert_eq!(list_package_names(&RealFileSystem, dir.path()), ["plain"]);
     }
 
     #[test]
     fn list_package_names_returns_empty_for_nonexistent_dir() {
-        let names = list_package_names(Path::new("/nonexistent/path/that/does/not/exist"));
+        let names = list_package_names(
+            &RealFileSystem,
+            Path::new("/nonexistent/path/that/does/not/exist"),
+        );
         assert!(names.is_empty());
-    }
-
-    // The layout `docs/configuration.md` prescribes, read the way the completer
-    // reads it. `cli:` is a mapping and `command_timeout` a number, so a shape
-    // that accepted only strings would refuse the whole file and hand every TAB
-    // press an empty list -- silently, since completion errors are swallowed.
-    #[test]
-    fn the_documented_config_layout_still_yields_a_package_directory() {
-        let yaml = "environment: macos\npackage_directory: ~/.selfie/packages\n\
-                    command_timeout: 60\ncli:\n  verbose: true\n  use_colors: false\n";
-
-        let config: PackageDirectory = selfie::yaml::parse(yaml).expect("the config must parse");
-
-        assert_eq!(config.package_directory, "~/.selfie/packages");
-    }
-
-    #[test]
-    fn complete_package_names_returns_empty_without_config() {
-        // With no real config, this should silently return empty
-        let result = complete_package_names(&OsString::from("nonexistent-prefix-xyz"));
-        assert!(result.is_empty());
     }
 }

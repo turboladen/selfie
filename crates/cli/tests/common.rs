@@ -196,6 +196,29 @@ pub fn sandboxed_std_command(temp_dir: &TempDir) -> std::process::Command {
     cmd
 }
 
+/// A sandbox whose configuration path, `.config/selfie/config.yaml`, is a fifo.
+///
+/// Every command reads that file before doing anything else, so a command that
+/// opened it without the irregular-file guard would block until a writer
+/// arrived. Run it with a timeout.
+///
+/// # Panics
+///
+/// Panics if the sandbox, its configuration directory or the fifo cannot be
+/// created.
+#[must_use]
+pub fn config_dir_with_fifo() -> TempDir {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_dir = temp_dir.path().join(".config").join("selfie");
+    fs::create_dir_all(&config_dir).unwrap();
+    nix::unistd::mkfifo(
+        &config_dir.join("config.yaml"),
+        nix::sys::stat::Mode::S_IRWXU,
+    )
+    .unwrap();
+    temp_dir
+}
+
 /// A `selfie` command with no sandbox at all.
 ///
 /// Only for runs that exit before any config, `HOME` or `EDITOR` lookup: a clap

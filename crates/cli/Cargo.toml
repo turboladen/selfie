@@ -13,8 +13,6 @@ doc = false
 anyhow.workspace = true
 clap = { version = "4.5.31", features = ["derive"] }
 clap_complete = { version = "4.5", features = ["unstable-dynamic"] }
-etcetera.workspace = true
-shellexpand.workspace = true
 comfy-table = { version = "8.0.0", features = ["custom_styling"] }
 console.workspace = true
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
