@@ -229,6 +229,23 @@ fn completion_offers_nothing_when_the_package_directory_is_a_file() {
     assert!(candidates(&complete(sandboxed_command(&temp), PREFIX)).is_empty());
 }
 
+// Every command folds a package name to lower case. The typed word is folded
+// the same way, so `pkg-Neo` still finds the spec `pkg-Neovim.yaml`.
+#[test]
+fn completion_matches_the_typed_word_ignoring_case() {
+    let temp = tempfile::tempdir().unwrap();
+    fixture(
+        &temp.path().join(".config/selfie"),
+        &temp.path().join("pkgs"),
+        &["pkg-Neovim"],
+    );
+
+    assert_eq!(
+        candidates(&complete(sandboxed_command(&temp), "pkg-Neo")),
+        ["pkg-neovim"]
+    );
+}
+
 // Every package-name argument registers the same completer; this one stands in
 // for those other than `spec edit`.
 #[test]

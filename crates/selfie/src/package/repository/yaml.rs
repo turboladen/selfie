@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -82,6 +83,35 @@ pub(crate) fn list_spec_directory<F: FileSystem + ?Sized>(
     fs.list_directory(dir)
         .map_err(preserving_kind)
         .map_err(|error| PackageListError::from_listing(fs, dir.to_path_buf(), &error))
+}
+
+/// The names of the packages whose spec files are in `dir`, sorted, without
+/// reading any of them.
+///
+/// Each is the name every command knows the package by, so `Neovim.YML` is
+/// `neovim`, and each appears once, even for a package with two spec files. A
+/// file whose stem no command accepts as a name, such as `my pkg.yml`, is left
+/// out.
+///
+/// # Errors
+///
+/// [`PackageListError`] carrying `dir` and what is at it, when that is not a
+/// directory or its entries cannot be read.
+pub fn package_names<F: FileSystem + ?Sized>(
+    fs: &F,
+    dir: &Path,
+) -> Result<BTreeSet<String>, PackageListError> {
+    Ok(list_spec_directory(fs, dir)?
+        .iter()
+        // The stem as spelled, as `load_package_from_file` checks it, so no
+        // name is offered whose spec every command refuses to load.
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(crate::package::is_valid_spec_name)
+        })
+        .filter_map(|path| crate::package::spec_name_of(path))
+        .collect())
 }
 
 impl<F: FileSystem> YamlPackageRepository<F> {
@@ -1031,6 +1061,35 @@ mod tests {
         assert!(ripgrep.environments().contains_key("test-env"));
 
         assert!(fzf.environments().contains_key("other-env"));
+    }
+
+    // Listed out of order, with a mixed-case extension, two files for one
+    // package, entries that name no package, and stems no command accepts.
+    #[test]
+    fn package_names_are_folded_sorted_unique_and_valid() {
+        let mut fs = MockFileSystem::default();
+        fs.mock_directories_exist();
+        let dir = PathBuf::from("/test/dir");
+        let cloned = dir.clone();
+        fs.expect_list_directory()
+            .with(predicate::eq(dir.clone()))
+            .returning(move |_| {
+                Ok(vec![
+                    cloned.join("zzz.yml"),
+                    cloned.join("Neovim.YML"),
+                    cloned.join("readme.md"),
+                    cloned.join("aaa.yaml"),
+                    cloned.join("neovim.yaml"),
+                    cloned.join(".yml"),
+                    cloned.join("my pkg.yml"),
+                    cloned.join("trailing..yml"),
+                ])
+            });
+
+        assert_eq!(
+            Vec::from_iter(super::package_names(&fs, &dir).unwrap()),
+            ["aaa", "neovim", "zzz"]
+        );
     }
 
     #[test]

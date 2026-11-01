@@ -18,14 +18,16 @@ use selfie::fs::{FileSystem, RealFileSystem};
 /// reach completion. Returns empty vec on any error (completion errors must be
 /// silent).
 pub(crate) fn complete_package_names(current: &OsStr) -> Vec<CompletionCandidate> {
-    let current_str = current.to_string_lossy();
-    let Some(package_dir) = resolve_package_directory(&RealFileSystem) else {
+    // Folded as the names are, so `Neo` finds `neovim`.
+    let typed = current.to_string_lossy().to_lowercase();
+    let fs = RealFileSystem;
+    let Some(package_dir) = resolve_package_directory(&fs) else {
         return vec![];
     };
 
-    list_package_names(&package_dir)
+    list_package_names(&fs, &package_dir)
         .into_iter()
-        .filter(|name| name.starts_with(current_str.as_ref()))
+        .filter(|name| name.starts_with(&typed))
         .map(CompletionCandidate::new)
         .collect()
 }
@@ -39,32 +41,18 @@ fn resolve_package_directory(fs: &impl FileSystem) -> Option<PathBuf> {
     loaded.config().package_directory(fs)
 }
 
-/// List package names (file stems of `.yml`/`.yaml` files) in a directory.
+/// The package names in `dir`, empty when it cannot be listed.
 ///
 /// A name a [`Name`](crate::terminal_text::Name) would show escaped is left
 /// out: one holding a character the terminal would act on, one that renders as
 /// nothing, or a blank other than a space. The shell inserts a candidate as
 /// written, so it cannot be shown escaped, and a newline would split it into
 /// two candidates.
-fn list_package_names(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return vec![];
-    };
-
-    entries
-        .filter_map(|e| e.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let ext = path.extension()?.to_str()?;
-            if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") {
-                path.file_stem()?
-                    .to_str()
-                    .filter(|name| crate::terminal_text::Name::is_plain(name))
-                    .map(String::from)
-            } else {
-                None
-            }
-        })
+fn list_package_names(fs: &impl FileSystem, dir: &Path) -> Vec<String> {
+    selfie::package::repository::yaml::package_names(fs, dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| crate::terminal_text::Name::is_plain(name))
         .collect()
 }
 
@@ -91,24 +79,15 @@ mod tests {
             std::fs::write(dir.path().join(format!("{name}.yml")), "").unwrap();
         }
 
-        assert_eq!(list_package_names(dir.path()), ["plain"]);
-    }
-
-    #[test]
-    fn list_package_names_finds_yaml_files() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("node.yml"), "").unwrap();
-        std::fs::write(dir.path().join("rust.yaml"), "").unwrap();
-        std::fs::write(dir.path().join("readme.md"), "").unwrap();
-
-        let mut names = list_package_names(dir.path());
-        names.sort();
-        assert_eq!(names, vec!["node", "rust"]);
+        assert_eq!(list_package_names(&RealFileSystem, dir.path()), ["plain"]);
     }
 
     #[test]
     fn list_package_names_returns_empty_for_nonexistent_dir() {
-        let names = list_package_names(Path::new("/nonexistent/path/that/does/not/exist"));
+        let names = list_package_names(
+            &RealFileSystem,
+            Path::new("/nonexistent/path/that/does/not/exist"),
+        );
         assert!(names.is_empty());
     }
 }
