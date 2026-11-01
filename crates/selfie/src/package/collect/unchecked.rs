@@ -49,9 +49,8 @@ impl From<&CollectionRefusal> for Unchecked {
                 path: error.package_path().to_path_buf(),
                 base: *base,
             },
-            CollectionRefusal::UnlistableDotfilesDirectory(error)
-            | CollectionRefusal::UncheckableDotfilesDirectory(error) => {
-                Self::DotfilesDirectory(error.clone())
+            CollectionRefusal::UnreadableDotfilesDirectory(unreadable) => {
+                Self::DotfilesDirectory(unreadable.error().clone())
             }
             CollectionRefusal::AmbiguousName { name, paths, base } => Self::Ambiguous {
                 name: name.clone(),

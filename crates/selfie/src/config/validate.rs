@@ -10,11 +10,13 @@ use thiserror::Error;
 
 use crate::{
     fs::{AbsentReason, DirectoryState, FileSystem},
-    package::collect::directory::{UnlistedDotfilesDirectory, absent_warning},
+    package::collect::directory::{
+        DotfilesDirectoryWarning, UnlistedDotfilesDirectory, UnreadableDotfilesDirectory,
+    },
     package::repository::yaml::list_spec_directory,
     validation::{
-        DeployStateNotice, ValidationErrorCategory, ValidationIssue, ValidationIssues,
-        ValidationLevel,
+        DeployStateNotice, DirectoryIssue, ValidationErrorCategory, ValidationIssue,
+        ValidationIssues, ValidationLevel,
     },
 };
 
@@ -274,11 +276,15 @@ fn package_directory_issue(fs: &impl FileSystem, path: &Path) -> Option<Validati
     // command reaches, `Unlistable` included. `spec create` alone carries on over
     // a missing directory, creating it, which is why the remedy is still offered.
     let error = list_spec_directory(fs, path).err()?;
-    Some(ValidationIssue::error(
-        ValidationErrorCategory::PathFormat,
+    let suggestion = directory_suggestion(path, error.state());
+    Some(ValidationIssue::of_directory(
+        ValidationLevel::Error,
         "package_directory",
-        &format!("The `package_directory` path {error}"),
-        Some(&directory_suggestion(path, error.state())),
+        DirectoryIssue::Listing {
+            setting: "package_directory",
+            error,
+        },
+        Some(&suggestion),
     ))
 }
 
@@ -294,35 +300,36 @@ fn dotfiles_directory_issue(
     let check_it = directory_suggestion(path, error.state());
     let unlisted = UnlistedDotfilesDirectory::classify(error, configured);
     let refuses = unlisted.refuses_collection();
-    let (message, suggestion) = match unlisted {
+    let (issue, suggestion) = match unlisted {
         UnlistedDotfilesDirectory::OrdinarilyAbsent => return None,
         // The commands' own sentence already ends with the remedy, so only the
         // correction of a setting the user typed is suggested beside it.
         UnlistedDotfilesDirectory::Absent { path, reason } => (
-            absent_warning(&path, &reason),
+            DirectoryIssue::Dotfiles(DotfilesDirectoryWarning::Absent { path, reason }),
             configured.then(|| "Correct the setting if the path is a typo".to_string()),
         ),
-        UnlistedDotfilesDirectory::Unlistable(error)
-        | UnlistedDotfilesDirectory::Unknown(error) => (
-            format!("The `dotfiles_directory` path {error}"),
+        UnlistedDotfilesDirectory::Unreadable(
+            UnreadableDotfilesDirectory::Unlistable(error)
+            | UnreadableDotfilesDirectory::Uncheckable(error),
+        ) => (
+            DirectoryIssue::Listing {
+                setting: "dotfiles_directory",
+                error,
+            },
             Some(check_it),
         ),
     };
-    Some(if refuses {
-        ValidationIssue::error(
-            ValidationErrorCategory::PathFormat,
-            "dotfiles_directory",
-            &message,
-            suggestion.as_deref(),
-        )
+    let level = if refuses {
+        ValidationLevel::Error
     } else {
-        ValidationIssue::warning(
-            ValidationErrorCategory::PathFormat,
-            "dotfiles_directory",
-            &message,
-            suggestion.as_deref(),
-        )
-    })
+        ValidationLevel::Warning
+    };
+    Some(ValidationIssue::of_directory(
+        level,
+        "dotfiles_directory",
+        issue,
+        suggestion.as_deref(),
+    ))
 }
 
 /// What to do about a spec directory at `path` whose state is `state`.

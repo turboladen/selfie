@@ -3,8 +3,8 @@ use crate::received;
 use crate::terminal_text::{DisplayPath, Literal, Name, Shown, lit, shown};
 use selfie::package::{
     event::{
-        CollectionRefusal, OperationResult, OperationSuccess, Outcome, PackageEvent,
-        RefusedPackage, SpecStatus, ValidationResultData,
+        CollectionRefusal, DotfilesDirectoryWarning, OperationResult, OperationSuccess, Outcome,
+        PackageEvent, RefusedPackage, SpecStatus, ValidationResultData,
     },
     port::PackageParseError,
     service::SpecService,
@@ -114,7 +114,8 @@ fn handle_validate_all_event(
         }
         PackageEvent::SpecSkipped { .. }
         | PackageEvent::PackagesRefused { .. }
-        | PackageEvent::Warning { .. } => {
+        | PackageEvent::Warning { .. }
+        | PackageEvent::DotfilesDirectoryWarning { .. } => {
             held.warnings.push(event.clone());
             true
         }
@@ -164,9 +165,12 @@ fn print_unlisted_warnings(
                     display.print_warning(line);
                 }
             }
-            // A directory refusal arrives as a plain warning carrying its
-            // sentence, so that sentence is what identifies it.
-            PackageEvent::Warning { message, .. } if !listed(&|r| names_directory(r, message)) => {
+            PackageEvent::DotfilesDirectoryWarning { warning, .. }
+                if !listed(&|r| names_directory(r, warning)) =>
+            {
+                display.print_warning(received::composed(warning));
+            }
+            PackageEvent::Warning { message, .. } => {
                 display.print_warning(received::message(message));
             }
             _ => {}
@@ -180,13 +184,15 @@ fn names_file(refusal: &CollectionRefusal, error: &PackageParseError) -> bool {
         if refused.package_path() == error.package_path())
 }
 
-/// Whether `refusal` is the unreadable directory the warning `message` reports.
-fn names_directory(refusal: &CollectionRefusal, message: &str) -> bool {
+/// Whether `refusal` is the unreadable directory `warning` reports.
+fn names_directory(refusal: &CollectionRefusal, warning: &DotfilesDirectoryWarning) -> bool {
     matches!(
-        refusal,
-        CollectionRefusal::UnlistableDotfilesDirectory(_)
-            | CollectionRefusal::UncheckableDotfilesDirectory(_)
-    ) && refusal.sentence() == message
+        (refusal, warning),
+        (
+            CollectionRefusal::UnreadableDotfilesDirectory(refused),
+            DotfilesDirectoryWarning::Unreadable(warned),
+        ) if refused.error().path() == warned.error().path()
+    )
 }
 
 /// Whether `refusal` is the ambiguous name `package` reports.
@@ -255,14 +261,13 @@ impl Unvalidated {
             },
             // One class for both, as the summary counts them; the message says
             // which.
-            CollectionRefusal::UnlistableDotfilesDirectory(error)
-            | CollectionRefusal::UncheckableDotfilesDirectory(error) => Self {
-                spec: DisplayPath::of(error.path()).into(),
+            CollectionRefusal::UnreadableDotfilesDirectory(unreadable) => Self {
+                spec: DisplayPath::of(unreadable.error().path()).into(),
                 status: refusal.status(),
                 issues: None,
-                label: DisplayPath::of(error.path()).into(),
+                label: DisplayPath::of(unreadable.error().path()).into(),
                 field: None,
-                message: received::message(refusal.sentence()).into(),
+                message: received::composed(unreadable),
                 location: None,
             },
         }
@@ -419,6 +424,7 @@ fn issue_rows(validation_result: &ValidationResultData) -> Vec<received::Issue> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use selfie::package::event::UnreadableDotfilesDirectory as Unreadable;
     use selfie::package::event::ValidationIssueData;
     use selfie::package::port::PackageListError;
     use selfie::validation::ValidationErrorCategory;
@@ -459,14 +465,14 @@ mod tests {
         let denied =
             || std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
         let unvalidated = [
-            CollectionRefusal::UnlistableDotfilesDirectory(directory(
+            CollectionRefusal::UnreadableDotfilesDirectory(Unreadable::Unlistable(directory(
                 "/listed",
                 selfie::fs::DirectoryState::Unlistable(denied()),
-            )),
-            CollectionRefusal::UncheckableDotfilesDirectory(directory(
+            ))),
+            CollectionRefusal::UnreadableDotfilesDirectory(Unreadable::Uncheckable(directory(
                 "/checked",
                 selfie::fs::DirectoryState::Unknown(denied()),
-            )),
+            ))),
         ];
         let display = DisplayManager::new(false);
 
@@ -523,12 +529,83 @@ mod tests {
         );
     }
 
+    // `validate --all` over `events`: its exit and everything it printed.
+    async fn run_over(events: Vec<PackageEvent>) -> (Exit, String) {
+        use selfie::package::{event::EventStream, service::MockSpecService};
+
+        let mut service = MockSpecService::new();
+        service.expect_validate_all().return_once(move || {
+            Box::pin(async move { Box::pin(futures::stream::iter(events)) as EventStream })
+        });
+        let config = CliConfig::wrap_for_test(
+            selfie::config::SelfieConfigBuilder::default()
+                .environment("test")
+                .build(),
+        );
+        let display = DisplayManager::new(false);
+
+        let exit = handle_validate_all(&service, &config, &display).await;
+        (exit, printed(&display))
+    }
+
+    // A dotfiles directory the run lists as unvalidated is said once, in its
+    // entry, and its warning is not printed beside it. A warning about another
+    // directory is still printed, so the warning is held and matched rather
+    // than dropped.
+    #[tokio::test]
+    async fn a_listed_directory_is_said_once() {
+        use selfie::package::event::{DotfilesDirectoryWarning, StepCount};
+
+        let denied = test_common::permission_denied;
+        let listed = directory("/listed", selfie::fs::DirectoryState::Unlistable(denied()));
+        let other = directory("/other", selfie::fs::DirectoryState::Unlistable(denied()));
+        let events = vec![
+            PackageEvent::DotfilesDirectoryWarning {
+                operation_info: info(),
+                warning: DotfilesDirectoryWarning::Unreadable(Unreadable::Unlistable(
+                    listed.clone(),
+                )),
+            },
+            PackageEvent::DotfilesDirectoryWarning {
+                operation_info: info(),
+                warning: DotfilesDirectoryWarning::Unreadable(Unreadable::Unlistable(other)),
+            },
+            PackageEvent::Completed {
+                operation_info: info(),
+                result: OperationResult::Success(OperationSuccess::SpecsValidated {
+                    validated_count: 0,
+                    error_count: 0,
+                    unvalidated: vec![CollectionRefusal::UnreadableDotfilesDirectory(
+                        Unreadable::Unlistable(listed),
+                    )],
+                    warning_count: 0,
+                    other_warning_count: 1,
+                    environment: "test".to_string(),
+                    steps_completed: StepCount::new(1, 1),
+                }),
+            },
+        ];
+
+        let (_, out) = run_over(events).await;
+
+        assert_eq!(
+            out.matches("Failed to load standalone dotfiles: /listed")
+                .count(),
+            1,
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("Failed to load standalone dotfiles: /other")
+                .count(),
+            1,
+            "{out}"
+        );
+    }
+
     // `validate --all` over a stream holding a skipped spec, a validated spec,
     // and then `last`, if any: its exit and everything it printed.
     async fn run_ending_with(last: Option<PackageEvent>) -> (Exit, String) {
-        use selfie::package::{
-            event::EventStream, port::PackageParseKind, service::MockSpecService,
-        };
+        use selfie::package::port::PackageParseKind;
 
         let mut events = vec![
             PackageEvent::SpecSkipped {
@@ -546,19 +623,7 @@ mod tests {
             },
         ];
         events.extend(last);
-        let mut service = MockSpecService::new();
-        service.expect_validate_all().return_once(move || {
-            Box::pin(async move { Box::pin(futures::stream::iter(events)) as EventStream })
-        });
-        let config = CliConfig::wrap_for_test(
-            selfie::config::SelfieConfigBuilder::default()
-                .environment("test")
-                .build(),
-        );
-        let display = DisplayManager::new(false);
-
-        let exit = handle_validate_all(&service, &config, &display).await;
-        (exit, printed(&display))
+        run_over(events).await
     }
 
     fn info() -> selfie::package::event::OperationInfo {

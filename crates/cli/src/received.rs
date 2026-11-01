@@ -421,6 +421,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         OperationFailure::Package(error) => package_error(error),
         OperationFailure::DeployState(failure) => composed(failure),
         OperationFailure::PackageList(error) => composed(error),
+        OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
         OperationFailure::UnreadableSpec {
             package_name,
             reason,
@@ -1352,6 +1353,120 @@ mod tests {
             })
             .collect();
         assert_renders_as_its_display(&refusals);
+    }
+
+    // Each sentence about a dotfiles directory a command could not use, and
+    // each directory issue, for the listing error of every state.
+    fn directory_sentences(
+        root: &str,
+    ) -> (
+        Vec<selfie::package::event::DotfilesDirectoryWarning>,
+        Vec<selfie::package::event::TrackDirectoryRefusal>,
+        Vec<selfie::validation::DirectoryIssue>,
+    ) {
+        use selfie::fs::DirectoryState;
+        use selfie::package::event::{
+            DotfilesDirectoryWarning as Warning, TrackDirectoryRefusal,
+            UnreadableDotfilesDirectory as Unreadable,
+        };
+        use selfie::validation::DirectoryIssue;
+
+        let errors = test_common::every_listing_error(root);
+        let warnings: Vec<Warning> = errors
+            .iter()
+            .filter_map(|error| match error.state() {
+                DirectoryState::Absent(reason) => Some(Warning::Absent {
+                    path: error.path().to_path_buf(),
+                    reason: reason.clone(),
+                }),
+                DirectoryState::Unlistable(_) => {
+                    Some(Warning::Unreadable(Unreadable::Unlistable(error.clone())))
+                }
+                DirectoryState::Unknown(_) => {
+                    Some(Warning::Unreadable(Unreadable::Uncheckable(error.clone())))
+                }
+                DirectoryState::Directory => None,
+            })
+            .collect();
+        let refusals = errors
+            .iter()
+            .cloned()
+            .map(TrackDirectoryRefusal::new)
+            .collect();
+        let issues = errors
+            .iter()
+            .map(|error| DirectoryIssue::Listing {
+                setting: "dotfiles_directory",
+                error: error.clone(),
+            })
+            .chain(warnings.iter().cloned().map(DirectoryIssue::Dotfiles))
+            .collect();
+        (warnings, refusals, issues)
+    }
+
+    // A dotfiles directory's warning, a track's refusal over one and a
+    // directory issue read as the library words them, in every state.
+    #[test]
+    fn a_directory_sentence_reads_as_the_library_words_it() {
+        let (warnings, refusals, issues) = directory_sentences("/d");
+        assert_eq!(warnings.len(), 7);
+        assert_renders_as_its_display(&warnings);
+        assert_renders_as_its_display(&refusals);
+        assert_renders_as_its_display(&issues);
+    }
+
+    // Each of them names the directory as a path once, and a path inside the
+    // reason, such as a link's destination, as a path too. A raw U+200B or
+    // line feed never shows, outside the note that follows a command.
+    #[test]
+    fn a_directory_sentence_names_its_paths_as_paths() {
+        let root = "/d/g\u{200B}one\nx";
+        let escaped = r"/d/g\u{200b}one\nx";
+        let (warnings, refusals, issues) = directory_sentences(root);
+        let mut shown: Vec<String> = warnings
+            .iter()
+            .map(|warning| composed(warning).into_string())
+            .collect();
+        shown.extend(
+            refusals
+                .iter()
+                .map(|refusal| composed(refusal).into_string()),
+        );
+        shown.extend(
+            refusals
+                .iter()
+                .cloned()
+                .map(|refusal| failure(&OperationFailure::UnusableDotfilesDirectory(refusal)))
+                .map(Shown::into_string),
+        );
+        shown.extend(issues.iter().map(|issue| composed(issue).into_string()));
+        // Only an empty path is offered `mkdir -p`. Its command keeps the
+        // invisible character, so that it creates the path as written, and a
+        // note under it spells the command out. Every other sentence shows
+        // none raw.
+        let (offering, plain): (Vec<&String>, Vec<&String>) = shown
+            .iter()
+            .partition(|shown| shown.contains("Create it with: "));
+        assert_eq!(offering.len(), 4, "{offering:#?}");
+        for shown in &offering {
+            let lines: Vec<&str> = shown.lines().collect();
+            assert_eq!(lines.len(), 2, "{shown:?}");
+            let words = lines[0].split("Create it with: ").next().expect("a part");
+            assert!(!words.contains('\u{200B}'), "{shown:?}");
+            assert_eq!(
+                lines[1],
+                format!("Escaped: mkdir -p -- '{escaped}/dots'"),
+                "{shown:?}"
+            );
+        }
+        for shown in &plain {
+            assert!(!shown.contains(['\u{200B}', '\n']), "{shown:?}");
+        }
+        for shown in &shown {
+            let sentence = shown.lines().next().expect("a line");
+            let named = sentence.matches(&format!("{escaped}/dots")).count();
+            assert_eq!(named, 1, "{shown:?}");
+        }
     }
 
     // A listing error names its directory as a path, once, on every route the

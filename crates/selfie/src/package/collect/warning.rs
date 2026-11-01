@@ -38,10 +38,7 @@ impl Finding {
             Self::Warning(ApplyWarning::Named { name, .. })
             | Self::Refusal(CollectionRefusal::AmbiguousName { name, .. }) => Some(name.clone()),
             Self::Warning(ApplyWarning::AbsentDotfilesDirectory { .. })
-            | Self::Refusal(
-                CollectionRefusal::UnlistableDotfilesDirectory(_)
-                | CollectionRefusal::UncheckableDotfilesDirectory(_),
-            ) => None,
+            | Self::Refusal(CollectionRefusal::UnreadableDotfilesDirectory(_)) => None,
         };
         about.is_some_and(|about| about != name.to_lowercase())
     }
@@ -97,7 +94,12 @@ impl ApplyWarning {
             Self::SkippedSpec(error) => sender.send_spec_skipped(error.clone()).await,
             Self::AbsentDotfilesDirectory { path, reason } => {
                 sender
-                    .send_warning(super::directory::absent_warning(path, reason))
+                    .send_dotfiles_directory_warning(
+                        super::directory::DotfilesDirectoryWarning::Absent {
+                            path: path.clone(),
+                            reason: reason.clone(),
+                        },
+                    )
                     .await;
             }
             Self::Named { message, .. } => sender.send_warning(message.clone()).await,
@@ -112,13 +114,9 @@ impl ApplyWarning {
 /// say why; [`sentence`](Self::sentence) says it as prose.
 #[derive(Debug, Clone)]
 pub enum CollectionRefusal {
-    /// A dotfiles directory that exists and could not be listed, so it may hold
+    /// A dotfiles directory selfie could not read through, so it may hold
     /// standalone dotfiles.
-    UnlistableDotfilesDirectory(crate::package::port::PackageListError),
-    /// A dotfiles directory path that could not be classified, so nothing is known
-    /// about what is at it. Kept apart from the unlistable one because that one
-    /// says a directory is there: this one cannot say even that.
-    UncheckableDotfilesDirectory(crate::package::port::PackageListError),
+    UnreadableDotfilesDirectory(super::directory::UnreadableDotfilesDirectory),
     /// A name several spec files in one directory claim, so none of them is used.
     /// Carries the files, sorted.
     AmbiguousName {
@@ -153,7 +151,7 @@ impl CollectionRefusal {
                 .iter()
                 .map(|path| UncheckedSource::spec_file(path, *base))
                 .collect(),
-            Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
+            Self::UnreadableDotfilesDirectory(_) => {
                 vec![UncheckedSource::DotfilesDirectory]
             }
         }
@@ -166,19 +164,14 @@ impl CollectionRefusal {
         match self {
             Self::UnloadableSpec { .. } => SpecStatus::Unparsable,
             Self::AmbiguousName { .. } => SpecStatus::Ambiguous,
-            Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
-                SpecStatus::Unlistable
-            }
+            Self::UnreadableDotfilesDirectory(_) => SpecStatus::Unlistable,
         }
     }
 
     /// Whether this refusal is a dotfiles directory selfie could not read
     /// through, so a collection holding it is missing whatever the directory has.
     pub(crate) fn is_unreadable_directory(&self) -> bool {
-        matches!(
-            self,
-            Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_)
-        )
+        matches!(self, Self::UnreadableDotfilesDirectory(_))
     }
 
     /// This refusal as a sentence for a person. A spec that could not be loaded
@@ -187,12 +180,7 @@ impl CollectionRefusal {
     #[must_use]
     pub fn sentence(&self) -> String {
         match self {
-            Self::UnlistableDotfilesDirectory(error) => {
-                format!("Failed to load standalone dotfiles: {error}")
-            }
-            Self::UncheckableDotfilesDirectory(error) => {
-                format!("Could not check the standalone dotfiles directory: {error}")
-            }
+            Self::UnreadableDotfilesDirectory(unreadable) => unreadable.to_string(),
             Self::AmbiguousName { name, paths, .. } => {
                 crate::package::port::ambiguous_files_sentence(name, paths)
             }
@@ -200,13 +188,17 @@ impl CollectionRefusal {
         }
     }
 
-    // Each refusal leaves as the event its kind calls for: a directory as a
-    // warning, a name as a refused package, an unloadable spec typed, so each
-    // adapter renders it. All but the last carry `sentence`.
+    // Each refusal leaves as the event its kind calls for: a directory as its
+    // warning, a name as a refused package carrying `sentence`, an unloadable
+    // spec typed, so each adapter renders it.
     async fn send(&self, sender: &crate::package::event::EventSender) {
         match self {
-            Self::UnlistableDotfilesDirectory(_) | Self::UncheckableDotfilesDirectory(_) => {
-                sender.send_warning(self.sentence()).await;
+            Self::UnreadableDotfilesDirectory(unreadable) => {
+                sender
+                    .send_dotfiles_directory_warning(
+                        super::directory::DotfilesDirectoryWarning::Unreadable(unreadable.clone()),
+                    )
+                    .await;
             }
             Self::AmbiguousName { name, paths, .. } => {
                 sender
@@ -232,6 +224,7 @@ pub(crate) fn no_such_package(
     findings: &[Finding],
     unrefused_ambiguities: &[(String, Vec<PathBuf>, crate::package::event::BaseKind)],
 ) -> OperationFailure {
+    use super::directory::UnreadableDotfilesDirectory as Unreadable;
     use crate::package::event::NoSuchPackageReason;
 
     // The unloadable check runs before either not-found answer. A spec that
@@ -280,9 +273,19 @@ pub(crate) fn no_such_package(
         NoSuchPackageReason::Ambiguous { conflicting_paths }
     } else if unloadable {
         NoSuchPackageReason::NotLoaded
-    } else if refused(|r| matches!(r, CollectionRefusal::UnlistableDotfilesDirectory(_))) {
+    } else if refused(|r| {
+        matches!(
+            r,
+            CollectionRefusal::UnreadableDotfilesDirectory(Unreadable::Unlistable(_))
+        )
+    }) {
         NoSuchPackageReason::MaybeInUnlistableDirectory
-    } else if refused(|r| matches!(r, CollectionRefusal::UncheckableDotfilesDirectory(_))) {
+    } else if refused(|r| {
+        matches!(
+            r,
+            CollectionRefusal::UnreadableDotfilesDirectory(Unreadable::Uncheckable(_))
+        )
+    }) {
         NoSuchPackageReason::MaybeInUncheckableDirectory
     } else {
         NoSuchPackageReason::NotFound

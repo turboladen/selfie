@@ -140,22 +140,6 @@ impl Composed for AbsentReason {
 }
 
 impl AbsentReason {
-    /// The command that would create the directory at `path`, or `None` when no
-    /// single command is the remedy.
-    ///
-    /// Only [`Empty`](Self::Empty) has one. `mkdir -p` fails with "File exists"
-    /// against a plain file and "No such file or directory" against a dangling
-    /// symlink, so offering it for those sends the user to a command that cannot
-    /// work. The path is shell-quoted, because the sentence exists to be pasted.
-    #[must_use]
-    pub fn remedy(&self, path: &Path) -> Option<String> {
-        if !self.creatable() {
-            return None;
-        }
-        crate::parts::SuggestedCommand::make_directory(path)
-            .map(|command| format!("Create it with: {command}"))
-    }
-
     /// Reports whether `mkdir -p` creates the directory, which it does only when
     /// nothing is at the path.
     #[must_use]

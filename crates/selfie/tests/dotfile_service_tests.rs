@@ -144,6 +144,7 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
         .flat_map(|event| match event {
             PackageEvent::Warning { message, .. } => vec![message.clone()],
             PackageEvent::DeployStateWarning { warning, .. } => vec![warning.to_string()],
+            PackageEvent::DotfilesDirectoryWarning { warning, .. } => vec![warning.to_string()],
             PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.clone()],
             PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.clone()],
             PackageEvent::PackagesRefused {

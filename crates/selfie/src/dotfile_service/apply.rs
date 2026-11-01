@@ -96,12 +96,11 @@ impl Stop {
                 "Stopped before applying anything: package '{name}' is refused (stop_on_error is \
                  enabled)"
             ),
-            Self::Collection(
-                CollectionRefusal::UnlistableDotfilesDirectory(_)
-                | CollectionRefusal::UncheckableDotfilesDirectory(_),
-            ) => "Stopped before applying anything: the standalone dotfiles directory could not \
+            Self::Collection(CollectionRefusal::UnreadableDotfilesDirectory(_)) => {
+                "Stopped before applying anything: the standalone dotfiles directory could not \
                   be read (stop_on_error is enabled)"
-                .to_string(),
+                    .to_string()
+            }
             Self::Collection(CollectionRefusal::AmbiguousName { name, .. }) => format!(
                 "Stopped before applying anything: several spec files claim the name '{name}' \
                  (stop_on_error is enabled)"
