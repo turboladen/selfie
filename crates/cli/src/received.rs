@@ -518,10 +518,9 @@ pub(crate) fn spec_name_suggestion(name: &str) -> Suggestion {
     }
 }
 
-/// `error`'s sentence, each path in it a [`DisplayPath`]. `None` for a
-/// file-system error, which carries causes of its own for the caller to show.
-pub(crate) fn config_load_error(error: &ConfigLoadError) -> Option<Shown> {
-    Some(match error {
+/// `error`'s sentence, each path in it a [`DisplayPath`].
+pub(crate) fn config_load_error(error: &ConfigLoadError) -> Shown {
+    match error {
         ConfigLoadError::Parse { path, failure } => shown!(
             "Cannot parse the configuration file {}: {}",
             DisplayPath::of(path),
@@ -546,8 +545,9 @@ pub(crate) fn config_load_error(error: &ConfigLoadError) -> Option<Shown> {
             "Multiple configuration files found: {}",
             Shown::join(paths.iter().map(|path| DisplayPath::new(path)), lit!(", "))
         ),
-        ConfigLoadError::FileSystemError(_) => return None,
-    })
+        // Its sentence is the filesystem error's own.
+        ConfigLoadError::FileSystemError(error) => composed(error),
+    }
 }
 
 /// What a step of a run is doing, on one line, as a spinner, a progress line
@@ -788,10 +788,29 @@ mod tests {
                 searched: "/c".into(),
             },
             ConfigLoadError::MultipleFound(vec!["/c/a.yaml".to_string(), "/c/b.yaml".to_string()]),
+            ConfigLoadError::FileSystemError(FileSystemError::IoError(selfie::fs::IoFailure::at(
+                std::path::Path::new("/c/config.yaml"),
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ))),
         ] {
-            let composed = config_load_error(&error).expect("a configuration file's error");
-            assert_eq!(composed.as_str(), error.to_string());
+            assert_eq!(config_load_error(&error).as_str(), error.to_string());
         }
+    }
+
+    // A filesystem error loading the configuration names its path as a path,
+    // as every other configuration error does.
+    #[test]
+    fn a_config_filesystem_error_names_its_path_escaped() {
+        let error =
+            ConfigLoadError::FileSystemError(FileSystemError::IoError(selfie::fs::IoFailure::at(
+                std::path::Path::new("/c/con\u{200B}fig\n.yaml"),
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )));
+
+        assert_eq!(
+            config_load_error(&error).as_str(),
+            r"IO error: /c/con\u{200b}fig\n.yaml: permission denied"
+        );
     }
 
     // Each package error and refusal the CLI composes reads as

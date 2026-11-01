@@ -123,7 +123,7 @@ fn report_startup_error(display: &DisplayManager, error: &anyhow::Error) {
     if let Some(composed) = (error.chain().count() == 1)
         .then(|| error.downcast_ref::<ConfigLoadError>())
         .flatten()
-        .and_then(crate::received::config_load_error)
+        .map(crate::received::config_load_error)
     {
         display.print_error(composed);
         return;
