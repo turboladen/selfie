@@ -2,7 +2,7 @@ error[E0277]: `String` is not one of the library's values, so sentence() cannot 
   --> tests/compile_fail/sentence_takes_no_string.rs:14:33
    |
 14 |     let _ = sentence::sentence(&name);
-   |             ------------------  ^^^^ a string the library hands over as a sentence goes to message()
+   |             ------------------  ^^^^ a string the library hands over as a sentence goes to message(), and a value built from parts to composed()
    |             |
    |             required by a bound introduced by this call
    |
@@ -14,8 +14,8 @@ error[E0277]: `String` is not one of the library's values, so sentence() cannot 
              NamespaceConflict
              NamespaceValidationError
              OperationFailure
-             OperationSuccess
              OperationType
+             PackageParseKind
            and $N others
 note: required for `&String` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs
@@ -34,7 +34,7 @@ error[E0277]: `str` is not one of the library's values, so sentence() cannot tak
   --> tests/compile_fail/sentence_takes_no_string.rs:15:32
    |
 15 |     let _ = sentence::sentence("tool");
-   |             ------------------ ^^^^^^ a string the library hands over as a sentence goes to message()
+   |             ------------------ ^^^^^^ a string the library hands over as a sentence goes to message(), and a value built from parts to composed()
    |             |
    |             required by a bound introduced by this call
    |
@@ -46,8 +46,8 @@ error[E0277]: `str` is not one of the library's values, so sentence() cannot tak
              NamespaceConflict
              NamespaceValidationError
              OperationFailure
-             OperationSuccess
              OperationType
+             PackageParseKind
            and $N others
 note: required for `&str` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs

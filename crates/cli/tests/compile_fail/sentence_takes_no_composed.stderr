@@ -1,0 +1,31 @@
+error[E0277]: `OperationSuccess` is not one of the library's values, so sentence() cannot take it
+  --> tests/compile_fail/sentence_takes_no_composed.rs:14:33
+   |
+14 |     let _ = sentence::sentence(&done);
+   |             ------------------  ^^^^ a string the library hands over as a sentence goes to message(), and a value built from parts to composed()
+   |             |
+   |             required by a bound introduced by this call
+   |
+   = help: the trait `Sentence` is not implemented for `OperationSuccess`
+   = help: the following other types implement trait `Sentence`:
+             &T
+             CheckFailure
+             ConfigLoadError
+             NamespaceConflict
+             NamespaceValidationError
+             OperationFailure
+             OperationType
+             PackageParseKind
+           and $N others
+note: required for `&OperationSuccess` to implement `Sentence`
+  --> tests/compile_fail/../../src/sentence.rs
+   |
+   | impl<T: Sentence + ?Sized> Sentence for &T {}
+   |         --------           ^^^^^^^^     ^^
+   |         |
+   |         unsatisfied trait bound introduced here
+note: required by a bound in `sentence`
+  --> tests/compile_fail/../../src/sentence.rs
+   |
+   | pub(crate) fn sentence(value: impl Sentence) -> Prose {
+   |                                    ^^^^^^^^ required by this bound in `sentence`
