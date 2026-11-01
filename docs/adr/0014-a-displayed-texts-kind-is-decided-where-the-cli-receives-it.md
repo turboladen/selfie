@@ -6,6 +6,8 @@ Date: 2026-10-29
 
 Accepted 2026-10-29.
 
+Amended 2026-10-31: §9 hands a library sentence that names a value to the CLI as parts.
+
 ## Context
 
 `selfie-cli` prints text from outside selfie: spec, package and environment names, paths, spec
@@ -39,12 +41,22 @@ at two different columns. An escape that skips the indent exists only to avoid t
 - Colors are switched off through `console`'s process-wide state, and the message printers style
   through that state, so no test can observe an explicit color decision.
 
+A library value's sentence reaches the CLI whole, so a name or a path inside it is escaped as prose
+while the table and the header of the same run escape it as a `Name` or a `DisplayPath`. One
+environment name then has two spellings in one run: U+00A0 shows as `\u{a0}` in the header and as a
+blank in the summary. A sentence the CLI composes from the value's fields instead has its wording
+twice, once in each crate, and only a test holds the two copies together.
+
 Options considered:
 
 - **Keep the escaping functions and review call sites harder.** That is the arrangement that keeps
   producing findings; review cannot see what a type does not say.
 - **Let the library return typed text.** The library also serves the MCP server, whose JSON wants
   the raw string, and presentation stays out of the library by design. Rejected.
+- **Let the library return parts that say what each value is.** A part names a kind of value, such
+  as a name or a path, and never an escape, so the library stays free of presentation and the MCP
+  server still gets one raw string from `Display`. Chosen for the sentences §9.6 lists. This is not
+  the typed text rejected above: no part carries a CLI kind or an escaped string.
 - **Decide the kind in the CLI, once, where it receives each value.** Chosen.
 
 ## Decision
@@ -107,10 +119,22 @@ Options considered:
    displays to its kind: `PackageInfoData::description` to `Prose`, `EnvironmentStatusData`'s
    dependency names to `Name`, its `install_command` and `CheckResultData::check_command` to
    `Command`. Command handlers read the mapped values and never format the raw field.
-2. A library value's `Display` is `Prose`. Where that sentence interpolates a path or a name the
-   user will act on, the CLI composes the sentence itself from the value's fields, with the path as
-   a `DisplayPath`. `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination is composed this
-   way.
+2. A library value's `Display` is `Prose`. Where that sentence names a value, the library hands it
+   over as parts (§9) and the CLI renders them. The CLI still composes these library sentences from
+   the value's fields, with each path a `DisplayPath` and each name a `Name`, and they are not yet
+   `Composed`:
+   - `PackageError`'s parse, unreadable-file, unusable-name, not-found and several-files sentences;
+   - `Uncreatable`'s refusal;
+   - `OperationFailure::UnreadableSpec`;
+   - `ConfigLoadError`;
+   - the warning that a run skips a spec file;
+   - the warning that a run did not check collisions with sources it could not use;
+   - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
+   - the deploy state's `StateLoadFailure`, `StateSaveError`, `DeployStateWarning` and
+     `DeployStateFailure`, with the `FileSystemError`, `AbsentReason` and `StatePathError` values
+     inside them.
+
+   Each of these moves to §9 when it is next changed.
 3. A name inside a sentence the CLI composes is a `Name`, whatever the sentence around it is.
 
 ### 3. Only the layout indents
@@ -240,9 +264,11 @@ when it is pasted.
    - a kind is built from one value, never from a string composed by `format!` or a join (§1.7);
    - `Prose`, `Output`, `Content` and a written `Command`, which escape less than a `Name`, are
      built only where the CLI receives a value or lays one out (§2.1);
-   - a library value's sentence goes through `sentence`, which accepts only the library's own
-     values, and a sentence the library hands over as a string goes through `message`, whose
-     argument must be read from a field named as a sentence, such as a message or a reason (§2.2);
+   - a library value's sentence goes through `sentence`, which accepts only the library's values
+     that are not `Composed`, or through `composed`, which accepts only a `Composed` value and shows
+     its parts through `rendered`, which takes a `&Parts`; a sentence the library hands over as a
+     string goes through `message`, whose argument must be read from a field named as a sentence,
+     such as a message or a reason (§2.2, §9);
    - no printer, cell or choice takes a string or an `impl Display` (§1.1);
    - nothing sets `console`'s color state or styles through it, only `DisplayManager`'s guarded
      writers write to a stream, and only `display_manager.rs` uses indicatif, whose bars also write
@@ -266,6 +292,41 @@ applies the stream's answer, and keeps `console`'s process-wide state from being
 through. The verbose log is the exception: it is never colored, whatever stderr's answer, since its
 writer escapes every escape sequence (§1.8).
 
+### 9. A library sentence that names a value is handed over as parts
+
+1. `selfie::parts` defines `Part`, `Parts` and the trait `Composed`. A `Parts` is an ordered list of
+   `Part`s, and a `Part` is one of:
+
+   | Part             | What it holds                                                                   |
+   | ---------------- | ------------------------------------------------------------------------------- |
+   | `Text(Cow<str>)` | selfie's words, a count it formats, or text from outside it read as a sentence, |
+   |                  | such as an `io::Error`'s message or a parse failure                             |
+   | `Name(&str)`     | an environment, package or spec name                                            |
+   | `Path(&Path)`    | a path, including one spelled as the spec spells it, such as `~/.bashrc`        |
+
+   A part says what a value is, never how to escape it.
+2. A `Composed` type's sentence is its `parts`, and its `Display` writes those parts and nothing
+   else: a `Text` or a `Name` as it is, and a `Path` through `Path::display`. A `Composed` type has
+   no other source for its sentence: it takes its `Display` from the one shared implementation that
+   writes its parts, and has no `#[error]` attribute and no `Display` arm of its own. An error type
+   among them implements `std::error::Error` by hand.
+3. A sentence that embeds another `Composed` value appends that value's parts in place, so a path
+   inside a nested cause stays a `Path`. A value that is not `Composed` enters as one `Text`.
+4. The CLI renders a `Parts` in one function in `sentence.rs`, and shows a `Composed` value by
+   rendering its parts: `Text` as `Prose`, `Name` as `Name`, and `Path` as `DisplayPath`. A sentence
+   that ends in a `Text` leaves out the line breaks at its end, as `message` does, before escaping.
+   The match has no catch-all, so a new part fails to compile until the CLI says how to show it. A
+   `Composed` type is not a `Sentence` (§2.2), so `sentence()` refuses it at compile time, and a
+   source rule (§7.4) keeps every `Composed` type off the list of `Sentence`s.
+5. The MCP server writes each value's `Display`, which is its parts written raw. It therefore shows
+   the same words as the CLI, without the CLI's escapes.
+6. These types are `Composed`: `OperationSuccess`.
+7. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
+   is `Composed`. The CLI does not compose a new one from the value's fields. These stay plain
+   strings: a message an event carries as a `String`, such as a warning, a refusal reason or a
+   suggestion, which `message` shows as `Prose`; a step's progress text; and a sentence the CLI
+   words itself.
+
 ## Consequences
 
 - Each kind has one constructor and one policy, so the CLI has one way to show a name, a path, a
@@ -273,6 +334,8 @@ writer escapes every escape sequence (§1.8).
   printer to hand its `String` to.
 - A test reading back what a printer wrote strips selfie's styling from the one `Shown` the printer
   was given; no printer builds a second, plain copy for it.
+- A name or a path in a success summary has the spelling the table and the header give it, and the
+  success summaries are worded once, in the library.
 - The spec-name rule refuses the four Hangul fillers (U+115F, U+1160, U+3164 and U+FFA0). They are
   the only strict-set characters `char::is_alphanumeric` admits, and refusing them is what makes
   §6.2's case for `track` hold.
@@ -286,10 +349,13 @@ Costs:
   strictness. §2.2 keeps paths out of sentences where it matters, and no gate enforces it.
 - Homoglyphs, such as a Cyrillic `а` in place of a Latin `a`, are not escaped by any kind.
 - `syn` becomes a direct dev-dependency of `selfie-cli`.
+- A `Composed` type writes its sentence as a builder chain instead of one format string, which reads
+  worse than the sentence it builds. An error type among them writes `Display` and
+  `std::error::Error` by hand instead of deriving them with thiserror.
 
 Out of scope: the MCP server, which writes JSON and no terminal; the library's `Display`
 implementations, which stay for logs and the MCP server; and non-UTF-8 paths, which `DisplayPath`
 shows lossily, so two of them can read alike.
 
-Reopen when selfie gains a second terminal renderer, such as a TUI, or when the library starts
-returning messages as structured parts rather than sentences.
+Reopen when selfie gains a second terminal renderer, such as a TUI, or when a part has to carry
+something other than what a value is, such as emphasis or a link.
