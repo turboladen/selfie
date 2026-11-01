@@ -681,3 +681,40 @@ fn dotfiles_track_over_a_name_several_specs_claim_gets_one_remedy() {
         "{solo}"
     );
 }
+
+// A dotfiles directory that is a dangling symlink is named by the link's
+// destination as a path: U+200B in the destination shows escaped in the
+// warning `track` prints before it asks anything.
+#[cfg(unix)]
+#[test]
+fn a_dangling_dotfiles_directory_names_its_destination_as_a_path() {
+    let temp = common::setup_test_config("");
+    let home = temp.path();
+    std::os::unix::fs::symlink(home.join("g\u{200B}one"), home.join("dotfiles")).unwrap();
+    std::fs::write(
+        home.join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            home.join("packages").display(),
+            home.join("dotfiles").display()
+        ),
+    )
+    .unwrap();
+    let untracked = home.join("untracked.conf");
+    std::fs::write(&untracked, "x").unwrap();
+
+    let output =
+        common::run_sandboxed(&temp, &["--no-color", "track", untracked.to_str().unwrap()]);
+    let both = format!("{}{}", output.stdout, output.stderr);
+
+    assert!(!both.contains('\u{200B}'), "a raw U+200B: {both:?}");
+    let warning = both
+        .lines()
+        .find(|line| line.contains("The dotfiles directory at"))
+        .unwrap_or_else(|| panic!("no warning about the dotfiles directory: {both}"));
+    assert!(
+        warning.contains(r"is a symlink to nothing: it points at ")
+            && warning.contains(r"g\u{200b}one. A standalone dotfile"),
+        "{warning}"
+    );
+}

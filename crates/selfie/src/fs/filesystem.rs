@@ -139,13 +139,6 @@ impl Composed for AbsentReason {
 }
 
 impl AbsentReason {
-    /// What is at the path instead of a directory, as a clause that follows the
-    /// directory's name: "does not exist", "is a regular file".
-    #[must_use]
-    pub fn clause(&self) -> String {
-        self.to_string()
-    }
-
     /// The command that would create the directory at `path`, or `None` when no
     /// single command is the remedy.
     ///
