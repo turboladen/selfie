@@ -864,16 +864,6 @@ pub enum FileSystemError {
     },
 }
 
-impl FileSystemError {
-    /// Returns the directory that a write to `path`, blocked by
-    /// [`BelowNonDirectory`](Self::BelowNonDirectory), could not create, which
-    /// is the directory that variant's message names.
-    #[must_use]
-    pub fn uncreatable_directory(path: &Path) -> &Path {
-        parent_dir(path)
-    }
-}
-
 crate::parts::display_from_parts!(error FileSystemError);
 
 impl Composed for FileSystemError {
@@ -900,7 +890,7 @@ impl Composed for FileSystemError {
             // The message names the directory the write could not create.
             Self::BelowNonDirectory { path, cause, .. } => Parts::new()
                 .text("IO error: ")
-                .append(io_parts(Some(Self::uncreatable_directory(path)), cause)),
+                .append(io_parts(Some(parent_dir(path)), cause)),
             Self::DirectoryTarget { path, cause } => Parts::new()
                 .text("IO error: ")
                 .append(io_parts(Some(path), cause)),
