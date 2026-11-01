@@ -10,6 +10,9 @@ Amended 2026-10-31: §9 hands a library sentence that names a value to the CLI a
 
 Amended 2026-11-01: §9 covers the deploy state's sentences and the filesystem errors inside them.
 
+Amended 2026-11-01: §9 covers a directory listing's error and the sentences about a dotfiles
+directory selfie cannot use, and a command part can be `mkdir -p`.
+
 ## Context
 
 `selfie-cli` prints text from outside selfie: spec, package and environment names, paths, spec
@@ -133,8 +136,10 @@ Options considered:
    - the warning that a run did not check collisions with sources it could not use;
    - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
    - `PackageRepoError::FileSystemError`'s sentence, which holds a `FileSystemError` as prose;
-   - a `PackageListError`'s sentence, and the `DirectoryState` clause it and the package directory's
-     error show, which hold an `AbsentReason` as prose;
+   - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
+     or `OperationFailure` holding one, into a `String`, such as a warning that `spec create` or
+     `spec remove` sends, a failed recommend's reason, `sync status`'s drift error, and the warning
+     that a run did not check collisions with a directory it could not list;
    - an `io::Error` that `tempfile` built, whose message names its temporary file and enters a
      sentence as `Text`.
 
@@ -307,37 +312,50 @@ writer escapes every escape sequence (§1.8).
    |                  | such as an `io::Error`'s message or a parse failure                             |
    | `Name(&str)`     | an environment, package or spec name                                            |
    | `Path(&Path)`    | a path, including one spelled as the spec spells it, such as `~/.bashrc`        |
-   | `Command(..)`    | a `selfie` command for the user to run: a subcommand from a closed enum and one |
-   |                  | operand                                                                         |
+   | `Command(..)`    | a command for the user to run: a program from a closed enum, `selfie` with a    |
+   |                  | subcommand or `mkdir -p --`, and one operand                                    |
 
    A part says what a value is, never how to escape it.
 2. A `Composed` type's sentence is its `parts`, and its `Display` writes those parts and nothing
-   else: a `Text` or a `Name` as it is, a `Path` through `Path::display`, and a `Command` as
-   `selfie <subcommand> <word>`, with the operand's shell word (§9.5). A `Composed` type has no
-   other source for its sentence: it takes its `Display` from the one shared implementation that
-   writes its parts, and has no `#[error]` attribute and no `Display` arm of its own. An error type
-   among them implements `std::error::Error` by hand.
+   else: a `Text` or a `Name` as it is, a `Path` through `Path::display`, and a `Command` as its
+   program's words followed by the operand's shell word (§9.5), `selfie <subcommand> <word>` or
+   `mkdir -p -- <word>`. A `Composed` type has no other source for its sentence: it takes its
+   `Display` from the one shared implementation that writes its parts, and has no `#[error]`
+   attribute and no `Display` arm of its own. An error type among them implements
+   `std::error::Error` by hand.
 3. A sentence that embeds another `Composed` value appends that value's parts in place, so a path
    inside a nested cause stays a `Path`. A value that is not `Composed` enters as one `Text`.
 4. The CLI renders a `Parts` in one function in `sentence.rs`, and shows a `Composed` value by
    rendering its parts: `Text` as `Prose`, `Name` as `Name`, `Path` as `DisplayPath`, and `Command`
-   as a `Command` of selfie's `Literal` words and the part's shell word, with the subcommand's
-   `Literal` from an exhaustive match. A sentence that ends in a `Text` leaves out the line breaks
-   at its end, as `message` does, before escaping. The match has no catch-all, so a new part fails
-   to compile until the CLI says how to show it. A `Composed` type is not a `Sentence` (§2.2), so
-   `sentence()` refuses it at compile time, and a source rule (§7.4) keeps every `Composed` type off
-   the list of `Sentence`s.
-5. A `Command` part is built only by `SelfieCommand::new`, which quotes its operand as one shell
-   word through `selfie::fs::shell_operand` and refuses an operand that holds NUL, since no shell
-   word can carry one. A part therefore always holds a word, and the CLI shows that word and never
-   quotes the operand again, so the library's `Display` and the CLI quote it once, the same way. A
-   sentence that offers a command leaves out the clause offering it when `new` refuses.
+   as a `Command` of selfie's `Literal` words and the part's shell word, with the program's words
+   from an exhaustive match. A command that shows any character escaped is followed by a note on the
+   line after the sentence: §5.5's note for a character the strict set escapes, and the command as
+   shown for a control character such as a line feed or a tab, which the command already shows
+   escaped and so does not run as shown. A value whose parts can hold a command therefore ends the
+   line it is shown on, and no line break follows a command inside its sentence. A sentence that
+   ends in a `Text` leaves out the line breaks at its end, as `message` does, before escaping. The
+   match has no catch-all, so a new part fails to compile until the CLI says how to show it. A
+   `Composed` type is not a `Sentence` (§2.2), so `sentence()` refuses it at compile time, and a
+   source rule (§7.4) keeps every `Composed` type off the list of `Sentence`s.
+5. A `Command` part is a `SuggestedCommand`, built only by its two constructors.
+   `SuggestedCommand::selfie` quotes a name as one shell word through `selfie::fs::shell_operand`;
+   `make_directory` quotes a path through `selfie::fs::shell_quote`, which keeps a leading `~/`
+   outside the quotes. Each refuses an operand that holds NUL, since no shell word can carry one. A
+   part therefore always holds a word, and the CLI shows that word and never quotes the operand
+   again, so the library's `Display` and the CLI quote it once, the same way. A sentence that offers
+   a command leaves out the clause offering it when the constructor refuses. The program is a closed
+   enum, and the CLI's match over it has no catch-all.
 6. The MCP server writes each value's `Display`, which is its parts written raw. It therefore shows
    the same words as the CLI, without the CLI's escapes.
 7. These types are `Composed`: `OperationSuccess`; the deploy state's `StateLoadFailure`,
    `StateSaveError`, `DeployStateWarning`, `DeployStateFailure` and `DeployStateNotice`; the
-   `FileSystemError`, `IoFailure`, `AbsentReason` and `StatePathError` values those hold; and a
-   validation issue's message, `IssueMessage`, which is its own text or the deploy state's notice.
+   `FileSystemError`, `IoFailure`, `AbsentReason` and `StatePathError` values those hold; a
+   directory listing's `PackageListError` and the `DirectoryState` it holds; the name check's
+   `NamespaceValidationError`; the `UnreadableDotfilesDirectory` a collection refuses; the
+   `DotfilesDirectoryWarning` a command reading standalone dotfiles sends; the
+   `TrackDirectoryRefusal` a standalone track gives over a directory it could not use; and a
+   validation issue's message, `IssueMessage`, which is its own text, the deploy state's notice or a
+   `DirectoryIssue`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. These stay plain
    strings: a message an event carries as a `String`, such as a warning, a refusal reason or a
@@ -351,8 +369,9 @@ writer escapes every escape sequence (§1.8).
   printer to hand its `String` to.
 - A test reading back what a printer wrote strips selfie's styling from the one `Shown` the printer
   was given; no printer builds a second, plain copy for it.
-- A name or a path in a success summary, a deploy-state warning or failure, a filesystem error, or a
-  configuration issue that reports the deploy state has the spelling the table and the header give
+- A name or a path in a success summary, a deploy-state warning or failure, a filesystem error, a
+  directory listing's error, a warning or refusal about the dotfiles directory, or a configuration
+  issue that reports the deploy state or a directory has the spelling the table and the header give
   it. Those sentences are worded once, in the library.
 - The spec-name rule refuses the four Hangul fillers (U+115F, U+1160, U+3164 and U+FFA0). They are
   the only strict-set characters `char::is_alphanumeric` admits, and refusing them is what makes
