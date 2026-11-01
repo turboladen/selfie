@@ -95,7 +95,7 @@ impl fmt::Display for SpecRefusal {
             // be defined" leaves a reader to work out where the section goes.
             Self::NoEnvironments(issue) => match issue.suggestion() {
                 Some(suggestion) => write!(f, "{}. {suggestion}", issue.message()),
-                None => f.write_str(issue.message()),
+                None => f.write_str(&issue.message()),
             },
         }
     }

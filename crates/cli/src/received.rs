@@ -209,18 +209,16 @@ impl Issue {
         level: ValidationLevel,
         category: impl Display,
         field: &str,
-        message: &str,
-        suggestion: Option<&str>,
+        message: Shown,
+        suggestion: Option<Shown>,
         at: Option<SourceLocation>,
     ) -> Self {
         Self {
             level,
             category: Name::new(&category.to_string()).into(),
             field: Name::new(field).into(),
-            // `message` is also a parameter here, so the function is named
-            // by its path.
-            message: crate::sentence::message(message).into(),
-            suggestion: suggestion.map(|suggestion| crate::sentence::message(suggestion).into()),
+            message,
+            suggestion,
             location: location(at),
         }
     }
@@ -232,8 +230,10 @@ impl From<&ValidationIssueData> for Issue {
             data.level,
             data.category,
             &data.field,
-            &data.message,
-            data.suggestion.as_deref(),
+            message(&data.message).into(),
+            data.suggestion
+                .as_deref()
+                .map(|suggestion| message(suggestion).into()),
             data.location,
         )
     }
@@ -245,8 +245,10 @@ impl From<&PackageValidationIssue> for Issue {
             data.level,
             data.category,
             &data.field,
-            &data.message,
-            data.suggestion.as_deref(),
+            message(&data.message).into(),
+            data.suggestion
+                .as_deref()
+                .map(|suggestion| message(suggestion).into()),
             data.location,
         )
     }
@@ -254,19 +256,16 @@ impl From<&PackageValidationIssue> for Issue {
 
 impl From<&ValidationIssue> for Issue {
     fn from(data: &ValidationIssue) -> Self {
-        let mut issue = Self::of(
+        // A deploy-state issue names its paths as paths, as a run does.
+        Self::of(
             data.level(),
             data.category(),
             data.field(),
-            data.message(),
-            data.suggestion().map(String::as_str),
+            composed(data.wording()),
+            data.suggestion()
+                .map(|suggestion| message(suggestion).into()),
             data.location(),
-        );
-        // The deploy state's issue names its paths as paths, as a run does.
-        if let Some(notice) = data.deploy_state() {
-            issue.message = composed(notice);
-        }
-        issue
+        )
     }
 }
 

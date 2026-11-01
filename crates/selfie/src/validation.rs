@@ -131,7 +131,7 @@ pub struct ValidationIssue {
 
     /// Detailed description of the issue
     ///
-    pub(crate) message: String,
+    pub(crate) message: IssueMessage,
 
     /// Is this a warning (false = error)
     ///
@@ -143,10 +143,28 @@ pub struct ValidationIssue {
 
     /// Where in the YAML file the issue is, when the file says.
     pub(crate) location: Option<crate::yaml::SourceLocation>,
+}
 
-    /// The deploy state's verdict this issue reports, when it reports one.
+/// What a validation issue says: its own words, or the deploy state's verdict
+/// in the words a run gives it.
+#[derive(Debug, Clone)]
+pub enum IssueMessage {
+    /// The issue's own sentence.
+    Text(String),
+    /// The deploy state's verdict.
     // Boxed: the notice is large, and most issues have none.
-    pub(crate) deploy_state: Option<Box<DeployStateNotice>>,
+    DeployState(Box<DeployStateNotice>),
+}
+
+crate::parts::display_from_parts!(IssueMessage);
+
+impl crate::parts::Composed for IssueMessage {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        match self {
+            Self::Text(text) => crate::parts::Parts::new().text(text.as_str()),
+            Self::DeployState(notice) => notice.parts(),
+        }
+    }
 }
 
 /// The deploy state's verdict a configuration issue reports, with the paths
@@ -182,11 +200,10 @@ impl ValidationIssue {
         Self {
             category,
             field: field.to_string(),
-            message: message.to_string(),
+            message: IssueMessage::Text(message.to_string()),
             level: ValidationLevel::Error,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
-            deploy_state: None,
         }
     }
 
@@ -205,11 +222,10 @@ impl ValidationIssue {
         Self {
             category,
             field: field.to_string(),
-            message: message.to_string(),
+            message: IssueMessage::Text(message.to_string()),
             level: ValidationLevel::Info,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
-            deploy_state: None,
         }
     }
 
@@ -224,11 +240,10 @@ impl ValidationIssue {
         Self {
             category,
             field: field.to_string(),
-            message: message.to_string(),
+            message: IssueMessage::Text(message.to_string()),
             level: ValidationLevel::Error,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location,
-            deploy_state: None,
         }
     }
 
@@ -242,11 +257,10 @@ impl ValidationIssue {
         Self {
             category,
             field: field.to_string(),
-            message: message.to_string(),
+            message: IssueMessage::Text(message.to_string()),
             level: ValidationLevel::Warning,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
-            deploy_state: None,
         }
     }
 
@@ -261,11 +275,10 @@ impl ValidationIssue {
         Self {
             category,
             field: field.to_string(),
-            message: message.to_string(),
+            message: IssueMessage::Text(message.to_string()),
             level: ValidationLevel::Warning,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location,
-            deploy_state: None,
         }
     }
 
@@ -279,8 +292,18 @@ impl ValidationIssue {
         &self.field
     }
 
+    /// The issue's sentence, as its [`wording`](Self::wording) words it.
     #[must_use]
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> std::borrow::Cow<'_, str> {
+        match &self.message {
+            IssueMessage::Text(text) => text.as_str().into(),
+            IssueMessage::DeployState(notice) => notice.to_string().into(),
+        }
+    }
+
+    /// What the issue says, as parts a caller can show by kind.
+    #[must_use]
+    pub fn wording(&self) -> &IssueMessage {
         &self.message
     }
 
@@ -299,13 +322,6 @@ impl ValidationIssue {
         self.location
     }
 
-    /// The deploy state's verdict this issue reports, whose sentence is
-    /// [`message`](Self::message), or `None` for any other issue.
-    #[must_use]
-    pub fn deploy_state(&self) -> Option<&DeployStateNotice> {
-        self.deploy_state.as_deref()
-    }
-
     /// An issue at `level` reporting `notice`, worded as the notice is.
     pub(crate) fn of_deploy_state(
         level: ValidationLevel,
@@ -315,11 +331,10 @@ impl ValidationIssue {
         Self {
             category,
             field: "state_directory".to_string(),
-            message: notice.to_string(),
+            message: IssueMessage::DeployState(Box::new(notice)),
             level,
             suggestion: None,
             location: None,
-            deploy_state: Some(Box::new(notice)),
         }
     }
 }
@@ -386,11 +401,10 @@ mod tests {
         ValidationIssue {
             category: ValidationErrorCategory::Advisory,
             field: "f".to_string(),
-            message: "m".to_string(),
+            message: IssueMessage::Text("m".to_string()),
             level,
             suggestion: None,
             location: None,
-            deploy_state: None,
         }
     }
 
