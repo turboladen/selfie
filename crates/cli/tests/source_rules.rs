@@ -1593,3 +1593,79 @@ fn indicatif_is_seen_outside_display_manager() {
     );
     assert_eq!(found_in("display_manager.rs", text), []);
 }
+
+// Each library type whose sentence is built from parts, by name: the type of
+// every `impl Composed for` under the library's `src`.
+fn composed_types() -> Vec<String> {
+    struct Impls(Vec<String>);
+    impl<'ast> Visit<'ast> for Impls {
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
+            let composed = match &item.trait_ {
+                Some((path, _)) => path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "Composed"),
+                None => false,
+            };
+            if composed {
+                self.0.push(last_segment(&item.self_ty));
+            }
+            visit::visit_item_impl(self, item);
+        }
+    }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../selfie/src");
+    let mut files = Vec::new();
+    collect_rust_files(&src, &mut files);
+    let mut impls = Impls(Vec::new());
+    for path in files {
+        let file = syn::parse_file(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        impls.visit_file(&file);
+    }
+    impls.0
+}
+
+// Each type `sentence.rs` lists in `sentences!`, by name.
+fn sentence_types() -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sentence.rs");
+    let file = syn::parse_file(&std::fs::read_to_string(path).unwrap()).unwrap();
+    file.items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Macro(item) if item.mac.path.is_ident("sentences") => Some(
+                item.mac
+                    .parse_body_with(Punctuated::<syn::Type, Token![,]>::parse_terminated)
+                    .unwrap(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .map(|ty| last_segment(&ty))
+        .collect()
+}
+
+// A library type whose sentence is built from parts is shown through
+// `composed`, which shows each name in it as a name, so it is never also a
+// `Sentence`, which `sentence()` would show as one prose sentence.
+#[test]
+fn no_type_built_from_parts_is_a_sentence() {
+    let composed = composed_types();
+    let sentences = sentence_types();
+    assert!(
+        composed.iter().any(|name| name == "OperationSuccess"),
+        "the walk found no Composed impl it should: {composed:?}"
+    );
+    assert!(
+        sentences.iter().any(|name| name == "PackageError"),
+        "the walk found no sentences! list: {sentences:?}"
+    );
+
+    let both: Vec<&String> = sentences
+        .iter()
+        .filter(|name| composed.contains(name))
+        .collect();
+    assert_eq!(
+        both,
+        Vec::<&String>::new(),
+        "listed in sentences! and Composed"
+    );
+}

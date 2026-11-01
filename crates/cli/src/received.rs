@@ -22,7 +22,7 @@ use selfie::package::event::{
     RefusedSpec, SkipReason, SpecListItem, Uncreatable, ValidationIssueData, ValidationResultData,
 };
 use selfie::package::event::{
-    Coverage, Gap, OperationFailure, OperationSuccess, RefusalKind, UncheckedSource, UnknownStatus,
+    OperationFailure, OperationSuccess, RefusalKind, UncheckedSource, UnknownStatus,
 };
 use selfie::package::port::{PackageError, PackageParseError, PackageParseKind, PackageRepoError};
 use selfie::sync_service::port::PackageValidationIssue;
@@ -30,7 +30,8 @@ use selfie::validation::{DeployStateNotice, ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
 
 use crate::display_manager::Suggestion;
-use crate::terminal_text::{Command, DisplayPath, Literal, Name, Output, Prose, Shown, lit, shown};
+use crate::sentence::composed;
+use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
 
 pub(crate) use crate::sentence::{message, sentence};
 
@@ -440,103 +441,10 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
     }
 }
 
-// These are the clauses naming a run's gaps, worded as the library words them
-// with each package a Name: "; could not answer for: a (timed out)" and
-// "; selfie failed for: b (...)".
-fn gaps_named(gaps: &[Gap]) -> Shown {
-    let clause = |coverage, lead: Literal| {
-        let named: Vec<Shown> = Gap::with_coverage(gaps, coverage)
-            .map(|gap| {
-                shown!(
-                    "{} ({})",
-                    Name::new(gap.package_name()),
-                    Prose::new(gap.reason().brief())
-                )
-            })
-            .collect();
-        if named.is_empty() {
-            Shown::default()
-        } else {
-            shown!("; {}: {}", lead, crate::formatters::comma_joined(named))
-        }
-    };
-    shown!(
-        "{}{}",
-        clause(Coverage::Unanswered, lit!("could not answer for")),
-        clause(Coverage::Error, lit!("selfie failed for"))
-    )
-}
-
-/// An operation's success, as its summary line shows it. The lines that name
-/// the packages a run could not answer for name each as a Name.
+/// An operation's success, as its summary line shows it, with each name and
+/// path in it escaped as the header and the table escape them.
 pub(crate) fn success(success: &OperationSuccess) -> Shown {
-    match success {
-        OperationSuccess::PackageInstalled {
-            package_name,
-            environment,
-            was_already_installed,
-            executable_path,
-            gaps,
-            ..
-        } => {
-            let (status, at) = match (*was_already_installed, gaps.is_empty()) {
-                (true, _) => (
-                    lit!("was already installed"),
-                    executable_path
-                        .as_deref()
-                        .map(|path| shown!(", at {}", DisplayPath::new(path))),
-                ),
-                (false, true) => (lit!("installation completed successfully"), None),
-                (false, false) => (lit!("installed"), None),
-            };
-            shown!(
-                "Package '{}' {} in environment '{}'{}{}",
-                Name::new(package_name),
-                status,
-                Name::new(environment),
-                at.unwrap_or_default(),
-                gaps_named(gaps)
-            )
-        }
-        OperationSuccess::PackageStatusChecked {
-            package_name,
-            environment,
-            gaps,
-            ..
-        } => {
-            let status = if gaps.is_empty() {
-                lit!("status checked successfully")
-            } else {
-                lit!("status checked")
-            };
-            shown!(
-                "Package '{}' {} in environment '{}'{}",
-                Name::new(package_name),
-                status,
-                Name::new(environment),
-                gaps_named(gaps)
-            )
-        }
-        OperationSuccess::PackageListGenerated {
-            valid_count,
-            invalid_count,
-            refused_specs,
-            gaps,
-            environment,
-            ..
-        } => shown!(
-            "Package listing completed with {} in environment '{}'{}",
-            Prose::new(&selfie::package::event::listing_counts(
-                *valid_count,
-                *invalid_count,
-                *refused_specs,
-                "package"
-            )),
-            Name::new(environment),
-            gaps_named(gaps)
-        ),
-        other => sentence(other).into(),
-    }
+    composed(success)
 }
 
 /// The warning for a run that could not check its targets against `sources`,
@@ -1168,13 +1076,11 @@ mod tests {
         }
     }
 
-    // Each package error, success line and refusal the CLI composes reads as
+    // Each package error and refusal the CLI composes reads as
     // the library words it for plain values, so composing it changes only how
     // a name or a path in it is escaped.
     #[test]
     fn a_composed_package_sentence_matches_the_library_wording_for_plain_values() {
-        use selfie::package::event::StepCount;
-
         let invalid = || {
             PackageParseError::new(
                 "/p/a b.yml",
@@ -1224,46 +1130,6 @@ mod tests {
             assert_eq!(package_error(error).as_str(), error.to_string());
         }
 
-        let successes = [
-            OperationSuccess::PackageInstalled {
-                package_name: "tool".to_string(),
-                environment: "env".to_string(),
-                was_already_installed: true,
-                executable_path: Some("/bin/tool".to_string()),
-                gaps: Vec::new(),
-                steps_completed: StepCount::new(1, 1),
-            },
-            OperationSuccess::PackageInstalled {
-                package_name: "tool".to_string(),
-                environment: "env".to_string(),
-                was_already_installed: false,
-                executable_path: None,
-                gaps: Vec::new(),
-                steps_completed: StepCount::new(1, 1),
-            },
-            OperationSuccess::PackageStatusChecked {
-                package_name: "tool".to_string(),
-                environment: "env".to_string(),
-                gaps: Vec::new(),
-                steps_completed: StepCount::new(1, 1),
-            },
-            OperationSuccess::DotfilesListed {
-                package_count: 2,
-                gaps: Vec::new(),
-            },
-            OperationSuccess::PackageListGenerated {
-                valid_count: 2,
-                invalid_count: 1,
-                refused_specs: 1,
-                gaps: Vec::new(),
-                environment: "env".to_string(),
-                steps_completed: StepCount::new(1, 1),
-            },
-        ];
-        for line in &successes {
-            assert_eq!(success(line).as_str(), line.to_string());
-        }
-
         let ambiguous = RefusedSpec {
             package_name: "tool".to_string(),
             path: "/p/tool.yml".into(),
@@ -1284,6 +1150,65 @@ mod tests {
             collisions_unchecked(&sources).as_str(),
             selfie::package::service::collisions_unchecked_warning(&sources)
         );
+    }
+
+    // Each of `values`, a library value built from plain parts, renders as
+    // its own Display less the line breaks at its end, so the CLI and the MCP
+    // server say the same thing. Every Composed type's fixtures go through
+    // here.
+    fn assert_renders_as_its_display<T: selfie::parts::Composed + std::fmt::Debug>(values: &[T]) {
+        for value in values {
+            assert_eq!(
+                composed(value).as_str(),
+                value.to_string().trim_end_matches(['\r', '\n']),
+                "{value:?}"
+            );
+        }
+    }
+
+    // A success summary of plain values reads as the library words it. The
+    // Generic lines hold a line break inside, which the CLI keeps, and an LF
+    // and a CRLF at the end, which it drops.
+    #[test]
+    fn a_success_summary_of_plain_values_reads_as_the_library_words_it() {
+        let mut successes = test_common::every_success("env", "tool", "/p/tool.yml");
+        successes.push(OperationSuccess::Generic("two\nlines".to_string()));
+        successes.push(OperationSuccess::Generic("ends\n".to_string()));
+        successes.push(OperationSuccess::Generic("ends\r\n".to_string()));
+
+        assert_renders_as_its_display(&successes);
+    }
+
+    // Every name and path in a success summary shows escaped, as the header
+    // and the table show it: no U+00A0, U+200B or line break reaches the
+    // line raw, and each value shows escaped once for each time the library
+    // names it.
+    #[test]
+    fn a_success_summary_names_each_value_escaped() {
+        let (environment, package, path) = ("a\u{A0}b", "p\u{200B}q", "/d/x\ny");
+        let escaped = [
+            (environment, r"a\u{a0}b"),
+            (package, r"p\u{200b}q"),
+            (path, r"/d/x\ny"),
+        ];
+        let mut named = [0; 3];
+        for line in test_common::every_success(environment, package, path) {
+            let shown = success(&line).into_string();
+            let library = line.to_string();
+
+            assert!(!shown.contains(['\u{A0}', '\u{200B}', '\n']), "{shown:?}");
+            for ((raw, spelled), count) in escaped.into_iter().zip(&mut named) {
+                assert_eq!(
+                    shown.matches(spelled).count(),
+                    library.matches(raw).count(),
+                    "{spelled} in {shown:?} from {library:?}"
+                );
+                *count += library.matches(raw).count();
+            }
+        }
+        // Each value is named somewhere, so the counts above compare
+        // something.
+        assert!(named.iter().all(|count| *count > 0), "{named:?}");
     }
 
     fn not_found(declared_by: Vec<selfie::package::port::NameDeclaration>) -> PackageError {

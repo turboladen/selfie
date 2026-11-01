@@ -1903,8 +1903,7 @@ impl From<Outcome> for SpecStatus {
 
 /// A listing's counts as "3 valid package(s) and 1 refused package(s)", naming
 /// the invalid and refused counts only when either is not zero.
-#[must_use]
-pub fn listing_counts(valid: usize, invalid: usize, refused: usize, noun: &str) -> String {
+fn listing_counts(valid: usize, invalid: usize, refused: usize, noun: &str) -> String {
     let mut parts = vec![format!("{valid} valid {noun}(s)")];
     if invalid > 0 {
         parts.push(format!("{invalid} invalid {noun}(s)"));

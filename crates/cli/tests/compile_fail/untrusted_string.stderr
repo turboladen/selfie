@@ -17,10 +17,10 @@ error[E0277]: `String` is not Trusted, so shown! cannot format it
              Content
              DisplayPath
              Literal
-             Name
              Prose
              SafeTable
              Shown
+             f32
            and $N others
 note: required for `&String` to implement `Trusted`
   --> tests/compile_fail/../../src/terminal_text.rs

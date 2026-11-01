@@ -1,6 +1,6 @@
 //! A sentence the library words, as the CLI shows it: [`Prose`], from one of
 //! the library's own values or from a string the library hands over as a
-//! sentence.
+//! sentence, or a [`Shown`] built from a library value's parts.
 
 use std::fmt::Display;
 
@@ -10,22 +10,24 @@ use selfie::fs::FileSystemError;
 use selfie::fs::target::StatePathError;
 use selfie::namespace::{NamespaceConflict, NamespaceValidationError};
 use selfie::package::event::{
-    CheckFailure, OperationFailure, OperationSuccess, OperationType, SkipReason, SpecStatus,
-    UncheckedSource, UnknownStatus,
+    CheckFailure, OperationFailure, OperationType, SkipReason, SpecStatus, UncheckedSource,
+    UnknownStatus,
 };
 use selfie::package::port::{PackageError, PackageListError, PackageParseKind, PackageRepoError};
+use selfie::parts::{Composed, Part, Parts};
 use selfie::sync_service::port::SyncError;
 use selfie::yaml::ParseFailure;
 
-use crate::terminal_text::Prose;
+use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit};
 
 /// A library value whose `Display` is a sentence the CLI shows as [`Prose`].
 ///
 /// Implemented for the library's errors and outcomes, never for a string: a
-/// string the library hands over as a sentence goes to [`message`].
+/// string the library hands over as a sentence goes to [`message`], and a value
+/// whose sentence is built from parts goes to [`composed`].
 #[diagnostic::on_unimplemented(
     message = "`{Self}` is not one of the library's values, so sentence() cannot take it",
-    label = "a string the library hands over as a sentence goes to message()"
+    label = "a string the library hands over as a sentence goes to message(), and a value built from parts to composed()"
 )]
 pub(crate) trait Sentence: Display + sealed::Seal {}
 
@@ -49,7 +51,6 @@ sentences!(
     NamespaceConflict,
     NamespaceValidationError,
     OperationFailure,
-    OperationSuccess,
     OperationType,
     PackageError,
     PackageListError,
@@ -80,4 +81,31 @@ pub(crate) fn sentence(value: impl Sentence) -> Prose {
 /// message or a refusal's suggestion, without a trailing line break.
 pub(crate) fn message(text: impl AsRef<str>) -> Prose {
     Prose::new(text.as_ref().trim_end_matches(['\r', '\n']))
+}
+
+/// `value`'s sentence, as the library words it: its parts [`rendered`].
+pub(crate) fn composed(value: &impl Composed) -> Shown {
+    rendered(&value.parts())
+}
+
+/// `parts` as the CLI shows them: a name as a [`Name`], a path as a
+/// [`DisplayPath`], and the words around them as [`Prose`]. Line breaks at
+/// the end of a sentence that ends in words are left out, as [`message`]
+/// leaves them out; a name or a path shows its own line breaks escaped.
+pub(crate) fn rendered(parts: &Parts) -> Shown {
+    let mut parts = parts.into_iter().peekable();
+    let mut shown = Vec::new();
+    while let Some(part) = parts.next() {
+        let last = parts.peek().is_none();
+        // No catch-all, so a part the library adds must choose here how it
+        // is shown.
+        shown.push(match part {
+            // Trimmed before it is escaped, so a CR before the LF goes too.
+            Part::Text(clause) if last => Shown::from(message(clause)),
+            Part::Text(clause) => Prose::new(clause).into(),
+            Part::Name(name) => Name::new(name).into(),
+            Part::Path(path) => DisplayPath::of(path).into(),
+        });
+    }
+    Shown::join(shown, lit!(""))
 }
