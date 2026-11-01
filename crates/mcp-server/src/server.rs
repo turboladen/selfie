@@ -1634,6 +1634,33 @@ mod tests {
         );
     }
 
+    // A package spec that declares no environment is refused here, as in every
+    // environment, and nothing is reported for another one.
+    #[tokio::test]
+    async fn spec_info_refuses_a_package_spec_that_declares_no_environment() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::write(packages.join("noenv.yml"), "name: noenv\ndescription: x\n").unwrap();
+        let server = server_over(&packages, None);
+        let params = PackageNameParam {
+            package: "noenv".to_string(),
+        };
+
+        let json = tool_json(&server.spec_info(Parameters(params)).await.unwrap());
+
+        let info = &json["data"][0];
+        assert_eq!(info["type"], "package_info", "{json}");
+        assert!(
+            info["refusal"].as_str().is_some_and(
+                |reason| reason.starts_with("At least one environment must be defined")
+            ),
+            "{json}"
+        );
+        assert_eq!(info["refusal_elsewhere"], serde_json::Value::Null, "{json}");
+        assert_eq!(info["environments"], serde_json::json!([]), "{json}");
+    }
+
     // A spec `spec validate` would report an error for is not written, and the
     // failure carries each issue as fields.
     #[tokio::test]
