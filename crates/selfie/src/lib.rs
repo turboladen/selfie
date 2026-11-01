@@ -11,6 +11,7 @@
 //! - [`config`] — configuration
 //! - [`commands`] — command execution
 //! - [`fs`] — file system access
+//! - [`parts`] — library sentences as typed parts
 //! - [`privilege`] — whether the process holds privilege it should not write with
 //! - [`validation`] — validation types
 //! - [`yaml`] — reading YAML files
@@ -29,6 +30,7 @@ pub mod fs;
 pub mod git;
 pub mod namespace;
 pub mod package;
+pub mod parts;
 pub(crate) mod paths;
 pub mod privilege;
 pub mod sync_service;

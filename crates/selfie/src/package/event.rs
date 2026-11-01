@@ -277,6 +277,7 @@ use std::{
 use futures::Stream;
 
 use crate::commands::runner::TimedOut;
+use crate::parts::{Composed, Parts};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -1799,25 +1800,25 @@ impl From<&str> for OperationFailure {
 
 /// The clauses naming a run's gaps: "; could not answer for: a (timed out)"
 /// for the unanswered, and "; selfie failed for: b (…)" for the errors, each
-/// reason in brief. Empty when there are none.
-fn gap_clauses(gaps: &[Gap]) -> String {
-    let named = |coverage| {
-        Gap::with_coverage(gaps, coverage)
-            .map(|gap| format!("{} ({})", gap.package_name(), gap.reason().brief()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let mut clauses = String::new();
+/// package a name and each reason in brief. Empty when there are none.
+fn gap_clauses(gaps: &[Gap]) -> Parts<'_> {
+    let mut parts = Parts::new();
     for (coverage, lead) in [
         (Coverage::Unanswered, "could not answer for"),
         (Coverage::Error, "selfie failed for"),
     ] {
-        let named = named(coverage);
-        if !named.is_empty() {
-            clauses.push_str(&format!("; {lead}: {named}"));
+        let mut named = Gap::with_coverage(gaps, coverage).peekable();
+        if named.peek().is_some() {
+            parts = parts
+                .text(format!("; {lead}: "))
+                .append(Parts::joined(named, ", ", |gap| {
+                    Parts::new()
+                        .name(gap.package_name())
+                        .text(format!(" ({})", gap.reason().brief()))
+                }));
         }
     }
-    clauses
+    parts
 }
 
 /// What a validation of every spec found for one spec, or for one file or
@@ -1929,21 +1930,22 @@ fn orphaned_clause(orphan_count: usize) -> String {
     }
 }
 
-impl std::fmt::Display for OperationSuccess {
+crate::parts::display_from_parts!(OperationSuccess);
+
+impl Composed for OperationSuccess {
     // Each message names the environment when the answer depends on it, and
     // never a step count: the count is `steps_completed`, a field for whoever
     // wants it.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn parts(&self) -> Parts<'_> {
         match self {
             OperationSuccess::PackageChecked {
                 package_name,
                 environment,
                 verdict,
                 ..
-            } => write!(
-                f,
-                "Package '{package_name}' check completed {verdict} in environment '{environment}'"
-            ),
+            } => package_named(package_name)
+                .text(format!(" check completed {verdict}"))
+                .append(in_environment(environment)),
             OperationSuccess::PackagesAudited {
                 audited_count,
                 conflict_count,
@@ -1952,21 +1954,21 @@ impl std::fmt::Display for OperationSuccess {
                 refused_count,
                 environment,
                 ..
-            } => write!(
-                f,
-                "Audit completed for {audited_count} package(s) in environment '{environment}': \
-                 {conflict_count} with conflicts, {not_installed_count} not installed, \
-                 {error_count} could not be audited, {refused_count} spec(s) left out"
-            ),
+            } => Parts::new()
+                .text(format!("Audit completed for {audited_count} package(s)"))
+                .append(in_environment(environment))
+                .text(format!(
+                    ": {conflict_count} with conflicts, {not_installed_count} not installed, \
+                     {error_count} could not be audited, {refused_count} spec(s) left out"
+                )),
             OperationSuccess::PackageAudited {
                 package_name,
                 environment,
                 audit_result,
                 ..
-            } => write!(
-                f,
-                "Package '{package_name}' audit completed {audit_result} in environment '{environment}'"
-            ),
+            } => package_named(package_name)
+                .text(format!(" audit completed {audit_result}"))
+                .append(in_environment(environment)),
             OperationSuccess::PackageInstalled {
                 package_name,
                 environment,
@@ -1979,19 +1981,18 @@ impl std::fmt::Display for OperationSuccess {
                 // does not read as part of it. A run with gaps never says
                 // "successfully".
                 let (status, at) = match (*was_already_installed, gaps.is_empty()) {
-                    (true, _) => (
-                        "was already installed",
-                        executable_path.as_ref().map(|path| format!(", at {path}")),
-                    ),
+                    (true, _) => ("was already installed", executable_path.as_deref()),
                     (false, true) => ("installation completed successfully", None),
                     (false, false) => ("installed", None),
                 };
-                write!(
-                    f,
-                    "Package '{package_name}' {status} in environment '{environment}'{}{}",
-                    at.unwrap_or_default(),
-                    gap_clauses(gaps)
-                )
+                let at = at.map_or_else(Parts::new, |path| {
+                    Parts::new().text(", at ").path(std::path::Path::new(path))
+                });
+                package_named(package_name)
+                    .text(format!(" {status}"))
+                    .append(in_environment(environment))
+                    .append(at)
+                    .append(gap_clauses(gaps))
             }
             OperationSuccess::PackageValidated {
                 package_name,
@@ -2000,26 +2001,25 @@ impl std::fmt::Display for OperationSuccess {
                 error_count,
                 warning_count,
                 ..
-            } => match outcome {
-                Outcome::Failed => write!(
-                    f,
-                    "Package '{package_name}' validation failed with {error_count} error(s) and {} warning(s) in environment '{environment}'",
-                    warning_count.unwrap_or(0)
-                ),
-                Outcome::Found => write!(
-                    f,
-                    "Package '{package_name}' validation completed with {} warning(s) in environment '{environment}'",
-                    warning_count.unwrap_or(0)
-                ),
-                Outcome::Clean => write!(
-                    f,
-                    "Package '{package_name}' validation completed successfully in environment '{environment}'"
-                ),
-            },
-            OperationSuccess::SpecInfoRetrieved { package_name, .. } => write!(
-                f,
-                "Package '{package_name}' spec info retrieved successfully"
-            ),
+            } => {
+                let status = match outcome {
+                    Outcome::Failed => format!(
+                        "validation failed with {error_count} error(s) and {} warning(s)",
+                        warning_count.unwrap_or(0)
+                    ),
+                    Outcome::Found => format!(
+                        "validation completed with {} warning(s)",
+                        warning_count.unwrap_or(0)
+                    ),
+                    Outcome::Clean => "validation completed successfully".to_string(),
+                };
+                package_named(package_name)
+                    .text(format!(" {status}"))
+                    .append(in_environment(environment))
+            }
+            OperationSuccess::SpecInfoRetrieved { package_name, .. } => {
+                package_named(package_name).text(" spec info retrieved successfully")
+            }
             OperationSuccess::PackageStatusChecked {
                 package_name,
                 environment,
@@ -2027,15 +2027,14 @@ impl std::fmt::Display for OperationSuccess {
                 ..
             } => {
                 let status = if gaps.is_empty() {
-                    "status checked successfully"
+                    " status checked successfully"
                 } else {
-                    "status checked"
+                    " status checked"
                 };
-                write!(
-                    f,
-                    "Package '{package_name}' {status} in environment '{environment}'{}",
-                    gap_clauses(gaps)
-                )
+                package_named(package_name)
+                    .text(status)
+                    .append(in_environment(environment))
+                    .append(gap_clauses(gaps))
             }
             OperationSuccess::PackageListGenerated {
                 valid_count,
@@ -2047,23 +2046,20 @@ impl std::fmt::Display for OperationSuccess {
             } => {
                 let status =
                     listing_counts(*valid_count, *invalid_count, *refused_specs, "package");
-                write!(
-                    f,
-                    "Package listing completed with {status} in environment '{environment}'{}",
-                    gap_clauses(gaps)
-                )
+                Parts::new()
+                    .text(format!("Package listing completed with {status}"))
+                    .append(in_environment(environment))
+                    .append(gap_clauses(gaps))
             }
             OperationSuccess::PackageCreated {
                 package_name,
                 file_path,
                 ..
-            } => write!(
-                f,
-                "Package '{package_name}' created at {}",
-                file_path.display()
-            ),
+            } => package_named(package_name)
+                .text(" created at ")
+                .path(file_path),
             OperationSuccess::PackageUpdated { package_name, .. } => {
-                write!(f, "Package '{package_name}' updated successfully")
+                package_named(package_name).text(" updated successfully")
             }
             OperationSuccess::PackageRemoved {
                 package_name,
@@ -2071,20 +2067,15 @@ impl std::fmt::Display for OperationSuccess {
                 dependent_packages,
                 ..
             } => {
-                if dependent_packages.is_empty() {
-                    write!(
-                        f,
-                        "Package '{package_name}' removed from {}",
-                        file_path.display()
-                    )
+                let dependents = if dependent_packages.is_empty() {
+                    String::new()
                 } else {
-                    write!(
-                        f,
-                        "Package '{package_name}' removed from {} (had {} dependent package(s))",
-                        file_path.display(),
-                        dependent_packages.len()
-                    )
-                }
+                    format!(" (had {} dependent package(s))", dependent_packages.len())
+                };
+                package_named(package_name)
+                    .text(" removed from ")
+                    .path(file_path)
+                    .text(dependents)
             }
             OperationSuccess::SpecListGenerated {
                 valid_count,
@@ -2094,10 +2085,9 @@ impl std::fmt::Display for OperationSuccess {
                 ..
             } => {
                 let status = listing_counts(*valid_count, *invalid_count, *refused_specs, "spec");
-                write!(
-                    f,
-                    "Spec listing completed with {status} in environment '{environment}'"
-                )
+                Parts::new()
+                    .text(format!("Spec listing completed with {status}"))
+                    .append(in_environment(environment))
             }
             OperationSuccess::SpecsValidated {
                 validated_count,
@@ -2128,10 +2118,10 @@ impl std::fmt::Display for OperationSuccess {
                 if *other_warning_count > 0 {
                     status.push_str(&format!(", {other_warning_count} other warning(s)"));
                 }
-                write!(
-                    f,
-                    "Spec validation completed in environment '{environment}': {status}"
-                )
+                Parts::new()
+                    .text("Spec validation completed")
+                    .append(in_environment(environment))
+                    .text(format!(": {status}"))
             }
             OperationSuccess::DotfilesApplied {
                 deployed_count,
@@ -2149,13 +2139,14 @@ impl std::fmt::Display for OperationSuccess {
                 } else {
                     format!(", {failed_count} failed")
                 };
-                write!(
-                    f,
-                    "Dotfiles applied in environment '{environment}': {deployed_count} deployed, \
-                     {skipped_count} skipped, {conflict_count} conflict(s), {refused_count} \
-                     refused{failed}{}",
-                    orphaned_clause(*orphan_count)
-                )
+                Parts::new()
+                    .text("Dotfiles applied")
+                    .append(in_environment(environment))
+                    .text(format!(
+                        ": {deployed_count} deployed, {skipped_count} skipped, \
+                         {conflict_count} conflict(s), {refused_count} refused{failed}{}",
+                        orphaned_clause(*orphan_count)
+                    ))
             }
             OperationSuccess::DotfileDriftChecked {
                 drift_count,
@@ -2172,26 +2163,36 @@ impl std::fmt::Display for OperationSuccess {
                 } else {
                     format!(", {unjudged_count} not checked for orphans")
                 };
-                write!(
-                    f,
-                    "Dotfile drift check in environment '{environment}': {drift_count} drifted out \
-                     of {total_count}, {refused_count} refused, {unverified_count} not \
-                     verifiable{}{unjudged}",
-                    orphaned_clause(*orphan_count)
-                )
+                Parts::new()
+                    .text("Dotfile drift check")
+                    .append(in_environment(environment))
+                    .text(format!(
+                        ": {drift_count} drifted out of {total_count}, {refused_count} \
+                         refused, {unverified_count} not verifiable{}{unjudged}",
+                        orphaned_clause(*orphan_count)
+                    ))
             }
             OperationSuccess::DotfileTracked {
                 name,
                 target_path,
-                was_already_tracked: true,
+                was_already_tracked,
                 ..
-            } => write!(f, "Already tracking '{target_path}' in spec '{name}'"),
-            OperationSuccess::DotfileTracked {
-                name, target_path, ..
-            } => write!(f, "Now tracking '{target_path}' in spec '{name}'"),
+            } => {
+                let lead = if *was_already_tracked {
+                    "Already tracking '"
+                } else {
+                    "Now tracking '"
+                };
+                Parts::new()
+                    .text(lead)
+                    .path(std::path::Path::new(target_path))
+                    .text("' in spec '")
+                    .name(name)
+                    .text("'")
+            }
             OperationSuccess::SyncPushComplete { commits_pushed, .. } => {
                 let label = crate::pluralize(*commits_pushed, "commit", "commits");
-                write!(f, "Pushed {commits_pushed} {label} to remote")
+                Parts::new().text(format!("Pushed {commits_pushed} {label} to remote"))
             }
             OperationSuccess::SyncPullComplete {
                 commits_pulled,
@@ -2201,45 +2202,57 @@ impl std::fmt::Display for OperationSuccess {
                 ..
             } => {
                 let label = crate::pluralize(*commits_pulled, "commit", "commits");
-                let mut parts = Vec::new();
-                if !packages_updated.is_empty() {
-                    parts.push(format!("updated: {}", packages_updated.join(", ")));
+                let pulled =
+                    Parts::new().text(format!("Pulled {commits_pulled} {label} from remote"));
+                let clauses: Vec<_> = [
+                    ("updated", packages_updated),
+                    ("added", packages_added),
+                    ("removed", packages_removed),
+                ]
+                .into_iter()
+                .filter(|(_, names)| !names.is_empty())
+                .collect();
+                if clauses.is_empty() {
+                    return pulled;
                 }
-                if !packages_added.is_empty() {
-                    parts.push(format!("added: {}", packages_added.join(", ")));
-                }
-                if !packages_removed.is_empty() {
-                    parts.push(format!("removed: {}", packages_removed.join(", ")));
-                }
-                if parts.is_empty() {
-                    write!(f, "Pulled {commits_pulled} {label} from remote")
-                } else {
-                    write!(
-                        f,
-                        "Pulled {commits_pulled} {label} from remote ({})",
-                        parts.join("; ")
-                    )
-                }
+                let clauses = Parts::joined(clauses, "; ", |(lead, names)| {
+                    Parts::new().text(format!("{lead}: ")).append(Parts::joined(
+                        names,
+                        ", ",
+                        |name| Parts::new().name(name),
+                    ))
+                });
+                pulled.text(" (").append(clauses).text(")")
             }
             OperationSuccess::SyncPullUpToDate { .. } => {
-                write!(f, "Already up to date with remote")
+                Parts::new().text("Already up to date with remote")
             }
             OperationSuccess::SyncNothingToPush { .. } => {
-                write!(f, "Nothing to push — working tree is clean")
+                Parts::new().text("Nothing to push — working tree is clean")
             }
             OperationSuccess::DotfilesListed {
                 package_count,
                 gaps,
-            } => {
-                write!(
-                    f,
-                    "Listed dotfiles across {package_count} package(s){}",
-                    gap_clauses(gaps)
-                )
-            }
-            OperationSuccess::Generic(msg) => write!(f, "{msg}"),
+            } => Parts::new()
+                .text(format!("Listed dotfiles across {package_count} package(s)"))
+                .append(gap_clauses(gaps)),
+            OperationSuccess::Generic(msg) => Parts::new().text(msg.as_str()),
         }
     }
+}
+
+// "Package 'name'", the way a summary about one package opens.
+fn package_named(name: &str) -> Parts<'_> {
+    Parts::new().text("Package '").name(name).text("'")
+}
+
+// " in environment 'name'", the clause naming the environment an answer
+// depends on.
+fn in_environment(environment: &str) -> Parts<'_> {
+    Parts::new()
+        .text(" in environment '")
+        .name(environment)
+        .text("'")
 }
 
 // Convenience: allow creating OperationSuccess from strings

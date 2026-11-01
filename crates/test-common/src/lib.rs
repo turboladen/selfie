@@ -16,6 +16,7 @@ pub mod runner;
 pub mod scripts;
 pub mod secrets;
 pub mod service;
+pub mod successes;
 
 // Re-export the most commonly used items for convenience
 pub use config::{
@@ -47,6 +48,7 @@ pub use service::{
     create_service_with_config_and_runner, create_service_with_fs_and_runner, create_test_service,
     create_test_service_for_env, create_test_service_with_config,
 };
+pub use successes::every_success;
 
 // Re-export commonly used external dependencies for convenience
 pub use selfie::{
