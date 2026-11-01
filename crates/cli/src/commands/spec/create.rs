@@ -332,12 +332,14 @@ fn get_valid_package_name(
                     }
                 } else {
                     // Not a package this command can edit, so a different name is
-                    // the way out.
-                    let why = match conflict.found_in {
-                        namespace::NameLocation::Packages => {
+                    // the way out. Only a single package spec could have been
+                    // edited, so only it failed to load.
+                    let why = match conflict.remedy() {
+                        namespace::Remedy::UseThePackage => {
                             lit!(" It could not be loaded, so it cannot be edited here.")
                         }
-                        namespace::NameLocation::Dotfiles => lit!(""),
+                        namespace::Remedy::ChooseAnotherName
+                        | namespace::Remedy::RemoveTheDotfileSpec => lit!(""),
                     };
                     display.print_warning(shown!(
                         "{}{} Choose a different name.",
@@ -1508,6 +1510,48 @@ mod tests {
         let environments = package.environments();
         assert!(environments.contains_key("production"));
         assert!(!environments.contains_key("test-env"));
+    }
+
+    // Two package files claiming the name are not one that failed to load, so
+    // the warning says only what the conflict says. One unloadable file keeps
+    // the reason it cannot be edited.
+    #[test]
+    fn a_name_several_packages_claim_is_not_called_unloadable() {
+        let warning_for = |files: &[(&str, &str)]| {
+            let temp = tempfile::tempdir().unwrap();
+            let packages = temp.path().join("packages");
+            std::fs::create_dir_all(&packages).unwrap();
+            for (file, body) in files {
+                std::fs::write(packages.join(file), body).unwrap();
+            }
+            let config = CliConfig::wrap_for_test(test_config_with_dir(&packages));
+            let repo = common::create_package_repository(&config);
+            let display = DisplayManager::new(false);
+            let _ = get_valid_package_name("twin", &repo, &config, &display);
+            display
+                .printed()
+                .iter()
+                .map(|(_, line)| line.clone())
+                .find(|line| line.contains("twin"))
+                .expect("the conflict is reported")
+        };
+        let spec = format!(
+            "name: twin\nenvironments:\n  {}:\n    install: \"true\"\n",
+            test_common::TEST_ENV
+        );
+
+        let several = warning_for(&[("twin.yml", &spec), ("Twin.yaml", &spec)]);
+        assert!(!several.contains("could not be loaded"), "{several}");
+        assert!(
+            several.ends_with("all but one must be removed. Choose a different name."),
+            "{several}"
+        );
+
+        let unloadable = warning_for(&[("twin.yml", "name: [unclosed\n")]);
+        assert!(
+            unloadable.contains("It could not be loaded, so it cannot be edited here."),
+            "{unloadable}"
+        );
     }
 
     // ── Service-layer tests (persistence goes through PackageService::create) ──

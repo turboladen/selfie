@@ -18,6 +18,32 @@ pub enum NameLocation {
     Dotfiles,
 }
 
+/// What a caller can do about a [`NamespaceConflict`], besides choosing another
+/// name, which it can always do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedy {
+    /// The caller can only choose another name, because several spec files
+    /// claim this one.
+    ChooseAnotherName,
+    /// Act on the one package spec that holds the name.
+    UseThePackage,
+    /// Remove the one standalone dotfile spec that holds the name.
+    RemoveTheDotfileSpec,
+}
+
+/// Which spec files claim a name, by where they are and how many there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConflictKind {
+    /// One package spec claims the name.
+    Package,
+    /// One standalone dotfile spec claims the name.
+    DotfileSpec,
+    /// Several package specs claim the name.
+    SeveralPackages,
+    /// Several standalone dotfile specs claim the name.
+    SeveralDotfileSpecs,
+}
+
 /// Error returned when a name already exists in the shared namespace
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamespaceConflict {
@@ -52,6 +78,32 @@ impl NamespaceConflict {
         &self.paths
     }
 
+    /// Which spec files claim the name.
+    fn kind(&self) -> ConflictKind {
+        match (&self.found_in, self.paths.len() > 1) {
+            (NameLocation::Packages, false) => ConflictKind::Package,
+            (NameLocation::Dotfiles, false) => ConflictKind::DotfileSpec,
+            (NameLocation::Packages, true) => ConflictKind::SeveralPackages,
+            (NameLocation::Dotfiles, true) => ConflictKind::SeveralDotfileSpecs,
+        }
+    }
+
+    /// What the caller can do about the conflict, for it to word in its own
+    /// commands.
+    #[must_use]
+    pub fn remedy(&self) -> Remedy {
+        // With several claimants the sentence already says the extra files must
+        // go, and every command refuses the name until they do. Removing them
+        // still leaves it taken, so another name is the only way forward.
+        match self.kind() {
+            ConflictKind::Package => Remedy::UseThePackage,
+            ConflictKind::DotfileSpec => Remedy::RemoveTheDotfileSpec,
+            ConflictKind::SeveralPackages | ConflictKind::SeveralDotfileSpecs => {
+                Remedy::ChooseAnotherName
+            }
+        }
+    }
+
     /// The files that claim the name, for a sentence: the path itself for one
     /// file, and each path quoted for several, so a comma or a space in a path
     /// cannot be mistaken for the separator.
@@ -77,19 +129,19 @@ impl NamespaceConflict {
 impl fmt::Display for NamespaceConflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (name, files, count) = (&self.name, self.claimants(), self.paths.len());
-        match (self.found_in.clone(), count) {
-            (NameLocation::Dotfiles, 1) => {
+        match self.kind() {
+            ConflictKind::DotfileSpec => {
                 write!(f, "A dotfile spec named '{name}' already exists ({files}).")
             }
-            (NameLocation::Packages, 1) => write!(f, "'{name}' is already a package ({files})."),
+            ConflictKind::Package => write!(f, "'{name}' is already a package ({files})."),
             // Several files claiming one name is itself a problem: every command
             // that looks the name up refuses it until all but one are gone.
-            (NameLocation::Dotfiles, _) => write!(
+            ConflictKind::SeveralDotfileSpecs => write!(
                 f,
                 "{count} dotfile specs claim the name '{name}', {files}; all but one must be \
                  removed."
             ),
-            (NameLocation::Packages, _) => write!(
+            ConflictKind::SeveralPackages => write!(
                 f,
                 "{count} package specs claim the name '{name}', {files}; all but one must be \
                  removed."
@@ -229,6 +281,48 @@ mod tests {
 
         let result = validate_unique_name("new-pkg", &package_repo, Some(&dotfiles_repo));
         assert!(result.is_ok());
+    }
+
+    // The kind is where the claimants are and whether there are several. One
+    // claimant's remedy follows where it is; several claimants leave only
+    // another name, wherever they are.
+    #[test]
+    fn the_kind_and_remedy_follow_the_claimants() {
+        let conflict = |found_in: NameLocation, paths: &[&str]| {
+            NamespaceConflict::new("x", found_in, paths.iter().map(PathBuf::from).collect())
+                .expect("a claimant")
+        };
+        let remedy = |found_in: NameLocation, paths: &[&str]| conflict(found_in, paths).remedy();
+        let several = ["/s/x.yaml", "/s/x.yml"];
+
+        assert_eq!(
+            conflict(NameLocation::Packages, &["/p/x.yml"]).kind(),
+            ConflictKind::Package
+        );
+        assert_eq!(
+            conflict(NameLocation::Dotfiles, &["/d/x.yml"]).kind(),
+            ConflictKind::DotfileSpec
+        );
+        assert_eq!(
+            conflict(NameLocation::Packages, &several).kind(),
+            ConflictKind::SeveralPackages
+        );
+        assert_eq!(
+            conflict(NameLocation::Dotfiles, &several).kind(),
+            ConflictKind::SeveralDotfileSpecs
+        );
+
+        assert_eq!(
+            remedy(NameLocation::Packages, &["/p/x.yml"]),
+            Remedy::UseThePackage
+        );
+        assert_eq!(
+            remedy(NameLocation::Dotfiles, &["/d/x.yml"]),
+            Remedy::RemoveTheDotfileSpec
+        );
+        for found_in in [NameLocation::Packages, NameLocation::Dotfiles] {
+            assert_eq!(remedy(found_in, &several), Remedy::ChooseAnotherName);
+        }
     }
 
     #[test]

@@ -883,17 +883,18 @@ fn namespace_refusal(
         Invalid::PackageDirectoryUnreadable(listing) => ("package_directory", listing),
         Invalid::DotfilesDirectoryUnreadable(listing) => ("dotfiles_directory", listing),
         Invalid::Conflict(conflict) => {
-            use selfie::namespace::NameLocation;
+            use selfie::namespace::Remedy;
 
-            let remedy = match (check, &conflict.found_in) {
-                (NameCheck::SpecCreate, NameLocation::Packages) => {
+            let remedy = match (conflict.remedy(), check) {
+                (Remedy::ChooseAnotherName, _) => "Choose a different name.",
+                (Remedy::UseThePackage, NameCheck::SpecCreate) => {
                     "Use selfie_spec_update to change it, or choose a different name."
                 }
-                (NameCheck::DotfilesTrack, NameLocation::Packages) => {
+                (Remedy::UseThePackage, NameCheck::DotfilesTrack) => {
                     "Use selfie_package_track_dotfile to track a file for it, or choose a \
                      different name."
                 }
-                (_, NameLocation::Dotfiles) => "Remove it first or choose a different name.",
+                (Remedy::RemoveTheDotfileSpec, _) => "Remove it first or choose a different name.",
             };
             return Err(McpError::invalid_params(
                 format!("{conflict} {remedy}"),
@@ -1336,6 +1337,39 @@ mod tests {
             "A dotfile spec named 'rc' already exists (/d/rc.yml). Remove it first or choose a \
              different name."
         );
+    }
+
+    // A name several files claim gets one remedy whichever tool asked: the
+    // sentence already says the extra files must go, and the tools a single
+    // claimant's remedy points at refuse the name until they do.
+    #[test]
+    fn a_name_several_specs_claim_gets_one_remedy_for_every_tool() {
+        use selfie::namespace::NameLocation;
+
+        for found_in in [NameLocation::Packages, NameLocation::Dotfiles] {
+            for check in [NameCheck::SpecCreate, NameCheck::DotfilesTrack] {
+                let conflict = selfie::namespace::NamespaceConflict::new(
+                    "dup",
+                    found_in.clone(),
+                    vec!["/s/dup.yaml".into(), "/s/dup.yml".into()],
+                )
+                .expect("two claimants");
+                let Err(refusal) = namespace_refusal(conflict.into(), check) else {
+                    panic!("a conflict is an error");
+                };
+
+                assert!(
+                    refusal
+                        .message
+                        .ends_with("all but one must be removed. Choose a different name."),
+                    "{}",
+                    refusal.message
+                );
+                for wrong in ["Remove it", "selfie_spec_update", "track_dotfile"] {
+                    assert!(!refusal.message.contains(wrong), "{}", refusal.message);
+                }
+            }
+        }
     }
 
     // A package's name gets the remedy for the tool that asked: an update for

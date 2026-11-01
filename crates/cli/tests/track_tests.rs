@@ -642,3 +642,42 @@ fn a_spec_both_scans_list_is_one_tracker() {
         "{stdout}{stderr}"
     );
 }
+
+// Two dotfile specs claiming the name: the conflict says the extra files must go,
+// and the remedy neither says "it" of several files nor offers a removal that
+// would still leave the name taken. One claimant keeps "Remove it first".
+#[test]
+fn dotfiles_track_over_a_name_several_specs_claim_gets_one_remedy() {
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    let dotfiles = home.join("dotfiles");
+    std::fs::create_dir_all(&dotfiles).unwrap();
+    let spec = "name: dup\ndotfiles:\n  - source: a\n    target: ~/.a\n";
+    std::fs::write(dotfiles.join("dup.yml"), spec).unwrap();
+    std::fs::write(dotfiles.join("dup.yaml"), spec).unwrap();
+    std::fs::write(dotfiles.join("solo.yml"), spec.replace("dup", "solo")).unwrap();
+    let file = home.join(".zz");
+    std::fs::write(&file, "x").unwrap();
+
+    let track = |name: &str| {
+        let output = sandboxed_command(&temp)
+            .env("HOME", &home)
+            .args(["dotfiles", "track", name, file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(FAILED), "{output:?}");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+
+    let several = track("dup");
+    assert!(
+        several.contains("all but one must be removed. Choose a different name."),
+        "{several}"
+    );
+    assert!(!several.contains("Remove it first"), "{several}");
+    let solo = track("solo");
+    assert!(
+        solo.contains("Remove it first or choose a different name."),
+        "{solo}"
+    );
+}
