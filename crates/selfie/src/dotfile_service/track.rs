@@ -858,6 +858,7 @@ where
 mod tests {
     use super::*;
     use crate::fs::MockFileSystem;
+    use crate::package::port::{UntrustedLevel, UntrustedLevels};
 
     // selfie-yw7i. Track copies the user's file *into* the dotfiles repository, so
     // a refusal is about a repository path -- but every `FileSystemError` variant
@@ -1116,15 +1117,53 @@ mod tests {
         );
     }
 
+    // A rewrite refusal names the spec in its refusal and in its remedy, however
+    // many levels it lists, and the frame adds no mention of its own.
+    #[test]
+    fn a_spec_save_refused_at_several_levels_adds_no_mention_of_the_spec() {
+        let spec = "/packages/creds.yml";
+        let error = PackageRepoError::UntrustedKeys {
+            path: PathBuf::from(spec),
+            levels: UntrustedLevels::new(vec![
+                UntrustedLevel::DotfileFields {
+                    fields: vec!["dotfiles[0].var".to_string()],
+                    entries: 1,
+                },
+                UntrustedLevel::EnvironmentFields(vec!["environments.work.audt".to_string()]),
+            ])
+            .unwrap(),
+        };
+
+        let message = spec_save_failure(
+            &error,
+            Path::new("/packages/creds/token"),
+            &CopyRemoval::Removed,
+        );
+
+        assert_eq!(
+            message.matches(spec).count(),
+            error.to_string().matches(spec).count(),
+            "the frame named the spec again: {message}"
+        );
+        assert!(
+            message.contains("environments.work.audt"),
+            "a level is missing: {message}"
+        );
+    }
+
     // A copy that survived says so, and says it differently. The two arms are
     // opposite advice -- one needs nothing from the user, the other needs a file
     // deleted before a retry can work -- so a reader must be able to tell them
     // apart.
     #[test]
     fn a_failed_spec_save_says_when_the_copy_survived() {
-        let error = PackageRepoError::UnknownDotfileFields {
+        let error = PackageRepoError::UntrustedKeys {
             path: PathBuf::from("/packages/creds.yml"),
-            fields: "dotfiles[0].var".to_string(),
+            levels: UntrustedLevels::new(vec![UntrustedLevel::DotfileFields {
+                fields: vec!["dotfiles[0].var".to_string()],
+                entries: 1,
+            }])
+            .unwrap(),
         };
         let removal = FileSystemError::IoError(
             std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied").into(),
