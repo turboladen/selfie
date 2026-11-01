@@ -6,19 +6,17 @@ use std::fmt::Display;
 
 use selfie::commands::runner::TimedOut;
 use selfie::config::ConfigLoadError;
-use selfie::fs::FileSystemError;
-use selfie::fs::target::StatePathError;
 use selfie::namespace::{NamespaceConflict, NamespaceValidationError};
 use selfie::package::event::{
     CheckFailure, OperationFailure, OperationType, SkipReason, SpecStatus, UncheckedSource,
     UnknownStatus,
 };
 use selfie::package::port::{PackageError, PackageListError, PackageParseKind, PackageRepoError};
-use selfie::parts::{Composed, Part, Parts};
+use selfie::parts::{Composed, Part, Parts, Subcommand};
 use selfie::sync_service::port::SyncError;
 use selfie::yaml::ParseFailure;
 
-use crate::terminal_text::{DisplayPath, Name, Prose, Shown, lit};
+use crate::terminal_text::{Command, DisplayPath, Literal, Name, Prose, Shown, lit};
 
 /// A library value whose `Display` is a sentence the CLI shows as [`Prose`].
 ///
@@ -47,7 +45,6 @@ macro_rules! sentences {
 sentences!(
     CheckFailure,
     ConfigLoadError,
-    FileSystemError,
     NamespaceConflict,
     NamespaceValidationError,
     OperationFailure,
@@ -59,7 +56,6 @@ sentences!(
     ParseFailure,
     SkipReason,
     SpecStatus,
-    StatePathError,
     SyncError,
     TimedOut,
     UncheckedSource,
@@ -105,7 +101,23 @@ pub(crate) fn rendered(parts: &Parts) -> Shown {
             Part::Text(clause) => Prose::new(clause).into(),
             Part::Name(name) => Name::new(name).into(),
             Part::Path(path) => DisplayPath::of(path).into(),
+            // The library quoted the operand when it built the command, so
+            // the word is shown as it is and never quoted again.
+            Part::Command(command) => Command::with_quoted(
+                &[lit!("selfie"), subcommand_word(command.subcommand())],
+                command.word(),
+            )
+            .into(),
         });
     }
     Shown::join(shown, lit!(""))
+}
+
+// The word that names `subcommand` on a command line.
+fn subcommand_word(subcommand: Subcommand) -> Literal {
+    // No catch-all, so a subcommand the library adds fails to compile here
+    // until the CLI says how to show it.
+    match subcommand {
+        Subcommand::Apply => lit!("apply"),
+    }
 }

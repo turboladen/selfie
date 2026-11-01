@@ -368,7 +368,7 @@ fn below_non_directory_refusal(
         Some(parent) => AbsentReason::ParentNotADirectory {
             parent: parent.to_path_buf(),
         }
-        .clause(),
+        .to_string(),
         None => "is below a component that is not a directory".to_string(),
     };
     Refusal::found(
@@ -408,7 +408,7 @@ fn path_refusal(source: &str, target: &TargetPath, found: &InTheWay<'_>, extra: 
         InTheWay::NotADirectory(reason) => format!(
             "Skipping '{source}': the target '{}' {}{unwritten}.{unrun}",
             target.display(),
-            reason.clause()
+            reason
         ),
         InTheWay::Undetermined(error) => format!(
             "Skipping '{source}': selfie could not determine what is at the target{unwritten}.\

@@ -158,7 +158,10 @@ const KIND_CONSTRUCTORS: &[(&str, &[&str])] = &[
     ("Prose", &["new"]),
     ("Output", &["new", "line"]),
     ("Content", &["new"]),
-    ("Command", &["composed", "written", "one_line"]),
+    (
+        "Command",
+        &["composed", "with_quoted", "written", "one_line"],
+    ),
 ];
 
 // These constructors build the kinds that escape less than the strict set.

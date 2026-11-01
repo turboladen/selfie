@@ -22,6 +22,67 @@ pub enum Part<'a> {
     Name(&'a str),
     /// A path, including one spelled as a spec spells it, such as `~/.bashrc`.
     Path(&'a Path),
+    /// A `selfie` command for the user to run.
+    Command(SelfieCommand),
+}
+
+/// A `selfie` subcommand a sentence offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subcommand {
+    /// `selfie apply`.
+    Apply,
+}
+
+impl Subcommand {
+    // The subcommand as it is typed, such as `apply`.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+        }
+    }
+}
+
+/// A `selfie` command for the user to run: a subcommand and one operand,
+/// such as a spec name, held as the shell words that pass it: the operand
+/// quoted as one word, after a `--` word when it starts with a dash.
+///
+/// Its operand always has those words, so the command can always be written
+/// out to run as shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelfieCommand {
+    subcommand: Subcommand,
+    word: String,
+}
+
+impl SelfieCommand {
+    /// The command running `subcommand` on `operand`, or `None` when
+    /// `operand` holds NUL, which no shell word can carry.
+    #[must_use]
+    pub fn new(subcommand: Subcommand, operand: &str) -> Option<Self> {
+        crate::fs::shell_operand(operand).map(|word| Self { subcommand, word })
+    }
+
+    /// The subcommand it runs.
+    #[must_use]
+    pub fn subcommand(&self) -> Subcommand {
+        self.subcommand
+    }
+
+    /// The shell words that pass the operand: the operand quoted as one word,
+    /// after a `--` word when it starts with a dash, as a command line shows
+    /// them.
+    #[must_use]
+    pub fn word(&self) -> &str {
+        &self.word
+    }
+}
+
+impl fmt::Display for SelfieCommand {
+    /// Writes `selfie <subcommand> <operand>`, the operand quoted as one shell
+    /// word, after `--` when it starts with a dash.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "selfie {} {}", self.subcommand.word(), self.word)
+    }
 }
 
 /// A sentence, as its parts in order.
@@ -41,6 +102,13 @@ impl<'a> Parts<'a> {
             self.0.push(Part::Text(text));
         }
         self
+    }
+
+    // A cause's own text, embedded in a sentence, without the line breaks at
+    // its end: the sentence goes on after it.
+    pub(crate) fn cause(self, cause: impl fmt::Display) -> Self {
+        let text = cause.to_string();
+        self.text(text.trim_end_matches(['\r', '\n']).to_string())
     }
 
     pub(crate) fn name(mut self, name: &'a str) -> Self {
@@ -73,6 +141,11 @@ impl<'a> Parts<'a> {
             })
     }
 
+    pub(crate) fn command(mut self, command: SelfieCommand) -> Self {
+        self.0.push(Part::Command(command));
+        self
+    }
+
     pub(crate) fn append(mut self, other: Parts<'a>) -> Self {
         self.0.extend(other.0);
         self
@@ -89,13 +162,15 @@ impl<'p, 'a> IntoIterator for &'p Parts<'a> {
 }
 
 impl fmt::Display for Parts<'_> {
-    /// Writes each part as it is, a path through [`Path::display`].
+    /// Writes each part as it is, a path through [`Path::display`] and a
+    /// command as [`SelfieCommand`] writes it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for part in self {
             match part {
                 Part::Text(text) => f.write_str(text)?,
                 Part::Name(name) => f.write_str(name)?,
                 Part::Path(path) => write!(f, "{}", path.display())?,
+                Part::Command(command) => write!(f, "{command}")?,
             }
         }
         Ok(())
@@ -116,7 +191,14 @@ pub trait Composed: fmt::Display {
 // `impl<T: Composed> Display for T` would hold every such type to it without
 // a macro, but the orphan rule refuses a foreign trait implemented for an
 // uncovered type parameter.
+// `display_from_parts!(error T)` also implements `std::error::Error`, with no
+// source, for a `Composed` type that is an error.
 macro_rules! display_from_parts {
+    (error $composed:ty) => {
+        $crate::parts::display_from_parts!($composed);
+
+        impl std::error::Error for $composed {}
+    };
     ($composed:ty) => {
         impl std::fmt::Display for $composed {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

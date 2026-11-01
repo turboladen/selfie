@@ -613,7 +613,7 @@ fn file_system_error(error: &FileSystemError) -> Shown {
             io_error(Some(FileSystemError::uncreatable_directory(path)), cause)
         }
         FileSystemError::DirectoryTarget { path, cause } => io_error(Some(path), cause),
-        FileSystemError::HomeDirNotFound => sentence(error).into(),
+        FileSystemError::HomeDirNotFound => composed(error),
     }
 }
 
@@ -633,7 +633,7 @@ fn state_path_error(error: &StatePathError) -> Shown {
              not",
             DisplayPath::of(path)
         ),
-        StatePathError::NoHome => sentence(error).into(),
+        StatePathError::NoHome => composed(error),
     }
 }
 

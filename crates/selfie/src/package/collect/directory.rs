@@ -72,7 +72,7 @@ pub(crate) fn absent_warning(path: &Path, reason: &AbsentReason) -> String {
     format!(
         "Dotfiles directory {} {} — standalone dotfiles will not be read.{}",
         path.display(),
-        reason.clause(),
+        reason,
         match reason.remedy(path) {
             Some(command) => format!(" {command}"),
             None => String::new(),
@@ -86,7 +86,7 @@ pub(crate) fn absent_track_refusal(path: &Path, reason: &AbsentReason) -> String
     format!(
         "Cannot track a standalone dotfile: the dotfiles directory {} {}{}",
         path.display(),
-        reason.clause(),
+        reason,
         match reason.remedy(path) {
             Some(command) => format!(" {command}"),
             None => String::new(),

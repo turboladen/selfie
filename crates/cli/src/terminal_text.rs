@@ -645,6 +645,15 @@ impl Command {
         ))
     }
 
+    /// Builds a command from selfie's own `words` followed by `quoted`, shell
+    /// words the library has already quoted, joined by spaces on one line. A
+    /// line break or a tab in `quoted` shows as an escape.
+    pub(crate) fn with_quoted(words: &[Literal], quoted: &str) -> Self {
+        let mut line: Vec<&str> = words.iter().map(|literal| literal.as_str()).collect();
+        line.push(quoted);
+        Self(escape(&line.join(" "), Policy::CommandLine).into_owned())
+    }
+
     /// Shows a command a spec's author wrote as written, keeping its line
     /// breaks and tabs for the layout to place.
     pub(crate) fn written(text: &str) -> Self {

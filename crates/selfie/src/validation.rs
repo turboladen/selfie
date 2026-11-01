@@ -159,11 +159,13 @@ pub enum DeployStateNotice {
     Warning(crate::dotfile_service::DeployStateWarning),
 }
 
-impl std::fmt::Display for DeployStateNotice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+crate::parts::display_from_parts!(DeployStateNotice);
+
+impl crate::parts::Composed for DeployStateNotice {
+    fn parts(&self) -> crate::parts::Parts<'_> {
         match self {
-            Self::Failure(failure) => write!(f, "{failure}"),
-            Self::Warning(warning) => write!(f, "{warning}"),
+            Self::Failure(failure) => failure.parts(),
+            Self::Warning(warning) => warning.parts(),
         }
     }
 }

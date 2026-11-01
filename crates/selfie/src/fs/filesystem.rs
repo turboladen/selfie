@@ -10,6 +10,7 @@ use std::{
 use thiserror::Error;
 
 use crate::fs::target::TargetPath;
+use crate::parts::{Composed, Parts};
 
 /// What is at a directory path.
 ///
@@ -106,9 +107,33 @@ impl DirectoryState {
         // words.
         match self {
             Self::Directory => "is a directory".to_string(),
-            Self::Absent(reason) => reason.clause(),
+            Self::Absent(reason) => reason.to_string(),
             Self::Unlistable(error) => format!("could not be listed: {error}"),
             Self::Unknown(error) => format!("could not be checked: {error}"),
+        }
+    }
+}
+
+crate::parts::display_from_parts!(AbsentReason);
+
+impl Composed for AbsentReason {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new();
+        match self {
+            Self::Empty => parts.text("does not exist"),
+            Self::Occupied { kind } => parts.text(format!("is not a directory, it is a {kind}")),
+            Self::DanglingSymlink {
+                points_to: Some(destination),
+            } => parts
+                .text("is a symlink to nothing: it points at ")
+                .path(destination),
+            // The link read once and would not read again, so the sentence names
+            // what is known rather than guessing a destination.
+            Self::DanglingSymlink { points_to: None } => parts.text("is a symlink to nothing"),
+            Self::ParentNotADirectory { parent } => parts
+                .text("is below ")
+                .path(parent)
+                .text(", which is not a directory"),
         }
     }
 }
@@ -116,29 +141,9 @@ impl DirectoryState {
 impl AbsentReason {
     /// What is at the path instead of a directory, as a clause that follows the
     /// directory's name: "does not exist", "is a regular file".
-    ///
-    /// Shared so a refusal and a warning about the same directory describe it the
-    /// same way, and so no caller has to match on the variants to word one.
     #[must_use]
     pub fn clause(&self) -> String {
-        match self {
-            Self::Empty => "does not exist".to_string(),
-            Self::Occupied { kind } => format!("is not a directory, it is a {kind}"),
-            Self::DanglingSymlink { points_to } => match points_to {
-                Some(destination) => {
-                    format!(
-                        "is a symlink to nothing: it points at {}",
-                        destination.display()
-                    )
-                }
-                // The link read once and would not read again, so the sentence names
-                // what is known rather than guessing a destination.
-                None => "is a symlink to nothing".to_string(),
-            },
-            Self::ParentNotADirectory { parent } => {
-                format!("is below {}, which is not a directory", parent.display())
-            }
-        }
+        self.to_string()
     }
 
     /// The command that would create the directory at `path`, or `None` when no
@@ -775,9 +780,11 @@ impl IoFailure {
     }
 }
 
-impl std::fmt::Display for IoFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&io_text(self.path.as_deref(), &self.error))
+crate::parts::display_from_parts!(IoFailure);
+
+impl Composed for IoFailure {
+    fn parts(&self) -> Parts<'_> {
+        io_parts(self.path.as_deref(), &self.error)
     }
 }
 
@@ -796,14 +803,12 @@ impl From<Arc<io::Error>> for IoFailure {
 /// Every way a file system operation here can fail.
 // No variant has a source: a CLI error with a chain longer than one prints the
 // chain, so a source here would print the cause twice.
-#[derive(Error, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum FileSystemError {
     /// General IO error occurred during file system operation
-    #[error("IO error: {0}")]
     IoError(IoFailure),
 
     /// Home directory could not be determined (needed for path expansion)
-    #[error("Home directory not found")]
     HomeDirNotFound,
 
     /// A write was refused because the final path component is a symlink
@@ -816,11 +821,6 @@ pub enum FileSystemError {
     ///
     /// `points_to` is optional because reading the link is a second syscall that
     /// can fail on its own; the refusal still stands when it does.
-    #[error(
-        "{}: target is a symlink{} and selfie will not write through it",
-        .path.display(),
-        .points_to.as_deref().map_or(String::new(), |dest| format!(" to '{}'", dest.display()))
-    )]
     SymlinkedTarget {
         path: PathBuf,
         points_to: Option<PathBuf>,
@@ -840,12 +840,10 @@ pub enum FileSystemError {
     /// *following* stat, so it covers a symlink pointing at a fifo as well as a
     /// bare one. A plain symlink is [`SymlinkedTarget`](Self::SymlinkedTarget)
     /// instead, asked with a non-following stat; do not conflate the two.
-    #[error("{}: target resolves to a {kind} and selfie will not write to it", .path.display())]
     IrregularTarget { path: PathBuf, kind: &'static str },
 
     /// A new file cannot be created under `path`: the directory it was asked
     /// about, or the nearest ancestor of it that exists, refuses one.
-    #[error("{}: {cause}", .path.display())]
     CannotCreateIn {
         path: PathBuf,
         cause: Arc<io::Error>,
@@ -853,7 +851,6 @@ pub enum FileSystemError {
 
     /// A write could not create the target because a component above it is not a
     /// directory. `parent` is the first such component, when it could be found.
-    #[error("IO error: {}", io_text(Some(Self::uncreatable_directory(.path)), .cause))]
     BelowNonDirectory {
         path: PathBuf,
         parent: Option<PathBuf>,
@@ -861,7 +858,6 @@ pub enum FileSystemError {
     },
 
     /// A write could not replace the target because a directory is there.
-    #[error("IO error: {}", io_text(Some(.path), .cause))]
     DirectoryTarget {
         path: PathBuf,
         cause: Arc<io::Error>,
@@ -878,13 +874,48 @@ impl FileSystemError {
     }
 }
 
-// An IO error's text after "IO error: ": the path it names, if any, then the
-// error.
-fn io_text(path: Option<&Path>, error: &io::Error) -> String {
-    match path {
-        Some(path) => format!("{}: {error}", path.display()),
-        None => error.to_string(),
+crate::parts::display_from_parts!(error FileSystemError);
+
+impl Composed for FileSystemError {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::IoError(failure) => Parts::new().text("IO error: ").append(failure.parts()),
+            Self::HomeDirNotFound => Parts::new().text("Home directory not found"),
+            Self::SymlinkedTarget { path, points_to } => {
+                let to = points_to.as_deref().map_or_else(Parts::new, |destination| {
+                    Parts::new().text(" to '").path(destination).text("'")
+                });
+                Parts::new()
+                    .path(path)
+                    .text(": target is a symlink")
+                    .append(to)
+                    .text(" and selfie will not write through it")
+            }
+            Self::IrregularTarget { path, kind } => Parts::new().path(path).text(format!(
+                ": target resolves to a {kind} and selfie will not write to it"
+            )),
+            Self::CannotCreateIn { path, cause } => {
+                Parts::new().path(path).text(": ").cause(&**cause)
+            }
+            // The message names the directory the write could not create.
+            Self::BelowNonDirectory { path, cause, .. } => Parts::new()
+                .text("IO error: ")
+                .append(io_parts(Some(Self::uncreatable_directory(path)), cause)),
+            Self::DirectoryTarget { path, cause } => Parts::new()
+                .text("IO error: ")
+                .append(io_parts(Some(path), cause)),
+        }
     }
+}
+
+// The parts of an IO error after "IO error: ": the path it is about, when it
+// has one, then the error.
+fn io_parts<'a>(path: Option<&'a Path>, error: &io::Error) -> Parts<'a> {
+    let parts = match path {
+        Some(path) => Parts::new().path(path).text(": "),
+        None => Parts::new(),
+    };
+    parts.cause(error)
 }
 
 /// What a failed read of a repository file found at the path.

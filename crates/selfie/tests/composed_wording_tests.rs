@@ -4,6 +4,7 @@
 // stated in full.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use selfie::fs::target::StatePathError;
 use selfie::fs::{AbsentReason, IoFailure};
@@ -147,22 +148,63 @@ fn every_state_path_absence_and_io_sentence_is_worded_as_pinned() {
     let shown = [
         StatePathError::NotAbsolute("s/state".into()).to_string(),
         StatePathError::NoHome.to_string(),
-        AbsentReason::Empty.clause(),
+        AbsentReason::Empty.to_string(),
         AbsentReason::Occupied {
             kind: "regular file",
         }
-        .clause(),
+        .to_string(),
         AbsentReason::DanglingSymlink {
             points_to: Some("/s/gone".into()),
         }
-        .clause(),
-        AbsentReason::DanglingSymlink { points_to: None }.clause(),
+        .to_string(),
+        AbsentReason::DanglingSymlink { points_to: None }.to_string(),
         AbsentReason::ParentNotADirectory {
             parent: "/s/file".into(),
         }
-        .clause(),
+        .to_string(),
         IoFailure::at(Path::new("/s/deploy-state.yml"), io()).to_string(),
         IoFailure::from(io()).to_string(),
     ];
     assert_worded(&shown, OTHERS);
+}
+
+// A cause whose own text ends in a line break is embedded without it, so the
+// sentence holding it goes on on the same line, for the MCP server and the
+// CLI alike.
+#[test]
+fn a_cause_ending_in_a_line_break_is_embedded_without_it() {
+    use selfie::dotfile_service::{StateLoadFailure, StateSaveError};
+    use selfie::fs::FileSystemError;
+
+    let io = || Arc::new(std::io::Error::other("disk full\n"));
+    let shown = [
+        StateSaveError::Write {
+            path: "/s/deploy-state.yml".into(),
+            cause: FileSystemError::IoError(IoFailure::at(Path::new("/s/deploy-state.yml"), io())),
+        }
+        .to_string(),
+        StateLoadFailure::StateDirectoryNotWritable {
+            directory: "/s/state".into(),
+            blocked: "/s/state".into(),
+            cause: Box::new(FileSystemError::CannotCreateIn {
+                path: "/s/state".into(),
+                cause: io(),
+            }),
+            configured: true,
+        }
+        .to_string(),
+        FileSystemError::CannotCreateIn {
+            path: "/s".into(),
+            cause: io(),
+        }
+        .to_string(),
+    ];
+    assert_worded(
+        &shown,
+        &[
+            "Cannot write deploy state '/s/deploy-state.yml': IO error: /s/deploy-state.yml: disk full",
+            "The deploy state cannot be written: the state directory '/s/state' does not accept a new file (disk full). Make it writable, or point state_directory elsewhere",
+            "/s: disk full",
+        ],
+    );
 }

@@ -402,7 +402,7 @@ fn spec_read_failure(path: &Path, failure: FileSystemError) -> PackageParseError
     let kind = match failure {
         FileSystemError::IoError(cause) => PackageParseKind::Io { cause },
         FileSystemError::BelowNonDirectory { path, cause, .. } => PackageParseKind::Io {
-            cause: IoFailure::at(FileSystemError::uncreatable_directory(&path), cause),
+            cause: IoFailure::at(crate::fs::filesystem::parent_dir(&path), cause),
         },
         FileSystemError::DirectoryTarget { path, cause } => PackageParseKind::Io {
             cause: IoFailure::at(&path, cause),

@@ -10,8 +10,6 @@
 
 use std::path::{Path, PathBuf};
 
-use thiserror::Error;
-
 use crate::{
     dotfile_service::state::DeployState,
     fs::{
@@ -19,6 +17,7 @@ use crate::{
         filesystem::{FileSystem, FileSystemError, IfPresent},
         target::{StatePathError, TargetPath, state_file_path},
     },
+    parts::{Composed, Parts, SelfieCommand, Subcommand},
     yaml::ParseFailure,
 };
 
@@ -234,28 +233,17 @@ pub(crate) enum StateLoad {
 }
 
 /// Why the deploy state could not be used. Each message names its remedy.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum StateLoadFailure {
     /// The file has no location.
-    #[error("Cannot locate the deploy state file: {0}")]
     Locate(StatePathError),
     /// Something that is not a directory occupies the state directory's path.
-    #[error(
-        "Cannot use the deploy state: '{}' {}. Remove it, or point state_directory elsewhere",
-        .path.display(),
-        .reason.clause()
-    )]
     StateDirectoryOccupied { path: PathBuf, reason: AbsentReason },
     /// The state directory could not be read or could not be classified, so
     /// selfie cannot tell whether a state it must not overwrite is in there.
-    #[error(
-        "Cannot use the deploy state: '{}' {why}. Point state_directory at a directory selfie can read",
-        .path.display()
-    )]
     StateDirectoryUnreadable { path: PathBuf, why: String },
     /// The state directory does not accept a new file, or is not there and
     /// cannot be created, so the deploy state cannot be written.
-    #[error("{}", not_writable_sentence(directory, blocked, cause, *configured))]
     StateDirectoryNotWritable {
         directory: PathBuf,
         /// The directory that refused: `directory` itself, or the nearest of its
@@ -268,84 +256,141 @@ pub enum StateLoadFailure {
         configured: bool,
     },
     /// The state file could not be written, though the permissions allow it.
-    #[error(
-        "The deploy state cannot be written: {0}. Free the space or lift the lock that stops \
-         it, or point state_directory elsewhere"
-    )]
     StateNotWritable(StateSaveError),
     /// Something that is not a regular file sits at the path.
-    #[error(
-        "Cannot read the deploy state: '{}' is a {kind}. Remove it, or point state_directory elsewhere",
-        .path.display()
-    )]
     Irregular { path: PathBuf, kind: &'static str },
     /// The file exists and could not be read.
-    #[error(
-        "Cannot read deploy state '{}': {cause}. Fix the file's permissions, or move it aside",
-        .path.display()
-    )]
     Read {
         path: PathBuf,
         cause: FileSystemError,
     },
     /// The file exists and holds nothing.
-    #[error(
-        "Deploy state '{}' is empty. Delete it to start over, or restore it from a backup",
-        .path.display()
-    )]
     Empty { path: PathBuf },
     /// The file exists and is not a deploy state selfie can read.
-    #[error(
-        "Cannot parse deploy state '{}': {cause}. Repair the file, or move it aside to start over",
-        .path.display()
-    )]
     Parse { path: PathBuf, cause: ParseFailure },
 }
 
-fn not_writable_sentence(
-    directory: &Path,
-    blocked: &Path,
-    refusal: &FileSystemError,
+crate::parts::display_from_parts!(error StateLoadFailure);
+
+impl Composed for StateLoadFailure {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new();
+        match self {
+            Self::Locate(error) => parts
+                .text("Cannot locate the deploy state file: ")
+                .append(error.parts()),
+            Self::StateDirectoryOccupied { path, reason } => parts
+                .text("Cannot use the deploy state: '")
+                .path(path)
+                .text("' ")
+                .append(reason.parts())
+                .text(". Remove it, or point state_directory elsewhere"),
+            Self::StateDirectoryUnreadable { path, why } => parts
+                .text("Cannot use the deploy state: '")
+                .path(path)
+                .text(format!(
+                    "' {why}. Point state_directory at a directory selfie can read"
+                )),
+            Self::StateDirectoryNotWritable {
+                directory,
+                blocked,
+                cause,
+                configured,
+            } => not_writable_parts(directory, blocked, cause, *configured),
+            Self::StateNotWritable(error) => parts
+                .text("The deploy state cannot be written: ")
+                .append(error.parts())
+                .text(
+                    ". Free the space or lift the lock that stops it, or point state_directory \
+                     elsewhere",
+                ),
+            Self::Irregular { path, kind } => parts
+                .text("Cannot read the deploy state: '")
+                .path(path)
+                .text(format!(
+                    "' is a {kind}. Remove it, or point state_directory elsewhere"
+                )),
+            Self::Read { path, cause } => parts
+                .text("Cannot read deploy state '")
+                .path(path)
+                .text("': ")
+                .append(cause.parts())
+                .text(". Fix the file's permissions, or move it aside"),
+            Self::Empty { path } => parts
+                .text("Deploy state '")
+                .path(path)
+                .text("' is empty. Delete it to start over, or restore it from a backup"),
+            Self::Parse { path, cause } => parts
+                .text("Cannot parse deploy state '")
+                .path(path)
+                .text("': ")
+                .cause(cause)
+                .text(". Repair the file, or move it aside to start over"),
+        }
+    }
+}
+
+fn not_writable_parts<'a>(
+    directory: &'a Path,
+    blocked: &'a Path,
+    refusal: &'a FileSystemError,
     configured: bool,
-) -> String {
+) -> Parts<'a> {
     // `blocked` names the directory, so a refusal naming it gives only its cause.
     let why = match refusal {
-        FileSystemError::CannotCreateIn { cause, .. } => cause.to_string(),
-        other => other.to_string(),
+        FileSystemError::CannotCreateIn { cause, .. } => Parts::new().cause(&**cause),
+        other => other.parts(),
     };
+    let lead = Parts::new()
+        .text("The deploy state cannot be written: the state directory '")
+        .path(directory);
     if directory == blocked {
-        return format!(
-            "The deploy state cannot be written: the state directory '{}' does not accept a new \
-             file ({why}). Make it writable, or point state_directory elsewhere",
-            directory.display()
-        );
+        return lead
+            .text("' does not accept a new file (")
+            .append(why)
+            .text("). Make it writable, or point state_directory elsewhere");
     }
     let typo = if configured {
         "Correct state_directory if that path is a typo, or make"
     } else {
         "Make"
     };
-    format!(
-        "The deploy state cannot be written: the state directory '{}' is not there, and selfie \
-         cannot create it under '{}' ({why}). {typo} '{}' writable",
-        directory.display(),
-        blocked.display(),
-        blocked.display()
-    )
+    lead.text("' is not there, and selfie cannot create it under '")
+        .path(blocked)
+        .text("' (")
+        .append(why)
+        .text(format!("). {typo} '"))
+        .path(blocked)
+        .text("' writable")
 }
 
 /// Why the deploy state could not be written.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum StateSaveError {
     /// selfie's own state would not serialize: a bug, not a filesystem condition.
-    #[error("Cannot serialize the deploy state: {0}")]
     Serialize(crate::yaml::SerializeFailure),
     /// The write failed.
-    #[error("Cannot write deploy state '{}': {cause}", .path.display())]
     Write {
         path: PathBuf,
         cause: FileSystemError,
     },
+}
+
+crate::parts::display_from_parts!(error StateSaveError);
+
+impl Composed for StateSaveError {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::Serialize(failure) => Parts::new()
+                .text("Cannot serialize the deploy state: ")
+                .cause(failure),
+            Self::Write { path, cause } => Parts::new()
+                .text("Cannot write deploy state '")
+                .path(path)
+                .text("': ")
+                .append(cause.parts()),
+        }
+    }
 }
 
 /// Something about the deploy state a command goes on past, and tells the user.
@@ -375,52 +420,50 @@ pub enum DeployStateWarning {
     Untidied(StateSaveError),
 }
 
-impl std::fmt::Display for DeployStateWarning {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+crate::parts::display_from_parts!(DeployStateWarning);
+
+impl Composed for DeployStateWarning {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new();
         match self {
             Self::NotThereYet {
                 directory,
                 cannot_create: None,
-            } => write!(
-                f,
-                "state_directory '{}' is not there yet, so nothing shows as deployed; selfie \
-                 creates it on the first write. Correct the setting if that path is a typo",
-                directory.display()
+            } => parts.text("state_directory '").path(directory).text(
+                "' is not there yet, so nothing shows as deployed; selfie creates it on the \
+                 first write. Correct the setting if that path is a typo",
             ),
             Self::NotThereYet {
                 directory,
                 cannot_create: Some(failure),
-            } => write!(
-                f,
-                "state_directory '{}' is not there yet, so nothing shows as deployed. {failure}",
-                directory.display()
-            ),
-            Self::ReadingPast(failure) => {
-                write!(
-                    f,
-                    "{failure}; continuing as though nothing had been deployed"
-                )
-            }
-            Self::DryRunWouldStop(failure) => write!(
-                f,
-                "{failure}. A real run stops before its first write, including recording a file \
-                 already in place"
+            } => parts
+                .text("state_directory '")
+                .path(directory)
+                .text("' is not there yet, so nothing shows as deployed. ")
+                .append(failure.parts()),
+            Self::ReadingPast(failure) => parts
+                .append(failure.parts())
+                .text("; continuing as though nothing had been deployed"),
+            Self::DryRunWouldStop(failure) => parts.append(failure.parts()).text(
+                ". A real run stops before its first write, including recording a file already \
+                 in place",
             ),
             // `error` already names the state file, so the sentence does not repeat it.
             Self::NotRecorded {
                 recorded,
                 target,
                 error,
-            } => write!(
-                f,
-                "{recorded} '{}' but cannot record it: {error}",
-                target.display()
-            ),
-            Self::Untidied(error) => write!(
-                f,
-                "Could not tidy the deploy state after the run, so the next apply tries again: \
-                 {error}"
-            ),
+            } => parts
+                .text(format!("{recorded} '"))
+                .path(target)
+                .text("' but cannot record it: ")
+                .append(error.parts()),
+            Self::Untidied(error) => parts
+                .text(
+                    "Could not tidy the deploy state after the run, so the next apply tries \
+                     again: ",
+                )
+                .append(error.parts()),
         }
     }
 }
@@ -444,35 +487,20 @@ impl std::fmt::Display for Recorded {
 }
 
 /// Why a command that records what it writes stopped over the deploy state.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone)]
 pub enum DeployStateFailure {
     /// The state could not be used, so the command did nothing.
-    #[error("{0}")]
     Unusable(StateLoadFailure),
     /// An apply could not write the state back before its first write, so
     /// nothing was written.
-    #[error("Stopped with nothing written. {0}")]
     StoppedBeforeWriting(StateLoadFailure),
     /// An apply wrote `target` and could not record it, and stopped there.
-    #[error(
-        "Stopped after failing to record '{}' in the deploy state; the next run re-evaluates \
-         it once the state can be written",
-        .target.display()
-    )]
     StoppedAfterRecording { target: PathBuf },
     /// A track could not write the state back before its first write, so
     /// nothing was tracked.
-    #[error("Nothing was tracked. {0}")]
     NothingTracked(StateLoadFailure),
     /// A track wrote the copy at `copy` and the entry in `spec_path`, and could
     /// not record the deployment of `target`. `selfie apply <name>` records it.
-    #[error(
-        "Tracked '{target}': the copy at '{}' and the entry in '{}' are written. The deployment \
-         was not recorded: {error}.{}",
-        .copy.display(),
-        .spec_path.display(),
-        apply_remedy(name)
-    )]
     TrackUnrecorded {
         error: StateSaveError,
         name: String,
@@ -484,15 +512,57 @@ pub enum DeployStateFailure {
     },
 }
 
-// The `selfie apply` that records a track's deployment, its name an operand as
-// the CLI quotes one. Empty for a name holding NUL, which no shell word can carry.
-fn apply_remedy(name: &str) -> String {
-    crate::fs::shell_operand(name).map_or_else(String::new, |operand| {
-        format!(
-            " Run `selfie apply {operand}` once the state file can be written, and it records \
-             the deployment."
-        )
-    })
+crate::parts::display_from_parts!(error DeployStateFailure);
+
+impl Composed for DeployStateFailure {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new();
+        match self {
+            Self::Unusable(failure) => failure.parts(),
+            Self::StoppedBeforeWriting(failure) => parts
+                .text("Stopped with nothing written. ")
+                .append(failure.parts()),
+            Self::StoppedAfterRecording { target } => parts
+                .text("Stopped after failing to record '")
+                .path(target)
+                .text(
+                    "' in the deploy state; the next run re-evaluates it once the state can be \
+                     written",
+                ),
+            Self::NothingTracked(failure) => {
+                parts.text("Nothing was tracked. ").append(failure.parts())
+            }
+            Self::TrackUnrecorded {
+                error,
+                name,
+                target,
+                spec_path,
+                copy,
+            } => {
+                // A name holding NUL has no shell word, so no command is offered.
+                let remedy = SelfieCommand::new(Subcommand::Apply, name).map_or_else(
+                    Parts::new,
+                    |command| {
+                        Parts::new().text(" Run `").command(command).text(
+                            "` once the state file can be written, and it records the \
+                             deployment.",
+                        )
+                    },
+                );
+                parts
+                    .text("Tracked '")
+                    .path(Path::new(target))
+                    .text("': the copy at '")
+                    .path(copy)
+                    .text("' and the entry in '")
+                    .path(spec_path)
+                    .text("' are written. The deployment was not recorded: ")
+                    .append(error.parts())
+                    .text(".")
+                    .append(remedy)
+            }
+        }
+    }
 }
 
 /// What selfie makes of a state directory, given what is at its path.
@@ -886,17 +956,18 @@ mod tests {
     #[test]
     fn only_a_configured_state_directory_is_offered_the_typo_remedy() {
         let sentence = |configured| {
-            not_writable_sentence(
-                Path::new("/home/me/.local/state/selfie"),
-                Path::new("/home/me/.local"),
-                &FileSystemError::CannotCreateIn {
+            StateLoadFailure::StateDirectoryNotWritable {
+                directory: "/home/me/.local/state/selfie".into(),
+                blocked: "/home/me/.local".into(),
+                cause: Box::new(FileSystemError::CannotCreateIn {
                     path: "/home/me/.local".into(),
                     cause: std::sync::Arc::new(std::io::Error::from(
                         std::io::ErrorKind::PermissionDenied,
                     )),
-                },
+                }),
                 configured,
-            )
+            }
+            .to_string()
         };
 
         assert!(
