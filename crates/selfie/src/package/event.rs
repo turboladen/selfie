@@ -1466,6 +1466,9 @@ pub enum OperationFailure {
     /// A standalone dotfile could not be tracked into a dotfiles directory
     /// selfie could not read.
     UnusableDotfilesDirectory(TrackDirectoryRefusal),
+    /// An apply with `stop_on_error` on stopped over a refusal: after a
+    /// refused or failed entry, or before applying anything.
+    Stopped(crate::dotfile_service::ApplyStop),
     /// Generic failure with a freeform message
     Generic(String),
 }
@@ -1734,6 +1737,7 @@ impl std::fmt::Display for OperationFailure {
             }
             OperationFailure::DeployState(failure) => write!(f, "{failure}"),
             OperationFailure::UnusableDotfilesDirectory(refusal) => write!(f, "{refusal}"),
+            OperationFailure::Stopped(stop) => write!(f, "{stop}"),
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }

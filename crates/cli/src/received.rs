@@ -422,6 +422,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         OperationFailure::DeployState(failure) => composed(failure),
         OperationFailure::PackageList(error) => composed(error),
         OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
+        OperationFailure::Stopped(stop) => composed(stop),
         OperationFailure::UnreadableSpec {
             package_name,
             reason,
@@ -1374,6 +1375,100 @@ mod tests {
             );
         }
         assert_eq!(shown("/d/ab"), "Create it with: mkdir -p -- /d/ab");
+    }
+
+    // This gives one stop of each kind that apply makes under `stop_on_error`,
+    // naming `target`, `name` and paths under `root` wherever its kind names one.
+    fn every_stop(target: &str, name: &str, root: &str) -> Vec<selfie::dotfile_service::ApplyStop> {
+        use selfie::dotfile_service::ApplyStop;
+        use selfie::package::event::{BaseKind, CollectionRefusal, UnreadableDotfilesDirectory};
+        use selfie::package::port::{PackageListError, PackageParseError, PackageParseKind};
+
+        let stops = vec![
+            ApplyStop::Entry {
+                target: target.into(),
+            },
+            ApplyStop::Package {
+                name: name.to_string(),
+            },
+            ApplyStop::Collection(CollectionRefusal::UnreadableDotfilesDirectory(
+                UnreadableDotfilesDirectory::Unlistable(PackageListError::new(
+                    format!("{root}/dots").into(),
+                    selfie::fs::DirectoryState::Unlistable(test_common::permission_denied()),
+                )),
+            )),
+            ApplyStop::Collection(CollectionRefusal::AmbiguousName {
+                name: name.to_string(),
+                paths: vec![
+                    format!("{root}/a.yml").into(),
+                    format!("{root}/a.yaml").into(),
+                ],
+                base: BaseKind::PackageDirectory,
+            }),
+            ApplyStop::Collection(CollectionRefusal::UnloadableSpec {
+                error: PackageParseError::new(
+                    format!("{root}/bad.yml"),
+                    PackageParseKind::Unreadable {
+                        reason: "a fifo".to_string(),
+                    },
+                ),
+                base: BaseKind::PackageDirectory,
+            }),
+        ];
+        // No catch-all, so a stop the library adds fails to compile here until it
+        // has a fixture.
+        for stop in &stops {
+            match stop {
+                ApplyStop::Entry { .. }
+                | ApplyStop::Package { .. }
+                | ApplyStop::Collection(
+                    CollectionRefusal::UnreadableDotfilesDirectory(_)
+                    | CollectionRefusal::AmbiguousName { .. }
+                    | CollectionRefusal::UnloadableSpec { .. },
+                ) => {}
+            }
+        }
+        stops
+    }
+
+    // A stop reads as the library words it.
+    #[test]
+    fn a_stop_reads_as_the_library_words_it() {
+        assert_renders_as_its_display(&every_stop("~/.toolrc", "tool", "/p"));
+    }
+
+    // A stop names its target and its spec as paths and its package as a
+    // name, as the run's failure line shows it.
+    #[test]
+    fn a_stop_names_its_values_by_kind() {
+        let stops = every_stop("~/t\u{200B}x\ny", "a\u{A0}b", "/p/g\u{200B}one");
+        let shown: Vec<String> = stops
+            .into_iter()
+            .map(|stop| failure(&OperationFailure::Stopped(stop)).into_string())
+            .collect();
+
+        for shown in &shown {
+            assert!(!shown.contains(['\u{200B}', '\n', '\u{A0}']), "{shown:?}");
+        }
+        assert!(
+            shown[0].contains(r"dotfile '~/t\u{200b}x\ny'"),
+            "{}",
+            shown[0]
+        );
+        assert!(shown[1].contains(r"package 'a\u{a0}b'"), "{}", shown[1]);
+        // The unreadable directory's stop names no value, so nothing of its
+        // directory's path may reach it.
+        assert_eq!(
+            shown[2],
+            "Stopped before applying anything: the standalone dotfiles directory could not be \
+             read (stop_on_error is enabled)"
+        );
+        assert!(shown[3].contains(r"the name 'a\u{a0}b'"), "{}", shown[3]);
+        assert!(
+            shown[4].contains(r"spec '/p/g\u{200b}one/bad.yml'"),
+            "{}",
+            shown[4]
+        );
     }
 
     // A listing error and the name check's refusal over one read as the

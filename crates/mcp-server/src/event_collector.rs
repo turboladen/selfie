@@ -3393,6 +3393,40 @@ mod tests {
         );
     }
 
+    // An apply's stop travels typed, and its JSON is the JSON of a generic
+    // failure carrying the same sentence.
+    #[tokio::test]
+    async fn an_apply_stop_collects_as_its_sentence() {
+        use selfie::dotfile_service::ApplyStop;
+
+        let stop = ApplyStop::Entry {
+            target: "~/.toolrc".into(),
+        };
+        let completed = |failure| {
+            vec![PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Failure(failure),
+            }]
+        };
+
+        let typed = collect_events(Box::pin(stream::iter(completed(
+            OperationFailure::Stopped(stop.clone()),
+        ))))
+        .await;
+        let worded = collect_events(Box::pin(stream::iter(completed(
+            OperationFailure::Generic(stop.to_string()),
+        ))))
+        .await;
+
+        assert_eq!(typed.data, worded.data);
+        assert_eq!(typed.success, worded.success);
+        // Control: the error is there, so the equality is not two empty payloads.
+        assert_eq!(
+            typed.data["result"]["error"],
+            "Stopped after failing to apply dotfile '~/.toolrc' (stop_on_error is enabled)"
+        );
+    }
+
     #[tokio::test]
     async fn test_collect_failure() {
         let events = vec![PackageEvent::Completed {
