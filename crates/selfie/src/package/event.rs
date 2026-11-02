@@ -6391,4 +6391,56 @@ mod settle_tests {
             assert_eq!(arrives(&mut returned).await, Some(SettleOutcome::Canceled));
         }
     }
+
+    // Every dependency failure's sentence, whole, as the failure that carries it
+    // writes it, so a change to how they are built cannot change their words.
+    #[test]
+    fn a_dependency_failures_sentences_are_worded_whole() {
+        let reason = "Parse error in package `b` from /p/b.yml: the package file could not be read";
+        let cases = [
+            (
+                DependencyFailure::CircularDependency {
+                    package_name: "a".to_string(),
+                    cycle: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+                },
+                "Dependency error: Circular dependency detected for package `a`: a -> b -> a"
+                    .to_string(),
+            ),
+            (
+                DependencyFailure::MissingDependency {
+                    package_name: "a".to_string(),
+                    dependency_name: "b".to_string(),
+                },
+                "Dependency error: Package `a` depends on `b`, which was not found".to_string(),
+            ),
+            (
+                DependencyFailure::UnreadableSpec {
+                    package_name: "b".to_string(),
+                    required_by: Some("a".to_string()),
+                    reason: reason.to_string(),
+                },
+                format!(
+                    "Dependency error: Package `a` depends on `b`, which carries a spec selfie will \
+                     not read, so its dependencies are unknown: {reason}"
+                ),
+            ),
+            (
+                DependencyFailure::UnreadableSpec {
+                    package_name: "b".to_string(),
+                    required_by: None,
+                    reason: reason.to_string(),
+                },
+                format!(
+                    "Dependency error: Package `b` carries a spec selfie will not read, so its \
+                     dependencies are unknown: {reason}"
+                ),
+            ),
+        ];
+        for (failure, sentence) in cases {
+            assert_eq!(
+                OperationFailure::DependencyError(failure).to_string(),
+                sentence
+            );
+        }
+    }
 }
