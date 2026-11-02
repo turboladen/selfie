@@ -213,88 +213,21 @@ pub enum PackageRepoError {
     #[error("The package cannot be written as YAML: {0}")]
     Unserializable(crate::yaml::SerializeFailure),
 
-    /// Refused to rewrite a package whose dotfile entries carry unrecognized keys.
+    /// Refused to rewrite a package file because it carries keys the struct does
+    /// not model, or because its top level could not be read back to tell.
     ///
-    /// Saving re-serializes from the struct, so a key the struct does not model
-    /// is dropped. For a dotfile entry that key is exactly what makes
-    /// [`content_source`](crate::package::DotfileEntry::content_source) refuse
-    /// the entry, so the rewrite would turn an entry `selfie apply` skips into
-    /// one it deploys.
+    /// Saving re-serializes from the struct, so every such key would be dropped,
+    /// with whatever it holds. The message names every level in `levels`, so the
+    /// file is fixed in one pass.
     // The remedy names editing the file rather than a selfie command on purpose:
     // every command that could rewrite the file is refused by this same guard, so
     // pointing at one would send the user back to a tool that just refused them.
-    #[error(
-        "refusing to rewrite {path}: unrecognized {fields}. \
-         Saving would delete the key and silently make the entry deployable. \
-         Edit {path} directly to correct or remove the key."
-    )]
-    UnknownDotfileFields {
+    #[error("{}", untrusted_keys_sentence(path, levels))]
+    UntrustedKeys {
         /// The file that would have been rewritten.
         path: PathBuf,
-        /// The offending field paths, e.g. `dotfiles[0].var`.
-        fields: String,
-    },
-
-    /// Refused to rewrite a package file because its top level carries a key the
-    /// struct does not model.
-    ///
-    /// `_dotfiles:` read as an anchor, or a plain misspelling like `configs:`,
-    /// is dropped by a rewrite -- taking every entry under it, which is the
-    /// largest thing any of these refusals protects.
-    #[error(
-        "refusing to rewrite {path}: unrecognized {fields}. \
-         Saving would delete the key and everything under it. \
-         Edit {path} directly to correct or remove the key."
-    )]
-    UnknownTopLevelFields {
-        /// The file that would have been rewritten.
-        path: PathBuf,
-        /// The offending field paths, e.g. `_dotfiles`.
-        fields: String,
-    },
-
-    /// Refused to rewrite a package file because its top level could not be read
-    /// back, so selfie cannot say whether it carries keys the struct would drop.
-    ///
-    /// Distinct from [`UnknownTopLevelFields`](Self::UnknownTopLevelFields),
-    /// which names keys it found. Here nothing is known, and a rewrite serializes
-    /// from the struct regardless -- so the safe direction is to decline the
-    /// write, which costs the user a retry, rather than to delete silently.
-    // The parse failure ends the message, because it is the part a reader can act
-    // on last: the remedy is the same whatever the file turned out to be wrong
-    // about. The apply-path warning orders the same string the same way.
-    #[error(
-        "refusing to rewrite {path}: its top level could not be read back, so any \
-         key selfie does not model would be dropped without warning. \
-         Edit {path} directly, or simplify it until selfie can read it. \
-         The read failed with: {error}"
-    )]
-    UncheckedTopLevel {
-        /// The file that would have been rewritten.
-        path: PathBuf,
-        /// Why the re-read failed.
-        error: String,
-    },
-
-    /// Refused to rewrite a package file because an environment carries a key
-    /// the struct does not model.
-    ///
-    /// Separate from [`UnknownDotfileFields`](Self::UnknownDotfileFields)
-    /// because the harm differs. No entry becomes deployable here: the key is
-    /// a setting of the environment, so re-serializing deletes whatever the user
-    /// wrote for it -- `audt: "brew audit myapp"` takes the command with it.
-    // Same reasoning as the sibling for naming the file rather than a command:
-    // every writer is refused by this guard.
-    #[error(
-        "refusing to rewrite {path}: unrecognized {fields}. \
-         Saving would delete the key and whatever it was set to. \
-         Edit {path} directly to correct or remove the key."
-    )]
-    UnknownEnvironmentFields {
-        /// The file that would have been rewritten.
-        path: PathBuf,
-        /// The offending field paths, e.g. `environments.work.audt`.
-        fields: String,
+        /// What makes the file unsafe to rewrite, in report order, never empty.
+        levels: Vec<UntrustedLevel>,
     },
 
     /// Refused to write a package file because of what is at its path.
@@ -523,10 +456,7 @@ impl PackageRepoError {
             // a lookup.
             Self::IoError(_)
             | Self::Unserializable(_)
-            | Self::UnknownDotfileFields { .. }
-            | Self::UnknownTopLevelFields { .. }
-            | Self::UncheckedTopLevel { .. }
-            | Self::UnknownEnvironmentFields { .. }
+            | Self::UntrustedKeys { .. }
             | Self::UnwritablePath { .. }
             | Self::Occupied { .. }
             | Self::ChangedSinceLoad { .. }
@@ -869,6 +799,105 @@ pub fn name_field_hint(declared: &[NameDeclaration]) -> String {
         ". {}; a package is named by its file, so use {}",
         claims.join(" and "),
         names.join(" or ")
+    )
+}
+
+/// One reason a package file cannot be rewritten, as
+/// [`PackageRepoError::UntrustedKeys`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UntrustedLevel {
+    /// Dotfile entries carry these keys, e.g. `dotfiles[0].var`. Such a key is
+    /// what makes apply refuse the entry, so a rewrite dropping it would turn an
+    /// entry apply skips into one it deploys.
+    DotfileFields(Vec<String>),
+    /// The top level carries these keys, e.g. `_dotfiles` or `configs`. A
+    /// rewrite would take every entry under the key with it.
+    TopLevelFields(Vec<String>),
+    /// Environments carry these keys, e.g. `environments.work.audt`. A rewrite
+    /// would delete what the user set the key to, such as a command.
+    EnvironmentFields(Vec<String>),
+    /// The top level could not be read back, carrying why, so whether it holds
+    /// a key the struct would drop is unknown.
+    UncheckedTopLevel(String),
+}
+
+impl UntrustedLevel {
+    // The level a rewrite refuses for `reason`, or `None` for a reason that is
+    // not about keys a rewrite would drop.
+    pub(crate) fn of(reason: &crate::package::RefusalReason) -> Option<Self> {
+        use crate::package::RefusalReason;
+        match reason {
+            RefusalReason::UnknownTopLevelKeys(_) => Some(Self::TopLevelFields(reason.fields())),
+            RefusalReason::UnknownEnvironmentKeys(_) => {
+                Some(Self::EnvironmentFields(reason.fields()))
+            }
+            RefusalReason::UncheckedTopLevel(error) => Some(Self::UncheckedTopLevel(error.clone())),
+            // A missing environment is a deployment rule, not a writing one: a
+            // spec declaring none is still the user's text. Named rather than left
+            // to a catch-all, so a new `RefusalReason` variant fails to compile
+            // here. `untrusted_keys_refusal` never returns this one, which
+            // `untrusted_keys_refusal_never_names_a_missing_environment` holds;
+            // the listings' rule that does is `every_environment_refusal`.
+            RefusalReason::NoEnvironments(_) => None,
+        }
+    }
+
+    // The field paths this level names; none for an unread top level.
+    fn fields(&self) -> &[String] {
+        match self {
+            Self::DotfileFields(fields)
+            | Self::TopLevelFields(fields)
+            | Self::EnvironmentFields(fields) => fields,
+            Self::UncheckedTopLevel(_) => &[],
+        }
+    }
+
+    // What this level holds and what a rewrite would cost, as a clause.
+    fn clause(&self) -> String {
+        let harm = match self {
+            Self::DotfileFields(_) => "silently make the entry deployable",
+            Self::TopLevelFields(_) => "everything under it",
+            Self::EnvironmentFields(_) => "whatever it was set to",
+            Self::UncheckedTopLevel(_) => {
+                return "its top level could not be read back, so any key selfie does not model \
+                        would be dropped without warning"
+                    .to_string();
+            }
+        };
+        format!(
+            "unrecognized {}. Saving would delete the key and {harm}",
+            self.fields().join(", ")
+        )
+    }
+}
+
+// The refusal names the file once and gives one remedy, after a clause per
+// level. An unread top level comes last, as `untrusted_keys_refusal` orders
+// it, and its parse failure ends the message: it is several lines of source
+// snippet, the part a reader can act on last, and anything after it reads as
+// part of it. Nothing is known about an unread top level, and a rewrite
+// serializes from the struct regardless, so declining costs the user a retry
+// where writing would delete silently.
+fn untrusted_keys_sentence(path: &Path, levels: &[UntrustedLevel]) -> String {
+    let path = path.display();
+    let remedy = match levels {
+        [UntrustedLevel::UncheckedTopLevel(error)] => format!(
+            "Edit {path} directly, or simplify it until selfie can read it. The read failed \
+             with: {error}"
+        ),
+        [_, .., UntrustedLevel::UncheckedTopLevel(error)] => format!(
+            "Edit {path} directly to correct or remove the keys, and simplify it until selfie \
+             can read it. The read failed with: {error}"
+        ),
+        _ => {
+            let fields: usize = levels.iter().map(|level| level.fields().len()).sum();
+            let keys = if fields > 1 { "keys" } else { "key" };
+            format!("Edit {path} directly to correct or remove the {keys}.")
+        }
+    };
+    format!(
+        "refusing to rewrite {path}: {}. {remedy}",
+        super::join_sentences(levels.iter().map(UntrustedLevel::clause))
     )
 }
 

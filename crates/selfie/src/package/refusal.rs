@@ -8,13 +8,24 @@ use super::{
 use crate::package::event::{EventSender, RefusalKind, RefusedSpec};
 use crate::validation::ValidationIssue;
 
-/// Why a package cannot be deployed as it stands.
+/// Why a package cannot be deployed as it stands: never empty, holding every
+/// reason that applies in report order.
 ///
-/// [`Display`](fmt::Display) renders the reason as a clause, which a caller
-/// naming the package puts after its colon. The fields are carried rather than
-/// pre-rendered so a caller reporting structured diagnostics can name the keys.
+/// [`Display`](fmt::Display) renders every reason as one clause, which a caller
+/// naming the package puts after its colon. [`SpecRefusal::kind`] is the first
+/// reason's kind.
+// Every reason rather than the first, so a file with problems at several
+// levels is fixed in one pass.
 #[derive(Debug, Clone)]
-pub(crate) enum SpecRefusal {
+pub(crate) struct SpecRefusal(Vec<RefusalReason>);
+
+/// One reason a package cannot be deployed as it stands.
+///
+/// [`Display`](fmt::Display) renders the reason as a clause. The fields are
+/// carried rather than pre-rendered so a caller reporting structured
+/// diagnostics can name the keys.
+#[derive(Debug, Clone)]
+pub(crate) enum RefusalReason {
     /// Top-level keys a package does not accept.
     UnknownTopLevelKeys(Vec<UnknownKey>),
     /// Unrecognized keys inside environment mappings, in name order, each
@@ -31,7 +42,41 @@ pub(crate) enum SpecRefusal {
 }
 
 impl SpecRefusal {
-    /// What this refusal objects to, without its detail.
+    // `None` for no reasons, so a refusal always has one to report.
+    fn of(reasons: impl IntoIterator<Item = Option<RefusalReason>>) -> Option<Self> {
+        let reasons: Vec<RefusalReason> = reasons.into_iter().flatten().collect();
+        (!reasons.is_empty()).then_some(Self(reasons))
+    }
+
+    /// Every reason, in the order they are reported.
+    pub(crate) fn reasons(&self) -> &[RefusalReason] {
+        &self.0
+    }
+
+    /// What this refusal objects to first, without its detail.
+    pub(crate) fn kind(&self) -> RefusalKind {
+        self.0[0].kind()
+    }
+
+    /// The field paths `selfie spec validate` reports this refusal's problems at,
+    /// one per problem across every reason, so a caller holding its issues can
+    /// tell whether each is already reported.
+    pub(crate) fn fields(&self) -> Vec<String> {
+        self.0.iter().flat_map(RefusalReason::fields).collect()
+    }
+}
+
+impl fmt::Display for SpecRefusal {
+    // One sentence per reason.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&super::join_sentences(
+            self.0.iter().map(RefusalReason::to_string),
+        ))
+    }
+}
+
+impl RefusalReason {
+    /// What this reason objects to, without its detail.
     pub(crate) fn kind(&self) -> RefusalKind {
         match self {
             Self::UnknownTopLevelKeys(_) => RefusalKind::UnknownTopLevelKeys,
@@ -41,9 +86,8 @@ impl SpecRefusal {
         }
     }
 
-    /// The field paths `selfie spec validate` reports this refusal's problems at,
-    /// one per problem, so a caller holding its issues can tell whether each is
-    /// already reported.
+    /// The field paths `selfie spec validate` reports this reason's problems at,
+    /// one per problem.
     pub(crate) fn fields(&self) -> Vec<String> {
         match self {
             Self::UnknownTopLevelKeys(keys) => keys.iter().map(|key| key.key.clone()).collect(),
@@ -61,7 +105,7 @@ impl SpecRefusal {
     }
 }
 
-impl fmt::Display for SpecRefusal {
+impl fmt::Display for RefusalReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownTopLevelKeys(keys) => {
@@ -175,15 +219,17 @@ impl Package {
         // Every environment rather than one, because a rewrite serializes all of
         // them, and so does a listing that shows them.
         //
-        // It names every offending environment, so a file with keys in two is fixed
-        // in one pass.
+        // It names every level and every offending environment, so a file with
+        // keys in several is fixed in one pass.
         //
-        // The two top-level rules stay split around the environment. Grouping them
-        // ahead of it reports the unread top level for a file whose environment
-        // names the key to fix.
-        self.unknown_top_level_keys()
-            .or_else(|| self.any_unknown_environment_keys())
-            .or_else(|| self.unchecked_top_level())
+        // The unread top level comes last, after the environments, because its
+        // parse failure is a multi-line snippet and anything after it reads as
+        // part of it.
+        SpecRefusal::of([
+            self.unknown_top_level_keys(),
+            self.any_unknown_environment_keys(),
+            self.unchecked_top_level(),
+        ])
     }
 
     /// Why a command showing every environment refuses this package, when it
@@ -192,27 +238,26 @@ impl Package {
     pub(crate) fn every_environment_refusal(&self) -> Option<SpecRefusal> {
         // A rewrite asks `untrusted_keys_refusal` alone, since `spec update` is
         // how a spec with no environment gets its first one. The missing
-        // environment is judged last, as it is in `spec_refusal`.
-        self.untrusted_keys_refusal()
-            .or_else(|| self.no_environments())
+        // environment is judged as in `spec_refusal`.
+        self.or_missing_environment(self.untrusted_keys_refusal())
     }
 
     // In name order, whatever order the file gives, as every environment
     // diagnostic reports.
-    fn any_unknown_environment_keys(&self) -> Option<SpecRefusal> {
+    fn any_unknown_environment_keys(&self) -> Option<RefusalReason> {
         let offending: Vec<(String, Vec<UnknownKey>)> = self
             .environments_sorted()
             .into_iter()
             .filter(|(_, env)| !env.unknown_keys().is_empty())
             .map(|(name, env)| (name.to_string(), env.unknown_keys().to_vec()))
             .collect();
-        (!offending.is_empty()).then_some(SpecRefusal::UnknownEnvironmentKeys(offending))
+        (!offending.is_empty()).then_some(RefusalReason::UnknownEnvironmentKeys(offending))
     }
 
     /// Why selfie refuses this whole package in `environment`, when it does.
     ///
-    /// `Some` carries the reason to report, and what it costs is the caller's to
-    /// decide.
+    /// `Some` carries every reason to report, and what it costs is the caller's
+    /// to decide.
     ///
     /// `None` says this file's top level and the environment's own keys are
     /// usable; it says nothing about the individual entries, which are refused
@@ -226,14 +271,13 @@ impl Package {
         // answer covers the package rather than a dotfile.
         //
         // Ordered as a command reads a file: the top level, the environment about
-        // to be used, then the top level it could not read back at all. The two
-        // top-level rules must stay split around the environment. Grouping them
-        // ahead of it puts the unread top level first, which changes the reason a
-        // file carrying both reports to the one a reader cannot act on.
-        self.unknown_top_level_keys()
-            .or_else(|| self.unknown_environment_keys(environment))
-            .or_else(|| self.unchecked_top_level())
-            .or_else(|| self.no_environments())
+        // to be used, then the top level it could not read back at all, whose
+        // multi-line parse failure has to end the sentence.
+        self.or_missing_environment(SpecRefusal::of([
+            self.unknown_top_level_keys(),
+            self.unknown_environment_keys(environment),
+            self.unchecked_top_level(),
+        ]))
     }
 
     /// Whether [`Package::spec_refusal`] refuses this package in `environment`,
@@ -258,33 +302,37 @@ impl Package {
         self.origin() != SpecOrigin::DotfilesDirectory
     }
 
-    // Last, so a file that is both missing an environment and carrying a bad key
-    // reports the key -- the reason a reader can act on without first guessing
-    // which of the two selfie objected to.
-    //
+    // `keys`, or the missing environment when no key reason holds. A file that is
+    // both missing an environment and carrying a bad key reports the key, the
+    // reason a reader can act on without first guessing which of the two selfie
+    // objected to.
+    fn or_missing_environment(&self, keys: Option<SpecRefusal>) -> Option<SpecRefusal> {
+        keys.or_else(|| SpecRefusal::of([self.no_environments()]))
+    }
+
     // Only a package spec must declare one. A standalone dotfile spec has no
     // environments because `dotfiles track` writes it that way: it deploys from
     // the shared list and an environment would have nothing to say about it.
     // Refusing those would refuse every dotfile anyone has tracked, and no test
     // in this workspace fails when it does -- the rule is keyed on the origin
     // for that reason and not as a convenience.
-    fn no_environments(&self) -> Option<SpecRefusal> {
+    fn no_environments(&self) -> Option<RefusalReason> {
         if !self.requires_environments() {
             return None;
         }
         self.validate_environments_exists()
             .err()
-            .map(SpecRefusal::NoEnvironments)
+            .map(RefusalReason::NoEnvironments)
     }
 
     // A `configs:` or a `_dotfiles:` anchor leaves the list selfie read empty or
     // short, so a caller checking only for entries would pass over the package in
     // silence (selfie-g199, selfie-jt6m). This is the set `selfie spec validate`
     // errors on, so the two commands answer alike.
-    fn unknown_top_level_keys(&self) -> Option<SpecRefusal> {
+    fn unknown_top_level_keys(&self) -> Option<RefusalReason> {
         match self.top_level_keys() {
             TopLevelKeys::Checked(keys) if !keys.is_empty() => {
-                Some(SpecRefusal::UnknownTopLevelKeys(keys.clone()))
+                Some(RefusalReason::UnknownTopLevelKeys(keys.clone()))
             }
             _ => None,
         }
@@ -295,11 +343,11 @@ impl Package {
     // `_dotfiles:` leaves this environment's list empty, so
     // `dotfiles_for_environment` falls back to the shared entry and deploys a
     // file this machine was meant to override.
-    fn unknown_environment_keys(&self, environment: &str) -> Option<SpecRefusal> {
+    fn unknown_environment_keys(&self, environment: &str) -> Option<RefusalReason> {
         let unknown = self.environments().get(environment)?.unknown_keys();
 
         (!unknown.is_empty()).then(|| {
-            SpecRefusal::UnknownEnvironmentKeys(vec![(environment.to_string(), unknown.to_vec())])
+            RefusalReason::UnknownEnvironmentKeys(vec![(environment.to_string(), unknown.to_vec())])
         })
     }
 
@@ -313,9 +361,9 @@ impl Package {
     // Neither can be ruled out here, and what the package still appears to have to
     // deploy does not distinguish them -- the flsi reproducer carries entries and
     // a decoy `environments:` both.
-    fn unchecked_top_level(&self) -> Option<SpecRefusal> {
+    fn unchecked_top_level(&self) -> Option<RefusalReason> {
         match self.top_level_keys() {
-            TopLevelKeys::Unchecked(error) => Some(SpecRefusal::UncheckedTopLevel(error.clone())),
+            TopLevelKeys::Unchecked(error) => Some(RefusalReason::UncheckedTopLevel(error.clone())),
             _ => None,
         }
     }
@@ -657,14 +705,10 @@ environments: {}
         );
     }
 
-    // The order `spec_refusal` composes by hand, and the only pair that makes
-    // the hand-composition observable: the two top-level rules cannot both hold
-    // of one file, so an unread top level against an environment's own key is
-    // where grouping the two top-level rules ahead of the environment changes the
-    // answer.
-    //
-    // Without this, that grouping compiles, passes, and quietly reports the
-    // unread top level for a file whose environment names the key to fix.
+    // An unread top level against an environment's own key is the one pair whose
+    // order a reader can see: the two top-level rules cannot both hold of one
+    // file. Both are named, the environment first, because the parse failure is
+    // a multi-line snippet that has to end the sentence.
     #[test]
     fn an_environment_key_is_reported_ahead_of_an_unread_top_level() {
         let yaml = format!(
@@ -674,19 +718,13 @@ environments: {}
         );
         let refusal = package_from(&yaml)
             .spec_refusal("test")
-            .expect("both rules apply");
-        assert!(
-            refusal.to_string().starts_with("in environment 'test':"),
-            "the environment's own key must be reported first, got: {refusal}"
-        );
+            .expect("both rules apply")
+            .to_string();
+        assert_environment_then_unread(&refusal);
     }
 
-    // The listing asks every environment, and the same ordering holds there: a
-    // file whose environment names the key to fix must report that key rather
-    // than the top level nothing could read. Grouping the two top-level rules
-    // ahead of the environment compiles and passes everything else while
-    // reporting the other one. A save shares this answer, so the same ordering
-    // decides which error a rewrite reports.
+    // The listing asks every environment, and the same order holds there. A save
+    // shares this answer, so the same order decides how a rewrite lists them.
     #[test]
     fn a_listing_reports_an_environment_key_ahead_of_an_unread_top_level() {
         let yaml = format!(
@@ -696,11 +734,165 @@ environments: {}
         );
         let refusal = package_from(&yaml)
             .untrusted_keys_refusal()
-            .expect("both rules apply");
+            .expect("both rules apply")
+            .to_string();
+        assert_environment_then_unread(&refusal);
+    }
+
+    fn assert_environment_then_unread(refusal: &str) {
         assert!(
-            refusal.to_string().starts_with("in environment 'test':"),
+            refusal.starts_with("in environment 'test':"),
             "the environment's own key must be reported first, got: {refusal}"
         );
+        crate::package::assert_in_order(
+            refusal,
+            &[
+                "_dotfiles",
+                ". Its top-level keys could not be checked",
+                "The re-read failed with:",
+            ],
+        );
+    }
+
+    // Every level a listing asks about is named in one refusal, the top level
+    // first and each offending environment after it in name order, so the file
+    // is fixed in one pass.
+    #[test]
+    fn a_listing_names_the_top_level_and_every_environment() {
+        use crate::package::event::RefusalKind;
+
+        let yaml = "name: myapp\nconfigs: []\nenvironments:\n  work:\n    install: \"echo i\"\n    \
+                    audt: x\n  alpha:\n    install: \"echo i\"\n    chk: x\n";
+        let refusal = package_from(yaml)
+            .untrusted_keys_refusal()
+            .expect("the top level and two environments carry unknown keys");
+        let rendered = refusal.to_string();
+
+        crate::package::assert_in_order(
+            &rendered,
+            &[
+                "'configs'",
+                ". In environment 'alpha': unknown field 'chk'",
+                ". In environment 'work': unknown field 'audt'",
+            ],
+        );
+        assert_eq!(refusal.kind(), RefusalKind::UnknownTopLevelKeys);
+        assert_eq!(
+            refusal.fields(),
+            [
+                "configs",
+                "environments.alpha.chk",
+                "environments.work.audt"
+            ]
+        );
+    }
+
+    // Apply names the top level and the environment it applies, and still leaves
+    // out an environment the run does not touch.
+    #[test]
+    fn apply_names_the_top_level_and_the_applied_environment_only() {
+        let yaml = "name: myapp\nconfigs: []\nenvironments:\n  work:\n    install: \"echo i\"\n    \
+                    audt: x\n  home:\n    install: \"echo i\"\n    chk: x\n";
+        let rendered = reason(yaml, "work").expect("the top level and 'work' carry unknown keys");
+
+        assert!(rendered.contains("'configs'"), "got: {rendered}");
+        assert!(
+            rendered.contains(". In environment 'work': unknown field 'audt'"),
+            "got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("'home'") && !rendered.contains("chk"),
+            "an environment apply does not touch is named, got: {rendered}"
+        );
+    }
+
+    // A package spec carrying a key and declaring no environment reports the
+    // key alone, in both rules, since the key may be what hid the environments.
+    #[test]
+    fn a_key_refusal_does_not_add_the_missing_environment() {
+        use crate::package::event::RefusalKind;
+
+        let package = package_from("name: myapp\nconfigs: []\n");
+        for refusal in [
+            package.spec_refusal("work").expect("the key refuses it"),
+            package
+                .every_environment_refusal()
+                .expect("the key refuses it"),
+        ] {
+            let kinds: Vec<RefusalKind> = refusal
+                .reasons()
+                .iter()
+                .map(super::RefusalReason::kind)
+                .collect();
+            assert_eq!(kinds, [RefusalKind::UnknownTopLevelKeys]);
+            assert!(
+                !refusal
+                    .to_string()
+                    .contains("Add an 'environments' section"),
+                "got: {refusal}"
+            );
+        }
+    }
+
+    // A rewrite drops what a key holds whether or not an environment is declared,
+    // so the rule a rewrite asks never names the missing one, with or without a
+    // key beside it.
+    #[test]
+    fn untrusted_keys_refusal_never_names_a_missing_environment() {
+        use crate::package::event::RefusalKind;
+
+        assert!(
+            package_from("name: myapp\n")
+                .untrusted_keys_refusal()
+                .is_none()
+        );
+        let refusal = package_from("name: myapp\nconfigs: []\n")
+            .untrusted_keys_refusal()
+            .expect("the key refuses it");
+        let kinds: Vec<RefusalKind> = refusal
+            .reasons()
+            .iter()
+            .map(super::RefusalReason::kind)
+            .collect();
+        assert_eq!(kinds, [RefusalKind::UnknownTopLevelKeys]);
+    }
+
+    // A single reason reads exactly as that reason does. The words for the two
+    // key levels are written out, so a change to how one reason is joined cannot
+    // pass by moving the reason's own words with it.
+    #[test]
+    fn a_single_reason_renders_as_that_reason() {
+        let env = "    install: \"echo i\"\n";
+        assert_eq!(
+            reason(
+                &format!("name: myapp\nchk: x\nenvironments:\n  work:\n{env}"),
+                "work"
+            )
+            .as_deref(),
+            Some(
+                "unknown field 'chk'; expected one of: name, homepage, description, dotfiles, \
+                 post_install_note, environments"
+            )
+        );
+        assert_eq!(
+            reason(
+                &format!("name: myapp\nenvironments:\n  work:\n{env}    chk: x\n"),
+                "work"
+            )
+            .as_deref(),
+            Some(
+                "in environment 'work': unknown field 'chk'; expected one of: install, check, \
+                 audit, dependencies, recommends, dotfiles"
+            )
+        );
+        for yaml in [
+            format!("name: myapp\n{UNREADABLE_TOP_LEVEL}environments:\n  work:\n{env}"),
+            "name: myapp\nenvironments: {}\n".to_string(),
+        ] {
+            let refusal = package_from(&yaml).spec_refusal("work").expect(&yaml);
+            assert_eq!(refusal.reasons().len(), 1, "{yaml}");
+            assert_eq!(refusal.to_string(), refusal.reasons()[0].to_string());
+        }
     }
 
     // Every offending environment is named, in name order whatever order the file
