@@ -3,23 +3,18 @@
 use std::future::Future;
 use std::path::PathBuf;
 
-use thiserror::Error;
-
 use crate::package::event::EventStream;
 
 /// Errors from sync preparation operations.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum SyncError {
     /// The package directory is not inside a git repository.
-    #[error("not a git repository: {path}")]
-    NotARepo { path: PathBuf },
+    NotARepo(NotARepository),
 
     /// A git operation failed during preparation.
-    #[error("{0}")]
     GitError(String),
 
     /// One or more changed package files failed validation.
-    #[error("validation failed for {} {}", .failures.len(), if .failures.len() == 1 { "package" } else { "packages" })]
     ValidationFailed {
         /// Per-file validation failures with structured details.
         failures: Vec<PackageValidationFailure>,
@@ -32,8 +27,49 @@ pub enum SyncError {
     /// fails on. Deploy state written as root is replaced by the next successful
     /// run, because it comes from a user-owned temporary file; git objects are
     /// not, so this does not self-heal.
-    #[error("{}. {}", .0.message(), .0.suggestion())]
     Privilege(crate::privilege::SudoRefusal),
+}
+
+crate::parts::display_from_parts!(error SyncError);
+
+impl crate::parts::Composed for SyncError {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        use crate::parts::Parts;
+
+        // A git failure's text names what git names, as text (selfie-thy5).
+        match self {
+            Self::NotARepo(outside) => outside.parts(),
+            Self::GitError(message) => Parts::new().text(message.as_str()),
+            Self::ValidationFailed { failures } => {
+                let noun = if failures.len() == 1 {
+                    "package"
+                } else {
+                    "packages"
+                };
+                Parts::new().text(format!("validation failed for {} {noun}", failures.len()))
+            }
+            Self::Privilege(refusal) => {
+                Parts::new().text(format!("{}. {}", refusal.message(), refusal.suggestion()))
+            }
+        }
+    }
+}
+
+/// A directory that is not inside a git repository.
+#[derive(Debug, Clone)]
+pub struct NotARepository {
+    /// The directory, which no git repository contains.
+    pub path: PathBuf,
+}
+
+crate::parts::display_from_parts!(NotARepository);
+
+impl crate::parts::Composed for NotARepository {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        crate::parts::Parts::new()
+            .text("not a git repository: ")
+            .path(&self.path)
+    }
 }
 
 /// A single package file that failed validation during sync push.

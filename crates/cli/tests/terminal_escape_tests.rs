@@ -838,6 +838,53 @@ fn spec_validate_names_a_spec_it_could_not_check_escaped() {
     assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
 }
 
+// A package directory outside any git repository is named as a path, so a
+// U+200B and a line feed in it show escaped on the error's one line.
+#[test]
+fn sync_push_names_a_directory_outside_a_repository_escaped() {
+    let temp = tempfile::tempdir().unwrap();
+    let packages = temp.path().join("p\u{200B}k\nx");
+    fs::create_dir_all(&packages).unwrap();
+    let config = temp.path().join(".config").join("selfie");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: \"{}\"\n",
+            packages.display().to_string().replace('\n', "\\n")
+        ),
+    )
+    .unwrap();
+    // Discovery walks up from the directory, and selfie's does not read
+    // GIT_CEILING_DIRECTORIES, so a TMPDIR inside a work tree finds that one.
+    let inside = common::isolated_git()
+        .arg("-C")
+        .arg(&packages)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .unwrap();
+    assert!(
+        !inside.status.success(),
+        "the sandbox {} is inside a git work tree, so this test cannot run here",
+        temp.path().display()
+    );
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "sync", "push", "--yes"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(FAILED), "{stderr}");
+    assert!(
+        stderr.lines().any(
+            |line| line.contains("not a git repository: ") && line.ends_with(r"/p\u{200b}k\nx")
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
 // A conflict's diff shows each line of content with its escape sequences as
 // escapes and its tabs as tabs, and a content line starting `-- ` or `++ ` as
 // content, not as a header.

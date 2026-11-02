@@ -26,7 +26,8 @@ use crate::{
 };
 
 use super::port::{
-    ConfirmedCommit, PendingCommit, PrepareResult, PushOptions, SyncError, SyncService,
+    ConfirmedCommit, NotARepository, PendingCommit, PrepareResult, PushOptions, SyncError,
+    SyncService,
 };
 
 /// Concrete implementation of [`SyncService`].
@@ -285,7 +286,7 @@ where
         })
         .await
         .map_err(|e| match e {
-            GitSyncError::NotARepo { path } => SyncError::NotARepo { path },
+            GitSyncError::NotARepo { path } => SyncError::NotARepo(NotARepository { path }),
             other => SyncError::GitError(other.to_string()),
         })?;
 
@@ -3234,9 +3235,9 @@ mod tests {
     // built cannot change its words.
     #[test]
     fn a_directory_outside_a_repository_is_worded_whole() {
-        let error = SyncError::NotARepo {
+        let error = SyncError::NotARepo(NotARepository {
             path: PathBuf::from("/p\u{200B}k"),
-        };
+        });
         assert_eq!(error.to_string(), "not a git repository: /p\u{200B}k");
     }
 

@@ -11,7 +11,6 @@ use selfie::package::event::{
     CheckFailure, OperationType, SkipReason, SpecStatus, UncheckedSource, UnknownStatus,
 };
 use selfie::parts::{Composed, Part, Parts, Program, Subcommand, SuggestedCommand};
-use selfie::sync_service::port::SyncError;
 use selfie::yaml::ParseFailure;
 
 use crate::terminal_text::{
@@ -50,7 +49,6 @@ sentences!(
     ParseFailure,
     SkipReason,
     SpecStatus,
-    SyncError,
     TimedOut,
     UncheckedSource,
     UnknownStatus,
