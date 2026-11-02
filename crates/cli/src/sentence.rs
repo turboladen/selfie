@@ -11,7 +11,7 @@ use selfie::package::event::{
     CheckFailure, OperationFailure, OperationType, SkipReason, SpecStatus, UncheckedSource,
     UnknownStatus,
 };
-use selfie::package::port::{PackageError, PackageParseKind, PackageRepoError};
+use selfie::package::port::{PackageError, PackageRepoError};
 use selfie::parts::{Composed, Part, Parts, Program, Subcommand, SuggestedCommand};
 use selfie::sync_service::port::SyncError;
 use selfie::yaml::ParseFailure;
@@ -51,7 +51,6 @@ sentences!(
     OperationFailure,
     OperationType,
     PackageError,
-    PackageParseKind,
     PackageRepoError,
     ParseFailure,
     SkipReason,

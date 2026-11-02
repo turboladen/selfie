@@ -176,10 +176,7 @@ fn handle_list_event(
                 add(
                     &RowResult::Failure,
                     &filename,
-                    failed(shown!(
-                        "unparsable: {}",
-                        crate::received::parse_error(invalid)
-                    )),
+                    failed(shown!("unparsable: {}", crate::received::composed(invalid))),
                     None,
                 );
             }
@@ -492,9 +489,14 @@ mod tests {
         let config = CliConfig::wrap_for_test(test_common::test_config());
         let invalid_package = selfie::package::port::PackageParseError::new(
             "/test/invalid.yml",
-            selfie::package::port::PackageParseKind::Unreadable {
-                reason: "missing field `name`".to_string(),
-            },
+            selfie::package::port::PackageParseKind::Unreadable(
+                selfie::package::port::UnreadableSpecFile::CannotCreateIn {
+                    directory: "/packages".into(),
+                    cause: std::sync::Arc::new(std::io::Error::from(
+                        std::io::ErrorKind::PermissionDenied,
+                    )),
+                },
+            ),
         );
 
         let package_list = selfie::package::event::PackageListData {
@@ -529,9 +531,14 @@ mod tests {
 
         let invalid_package = selfie::package::port::PackageParseError::new(
             "/test/invalid.yml",
-            selfie::package::port::PackageParseKind::Unreadable {
-                reason: "missing field `name`".to_string(),
-            },
+            selfie::package::port::PackageParseKind::Unreadable(
+                selfie::package::port::UnreadableSpecFile::CannotCreateIn {
+                    directory: "/packages".into(),
+                    cause: std::sync::Arc::new(std::io::Error::from(
+                        std::io::ErrorKind::PermissionDenied,
+                    )),
+                },
+            ),
         );
 
         let mut environment_stats = std::collections::HashMap::new();

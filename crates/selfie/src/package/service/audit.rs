@@ -1469,9 +1469,14 @@ mod tests {
                 Ok(yml.clone()),
                 Err(PackageParseError::new(
                     broken.clone(),
-                    PackageParseKind::Unreadable {
-                        reason: "broken".to_string(),
-                    },
+                    PackageParseKind::Unreadable(
+                        crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                            directory: "/packages".into(),
+                            cause: std::sync::Arc::new(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied,
+                            )),
+                        },
+                    ),
                 )),
             ]))
         });

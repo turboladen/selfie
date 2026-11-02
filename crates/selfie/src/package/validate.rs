@@ -268,7 +268,7 @@ fn unknown_top_level_keys(keys: &[UnknownKey]) -> Vec<ValidationIssue> {
             ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &unknown.key,
-                &unknown.message,
+                &unknown.message.to_string(),
                 anchor_suggestion::<PackageField>(unknown).as_deref(),
             )
         })
@@ -291,7 +291,7 @@ fn unknown_environment_keys(package: &Package) -> Vec<ValidationIssue> {
             issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &environment_field(env_name, &unknown.key),
-                &unknown.message,
+                &unknown.message.to_string(),
                 anchor_suggestion::<EnvironmentField>(unknown).as_deref(),
             ));
         }
@@ -317,7 +317,7 @@ fn unknown_dotfile_issue(entry_key: UnknownEntryKey) -> ValidationIssue {
     ValidationIssue::error(
         ValidationErrorCategory::InvalidValue,
         &entry_key.field,
-        &entry_key.unknown.message,
+        &entry_key.unknown.message.to_string(),
         Some(&suggestion),
     )
 }

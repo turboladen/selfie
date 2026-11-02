@@ -5812,9 +5812,14 @@ mod tests {
         CollectionRefusal::UnloadableSpec {
             error: crate::package::port::PackageParseError::new(
                 "/p/broken.yml",
-                crate::package::port::PackageParseKind::Unreadable {
-                    reason: "a fifo".to_string(),
-                },
+                crate::package::port::PackageParseKind::Unreadable(
+                    crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                        directory: "/packages".into(),
+                        cause: std::sync::Arc::new(std::io::Error::from(
+                            std::io::ErrorKind::PermissionDenied,
+                        )),
+                    },
+                ),
             ),
             base: BaseKind::PackageDirectory,
         }

@@ -1332,3 +1332,120 @@ fn a_command_source_keeps_its_blanks_in_the_dotfiles_list() {
         );
     }
 }
+
+// A package directory named `p<U+200B>k`, set as the sandbox's, with `specs`
+// written into it as file name and content.
+fn hostile_package_directory(temp: &tempfile::TempDir, specs: &[(&str, &str)]) {
+    let packages = temp.path().join("p\u{200B}k");
+    fs::create_dir_all(&packages).unwrap();
+    fs::write(
+        temp.path().join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: \"{}\"\n",
+            packages.display()
+        ),
+    )
+    .unwrap();
+    for (file, spec) in specs {
+        fs::write(packages.join(file), spec).unwrap();
+    }
+}
+
+// A spec named `name` that installs with `true` in the sandbox's environment.
+fn plain_spec(name: &str) -> String {
+    format!("name: {name}\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n")
+}
+
+// What `args` print on both streams, run in the sandbox without color.
+fn printed(temp: &tempfile::TempDir, args: &[&str]) -> String {
+    let output = sandboxed_std_command(temp)
+        .arg("--no-color")
+        .args(args)
+        .output()
+        .unwrap();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+// The one line of `text` holding `marker`.
+fn line_with<'a>(text: &'a str, marker: &str) -> &'a str {
+    let lines: Vec<&str> = text.lines().filter(|line| line.contains(marker)).collect();
+    assert_eq!(lines.len(), 1, "{marker:?} in {text}");
+    lines[0]
+}
+
+// `spec remove`'s scan for dependents skips a spec of an ambiguous name and one
+// with an unknown key, and names the directory, the environment and the key
+// escaped.
+#[test]
+fn a_dependent_scans_skipped_specs_name_the_directory_environment_and_key_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(
+        &temp,
+        &[
+            ("e.yml", &plain_spec("e")),
+            ("m.yml", &plain_spec("m")),
+            ("m.yaml", &plain_spec("m")),
+            (
+                "g.yml",
+                "name: g\nenvironments:\n  \"w\\u200Bk\":\n    install: \"true\"\n    \"bo\\u200Bgus\": 1\n",
+            ),
+        ],
+    );
+
+    let printed = printed(&temp, &["spec", "remove", "e", "--yes"]);
+
+    let untrusted = line_with(&printed, "g.yml: selfie will not use the package file");
+    assert!(
+        untrusted.contains(r"in environment 'w\u{200b}k'"),
+        "{untrusted}"
+    );
+    assert!(
+        untrusted.contains(r"unknown field 'bo\u{200b}gus'"),
+        "{untrusted}"
+    );
+    assert!(!untrusted.contains('\u{200B}'), "{untrusted:?}");
+    let ambiguous = line_with(
+        &printed,
+        "m.yml: selfie will not use the package file: Multiple packages found",
+    );
+    assert!(
+        ambiguous.contains(r"p\u{200b}k: m.yaml, m.yml"),
+        "{ambiguous}"
+    );
+    assert!(!ambiguous.contains('\u{200B}'), "{ambiguous:?}");
+}
+
+// A not-found failure's hint names the file declaring the name by its
+// directory, escaped.
+#[test]
+fn a_name_field_hint_names_the_declaring_file_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(&temp, &[("bar.yml", &plain_spec("foo"))]);
+
+    let printed = printed(&temp, &["spec", "info", "foo"]);
+
+    let hint = line_with(&printed, "declares `name: foo`");
+    assert!(hint.contains(r"p\u{200b}k/bar.yml declares"), "{hint}");
+    assert!(!hint.contains('\u{200B}'), "{hint:?}");
+}
+
+// `spec validate --all` names the directory of an ambiguous name escaped, as
+// `spec list` does.
+#[test]
+fn spec_validate_all_names_an_ambiguous_names_directory_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(
+        &temp,
+        &[("m.yml", &plain_spec("m")), ("m.yaml", &plain_spec("m"))],
+    );
+
+    let printed = printed(&temp, &["spec", "validate", "--all"]);
+
+    let row = line_with(&printed, "Multiple packages found");
+    assert!(row.contains(r"p\u{200b}k: m.yaml, m.yml"), "{row}");
+    assert!(!row.contains('\u{200B}'), "{row:?}");
+}

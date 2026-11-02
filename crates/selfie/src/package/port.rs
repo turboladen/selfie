@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::{
     fs::{DirectoryState, FileSystem, filesystem::FileSystemError},
     package::{GetPackage, Package},
-    parts::{Composed, Parts},
+    parts::{Composed, Message, Parts},
 };
 
 /// Port for package storage: discovering, loading, saving and removing package
@@ -702,13 +702,36 @@ impl Composed for PackageListError {
 /// The one wording, for install and for apply and drift alike. `directory` is
 /// where the files are, and `paths` the files.
 pub(crate) fn ambiguous_name_sentence(name: &str, directory: &Path, paths: &[PathBuf]) -> String {
-    format!(
-        "Multiple packages found with name `{name}` in path {}: {}. Names are compared ignoring \
-         case, and `.yml` and `.yaml` name the same package, so these files all claim one name. \
-         Rename or remove all but one.",
-        directory.display(),
-        format_conflicting_paths(paths)
-    )
+    ambiguous_name_parts(name, directory, paths).to_string()
+}
+
+/// [`ambiguous_name_sentence`] as parts: the name and each file's name as names,
+/// the directory as a path.
+pub(crate) fn ambiguous_name_parts<'a>(
+    name: &'a str,
+    directory: &'a Path,
+    paths: &'a [PathBuf],
+) -> Parts<'a> {
+    // File names alone: the directory is already named, so repeating the full
+    // path for every conflict buries the part that differs.
+    let files = Parts::joined(paths, ", ", |path| {
+        Parts::new().name(
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy(),
+        )
+    });
+    Parts::new()
+        .text("Multiple packages found with name `")
+        .name(name)
+        .text("` in path ")
+        .path(directory)
+        .text(": ")
+        .append(files)
+        .text(
+            ". Names are compared ignoring case, and `.yml` and `.yaml` name the same package, \
+             so these files all claim one name. Rename or remove all but one.",
+        )
 }
 
 /// A spec whose `name:` field answers to a name its file is not named for.
@@ -769,9 +792,9 @@ pub(crate) fn with_name_hint<R: PackageRepository + ?Sized>(
 /// The sentence a not-found failure appends for `declared`, naming each file
 /// and the name to use instead, or nothing when `declared` is empty.
 #[must_use]
-pub fn name_field_hint(declared: &[NameDeclaration]) -> String {
+pub fn name_field_hint(declared: &[NameDeclaration]) -> Message {
     if declared.is_empty() {
-        return String::new();
+        return Parts::new().into();
     }
     // The file by its directory and name, as `packages/nvim.yml`, so a reader
     // with both directories can tell which one holds it.
@@ -781,27 +804,29 @@ pub fn name_field_hint(declared: &[NameDeclaration]) -> String {
             .parent()
             .and_then(Path::file_name)
             .map_or_else(|| name.to_path_buf(), |dir| Path::new(dir).join(name))
-            .display()
-            .to_string()
     };
     // The `name:` field is text from a file, so control characters are escaped
-    // before it reaches a terminal.
-    let claims: Vec<String> = declared
-        .iter()
-        .map(|d| format!("{} declares `name: {}`", file(d), d.name.escape_debug()))
-        .collect();
+    // before it reaches a terminal, the MCP server's included.
+    let claims = Parts::joined(declared, " and ", |d| {
+        Parts::new()
+            .path(file(d))
+            .text(format!(" declares `name: {}`", d.name.escape_debug()))
+    });
     // Each name appears once without deduplicating: two files claiming one name
     // are ambiguous, and an ambiguous name is never collected or looked up.
     let names: Vec<String> = declared
         .iter()
         .filter_map(|d| crate::package::spec_name_of(&d.path))
-        .map(|name| format!("'{name}'"))
         .collect();
-    format!(
-        ". {}; a package is named by its file, so use {}",
-        claims.join(" and "),
-        names.join(" or ")
-    )
+    let names = Parts::joined(names, " or ", |name| {
+        Parts::new().text("'").name(name).text("'")
+    });
+    Parts::new()
+        .text(". ")
+        .append(claims)
+        .text("; a package is named by its file, so use ")
+        .append(names)
+        .into()
 }
 
 /// One reason a package file cannot be rewritten, as
@@ -943,26 +968,16 @@ fn untrusted_keys_sentence(path: &Path, levels: &[UntrustedLevel]) -> String {
 /// [`ambiguous_name_sentence`] for files that all sit in one directory, named
 /// by the first file's.
 pub(crate) fn ambiguous_files_sentence(name: &str, paths: &[PathBuf]) -> String {
+    ambiguous_files_parts(name, paths).to_string()
+}
+
+/// [`ambiguous_files_sentence`] as parts.
+pub(crate) fn ambiguous_files_parts<'a>(name: &'a str, paths: &'a [PathBuf]) -> Parts<'a> {
     let directory = paths
         .first()
         .and_then(|path| path.parent())
         .unwrap_or_else(|| Path::new("."));
-    ambiguous_name_sentence(name, directory, paths)
-}
-
-// File names alone -- the directory is already named earlier in the message, so
-// repeating the full path for every conflict buries the part that differs.
-fn format_conflicting_paths(paths: &[PathBuf]) -> String {
-    paths
-        .iter()
-        .map(|p| {
-            p.file_name()
-                .unwrap_or(p.as_os_str())
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+    ambiguous_name_parts(name, directory, paths)
 }
 
 /// Errors that can occur with specific package operations
@@ -1300,12 +1315,11 @@ pub struct ListingNames<'a> {
 /// [`skipped_spec_warning`](crate::package::service::skipped_spec_warning) is the
 /// library's wording of it in prose.
 // Split into a path and a path-free reason so that "the message names the file
-// exactly once" holds for every `#[error]` attribute at once rather than for each
-// of them separately. The kinds carrying free text -- `Io`, `Unreadable`,
-// `Refused` -- can still hold a path at runtime, so nothing building one of them
-// may re-tag a failure with the path it was reading.
-#[derive(Error, Debug, Clone)]
-#[error("{kind}")]
+// exactly once" holds for every kind's parts at once rather than for each of them
+// separately. `Io`, `Unreadable` and `Refused` can still name a path of their own
+// (a cause's path, a directory, a symlink's destination), so nothing building one
+// may name the file it was reading in it.
+#[derive(Debug, Clone)]
 pub struct PackageParseError {
     package_path: PathBuf,
     // Interpolated and not also `#[source]`: an error that both renders its cause
@@ -1376,19 +1390,25 @@ impl PackageParseError {
     }
 }
 
+crate::parts::display_from_parts!(error PackageParseError);
+
+impl Composed for PackageParseError {
+    fn parts(&self) -> Parts<'_> {
+        self.kind.parts()
+    }
+}
+
 /// Why a package file could not be turned into a package.
 ///
 /// No variant names the file: the path lives on
 /// [`PackageParseError`](PackageParseError::package_path), and a renderer that
 /// wants it in the sentence asks for it there.
-#[derive(Error, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum PackageParseKind {
     /// YAML syntax or structure error in the package file
-    #[error("YAML parsing error: {cause}")]
     Yaml { cause: crate::yaml::ParseFailure },
 
     /// IO error occurred while reading the package file
-    #[error("I/O error reading the package file: {cause}")]
     Io { cause: crate::fs::IoFailure },
 
     /// The package file could not be read, for a reason that is nobody's mistake
@@ -1396,39 +1416,141 @@ pub enum PackageParseKind {
     /// Distinct from [`Refused`](Self::Refused), which is selfie declining a file
     /// it could have read or did read. Nothing here was declined; the read could
     /// not be attempted.
-    #[error("the package file could not be read: {reason}")]
-    Unreadable { reason: String },
+    Unreadable(UnreadableSpecFile),
 
     /// The package file is a fifo, socket or device node rather than a regular file
     ///
     /// Reading one blocks until a writer arrives, so it is refused before the
     /// read rather than reported after it.
-    #[error(
-        "the package file is a {kind}, not a regular file. Replace it with a regular file or remove it from the package directory."
-    )]
     IrregularFile { kind: &'static str },
 
     /// selfie declined the package file: the filesystem port refused to read
     /// it, or selfie read it and the spec guard will not use what it says
     ///
-    /// Carries a `reason` rather than the refusal itself.
+    /// Carries its own reason rather than the file system's refusal.
     // Every filesystem refusal variant's own `Display` names a *target* and says
     // selfie will not **write** through it, having been written for the deploy
-    // side. Rendering one here would report a write refusal on a read path.
+    // side. Rendering one here would report a write refusal on a read path, so a
+    // read refusal is worded by `RefusedSpecFile` instead.
     //
     // The filesystem half is reached only if `irregular_target_refusal` ever
     // returns something other than `IrregularTarget`, so that growth fails closed
     // with sensible wording. The spec guard's half carries a refusal such as a
     // key shadowing `environments:`, for a file that parsed.
-    #[error("selfie will not use the package file: {reason}")]
-    Refused { reason: String },
+    Refused(RefusedSpecFile),
 
     /// The file's name, without its extension, is not a valid spec name
     ///
     /// Refused before the file is read, since no name the file could be asked
     /// for would be one selfie accepts everywhere else.
-    #[error("its name '{name}' is not a valid spec name. Rename the file: {rule}.", rule = crate::package::SPEC_NAME_RULE)]
     InvalidName { name: String },
+}
+
+crate::parts::display_from_parts!(error PackageParseKind);
+
+impl Composed for PackageParseKind {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::Yaml { cause } => Parts::new()
+                .text("YAML parsing error: ")
+                .text(cause.to_string()),
+            Self::Io { cause } => Parts::new()
+                .text("I/O error reading the package file: ")
+                .append(cause.parts()),
+            Self::Unreadable(reason) => Parts::new()
+                .text("the package file could not be read: ")
+                .append(reason.parts()),
+            Self::IrregularFile { kind } => Parts::new().text(format!(
+                "the package file is a {kind}, not a regular file. Replace it with a regular \
+                 file or remove it from the package directory."
+            )),
+            Self::Refused(reason) => Parts::new()
+                .text("selfie will not use the package file: ")
+                .append(reason.parts()),
+            Self::InvalidName { name } => Parts::new()
+                .text("its name '")
+                .name(name)
+                .text("' is not a valid spec name. Rename the file: ")
+                .text(crate::package::SPEC_NAME_RULE)
+                .text("."),
+        }
+    }
+}
+
+/// Why a package file could not be read, when the read could not be attempted.
+#[derive(Debug, Clone)]
+pub enum UnreadableSpecFile {
+    /// The home directory could not be determined.
+    HomeDirectory,
+    /// No new file can be created in `directory`.
+    CannotCreateIn {
+        /// The directory that refused one.
+        directory: PathBuf,
+        /// Why it refused.
+        cause: Arc<std::io::Error>,
+    },
+}
+
+crate::parts::display_from_parts!(UnreadableSpecFile);
+
+impl Composed for UnreadableSpecFile {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::HomeDirectory => Parts::new().text("the home directory could not be determined"),
+            // `FileSystemError::CannotCreateIn`'s own words, which name no target.
+            Self::CannotCreateIn { directory, cause } => {
+                Parts::new().path(directory).text(": ").cause(&**cause)
+            }
+        }
+    }
+}
+
+/// Why selfie declined a package file it could have read, or did read.
+#[derive(Debug, Clone)]
+pub enum RefusedSpecFile {
+    /// The file is a symlink.
+    Symlink(SymlinkReason),
+    /// Several files claim the spec's name, so none of them is used.
+    AmbiguousName {
+        /// The name they claim.
+        name: String,
+        /// Every file claiming it.
+        paths: Vec<PathBuf>,
+    },
+    /// The file carries keys selfie does not model, or could not be checked for
+    /// them, as the spec guard words it.
+    UntrustedKeys(Message),
+}
+
+crate::parts::display_from_parts!(RefusedSpecFile);
+
+impl Composed for RefusedSpecFile {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::Symlink(reason) => reason.parts(),
+            Self::AmbiguousName { name, paths } => ambiguous_files_parts(name, paths),
+            Self::UntrustedKeys(reason) => reason.parts(),
+        }
+    }
+}
+
+/// That a file selfie refused to read or write is a symlink, naming where it
+/// points when that could be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymlinkReason {
+    /// Where the link points, or `None` when the link could not be read.
+    pub to: Option<PathBuf>,
+}
+
+crate::parts::display_from_parts!(SymlinkReason);
+
+impl Composed for SymlinkReason {
+    fn parts(&self) -> Parts<'_> {
+        let to = self.to.as_deref().map_or_else(Parts::new, |destination| {
+            Parts::new().text(" to '").path(destination).text("'")
+        });
+        Parts::new().text("it is a symlink").append(to)
+    }
 }
 
 impl PackageParseKind {
@@ -1486,15 +1608,18 @@ mod tests {
         let (file, parse) = unreadable("dep", PackageParseKind::Yaml { cause: source });
         let (unread_file, unread) = unreadable(
             "dep",
-            PackageParseKind::Unreadable {
-                reason: "a fifo".to_string(),
-            },
+            PackageParseKind::Unreadable(crate::package::port::UnreadableSpecFile::HomeDirectory),
         );
         let (name_file, bad_name) = unreadable(
             "Dep",
-            PackageParseKind::Unreadable {
-                reason: "a capital".to_string(),
-            },
+            PackageParseKind::Unreadable(
+                crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                    directory: "/packages".into(),
+                    cause: std::sync::Arc::new(std::io::Error::from(
+                        std::io::ErrorKind::PermissionDenied,
+                    )),
+                },
+            ),
         );
         vec![
             (
@@ -1661,9 +1786,10 @@ mod tests {
         let parse = || {
             PackageParseError::new(
                 "/p/bat.yml",
-                PackageParseKind::Unreadable {
-                    reason: "the cause".to_string(),
-                },
+                PackageParseKind::Unreadable(UnreadableSpecFile::CannotCreateIn {
+                    directory: "/p".into(),
+                    cause: Arc::new(std::io::Error::other("the cause")),
+                }),
             )
         };
         let errors: Vec<Box<dyn std::error::Error>> = vec![
@@ -1925,5 +2051,102 @@ mod conflicting_path_tests {
              use 'bar'"
         );
         assert_eq!(name_field_hint(&[]).to_string(), "");
+    }
+
+    // Every path and name a spec file's read failure gives is a part of its own,
+    // so a value holding U+200B never sits inside selfie's words.
+    #[test]
+    fn a_spec_files_read_failure_names_its_values_as_parts() {
+        use crate::parts::values_of;
+
+        let directory = PathBuf::from("/p\u{200B}k");
+        let paths = [directory.join("m.yml"), directory.join("m.yaml")];
+        let untrusted: Message = Parts::new()
+            .text("in environment '")
+            .name("w\u{200B}k")
+            .text("': unknown field 'bogus'")
+            .into();
+        let cases = [
+            (
+                PackageParseKind::Refused(RefusedSpecFile::Symlink(SymlinkReason {
+                    to: Some(PathBuf::from("/else\u{200B}where")),
+                })),
+                vec!["/else\u{200B}where"],
+            ),
+            (
+                PackageParseKind::Refused(RefusedSpecFile::AmbiguousName {
+                    name: "m".to_string(),
+                    paths: paths.to_vec(),
+                }),
+                vec!["m", "/p\u{200B}k", "m.yml", "m.yaml"],
+            ),
+            (
+                PackageParseKind::Refused(RefusedSpecFile::UntrustedKeys(untrusted)),
+                vec!["w\u{200B}k"],
+            ),
+            (
+                PackageParseKind::Unreadable(UnreadableSpecFile::CannotCreateIn {
+                    directory: directory.clone(),
+                    cause: Arc::new(std::io::Error::other("the cause")),
+                }),
+                vec!["/p\u{200B}k"],
+            ),
+            (
+                PackageParseKind::Io {
+                    cause: crate::fs::IoFailure::at(&directory, std::io::Error::other("the cause")),
+                },
+                vec!["/p\u{200B}k"],
+            ),
+            (
+                PackageParseKind::InvalidName {
+                    name: "g\u{200B}host".to_string(),
+                },
+                vec!["g\u{200B}host"],
+            ),
+        ];
+        for (kind, values) in cases {
+            let error = PackageParseError::new(directory.join("g.yml"), kind);
+            assert_eq!(values_of(&error.parts().into()), values);
+        }
+    }
+
+    // An ambiguity names its spec and each file as names and its directory as a
+    // path, which `values_of` alone cannot tell apart.
+    #[test]
+    fn an_ambiguity_names_its_spec_as_a_name_and_its_directory_as_a_path() {
+        use crate::parts::Part;
+
+        let directory = Path::new("/p\u{200B}k");
+        let paths = [directory.join("m.yml")];
+        let parts = ambiguous_name_parts("m", directory, &paths);
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+
+        assert!(parts.contains(&&Part::Name("m".into())), "{parts:?}");
+        assert!(parts.contains(&&Part::Path(directory.into())), "{parts:?}");
+        assert!(parts.contains(&&Part::Name("m.yml".into())), "{parts:?}");
+    }
+
+    // A not-found hint names the declaring file as a path and the spec to use as
+    // a name.
+    #[test]
+    fn a_name_field_hint_names_its_file_as_a_path_and_its_spec_as_a_name() {
+        use crate::parts::{Part, values_of};
+
+        let declared = [NameDeclaration {
+            path: PathBuf::from("/home/p\u{200B}k/bar.yml"),
+            // `escape_debug` writes the `name:` value's U+200B as `\u{200b}`, so
+            // the text part holding it carries none.
+            name: "f\u{200B}oo".to_string(),
+        }];
+        let hint = name_field_hint(&declared);
+
+        assert_eq!(values_of(&hint), ["p\u{200B}k/bar.yml", "bar"]);
+        let parts = hint.parts();
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+        assert!(
+            parts.contains(&&Part::Path(Path::new("p\u{200B}k/bar.yml").into())),
+            "{parts:?}"
+        );
+        assert!(parts.contains(&&Part::Name("bar".into())), "{parts:?}");
     }
 }

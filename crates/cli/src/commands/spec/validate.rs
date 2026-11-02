@@ -266,7 +266,7 @@ impl Unvalidated {
                 issues: Some(shown!("{} files", paths.len())),
                 label: Name::new(name).into(),
                 field: None,
-                message: received::message(refusal.sentence()).into(),
+                message: received::composed(refusal),
                 location: None,
             },
             // One class for both, as the summary counts them; the message says
@@ -670,9 +670,14 @@ mod tests {
                 operation_info: info(),
                 error: PackageParseError::new(
                     "/p/creds.yml",
-                    PackageParseKind::Unreadable {
-                        reason: "a fifo".to_string(),
-                    },
+                    PackageParseKind::Unreadable(
+                        selfie::package::port::UnreadableSpecFile::CannotCreateIn {
+                            directory: "/packages".into(),
+                            cause: std::sync::Arc::new(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied,
+                            )),
+                        },
+                    ),
                 ),
             },
             PackageEvent::ValidationResultCompleted {

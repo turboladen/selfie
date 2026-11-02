@@ -290,9 +290,14 @@ fn every_apply_stop_is_worded_as_pinned() {
         ApplyStop::Collection(CollectionRefusal::UnloadableSpec {
             error: PackageParseError::new(
                 "/p/bad.yml",
-                PackageParseKind::Unreadable {
-                    reason: "a fifo".to_string(),
-                },
+                PackageParseKind::Unreadable(
+                    selfie::package::port::UnreadableSpecFile::CannotCreateIn {
+                        directory: "/packages".into(),
+                        cause: std::sync::Arc::new(std::io::Error::from(
+                            std::io::ErrorKind::PermissionDenied,
+                        )),
+                    },
+                ),
             ),
             base: BaseKind::PackageDirectory,
         }),

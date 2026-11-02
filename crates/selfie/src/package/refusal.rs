@@ -1,17 +1,16 @@
 //! Whether selfie refuses a whole package before it acts on any part of it.
 
-use std::fmt;
-
 use super::{
     DotfileEntry, EnvironmentField, Package, PackageField, SpecOrigin, TopLevelKeys, UnknownKey,
 };
 use crate::package::event::{EventSender, RefusalKind, RefusedSpec};
+use crate::parts::{Composed, Parts};
 use crate::validation::ValidationIssue;
 
 /// Why a package cannot be deployed as it stands: never empty, holding every
 /// reason that applies in report order.
 ///
-/// [`Display`](fmt::Display) renders every reason as one clause, which a caller
+/// [`Display`](std::fmt::Display) renders every reason as one clause, which a caller
 /// naming the package puts after its colon. [`SpecRefusal::kind`] is the first
 /// reason's kind.
 // Every reason that holds is kept, so a file with problems at several levels is
@@ -21,7 +20,7 @@ pub(crate) struct SpecRefusal(Vec<RefusalReason>);
 
 /// One reason a package cannot be deployed as it stands.
 ///
-/// [`Display`](fmt::Display) renders the reason as a clause. The fields are
+/// [`Display`](std::fmt::Display) renders the reason as a clause. The fields are
 /// carried rather than pre-rendered so a caller reporting structured
 /// diagnostics can name the keys.
 #[derive(Debug, Clone)]
@@ -71,12 +70,12 @@ impl SpecRefusal {
     }
 }
 
-impl fmt::Display for SpecRefusal {
+crate::parts::display_from_parts!(SpecRefusal);
+
+impl Composed for SpecRefusal {
     // One sentence per reason.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&super::join_sentences(
-            self.0.iter().map(RefusalReason::to_string),
-        ))
+    fn parts(&self) -> Parts<'_> {
+        super::join_sentence_parts(self.0.iter().map(RefusalReason::parts))
     }
 }
 
@@ -110,37 +109,37 @@ impl RefusalReason {
     }
 }
 
-impl fmt::Display for RefusalReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+crate::parts::display_from_parts!(RefusalReason);
+
+impl Composed for RefusalReason {
+    fn parts(&self) -> Parts<'_> {
         match self {
-            Self::UnknownTopLevelKeys(keys) => {
-                f.write_str(&super::describe_unknown_keys::<PackageField>(keys))
-            }
+            Self::UnknownTopLevelKeys(keys) => super::describe_unknown_keys::<PackageField>(keys),
             // One sentence per environment, so the "; " inside a clause never has
             // to separate environments too. The first starts lowercase because
             // every caller puts it after a colon.
-            Self::UnknownEnvironmentKeys(environments) => f.write_str(&super::join_sentences(
-                environments.iter().map(|(environment, keys)| {
-                    format!(
-                        "in environment '{environment}': {}",
-                        super::describe_unknown_keys::<EnvironmentField>(keys)
-                    )
-                }),
-            )),
-            // The parse failure ends the sentence because it is several lines of
-            // source snippet, and anything after it reads as part of it.
-            Self::UncheckedTopLevel(error) => write!(
-                f,
+            Self::UnknownEnvironmentKeys(environments) => {
+                super::join_sentence_parts(environments.iter().map(|(environment, keys)| {
+                    Parts::new()
+                        .text("in environment '")
+                        .name(environment)
+                        .text("': ")
+                        .append(super::describe_unknown_keys::<EnvironmentField>(keys))
+                }))
+            }
+            // The parse failure ends the sentence: it is the parser's own words and
+            // where it stopped, and anything after it would read as part of it.
+            Self::UncheckedTopLevel(error) => Parts::new().text(format!(
                 "its top-level keys could not be checked, so an unrecognized one -- a \
                  misspelling, or an anchor named after a real field -- cannot be ruled out. The \
                  re-read failed with: {error}"
-            ),
+            )),
             // The remedy travels with the message. Every other reason here ends
             // with what to do about it, and a bare "At least one environment must
             // be defined" leaves a reader to work out where the section goes.
             Self::NoEnvironments(issue) => match issue.suggestion() {
-                Some(suggestion) => write!(f, "{}. {suggestion}", issue.message()),
-                None => f.write_str(&issue.message()),
+                Some(suggestion) => Parts::new().text(format!("{}. {suggestion}", issue.message())),
+                None => Parts::new().text(issue.message().into_owned()),
             },
         }
     }
@@ -988,5 +987,41 @@ environments:
                 package.name()
             );
         }
+    }
+
+    // Every sentence a refusal joins after its first starts with selfie's words,
+    // never with a key, an environment or a path, so capitalizing only a leading
+    // text part changes no value and capitalizes what the string join did.
+    #[test]
+    fn every_joined_sentence_starts_with_selfies_words() {
+        use crate::parts::{Composed as _, Part};
+
+        let package = package_from(
+            "name: myapp\nconfigs: 1\n_dotfiles: 1\nenvironments:\n  \"a\\u200Bk\":\n    \
+             install: \"true\"\n    \"x\\u200By\": 1\n    _check: 1\n  \"b\\u200Bk\":\n    \
+             install: \"true\"\n    zz: 1\n",
+        );
+        let refusal = package
+            .untrusted_keys_refusal()
+            .expect("the keys refuse it");
+
+        let parts = refusal.parts();
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+        let mut joins = 0;
+        for pair in parts.windows(2) {
+            if matches!(pair[0], Part::Text(text) if text.ends_with(". ")) {
+                joins += 1;
+                let Part::Text(next) = pair[1] else {
+                    panic!("a sentence starts with {:?} in {parts:?}", pair[1]);
+                };
+                assert!(
+                    next.chars().next().is_some_and(|c| !c.is_lowercase()),
+                    "{next:?} is not capitalized in {parts:?}"
+                );
+            }
+        }
+        // The top level's two sentences (advice, then the plain key), the second
+        // environment's, and the two levels' own join.
+        assert!(joins >= 3, "only {joins} joins in {parts:?}");
     }
 }
