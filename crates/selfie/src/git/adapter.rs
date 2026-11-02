@@ -236,10 +236,44 @@ fn git_command(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Command {
 
 // The arguments `push` runs git with. `--porcelain` puts one tab-separated
 // status line per ref on stdout, which the classification below reads.
-const PUSH_ARGS: [&str; 2] = ["push", "--porcelain"];
+pub(crate) const PUSH: GitRun = GitRun::new("git push --porcelain", &["push", "--porcelain"]);
 
-// How a failure names the push.
-const PUSH: &str = "git push --porcelain";
+/// A git command selfie runs with fixed arguments, and the words a failure
+/// names it by, kept together so the two cannot drift apart.
+#[derive(Clone, Copy)]
+pub(crate) struct GitRun {
+    pub(crate) label: &'static str,
+    pub(crate) args: &'static [&'static str],
+}
+
+impl GitRun {
+    const fn new(label: &'static str, args: &'static [&'static str]) -> Self {
+        Self { label, args }
+    }
+}
+
+const REV_PARSE_BRANCH: GitRun = GitRun::new(
+    "git rev-parse --abbrev-ref HEAD",
+    &["rev-parse", "--abbrev-ref", "HEAD"],
+);
+const REMOTE: GitRun = GitRun::new("git remote", &["remote"]);
+const LS_FILES_DELETED: GitRun = GitRun::new("git ls-files --deleted", &["ls-files", "--deleted"]);
+const SYMBOLIC_REF: GitRun = GitRun::new(
+    "git symbolic-ref --quiet HEAD",
+    &["symbolic-ref", "--quiet", "HEAD"],
+);
+pub(crate) const FETCH: GitRun = GitRun::new("git fetch", &["fetch"]);
+const REV_PARSE_HEAD: GitRun = GitRun::new("git rev-parse HEAD", &["rev-parse", "HEAD"]);
+const MERGE_FF: GitRun = GitRun::new("git merge --ff-only @{u}", &["merge", "--ff-only", "@{u}"]);
+const AHEAD_BEHIND: GitRun = GitRun::new(
+    "git rev-list --left-right --count HEAD...@{u}",
+    &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
+);
+
+// The two commands whose arguments come from git's own output, commit IDs, so
+// only their labels are fixed.
+const REV_LIST_COUNT: &str = "git rev-list --count";
+pub(crate) const DIFF_NAME_STATUS: &str = "git diff --name-status";
 
 // Whether `git push --porcelain` refused to send `current_ref`, the branch being
 // pushed, because the remote has commits it lacks. The current branch is named
@@ -425,7 +459,7 @@ impl GitSyncProvider for GixGitAdapter {
         let root = repo
             .workdir()
             .ok_or_else(|| GitSyncError::OperationFailed {
-                operation: "discover",
+                operation: "discover repository",
                 message: GitMessage::new("bare repository"),
             })?
             .to_path_buf();
@@ -435,14 +469,14 @@ impl GitSyncProvider for GixGitAdapter {
         let branch = run_git(
             self.scope,
             &root,
-            "git rev-parse --abbrev-ref HEAD",
-            &["rev-parse", "--abbrev-ref", "HEAD"],
+            REV_PARSE_BRANCH.label,
+            REV_PARSE_BRANCH.args,
         )
         .ok()
         .filter(|b| b != "HEAD"); // Detached HEAD → None
 
         // Get remote name via git CLI
-        let remote_name = run_git(self.scope, &root, "git remote", &["remote"])
+        let remote_name = run_git(self.scope, &root, REMOTE.label, REMOTE.args)
             .ok()
             .and_then(|output| output.lines().next().map(String::from));
 
@@ -470,8 +504,8 @@ impl GitSyncProvider for GixGitAdapter {
         if let Ok(output) = run_git(
             self.scope,
             repo_root,
-            "git ls-files --deleted",
-            &["ls-files", "--deleted"],
+            LS_FILES_DELETED.label,
+            LS_FILES_DELETED.args,
         ) {
             for line in output.lines().filter(|l| !l.is_empty()) {
                 deleted.push(PathBuf::from(line));
@@ -579,23 +613,18 @@ impl GitSyncProvider for GixGitAdapter {
         // The classification reads the porcelain status lines rather than
         // git's messages, so it holds under any locale and leaves git's own
         // error text, which is relayed to the user, in their language.
-        let output = git_output(self.scope, repo_root, PUSH, &PUSH_ARGS)?;
+        let output = git_output(self.scope, repo_root, PUSH.label, PUSH.args)?;
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             // A detached HEAD has no branch to pull into, so it has no current
             // ref and keeps the generic failure.
-            let current_ref = run_git(
-                self.scope,
-                repo_root,
-                "git symbolic-ref --quiet HEAD",
-                &["symbolic-ref", "--quiet", "HEAD"],
-            )
-            .ok();
+            let current_ref =
+                run_git(self.scope, repo_root, SYMBOLIC_REF.label, SYMBOLIC_REF.args).ok();
             return Err(
                 if current_ref.is_some_and(|current| push_was_rejected(&stdout, &current)) {
                     GitSyncError::PushRejected
                 } else {
-                    failure(PUSH, &output, &failed_ref_lines(&stdout))
+                    failure(PUSH.label, &output, &failed_ref_lines(&stdout))
                 },
             );
         }
@@ -604,7 +633,7 @@ impl GitSyncProvider for GixGitAdapter {
 
     fn fetch(&self, repo_root: &Path) -> Result<(), GitSyncError> {
         // Shells out for the same reason as push — SSH/credential integration.
-        run_git(self.scope, repo_root, "git fetch", &["fetch"])?;
+        run_git(self.scope, repo_root, FETCH.label, FETCH.args)?;
         Ok(())
     }
 
@@ -626,26 +655,21 @@ impl GitSyncProvider for GixGitAdapter {
         let old_head = run_git(
             self.scope,
             repo_root,
-            "git rev-parse HEAD",
-            &["rev-parse", "HEAD"],
+            REV_PARSE_HEAD.label,
+            REV_PARSE_HEAD.args,
         )?;
-        run_git(
-            self.scope,
-            repo_root,
-            "git merge --ff-only @{u}",
-            &["merge", "--ff-only", "@{u}"],
-        )?;
+        run_git(self.scope, repo_root, MERGE_FF.label, MERGE_FF.args)?;
         let new_head = run_git(
             self.scope,
             repo_root,
-            "git rev-parse HEAD",
-            &["rev-parse", "HEAD"],
+            REV_PARSE_HEAD.label,
+            REV_PARSE_HEAD.args,
         )?;
 
         let commit_count = run_git(
             self.scope,
             repo_root,
-            "git rev-list --count",
+            REV_LIST_COUNT,
             &["rev-list", "--count", &format!("{old_head}..{new_head}")],
         )?
         .parse::<usize>()
@@ -667,7 +691,7 @@ impl GitSyncProvider for GixGitAdapter {
         let output = run_git(
             self.scope,
             repo_root,
-            "git diff --name-status",
+            DIFF_NAME_STATUS,
             &["diff", "--name-status", &from.0, &to.0],
         )?;
         Ok(output.lines().filter_map(parse_diff_line).collect())
@@ -684,17 +708,12 @@ impl GixGitAdapter {
     /// Get ahead/behind counts relative to the upstream tracking branch, or the
     /// error git gave, which includes there being no upstream.
     fn ahead_behind(&self, repo_root: &Path) -> Result<(usize, usize), GitSyncError> {
-        let counts = run_git(
-            self.scope,
-            repo_root,
-            "git rev-list --left-right --count HEAD...@{u}",
-            &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
-        )?;
+        let counts = run_git(self.scope, repo_root, AHEAD_BEHIND.label, AHEAD_BEHIND.args)?;
         let mut parts = counts.split_whitespace().map(str::parse::<usize>);
         match (parts.next(), parts.next()) {
             (Some(Ok(ahead)), Some(Ok(behind))) => Ok((ahead, behind)),
             _ => Err(git_sync_err(
-                "rev-list --count",
+                AHEAD_BEHIND.label,
                 format!("unexpected output {counts:?}"),
             )),
         }
@@ -1169,7 +1188,7 @@ mod tests {
         let port = spawn_401_server();
         let (_temp, path) = repo_with_a_credential_bearing_remote(port);
 
-        assert_git_really_leaks_the_token(&path, &PUSH_ARGS);
+        assert_git_really_leaks_the_token(&path, PUSH.args);
 
         let error = isolated()
             .push(&path)
@@ -1245,7 +1264,7 @@ mod tests {
             stderr: Vec::new(),
         };
 
-        let error = failure(PUSH, &output, "!\tx:y\t[rejected] (z)");
+        let error = failure(PUSH.label, &output, "!\tx:y\t[rejected] (z)");
 
         assert!(
             matches!(

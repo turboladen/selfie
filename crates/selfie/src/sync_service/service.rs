@@ -137,7 +137,7 @@ where
             sender.send_started().await;
 
             // Step 1: Get repo status
-            let repo_info = match blocking_git("discover_repo", {
+            let repo_info = match blocking_git("discover repository", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -155,7 +155,7 @@ where
                 }
             };
 
-            let repo_status = match blocking_git("repo_status", {
+            let repo_status = match blocking_git("status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -279,7 +279,7 @@ where
             return Err(SyncError::Privilege(refusal));
         }
 
-        let repo_info = blocking_git("discover_repo", {
+        let repo_info = blocking_git("discover repository", {
             let git = self.git.clone();
             let dir = self.config.package_directory().to_path_buf();
             move || git.discover_repo(&dir)
@@ -290,7 +290,7 @@ where
             other => SyncError::GitError(other),
         })?;
 
-        let status = blocking_git("repo_status", {
+        let status = blocking_git("status", {
             let git = self.git.clone();
             let root = repo_info.root.clone();
             move || git.repo_status(&root)
@@ -402,7 +402,7 @@ where
                 return;
             }
 
-            let repo_info = match blocking_git("discover_repo", {
+            let repo_info = match blocking_git("discover repository", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -436,7 +436,7 @@ where
                     .await;
 
                 // Stage files — move `files` directly to avoid cloning Vec<PathBuf>
-                if let Err(e) = blocking_git("stage_files", {
+                if let Err(e) = blocking_git("stage", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
                     move || git.stage_files(&root, &files)
@@ -494,7 +494,7 @@ where
             }
 
             // Snapshot ahead count before push to include pre-existing unpushed commits.
-            let ahead_before_push = blocking_git("repo_status", {
+            let ahead_before_push = blocking_git("status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -512,7 +512,7 @@ where
                 )
                 .await;
 
-            let pushed = blocking_git("push", {
+            let pushed = blocking_git(crate::git::adapter::PUSH.label, {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.push(&root)
@@ -565,7 +565,7 @@ where
             }
 
             // Step 1: Discover repo
-            let repo_info = match blocking_git("discover_repo", {
+            let repo_info = match blocking_git("discover repository", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -587,7 +587,7 @@ where
             // Modified and untracked files are fine — git merge --ff-only handles
             // them safely (fails if they'd conflict). Only staged files indicate
             // an in-progress commit that shouldn't be disrupted.
-            match blocking_git("repo_status", {
+            match blocking_git("status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -618,7 +618,7 @@ where
             let step = sender
                 .send_waiting_progress(1, 3, format!("Fetching from {}", remote_label(&repo_info)))
                 .await;
-            let fetched = blocking_git("fetch", {
+            let fetched = blocking_git(crate::git::adapter::FETCH.label, {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.fetch(&root)
@@ -639,7 +639,7 @@ where
             sender
                 .send_progress(2, 3, StepKind::Local, "Merging remote changes")
                 .await;
-            match blocking_git("fast_forward", {
+            match blocking_git("fast-forward", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.fast_forward(&root)
@@ -661,7 +661,7 @@ where
                     commit_count,
                 }) => {
                     // Diff old HEAD vs new HEAD to see what changed
-                    let changed_files = match blocking_git("diff_commits", {
+                    let changed_files = match blocking_git(crate::git::adapter::DIFF_NAME_STATUS, {
                         let git = git.clone();
                         let root = repo_info.root.clone();
                         move || git.diff_commits(&root, &from, &to)
