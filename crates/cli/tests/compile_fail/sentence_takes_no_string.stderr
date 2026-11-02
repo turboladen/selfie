@@ -9,13 +9,13 @@ error[E0277]: `String` is not one of the library's values, so sentence() cannot 
    = help: the trait `Sentence` is not implemented for `String`
    = help: the following other types implement trait `Sentence`:
              &T
-             CheckFailure
              ConfigLoadError
              NamespaceConflict
              OperationType
              ParseFailure
              SerializeFailure
              SkipReason
+             SpecStatus
            and $N others
 note: required for `&String` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs
@@ -41,13 +41,13 @@ error[E0277]: `str` is not one of the library's values, so sentence() cannot tak
    = help: the trait `Sentence` is not implemented for `str`
    = help: the following other types implement trait `Sentence`:
              &T
-             CheckFailure
              ConfigLoadError
              NamespaceConflict
              OperationType
              ParseFailure
              SerializeFailure
              SkipReason
+             SpecStatus
            and $N others
 note: required for `&str` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs

@@ -697,9 +697,13 @@ async fn a_shared_recommend_gap_is_warned_once_under_the_first_recommend() {
 // returns as an error.
 #[tokio::test]
 async fn a_post_install_check_that_could_not_start_fails_the_install() {
-    let events =
-        install_pkg_with_a_failing_check("pkg", CommandError::StdoutSpawn("check-pkg".to_string()))
-            .await;
+    let events = install_pkg_with_a_failing_check(
+        "pkg",
+        CommandError::StdoutSpawn {
+            command: "check-pkg".to_string(),
+        },
+    )
+    .await;
 
     let failure = failed(&events);
     assert!(

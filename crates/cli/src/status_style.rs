@@ -81,7 +81,7 @@ pub(crate) fn format_list_status(
             s.red()
         }),
         EnvironmentStatus::Unknown(reason) => {
-            let msg = shown!("Error: {}", crate::received::sentence(reason));
+            let msg = shown!("Error: {}", crate::received::unknown_status(reason));
             styled_text(msg, use_colors, |s| s.red())
         }
     }

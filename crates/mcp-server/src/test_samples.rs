@@ -73,14 +73,20 @@ pub(crate) fn every_labeled_reason() -> Vec<UnknownStatus> {
             "c",
             std::time::Duration::from_secs(1),
         )),
-        CheckFailure::CouldNotStart { message: message() },
+        CheckFailure::CouldNotStart {
+            message: test_common::message("m"),
+        },
         CheckFailure::WorkingDirectoryUnusable(selfie::commands::runner::UnusableDirectory::new(
             "c".to_string(),
             "/nowhere",
             std::sync::Arc::new(std::io::Error::other("gone")),
         )),
-        CheckFailure::ResultUnreadable { message: message() },
-        CheckFailure::Canceled { message: message() },
+        CheckFailure::ResultUnreadable {
+            message: test_common::message("m"),
+        },
+        CheckFailure::Canceled {
+            message: test_common::message("m"),
+        },
         CheckFailure::Internal { message: message() },
     ];
     [

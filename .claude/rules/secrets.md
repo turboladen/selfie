@@ -88,17 +88,19 @@ Test egress at the **boundary**, not by listing known paths:
   `OperationFailure::from(CommandError)` has nothing to read, and `CommandFailure::ExecutionFailed`
   has none either, so it would have nowhere to put it. Adding a `stdout` field to either — or a new
   `CommandError` variant that has one — reopens the path and needs a leak test again. Render a
-  `CommandError` with `to_string()`, never `{:?}`: `Display` is what each variant's `#[error(...)]`
-  curates, while `Debug` prints whatever fields a future variant adds. Still prefer the resolve
-  path's own error type over `from(CommandError)` or `command_failed`: those say "a command failed",
-  not which entry or which var, and the resolve variants carry that.
+  `CommandError` with `to_string()`, never `{:?}`: `Display` writes the sentence its
+  `Composed::parts` curates, while `Debug` prints whatever fields a future variant adds. Still
+  prefer the resolve path's own error type over `from(CommandError)` or `command_failed`: those say
+  "a command failed", not which entry or which var, and the resolve variants carry that.
 - **Forward command stderr on failure only**, bounded. It is content selfie does not control; a
-  provider run with a verbose flag can echo secret material there, and a rendered `CommandError`
-  embeds the package file's own unbounded `command:` string. `BoundedText` in `commands/runner.rs`
-  is the one bound. It is `pub` and re-exported as `selfie::commands::BoundedText`, so the CLI and
-  the MCP server can construct one — this rule is followable from every crate it is scoped to. Call
-  `BoundedText::bound` rather than deciding a limit per site. What it _enforces_ is uneven, and the
-  difference is the part worth knowing:
+  provider run with a verbose flag can echo secret material there. Every failure's sentence names
+  the package file's own `command:` string only as a `SpecCommandText` part, which bounds it, except
+  one: `OperationFailure::NotInstalledAfterInstall` (`package/event.rs`) still formats its
+  `check_command` into its sentence whole, until selfie-2kwj makes `OperationFailure` Composed.
+  `BoundedText` in `commands/runner.rs` is the one bound. It is `pub` and re-exported as
+  `selfie::commands::BoundedText`, so the CLI and the MCP server can construct one — this rule is
+  followable from every crate it is scoped to. Call `BoundedText::bound` rather than deciding a
+  limit per site. What it _enforces_ is uneven, and the difference is the part worth knowing:
   - **`CommandFailure::ExecutionFailed`'s `stderr` is the only compiler-enforced site.** Its type is
     `BoundedText`, whose field is private, so no struct-variant literal — library, adapter, or test
     — can put unbounded text there. This is the one place the bound is not a convention.
