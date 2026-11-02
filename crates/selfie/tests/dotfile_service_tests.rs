@@ -18154,9 +18154,18 @@ mod collection_findings {
 
         let carried_on =
             collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-        let notice = warning_messages(&carried_on)
-            .into_iter()
-            .find(|w| w.starts_with("Not checking"))
+        // Read from the event worded from parts alone, so the warning sent as a
+        // String instead is not found.
+        let notice = carried_on
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::ComposedWarning { warning, .. }
+                    if warning.to_string().starts_with("Not checking") =>
+                {
+                    Some(warning.to_string())
+                }
+                _ => None,
+            })
             .expect("the orphan check names its shortfall");
         assert!(
             notice.contains("the dotfiles directory could not be read"),
