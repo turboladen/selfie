@@ -1769,32 +1769,7 @@ impl std::fmt::Display for OperationFailure {
                 name,
                 reason,
                 declared_by,
-            } => match reason {
-                NoSuchPackageReason::NotFound => write!(
-                    f,
-                    "No package named '{name}' was found{}",
-                    crate::package::port::name_field_hint(declared_by)
-                ),
-                NoSuchPackageReason::MaybeInUnlistableDirectory => write!(
-                    f,
-                    "No package named '{name}' was found{}. A dotfiles directory could not be \
-                     listed, so it may be there.",
-                    crate::package::port::name_field_hint(declared_by)
-                ),
-                NoSuchPackageReason::MaybeInUncheckableDirectory => write!(
-                    f,
-                    "No package named '{name}' was found{}. A dotfiles directory could not be \
-                     checked, so whether it is there is unknown.",
-                    crate::package::port::name_field_hint(declared_by)
-                ),
-                NoSuchPackageReason::NotLoaded => write!(
-                    f,
-                    "Package '{name}' could not be loaded, so nothing was applied"
-                ),
-                NoSuchPackageReason::Ambiguous { conflicting_paths } => f.write_str(
-                    &crate::package::port::ambiguous_files_sentence(name, conflicting_paths),
-                ),
-            },
+            } => write!(f, "{}", no_such_package_parts(name, reason, declared_by)),
             OperationFailure::NotInstalledAfterInstall {
                 package_name,
                 check_command,
@@ -1896,6 +1871,39 @@ impl Composed for DependencyFailure {
                 .name(package_name)
                 .text("` carries a spec selfie will not read, so its dependencies are unknown: ")
                 .append(reason.parts()),
+        }
+    }
+}
+
+// The sentence saying `name` names no package selfie can use, for `reason`,
+// with the hint naming each of `declared_by`. `Display` and `message` both
+// write it, so the two cannot word it differently.
+fn no_such_package_parts<'a>(
+    name: &'a str,
+    reason: &'a NoSuchPackageReason,
+    declared_by: &'a [crate::package::port::NameDeclaration],
+) -> Parts<'a> {
+    let hint = || crate::package::port::name_field_hint_parts(declared_by);
+    let not_found = || {
+        Parts::new()
+            .text("No package named '")
+            .name(name)
+            .text("' was found")
+    };
+    match reason {
+        NoSuchPackageReason::NotFound => not_found().append(hint()),
+        NoSuchPackageReason::MaybeInUnlistableDirectory => not_found()
+            .append(hint())
+            .text(". A dotfiles directory could not be listed, so it may be there."),
+        NoSuchPackageReason::MaybeInUncheckableDirectory => not_found().append(hint()).text(
+            ". A dotfiles directory could not be checked, so whether it is there is unknown.",
+        ),
+        NoSuchPackageReason::NotLoaded => Parts::new()
+            .text("Package '")
+            .name(name)
+            .text("' could not be loaded, so nothing was applied"),
+        NoSuchPackageReason::Ambiguous { conflicting_paths } => {
+            crate::package::port::ambiguous_files_parts(name, conflicting_paths)
         }
     }
 }
@@ -3125,6 +3133,11 @@ impl OperationFailure {
                 .text("`: ")
                 .append(reason.parts())
                 .into(),
+            Self::NoSuchPackage {
+                name,
+                reason,
+                declared_by,
+            } => no_such_package_parts(name, reason, declared_by).into(),
             other => Parts::new().text(other.to_string()).into(),
         }
     }
@@ -6432,10 +6445,46 @@ mod tests {
                 &[],
             ),
         ];
-        for (failure, named) in &named {
+        // A not-found failure, for each reason, with a hint naming a declaring
+        // file and its `name:` value.
+        let declared = vec![crate::package::port::NameDeclaration {
+            path: "/h/p\u{200B}k/bar.yml".into(),
+            name: "ze\u{200B}o".to_string(),
+        }];
+        let hinted: &[&str] = &["ze\u{200B}o", "p\u{200B}k/bar.yml", "ze\u{200B}o", "bar"];
+        let not_found = [
+            (NoSuchPackageReason::NotFound, hinted),
+            (NoSuchPackageReason::MaybeInUnlistableDirectory, hinted),
+            (NoSuchPackageReason::MaybeInUncheckableDirectory, hinted),
+            (NoSuchPackageReason::NotLoaded, &["ze\u{200B}o"][..]),
+            (
+                NoSuchPackageReason::Ambiguous {
+                    conflicting_paths: vec![
+                        "/p\u{200B}k/ze.yml".into(),
+                        "/p\u{200B}k/Ze.yaml".into(),
+                    ],
+                },
+                &["ze\u{200B}o", "/p\u{200B}k", "ze.yml", "Ze.yaml"][..],
+            ),
+        ]
+        .map(|(reason, values)| {
+            (
+                OperationFailure::NoSuchPackage {
+                    name: "ze\u{200B}o".to_string(),
+                    reason,
+                    declared_by: declared.clone(),
+                },
+                values,
+            )
+        });
+        for (failure, named) in named
+            .iter()
+            .map(|(f, n)| (f, *n))
+            .chain(not_found.iter().map(|(f, n)| (f, *n)))
+        {
             let message = failure.message();
             assert_eq!(message.to_string(), failure.to_string());
-            assert_eq!(crate::parts::values_of(&message), *named, "{failure}");
+            assert_eq!(crate::parts::values_of(&message), named, "{failure}");
         }
     }
 

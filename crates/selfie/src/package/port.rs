@@ -864,7 +864,7 @@ pub fn name_field_hint(declared: &[NameDeclaration]) -> Message {
 }
 
 // This builds `name_field_hint`'s parts, borrowing each value from `declared`.
-fn name_field_hint_parts(declared: &[NameDeclaration]) -> Parts<'_> {
+pub(crate) fn name_field_hint_parts(declared: &[NameDeclaration]) -> Parts<'_> {
     if declared.is_empty() {
         return Parts::new();
     }
@@ -877,12 +877,12 @@ fn name_field_hint_parts(declared: &[NameDeclaration]) -> Parts<'_> {
             .and_then(Path::file_name)
             .map_or_else(|| name.to_path_buf(), |dir| Path::new(dir).join(name))
     };
-    // The `name:` field is text from a file, so control characters are escaped
-    // before it reaches a terminal, the MCP server's included.
     let claims = Parts::joined(declared, " and ", |d| {
         Parts::new()
             .path(file(d))
-            .text(format!(" declares `name: {}`", d.name.escape_debug()))
+            .text(" declares `name: ")
+            .name(&d.name)
+            .text("`")
     });
     // Each name appears once without deduplicating: two files claiming one name
     // are ambiguous, and an ambiguous name is never collected or looked up.
@@ -1050,11 +1050,6 @@ fn untrusted_keys_parts<'a>(path: &'a Path, levels: &'a [UntrustedLevel]) -> Par
 
 /// The ambiguity sentence for files that all sit in one directory, named
 /// by the first file's.
-pub(crate) fn ambiguous_files_sentence(name: &str, paths: &[PathBuf]) -> String {
-    ambiguous_files_parts(name, paths).to_string()
-}
-
-/// [`ambiguous_files_sentence`] as parts.
 pub(crate) fn ambiguous_files_parts<'a>(name: &'a str, paths: &'a [PathBuf]) -> Parts<'a> {
     let directory = paths
         .first()
@@ -2220,7 +2215,7 @@ mod conflicting_path_tests {
     }
 
     // A not-found failure's hint, whole: each file by its directory and name, the
-    // `name:` value escaped, and the name to use.
+    // `name:` value as the file writes it, and the name to use.
     #[test]
     fn a_name_field_hint_is_worded_whole() {
         let declared = [NameDeclaration {
@@ -2230,7 +2225,7 @@ mod conflicting_path_tests {
 
         assert_eq!(
             name_field_hint(&declared).to_string(),
-            ". p\u{200B}k/bar.yml declares `name: f\\u{1b}oo`; a package is named by its file, so \
+            ". p\u{200B}k/bar.yml declares `name: f\u{1b}oo`; a package is named by its file, so \
              use 'bar'"
         );
         assert_eq!(name_field_hint(&[]).to_string(), "");
@@ -2239,17 +2234,11 @@ mod conflicting_path_tests {
     // The `name:` value as the hint's words carry it, one row per class of
     // character an escape could treat differently: an invisible one, the three
     // ASCII characters a Rust escape backslashes, and a blank that is not a
-    // space.
+    // space. The value is a name part, written as it is; escaping it is the
+    // CLI's business.
     #[test]
     fn a_name_field_hints_value_keeps_its_spelling() {
-        let rows = [
-            ("ze\u{200B}o", "ze\\u{200b}o"),
-            ("ze\"o", "ze\\\"o"),
-            ("ze'o", "ze\\'o"),
-            ("ze\\o", "ze\\\\o"),
-            ("ze\u{A0}o", "ze\\u{a0}o"),
-        ];
-        for (name, written) in rows {
+        for name in ["ze\u{200B}o", "ze\"o", "ze'o", "ze\\o", "ze\u{A0}o"] {
             let declared = [NameDeclaration {
                 path: PathBuf::from("/home/me/pkgs/bar.yml"),
                 name: name.to_string(),
@@ -2257,7 +2246,7 @@ mod conflicting_path_tests {
             assert_eq!(
                 name_field_hint(&declared).to_string(),
                 format!(
-                    ". pkgs/bar.yml declares `name: {written}`; a package is named by its file, \
+                    ". pkgs/bar.yml declares `name: {name}`; a package is named by its file, \
                      so use 'bar'"
                 ),
                 "{name:?}"
@@ -2346,13 +2335,14 @@ mod conflicting_path_tests {
 
         let declared = [NameDeclaration {
             path: PathBuf::from("/home/p\u{200B}k/bar.yml"),
-            // `escape_debug` writes the `name:` value's U+200B as `\u{200b}`, so
-            // the text part holding it carries none.
             name: "f\u{200B}oo".to_string(),
         }];
         let hint = name_field_hint(&declared);
 
-        assert_eq!(values_of(&hint), ["p\u{200B}k/bar.yml", "bar"]);
+        assert_eq!(
+            values_of(&hint),
+            ["p\u{200B}k/bar.yml", "f\u{200B}oo", "bar"]
+        );
         let parts = hint.parts();
         let parts: Vec<&Part<'_>> = parts.into_iter().collect();
         assert!(
@@ -2360,6 +2350,10 @@ mod conflicting_path_tests {
             "{parts:?}"
         );
         assert!(parts.contains(&&Part::Name("bar".into())), "{parts:?}");
+        assert!(
+            parts.contains(&&Part::Name("f\u{200B}oo".into())),
+            "{parts:?}"
+        );
     }
 
     // Each package error, with values holding U+200B, and its sentence.
@@ -2553,6 +2547,7 @@ mod conflicting_path_tests {
                 name(n),
                 path(directory),
                 path("p\u{200B}k/bar.yml"),
+                name("foo"),
                 name("bar"),
             ],
             vec![name(n), path(directory), name("m.yml"), name("m.yaml")],

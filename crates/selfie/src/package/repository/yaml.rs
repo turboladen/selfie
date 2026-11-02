@@ -852,16 +852,15 @@ mod tests {
         );
     }
 
-    // A `name:` holding an escape and a newline is printed escaped, so the file's
-    // text cannot drive the terminal.
+    // A `name:` holding an escape and a newline is carried as the file writes it,
+    // as a name part, so each adapter escapes it as it escapes a name: the CLI
+    // shows both as escapes, and the file's text cannot drive the terminal.
     #[test]
-    fn a_control_character_in_a_name_field_is_escaped() {
+    fn a_control_character_in_a_name_field_is_carried_as_written() {
         let message =
             lookup_failure_for(&[("nvim", "\"neo\\u001b[2J\\nvim\"")], "neo\u{1b}[2J\nvim");
-        let hint = &message[message.find("declares").unwrap()..];
-        assert!(!hint.contains(['\u{1b}', '\n']), "{hint:?}");
         assert!(
-            message.contains("declares `name: neo\\u{1b}[2J\\nvim`"),
+            message.contains("declares `name: neo\u{1b}[2J\nvim`"),
             "{message:?}"
         );
     }

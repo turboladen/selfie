@@ -1790,3 +1790,26 @@ fn a_refused_specs_reason_names_its_key_and_environment_escaped() {
         assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
     }
 }
+
+// A not-found failure's hint shows the declared `name:` value as a name: an
+// invisible character escaped once, and a quote as it is written.
+#[test]
+fn a_name_field_hint_shows_the_declared_name_as_a_name() {
+    for (declared, asked, shown) in [
+        ("ze\\u200Bo", "ze\u{200B}o", r"name: ze\u{200b}o`"),
+        ("ze\\\"o", "ze\"o", "name: ze\"o`"),
+    ] {
+        let temp = setup_default_test_config();
+        let spec = format!(
+            "name: \"{declared}\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        );
+        hostile_package_directory(&temp, &[("bar.yml", &spec)]);
+
+        let printed = printed(&temp, &["apply", asked]);
+
+        let hint = line_with(&printed, "bar.yml declares");
+        assert!(hint.contains(shown), "{asked:?}: {hint}");
+        assert!(!hint.contains('\u{200B}'), "{asked:?}: {hint:?}");
+        assert!(hint.contains(r"p\u{200b}k/bar.yml"), "{asked:?}: {hint}");
+    }
+}
