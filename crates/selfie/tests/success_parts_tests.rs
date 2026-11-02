@@ -36,12 +36,12 @@ impl Kinds {
         for part in parts {
             match part {
                 Part::Name(name) => {
-                    assert!(names.contains(name), "{name:?} in {value:?}");
+                    assert!(names.contains(&name.as_ref()), "{name:?} in {value:?}");
                     self.names += 1;
                 }
                 Part::Path(path) => {
                     assert!(
-                        paths.iter().any(|whole| *path == Path::new(whole))
+                        paths.iter().any(|whole| path.as_ref() == Path::new(whole))
                             || path.starts_with(ROOT),
                         "{path:?} in {value:?}"
                     );
