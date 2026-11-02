@@ -36,6 +36,11 @@ const HANG: Rule = Rule {
     remedy: "print these through a layout, such as DisplayManager::println_after",
     allowed_in: LAYOUT_MODULES,
 };
+const PRETTY: Rule = Rule {
+    name: "no tracing macro formats a value with pretty Debug",
+    remedy: "log with {:?}: the verbose log shows a record on one line, so {:#?}'s line breaks show as escapes",
+    allowed_in: &[],
+};
 const HIDDEN: Rule = Rule {
     name: "the hidden constructors are called only in terminal_text.rs",
     remedy: "build these with shown! or lit!",
@@ -652,8 +657,9 @@ fn findings(source: &Source) -> Vec<Finding> {
                 && !punct_is(trees.get(index + 1), ':'))
     }));
     found.extend(find(&HANG, source, &shipped, |trees, index| {
-        method_call(trees, index, "hang") || ident_is(trees.get(index), "hang_text")
+        method_call(trees, index, "hang")
     }));
+    found.extend(find(&PRETTY, source, &shipped, pretty_debug_log));
     // This walks test code too: a test has no more business skipping the
     // checks `shown!` and `lit!` make than shipped code does.
     found.extend(find(
@@ -753,9 +759,28 @@ fn findings(source: &Source) -> Vec<Finding> {
 }
 
 const RULES: &[&Rule] = &[
-    &DISPLAY, &HANG, &HIDDEN, &TABLE, &INDENT, &COMPOSED, &LAX, &MESSAGE, &PRINTER, &CONSOLE,
-    &SETTER, &STYLE, &WRITER, &HANDLE, &INDICATIF,
+    &DISPLAY, &HANG, &PRETTY, &HIDDEN, &TABLE, &INDENT, &COMPOSED, &LAX, &MESSAGE, &PRINTER,
+    &CONSOLE, &SETTER, &STYLE, &WRITER, &HANDLE, &INDICATIF,
 ];
+
+// Whether `trees[index]` starts a tracing macro, such as `debug!`, with a
+// string literal among its arguments that formats a value with `{:#?}`.
+fn pretty_debug_log(trees: &[TokenTree], index: usize) -> bool {
+    let tracing_macro = ["trace", "debug", "info", "warn", "error", "event"]
+        .iter()
+        .any(|name| ident_is(trees.get(index), name));
+    if !tracing_macro || !punct_is(trees.get(index + 1), '!') {
+        return false;
+    }
+    let Some(TokenTree::Group(group)) = trees.get(index + 2) else {
+        return false;
+    };
+    group.stream().into_iter().any(|tree| {
+        matches!(&tree, TokenTree::Literal(_))
+            && syn::parse2::<syn::LitStr>(tree.to_token_stream())
+                .is_ok_and(|text| text.value().contains("#?}"))
+    })
+}
 
 // Whether `trees[index]` starts a `lit!` or `shown!` whose literal has a line
 // break followed by a space or a tab. The literal is judged by its value, so a
@@ -1300,20 +1325,62 @@ fn b(#[cfg(test)] t: [u8; { p().display(); 1 }], s: [u8; { p().display(); 1 }]) 
     assert_eq!(lines, [5, 10, 16, 21, 24]);
 }
 
-// `.hang(` is seen chained over a line break, and `hang_text` called on its
-// own, only outside the layout modules.
+// `.hang(` is seen chained over a line break, only outside the layout
+// modules.
 #[test]
 fn the_hang_rule_sees_a_call_outside_the_layout() {
     let text = "fn a(s: Shown) -> Shown { s.hang(2) }\n\
                 fn b(s: Shown) -> Shown { s.paint(true, red)\n    .hang(4) }\n\
-                fn c(s: Shown) -> Shown { s.change(2) }\n\
-                fn d(t: &str) -> String { terminal_text::hang_text(t, 2) }\n";
+                fn c(s: Shown) -> Shown { s.change(2) }\n";
 
     assert_eq!(
         found_in("commands/x.rs", text),
-        [(HANG.name, 1), (HANG.name, 3), (HANG.name, 5)]
+        [(HANG.name, 1), (HANG.name, 3)]
     );
     assert_eq!(found_in("entry_rows.rs", text), []);
+}
+
+// A tracing macro formatting a value with `{:#?}` is seen, named bare or by
+// its path; `{:?}` and a `format!` are not.
+#[test]
+fn the_pretty_rule_sees_a_pretty_log() {
+    let text = "fn a(v: V) { debug!(\"x {:#?}\", v); }\n\
+                fn b(v: V) { tracing::warn!(n = 1, \"{v:#?}\"); }\n\
+                fn c(v: V) { debug!(\"x {:?}\", v); }\n\
+                fn d(v: V) -> String { format!(\"{:#?}\", v) }\n";
+
+    assert_eq!(
+        found_in("commands/x.rs", text),
+        [(PRETTY.name, 1), (PRETTY.name, 2)]
+    );
+}
+
+// The library's shipped code logs nothing with `{:#?}` either, since its
+// events reach the same verbose log.
+#[test]
+fn the_library_logs_nothing_with_pretty_debug() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../selfie/src");
+    let mut files = Vec::new();
+    collect_rust_files(&src, &mut files);
+    assert!(files.len() > 20, "the walk found too few files: {files:?}");
+    let found: Vec<String> = files
+        .iter()
+        .flat_map(|path| {
+            let source = Source::parse(
+                &path.display().to_string(),
+                &std::fs::read_to_string(path).unwrap(),
+            );
+            find(&PRETTY, &source, &units(&source.shipped), pretty_debug_log)
+        })
+        .map(|f| format!("  {}:{} in {}", f.file, f.line, f.context))
+        .collect();
+    assert!(
+        found.is_empty(),
+        "{}; {}:\n{}",
+        PRETTY.name,
+        PRETTY.remedy,
+        found.join("\n")
+    );
 }
 
 // A hidden constructor is seen called directly, as a raw identifier, and in

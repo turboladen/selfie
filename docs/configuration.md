@@ -338,12 +338,13 @@ cli:
 
 stdout carries a command's answer at any verbosity. What verbose adds all goes to stderr: each
 command's operation header, such as `Spec info package 'bat'`, every step, a configured command's
-own output, and `DEBUG` log lines. At default verbosity a step that waits on something outside
-selfie (a configured command, a provider command, or the network) still shows: as a spinner on a
-terminal, which shows the command's latest output line and ends as `✓` with its elapsed time when it
-succeeds or `✗` when it fails, and otherwise as one status line. Steps that run at once, such as the
-audits of `package audit --all`, each get their own spinner. When a configured command fails, its
-last output lines are shown at every verbosity.
+own output, and `DEBUG` log lines. Each log line is one record: a value in it shows an invisible
+character, a line break or a tab as an escape such as `\u{200b}` or `\n`. At default verbosity a
+step that waits on something outside selfie (a configured command, a provider command, or the
+network) still shows: as a spinner on a terminal, which shows the command's latest output line and
+ends as `✓` with its elapsed time when it succeeds or `✗` when it fails, and otherwise as one status
+line. Steps that run at once, such as the audits of `package audit --all`, each get their own
+spinner. When a configured command fails, its last output lines are shown at every verbosity.
 
 #### `cli.use_colors`
 

@@ -90,7 +90,7 @@ enum Policy {
 }
 
 // The one escaping function. Its callers are the kind constructors,
-// `Name::is_plain`, `Command::note`, `guard` and `guard_unstyled`.
+// `Name::is_plain`, `Command::note`, `guard` and `log_record`.
 fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
     match policy {
         Policy::Strict => escape_with(text, in_strict_set, Sgr::Escape),
@@ -141,12 +141,18 @@ pub(crate) fn guard(block: &str, colors: bool) -> Cow<'_, str> {
     )
 }
 
-/// Returns `block` with every escape sequence, and everything else that could
-/// act on the terminal, escaped. A newline and a tab are kept. Unlike
-/// [`guard`], it keeps no styling, so it suits text that must reach the stream
-/// uncolored.
-pub(crate) fn guard_unstyled(block: &str) -> Cow<'_, str> {
-    escape(block, Policy::Guard(Sgr::Escape))
+/// Returns `record`, one record of a log, with the strict set escaped, every
+/// escape sequence, line break and tab included, so it shows uncolored on one
+/// line. A final newline, which ends the record, is kept.
+pub(crate) fn log_record(record: &str) -> Cow<'_, str> {
+    match record.strip_suffix('\n') {
+        Some(line) => {
+            let mut shown = escape(line, Policy::Strict).into_owned();
+            shown.push('\n');
+            Cow::Owned(shown)
+        }
+        None => escape(record, Policy::Strict),
+    }
 }
 
 // What the escaping loop does with an SGR sequence selfie's own styling writes.
@@ -194,11 +200,9 @@ fn painted(text: String, paint: Paint) -> String {
         .to_string()
 }
 
-/// Returns `text` with `column` spaces after each line break, so every line
-/// after the first starts `column` columns in. An empty line stays empty.
-// A layout calls this for text it writes that is not a `Shown`. Only a layout
-// may, as only a layout calls `Shown::hang`.
-pub(crate) fn hang_text(text: &str, column: usize) -> String {
+// Returns `text` with `column` spaces after each line break, so every line
+// after the first starts `column` columns in. An empty line stays empty.
+fn hang_text(text: &str, column: usize) -> String {
     let indent = " ".repeat(column);
     let mut lines = text.split('\n');
     let mut hung = lines.next().unwrap_or_default().to_string();

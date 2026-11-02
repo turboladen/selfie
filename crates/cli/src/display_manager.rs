@@ -17,8 +17,8 @@ use crate::event_processor::Exit;
 use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
-    Command, Content, ESCAPED, Literal, Name, Output, Paint, Prose, Shown, guard, guard_unstyled,
-    hang_text, lit, shown,
+    Command, Content, ESCAPED, Literal, Name, Output, Paint, Prose, Shown, guard, lit, log_record,
+    shown,
 };
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
@@ -741,16 +741,29 @@ fn console_colors() -> StreamColors {
 }
 
 /// The verbose log's writer. Each event tracing formats is written to stderr
-/// with every escape sequence and every other character that could act on the
-/// terminal escaped, so the log is never colored and a logged value cannot act
-/// on the terminal.
+/// on one line, with every escape sequence, line break and invisible character
+/// escaped, so the log is never colored, a logged value cannot act on the
+/// terminal, and no value can start a line that passes for a log line of its
+/// own or for selfie's result line.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct VerboseLog;
 
-// The verbose log indents an event's lines after its first by this many
-// columns, so a line break in a logged value cannot start a line that passes
-// for a log line of its own or for selfie's result line.
-const LOG_HANG: usize = 4;
+/// The verbose log's subscriber, writing through `writer`: DEBUG and above,
+/// never colored.
+pub(crate) fn verbose_subscriber<W>(writer: W) -> impl tracing::Subscriber + Send + Sync + 'static
+where
+    W: for<'w> tracing_subscriber::fmt::MakeWriter<'w> + Send + Sync + 'static,
+{
+    // Each record reaches `writer` through one `make_writer`, ending in a line
+    // break the formatter adds once, so `LogEvent` can escape every other one.
+    // A test pins that against this configuration, since another format, such
+    // as `.pretty()`, would break it.
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .with_writer(writer)
+        .finish()
+}
 
 impl tracing_subscriber::fmt::MakeWriter<'_> for VerboseLog {
     type Writer = LogEvent<std::io::Stderr>;
@@ -762,7 +775,7 @@ impl tracing_subscriber::fmt::MakeWriter<'_> for VerboseLog {
 
 /// One event of the verbose log. Nothing written to it reaches its stream
 /// until it is dropped. Then the whole event is escaped and written at once,
-/// each line after the first indented.
+/// on one line.
 pub(crate) struct LogEvent<W: std::io::Write> {
     sink: W,
     text: Vec<u8>,
@@ -783,7 +796,7 @@ impl<W: std::io::Write> LogEvent<W> {
         let text = std::mem::take(&mut self.text);
         let text = String::from_utf8_lossy(&text);
         // This runs in `drop`, so a failed write has nowhere to be reported.
-        let shown = hang_text(&guard_unstyled(&text), LOG_HANG);
+        let shown = log_record(&text);
         let _ = self.sink.write_all(shown.as_bytes());
     }
 }
@@ -2203,7 +2216,7 @@ mod tests {
 
     // An escape sequence in a log event shows as text, even one in selfie's own
     // palette, and an event split inside it, inside a character and at a line
-    // break is written as it is when written whole, its second line indented.
+    // break is written as it is when written whole, on one line.
     #[test]
     fn a_log_event_is_escaped_whole_however_it_is_written() {
         let event = "DEBUG \u{1b}[31ma\u{202e}b\nnext\n".as_bytes();
@@ -2217,8 +2230,108 @@ mod tests {
             &event[line_break..],
         ];
         let whole = logged(&[event]);
-        assert_eq!(whole, "DEBUG \\u{1b}[31ma\\u{202e}b\n    next\n");
+        assert_eq!(whole, "DEBUG \\u{1b}[31ma\\u{202e}b\\nnext\n");
         assert_eq!(logged(&pieces), whole);
+    }
+
+    // What each writer the subscriber made received, one entry per writer.
+    #[derive(Clone, Default)]
+    struct Records(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    struct Record {
+        records: Records,
+        index: usize,
+    }
+
+    impl tracing_subscriber::fmt::MakeWriter<'_> for Records {
+        type Writer = Record;
+
+        fn make_writer(&self) -> Record {
+            let mut records = self.0.lock().unwrap();
+            records.push(Vec::new());
+            Record {
+                records: self.clone(),
+                index: records.len() - 1,
+            }
+        }
+    }
+
+    impl std::io::Write for Record {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.records.0.lock().unwrap()[self.index].extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Every way tracing formats a value reaches the log escaped with the strict
+    // set, and each event stays on one line: a field named `message`, a format
+    // string's message, a `%` field, a `?` field, a `&str` field, an error and a
+    // span's field. A line feed, a carriage return, U+0085 and U+2028 each
+    // could end a line; U+200B and U+2800 escape only in the strict set. The
+    // Debug routes quote and escape the value first, and arrive at the same
+    // text.
+    #[test]
+    fn every_logged_value_escapes_the_strict_set_however_it_was_formatted() {
+        let value = "v\u{200b}\u{202e}\u{2800}\u{a0}\u{85}\u{2028}\r\nx";
+        let shown = r"v\u{200b}\u{202e}\u{2800}\u{a0}\u{85}\u{2028}\r\nx";
+        let records = Records::default();
+        let writer = records.clone();
+        let subscriber = verbose_subscriber(move || {
+            LogEvent::new(tracing_subscriber::fmt::MakeWriter::make_writer(&writer))
+        });
+        let owned = value.to_string();
+        let error = std::io::Error::other(value);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(message = &owned);
+            tracing::warn!("{value}");
+            tracing::warn!(shown = %value, "display");
+            tracing::warn!(debugged = ?value, "debug");
+            tracing::warn!(plain = value, "str");
+            tracing::warn!(error = &error as &dyn std::error::Error, "error");
+            tracing::info_span!("span", f = %value).in_scope(|| tracing::warn!("in a span"));
+        });
+        let log = String::from_utf8(records.0.lock().unwrap().concat()).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 7, "{log}");
+        for line in &lines {
+            assert!(line.contains(shown), "{line}");
+        }
+        // Nothing the strict set holds is left raw but each record's own end.
+        let raw: Vec<char> = log
+            .chars()
+            .filter(|&c| c != '\n' && !Name::is_plain(&c.to_string()))
+            .collect();
+        assert!(raw.is_empty(), "{raw:?} in {log}");
+    }
+
+    // `LogEvent` escapes every line break but a record's last, which holds
+    // only while the subscriber hands each record to its own writer and the
+    // formatter adds no line break but that one, a span's fields and an
+    // event's several fields included.
+    #[test]
+    fn the_verbose_subscriber_writes_each_record_to_one_writer_on_one_line() {
+        let records = Records::default();
+        let subscriber = verbose_subscriber(records.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info_span!("outer", a = 1, b = %"two").in_scope(|| {
+                tracing::debug_span!("inner", c = ?"three").in_scope(|| {
+                    tracing::warn!(d = "four", e = %"five", f = 6, "first");
+                    tracing::info!(g = true, "second");
+                });
+            });
+            tracing::debug!("third");
+        });
+        let records = records.0.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        for record in records.iter() {
+            let record = std::str::from_utf8(record).unwrap();
+            assert_eq!(record.matches('\n').count(), 1, "{record:?}");
+            assert!(record.ends_with('\n'), "{record:?}");
+        }
     }
 
     // Each message printer shows a library sentence as prose: a joiner renders,
