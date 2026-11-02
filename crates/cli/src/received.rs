@@ -423,6 +423,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         OperationFailure::PackageList(error) => composed(error),
         OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
         OperationFailure::Stopped(stop) => composed(stop),
+        OperationFailure::Track(message) => composed(message),
         OperationFailure::UnreadableSpec {
             package_name,
             reason,
@@ -1298,7 +1299,12 @@ mod tests {
                 .into_iter()
                 .filter_map(|name| SuggestedCommand::selfie(Subcommand::Apply, name)),
         );
-        assert_eq!(commands.len(), 8);
+        commands.extend(
+            [("bat", "~/.batrc"), ("my app", "/a b"), ("-x", "/y")]
+                .into_iter()
+                .filter_map(|(spec, target)| SuggestedCommand::track_dotfile(spec, target)),
+        );
+        assert_eq!(commands.len(), 11);
         for command in &commands {
             assert_eq!(suggested(command).to_string(), command.to_string());
         }

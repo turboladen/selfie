@@ -21,6 +21,7 @@ use crate::{
         event::{EventSender, OperationFailure, OperationResult, OperationSuccess, StepCount},
         port::{PackageRepoError, PackageRepository},
     },
+    parts::{Composed, Message, Parts, SuggestedCommand},
     paths::{is_within, normalize_path},
 };
 
@@ -44,16 +45,18 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// The spec, as a sentence names it: `package 'ruby'` or `standalone dotfile
-    /// 'gemrc'`.
+    /// The spec as a sentence names it, as parts with its name a name:
+    /// `package 'ruby'` or `standalone dotfile 'gemrc'`.
     #[must_use]
-    pub fn label(&self) -> String {
-        match self.origin {
-            SpecOrigin::DotfilesDirectory => format!("standalone dotfile '{}'", self.spec_name),
-            SpecOrigin::PackageDirectory | SpecOrigin::Memory => {
-                format!("package '{}'", self.spec_name)
-            }
-        }
+    pub(crate) fn label(&self) -> Parts<'_> {
+        let kind = match self.origin {
+            SpecOrigin::DotfilesDirectory => "standalone dotfile '",
+            SpecOrigin::PackageDirectory | SpecOrigin::Memory => "package '",
+        };
+        Parts::new()
+            .text(kind)
+            .name(self.spec_name.as_str())
+            .text("'")
     }
 }
 
@@ -91,11 +94,14 @@ pub fn trackers_of<H: HomeDir + ?Sized>(
 }
 
 // The refusal of a track whose file another spec already deploys.
-fn tracked_elsewhere_refusal(target: &str, trackers: &[Tracker]) -> String {
-    let named: Vec<String> = trackers
-        .iter()
-        .map(|tracker| format!("{} ({})", tracker.label(), tracker.spec_path.display()))
-        .collect();
+fn tracked_elsewhere_refusal(target: &str, trackers: &[Tracker]) -> Message {
+    let named = Parts::joined(trackers, " and ", |tracker| {
+        tracker
+            .label()
+            .text(" (")
+            .path(tracker.spec_path.as_path())
+            .text(")")
+    });
     let remedy = match trackers {
         [
             Tracker {
@@ -103,23 +109,20 @@ fn tracked_elsewhere_refusal(target: &str, trackers: &[Tracker]) -> String {
                 origin: SpecOrigin::PackageDirectory,
                 ..
             },
-        ] if let (Some(spec_name), Some(target)) = (
-            crate::fs::shell_word(spec_name),
-            crate::fs::shell_word(target),
-        ) =>
-        {
-            format!(
-                "Track it there with `selfie package track-dotfile {spec_name} {target}`, or \
-                 remove that entry first."
-            )
-        }
-        _ => "Remove the entry from the spec that should not deploy it first.".to_string(),
+        ] if let Some(command) = SuggestedCommand::track_dotfile(spec_name, target) => Parts::new()
+            .text("Track it there with `")
+            .command(command)
+            .text("`, or remove that entry first."),
+        _ => Parts::new().text("Remove the entry from the spec that should not deploy it first."),
     };
-    format!(
-        "Cannot track '{target}': {} already deploys it, and two specs deploying one file are \
-         both refused by apply. {remedy}",
-        named.join(" and ")
-    )
+    Parts::new()
+        .text("Cannot track '")
+        .path(Path::new(target))
+        .text("': ")
+        .append(named)
+        .text(" already deploys it, and two specs deploying one file are both refused by apply. ")
+        .append(remedy)
+        .into()
 }
 
 /// Why a name cannot be a directory under the repository, or `None` if it can.
@@ -127,10 +130,14 @@ fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
     if crate::package::is_valid_spec_name(name) {
         return None;
     }
-    Some(OperationFailure::Generic(format!(
-        "Invalid name '{name}': {}",
-        crate::package::SPEC_NAME_RULE
-    )))
+    Some(OperationFailure::Track(
+        Parts::new()
+            .text("Invalid name '")
+            .name(name)
+            .text("': ")
+            .text(crate::package::SPEC_NAME_RULE)
+            .into(),
+    ))
 }
 
 /// Why `name` cannot be the copy directory beside `spec_path`, or `None` if it can.
@@ -149,10 +156,15 @@ fn unsafe_name_failure(name: &str) -> Option<OperationFailure> {
 // position instead of characters, so it holds even if that rule admits a name
 // that climbs out.
 fn unusable_copy_directory(spec_path: &Path, name: &str) -> Option<OperationFailure> {
-    let refuse = |why: &str| {
-        Some(OperationFailure::Generic(format!(
-            "Cannot track into '{name}': {why}"
-        )))
+    let refuse = |why: Parts<'_>| {
+        Some(OperationFailure::Track(
+            Parts::new()
+                .text("Cannot track into '")
+                .name(name)
+                .text("': ")
+                .append(why)
+                .into(),
+        ))
     };
 
     // A spec with no parent cannot have a directory beside it. `Path::parent` is
@@ -163,29 +175,36 @@ fn unusable_copy_directory(spec_path: &Path, name: &str) -> Option<OperationFail
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     else {
-        return refuse("its spec has no directory to write beside");
+        return refuse(Parts::new().text("its spec has no directory to write beside"));
     };
 
     let composed = base_dir.join(name);
     if !is_within(&composed, base_dir) {
-        return refuse(&format!(
-            "the copy would be written outside '{}'",
-            base_dir.display()
-        ));
+        return refuse(
+            Parts::new()
+                .text("the copy would be written outside '")
+                .path(base_dir)
+                .text("'"),
+        );
     }
     if normalize_path(&composed) == normalize_path(base_dir) {
-        return refuse(&format!(
-            "the copy would be written straight into '{}' rather than a directory of its own",
-            base_dir.display()
-        ));
+        return refuse(
+            Parts::new()
+                .text("the copy would be written straight into '")
+                .path(base_dir)
+                .text("' rather than a directory of its own"),
+        );
     }
     None
 }
 
 // Both track handlers word a refused track. Same `FileSystemError` apply renders,
 // plus the remedy that only applies while the entry does not exist yet.
-fn track_refusal(refusal: &FileSystemError) -> String {
-    format!("{refusal}. Replace the symlink with a regular file, or track the path it points to.")
+fn track_refusal(refusal: &FileSystemError) -> Message {
+    refusal
+        .parts()
+        .text(". Replace the symlink with a regular file, or track the path it points to.")
+        .into()
 }
 
 // Both track handlers word a refused copy *into* the dotfiles repository.
@@ -197,28 +216,40 @@ fn track_refusal(refusal: &FileSystemError) -> String {
 //
 // The remedy differs from `track_refusal`'s for the same reason: what the user
 // can do here is clear the repository path or pick another name.
-fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> String {
+fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> Message {
     let what = match refusal {
         FileSystemError::SymlinkedTarget { points_to, .. } => match points_to {
-            Some(dest) => format!("it is a symlink to '{}'", dest.display()),
-            None => "it is a symlink".to_string(),
+            Some(dest) => Parts::new()
+                .text("it is a symlink to '")
+                .path(dest.as_path())
+                .text("'"),
+            None => Parts::new().text("it is a symlink"),
         },
-        FileSystemError::IrregularTarget { kind, .. } => format!("it is a {kind}"),
+        FileSystemError::IrregularTarget { kind, .. } => {
+            Parts::new().text(format!("it is a {kind}"))
+        }
         // Not a refusal: a permission problem, a full disk. Rendered as-is,
         // because the filesystem's own message is the useful one and it makes no
         // claim about a target.
-        other => return format!("Cannot write source file: {other}"),
+        other => {
+            return Parts::new()
+                .text("Cannot write source file: ")
+                .append(other.parts())
+                .into();
+        }
     };
 
     // "the tracked copy at" rather than naming a directory: `handle_track_
     // standalone` composes this under `dotfiles_directory` and
     // `handle_track_for_package` alongside the package YAML, so any sentence
     // naming one of the two is wrong at the other call site.
-    format!(
-        "Cannot write the tracked copy at '{}': {what}. \
-         Remove it, or track under a different name.",
-        source_path.display()
-    )
+    Parts::new()
+        .text("Cannot write the tracked copy at '")
+        .path(source_path)
+        .text("': ")
+        .append(what)
+        .text(". Remove it, or track under a different name.")
+        .into()
 }
 
 /// Why an already-tracked target cannot be written to, or `None` if it can.
@@ -308,19 +339,21 @@ fn remove_own_copy<F: FileSystem>(filesystem: &F, path: &Path, written: &str) ->
 
 // What became of the copy, worded once so the two failures that compensate cannot
 // describe the same outcome differently.
-fn copy_fate(copy: &Path, removal: &CopyRemoval) -> String {
-    let copy = copy.display();
+fn copy_fate<'a>(copy: &'a Path, removal: &'a CopyRemoval) -> Parts<'a> {
+    let the_copy = Parts::new().text("The copy at '").path(copy);
     match removal {
-        CopyRemoval::Removed => format!("The copy at '{copy}' was removed."),
-        CopyRemoval::Unconfirmed => format!(
-            "The copy at '{copy}' was left alone: it no longer holds what selfie wrote, so \
-             removing it could have deleted another file. Check it, and remove it yourself if \
-             it is not wanted."
+        CopyRemoval::Removed => the_copy.text("' was removed."),
+        CopyRemoval::Unconfirmed => the_copy.text(
+            "' was left alone: it no longer holds what selfie wrote, so removing it could have \
+             deleted another file. Check it, and remove it yourself if it is not wanted.",
         ),
-        CopyRemoval::Failed(e) => format!(
-            "The copy at '{copy}' could not be checked or removed: {e}. Check it, and remove it \
-             yourself before retrying if it is the copy selfie wrote."
-        ),
+        CopyRemoval::Failed(e) => the_copy
+            .text("' could not be checked or removed: ")
+            .append(e.parts())
+            .text(
+                ". Check it, and remove it yourself before retrying if it is the copy selfie \
+                 wrote.",
+            ),
     }
 }
 
@@ -333,29 +366,48 @@ fn copy_fate(copy: &Path, removal: &CopyRemoval) -> String {
 // as it is. `a_failed_spec_save_names_the_spec_exactly_once` holds that by
 // counting rather than by checking presence, so a variant that stops naming the
 // spec fails a test instead of going quiet.
-fn spec_save_failure(error: &PackageRepoError, copy: &Path, removal: &CopyRemoval) -> String {
+fn spec_save_failure(error: &PackageRepoError, copy: &Path, removal: &CopyRemoval) -> Message {
+    // A file system error and a listing error append their parts, so the path each
+    // names is a path part. Every other repository error enters as its own words,
+    // and a path it names stays inside that text until PackageRepoError is
+    // Composed (selfie-z00o).
+    let cause = match error {
+        PackageRepoError::FileSystemError(error) => Parts::new()
+            .text("File system error: ")
+            .append(error.parts()),
+        PackageRepoError::PackageListError(error) => error.parts(),
+        other => Parts::new().text(other.to_string()),
+    };
     // Several errors end their own sentence, so the frame does not add a second
     // period. Only one is stripped: an error ending in an ellipsis keeps it.
-    let error = error.to_string();
-    format!(
-        "Cannot save the spec: {}. {}",
-        error.strip_suffix('.').unwrap_or(&error),
-        copy_fate(copy, removal)
-    )
+    Parts::new()
+        .text("Cannot save the spec: ")
+        .append(cause.without_final('.'))
+        .text(". ")
+        .append(copy_fate(copy, removal))
+        .into()
 }
 
 // The same rule refused at track time, where it is a failure rather than a
 // skipped entry and the remedy is worth stating -- the user is standing at the
 // path they named and can retype it. Sibling of `track_refusal` above.
-fn track_target_refusal(target: &str, rejection: TargetRejection) -> String {
+fn track_target_refusal(target: &str, rejection: TargetRejection) -> Message {
     // The stop between the two belongs here rather than on `message()`: that one
     // also reads mid-sentence after "Dotfile " and "Skipping 'X': ", where a
     // trailing period would be wrong.
-    format!(
-        "Cannot track '{target}': {}. {}",
-        rejection.message(),
-        rejection.suggestion()
-    )
+    Parts::new()
+        .text("Cannot track '")
+        .path(Path::new(target))
+        .text("': ")
+        .text(rejection.message())
+        .text(". ")
+        .text(rejection.suggestion())
+        .into()
+}
+
+// The result of a track that `message` refuses or fails.
+fn track_failed(message: impl Into<Message>) -> OperationResult {
+    OperationResult::Failure(OperationFailure::Track(message.into()))
 }
 
 /// Which of the two specs a track writes into.
@@ -479,10 +531,12 @@ where
     // `Bat.yml` puts its copies in `packages/bat/`. The directory and the recorded
     // `source:` both read this one name, so they agree either way.
     let Some(name) = crate::package::spec_name_of(&spec_path) else {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot track into '{}': its file name does not name a package",
-            spec_path.display()
-        )));
+        return track_failed(
+            Parts::new()
+                .text("Cannot track into '")
+                .path(spec_path.as_path())
+                .text("': its file name does not name a package"),
+        );
     };
 
     handle_track(
@@ -534,10 +588,7 @@ where
     let expanded_target = match deploy_target(filesystem, target_path) {
         Ok(path) => path,
         Err(rejection) => {
-            return OperationResult::Failure(OperationFailure::Generic(track_target_refusal(
-                target_path,
-                rejection,
-            )));
+            return track_failed(track_target_refusal(target_path, rejection));
         }
     };
 
@@ -599,10 +650,7 @@ where
         .collect();
     let trackers = trackers_of(&others_but_this, filesystem, &expanded_target);
     if !trackers.is_empty() {
-        return OperationResult::Failure(OperationFailure::Generic(tracked_elsewhere_refusal(
-            target_path,
-            &trackers,
-        )));
+        return track_failed(tracked_elsewhere_refusal(target_path, &trackers));
     }
 
     // Ahead of the read and every write, so a link or a fifo gets its own sentence
@@ -617,12 +665,14 @@ where
     match guard_refusal(filesystem, &expanded_target) {
         None => {}
         Some(link @ FileSystemError::SymlinkedTarget { .. }) => {
-            return OperationResult::Failure(OperationFailure::Generic(track_refusal(&link)));
+            return track_failed(track_refusal(&link));
         }
         Some(refusal) => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "{refusal}. Point the entry at a regular file instead."
-            )));
+            return track_failed(
+                refusal
+                    .parts()
+                    .text(". Point the entry at a regular file instead."),
+            );
         }
     }
 
@@ -635,44 +685,49 @@ where
         TargetState::Readable(bytes) => match String::from_utf8(bytes) {
             Ok(content) => content,
             Err(e) => {
-                return OperationResult::Failure(OperationFailure::Generic(format!(
+                return track_failed(Parts::new().text(format!(
                     "Cannot read target file: it is not UTF-8 text ({e})"
                 )));
             }
         },
         TargetState::Absent | TargetState::BelowNonDirectory { .. } => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "Target file does not exist: {}",
-                expanded_target.display()
-            )));
+            return track_failed(
+                Parts::new()
+                    .text("Target file does not exist: ")
+                    .path(expanded_target.path()),
+            );
         }
         TargetState::Directory => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "Cannot track the target: {}",
-                directory_at_target(&expanded_target)
-            )));
+            return track_failed(
+                Parts::new()
+                    .text("Cannot track the target: ")
+                    .append(directory_at_target(&expanded_target)),
+            );
         }
         // A link or fifo put there after the guard, refused in the guard's words.
         TargetState::Link(link) => {
-            return OperationResult::Failure(OperationFailure::Generic(track_refusal(
-                &link.refusal(),
-            )));
+            return track_failed(track_refusal(&link.refusal()));
         }
         TargetState::Irregular(refusal) => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "{refusal}. Point the entry at a regular file instead."
-            )));
+            return track_failed(
+                refusal
+                    .parts()
+                    .text(". Point the entry at a regular file instead."),
+            );
         }
         TargetState::Unreadable(e) => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "Cannot read target file: {}",
-                FileSystemError::IoError(e.into())
-            )));
+            return track_failed(
+                Parts::new()
+                    .text("Cannot read target file: ")
+                    .append(FileSystemError::IoError(e.into()).parts()),
+            );
         }
         TargetState::Undetermined(e) => {
-            return OperationResult::Failure(OperationFailure::Generic(format!(
-                "Cannot read target file: {e}"
-            )));
+            return track_failed(
+                Parts::new()
+                    .text("Cannot read target file: ")
+                    .append(e.parts()),
+            );
         }
     };
 
@@ -706,12 +761,14 @@ where
     if matches!(spec.kind, SpecKind::New) && repo.path_is_occupied(&spec.spec_path) {
         // Says what was checked: this one path. A spec under the same name with
         // another extension is the name checks' to find, not this guard's.
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Something is already at {}, where the spec for '{}' would be written. Remove it \
-             first or choose a different name.",
-            spec.spec_path.display(),
-            spec.name
-        )));
+        return track_failed(
+            Parts::new()
+                .text("Something is already at ")
+                .path(spec.spec_path.as_path())
+                .text(", where the spec for '")
+                .name(spec.name.as_str())
+                .text("' would be written. Remove it first or choose a different name."),
+        );
     }
 
     // Asked here, beside the directory it protects, so both entry points are covered
@@ -729,20 +786,24 @@ where
     // because composing the copy against the process's working directory is the one
     // outcome worth never reaching by accident.
     let Some(base_dir) = spec.spec_path.parent() else {
-        return OperationResult::Failure(OperationFailure::Generic(format!(
-            "Cannot track into '{}': its spec has no directory to write beside",
-            spec.spec_path.display()
-        )));
+        return track_failed(
+            Parts::new()
+                .text("Cannot track into '")
+                .path(spec.spec_path.as_path())
+                .text("': its spec has no directory to write beside"),
+        );
     };
     let source_dir = base_dir.join(&spec.name);
     let source_path = source_dir.join(&filename);
     let relative_source = format!("{}/{filename}", spec.name);
 
     let already_exists = || {
-        OperationResult::Failure(OperationFailure::Generic(format!(
-            "Source file already exists at {}. Remove it first, or track a different file.",
-            source_path.display()
-        )))
+        track_failed(
+            Parts::new()
+                .text("Source file already exists at ")
+                .path(source_path.as_path())
+                .text(". Remove it first, or track a different file."),
+        )
     };
     if filesystem.path_exists(&source_path) {
         return already_exists();
@@ -770,10 +831,7 @@ where
         Ok(Placed::Written) => {}
         Ok(Placed::Kept) => return already_exists(),
         Err(e) => {
-            return OperationResult::Failure(OperationFailure::Generic(repository_write_refusal(
-                &source_path,
-                &e,
-            )));
+            return track_failed(repository_write_refusal(&source_path, &e));
         }
     }
 
@@ -796,11 +854,7 @@ where
         // cannot tell one it created from one that was already there and an empty
         // directory refuses nothing on a retry.
         let removal = remove_own_copy(filesystem, &source_path, &content);
-        return OperationResult::Failure(OperationFailure::Generic(spec_save_failure(
-            &e,
-            &source_path,
-            &removal,
-        )));
+        return track_failed(spec_save_failure(&e, &source_path, &removal));
     }
 
     let checksum = compute_checksum(content.as_bytes());
@@ -884,7 +938,7 @@ mod tests {
                 kind: "named pipe (fifo)",
             },
         ] {
-            let message = repository_write_refusal(source, &refusal);
+            let message = repository_write_refusal(source, &refusal).to_string();
             assert!(
                 !message.contains("target"),
                 "refusal calls a repository path a target: {message}"
@@ -944,7 +998,7 @@ mod tests {
             matches!(removal, CopyRemoval::Unconfirmed),
             "a foreign file must not be claimed"
         );
-        let message = copy_fate(copy, &removal);
+        let message = copy_fate(copy, &removal).to_string();
         assert!(
             message.contains("left alone"),
             "the user is not told the copy survived: {message}"
@@ -973,7 +1027,9 @@ mod tests {
             "selfie's own copy must be removed"
         );
         assert!(
-            copy_fate(copy, &removal).contains("was removed"),
+            copy_fate(copy, &removal)
+                .to_string()
+                .contains("was removed"),
             "the copy's fate is not stated"
         );
     }
@@ -997,7 +1053,7 @@ mod tests {
         assert!(matches!(removal, CopyRemoval::Failed(_)));
         // selfie cannot claim what it could not read, so the user is asked to check
         // the file rather than told to delete it.
-        let message = copy_fate(copy, &removal);
+        let message = copy_fate(copy, &removal).to_string();
         assert!(
             message.contains("permission denied"),
             "the user is not told why the copy survived: {message}"
@@ -1073,7 +1129,8 @@ mod tests {
             &error,
             Path::new("/dotfiles/gemrc/gemrc"),
             &CopyRemoval::Removed,
-        );
+        )
+        .to_string();
 
         assert_eq!(
             message.matches(spec).count(),
@@ -1104,7 +1161,8 @@ mod tests {
             &error,
             Path::new("/dotfiles/gemrc/gemrc"),
             &CopyRemoval::Removed,
-        );
+        )
+        .to_string();
 
         assert_eq!(
             message.matches(spec).count(),
@@ -1138,7 +1196,8 @@ mod tests {
             &error,
             Path::new("/packages/creds/token"),
             &CopyRemoval::Removed,
-        );
+        )
+        .to_string();
 
         assert_eq!(
             message.matches(spec).count(),
@@ -1173,12 +1232,14 @@ mod tests {
             &error,
             Path::new("/packages/creds/token"),
             &CopyRemoval::Failed(removal),
-        );
+        )
+        .to_string();
         let removed = spec_save_failure(
             &error,
             Path::new("/packages/creds/token"),
             &CopyRemoval::Removed,
-        );
+        )
+        .to_string();
 
         assert_ne!(
             survived, removed,
@@ -1208,7 +1269,8 @@ mod tests {
             &error,
             Path::new("/dotfiles/gemrc/gemrc"),
             &CopyRemoval::Removed,
-        );
+        )
+        .to_string();
 
         assert!(
             message.contains("the disk filled up... The copy"),
@@ -1227,7 +1289,237 @@ mod tests {
                 std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Permission denied")
                     .into(),
             ),
-        );
+        )
+        .to_string();
         assert!(message.contains("Permission denied"), "got: {message}");
+    }
+
+    // Each sentence a track builds outside its handlers, whole.
+    #[test]
+    fn the_track_builders_are_worded_whole() {
+        let spec = Path::new("/repo/my packages/x.yml");
+        let copy = Path::new("/d/g c/cfg");
+        let fs_error =
+            || FileSystemError::IoError(std::io::Error::other("/d/g.yml: denied").into());
+        let save = |removal: &CopyRemoval| {
+            spec_save_failure(
+                &PackageRepoError::FileSystemError(fs_error()),
+                copy,
+                removal,
+            )
+            .to_string()
+        };
+
+        assert_eq!(
+            unusable_copy_directory(spec, "..").map(|f| f.to_string()),
+            Some(
+                "Cannot track into '..': the copy would be written outside '/repo/my packages'"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            unusable_copy_directory(spec, ".").map(|f| f.to_string()),
+            Some(
+                "Cannot track into '.': the copy would be written straight into '/repo/my \
+                 packages' rather than a directory of its own"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            unusable_copy_directory(Path::new("x.yml"), "n").map(|f| f.to_string()),
+            Some("Cannot track into 'n': its spec has no directory to write beside".to_string())
+        );
+        assert_eq!(
+            repository_write_refusal(
+                copy,
+                &FileSystemError::SymlinkedTarget {
+                    path: copy.to_path_buf(),
+                    points_to: Some(PathBuf::from("/tmp/my planted")),
+                }
+            )
+            .to_string(),
+            "Cannot write the tracked copy at '/d/g c/cfg': it is a symlink to '/tmp/my \
+             planted'. Remove it, or track under a different name."
+        );
+        assert_eq!(
+            repository_write_refusal(
+                copy,
+                &FileSystemError::IrregularTarget {
+                    path: copy.to_path_buf(),
+                    kind: "socket",
+                }
+            )
+            .to_string(),
+            "Cannot write the tracked copy at '/d/g c/cfg': it is a socket. Remove it, or track \
+             under a different name."
+        );
+        assert_eq!(
+            repository_write_refusal(copy, &fs_error()).to_string(),
+            "Cannot write source file: IO error: /d/g.yml: denied"
+        );
+        assert_eq!(
+            save(&CopyRemoval::Removed),
+            "Cannot save the spec: File system error: IO error: /d/g.yml: denied. The copy at '/d/g c/cfg' was \
+             removed."
+        );
+        assert_eq!(
+            save(&CopyRemoval::Unconfirmed),
+            "Cannot save the spec: File system error: IO error: /d/g.yml: denied. The copy at '/d/g c/cfg' was left \
+             alone: it no longer holds what selfie wrote, so removing it could have deleted \
+             another file. Check it, and remove it yourself if it is not wanted."
+        );
+        assert_eq!(
+            save(&CopyRemoval::Failed(fs_error())),
+            "Cannot save the spec: File system error: IO error: /d/g.yml: denied. The copy at '/d/g c/cfg' could \
+             not be checked or removed: IO error: /d/g.yml: denied. Check it, and remove it \
+             yourself before retrying if it is the copy selfie wrote."
+        );
+        assert_eq!(
+            unsafe_name_failure("../x").map(|f| f.to_string()),
+            Some(format!(
+                "Invalid name '../x': {}",
+                crate::package::SPEC_NAME_RULE
+            ))
+        );
+    }
+
+    // Every path and name a track's failure names is a part of its own kind,
+    // its own or one inside a nested cause, whichever builder words it.
+    #[test]
+    fn every_value_in_a_track_failure_is_a_part() {
+        use crate::parts::values_of;
+
+        let spec = Path::new("/r\u{200B}epo/x.yml");
+        let copy = Path::new("/d\u{200B}/cfg");
+        let at = Path::new("/a\u{200B}t");
+        let fs_error = || {
+            FileSystemError::IoError(crate::fs::IoFailure::at(
+                at,
+                std::io::Error::other("denied"),
+            ))
+        };
+        let tracker = |spec_name: &str, origin| Tracker {
+            spec_name: spec_name.to_string(),
+            spec_path: PathBuf::from(format!("/p\u{200B}/{spec_name}.yml")),
+            target: "~/t\u{200B}".to_string(),
+            origin,
+        };
+        let failure_message = |failure: Option<OperationFailure>| match failure {
+            Some(OperationFailure::Track(message)) => message,
+            other => panic!("not a track failure: {other:?}"),
+        };
+        let values = |message: &Message| values_of(message);
+
+        assert_eq!(
+            values(&tracked_elsewhere_refusal(
+                "~/t\u{200B}",
+                &[
+                    tracker("b\u{200B}at", SpecOrigin::PackageDirectory),
+                    tracker("g\u{200B}em", SpecOrigin::DotfilesDirectory),
+                ],
+            )),
+            [
+                "~/t\u{200B}",
+                "b\u{200B}at",
+                "/p\u{200B}/b\u{200B}at.yml",
+                "g\u{200B}em",
+                "/p\u{200B}/g\u{200B}em.yml"
+            ]
+        );
+        assert_eq!(
+            values(&failure_message(unsafe_name_failure("../\u{200B}"))),
+            ["../\u{200B}"]
+        );
+        assert_eq!(
+            values(&failure_message(unusable_copy_directory(spec, ".."))),
+            ["..", "/r\u{200B}epo"]
+        );
+        assert_eq!(values(&track_refusal(&fs_error())), ["/a\u{200B}t"]);
+        assert_eq!(
+            values(&repository_write_refusal(
+                copy,
+                &FileSystemError::SymlinkedTarget {
+                    path: copy.to_path_buf(),
+                    points_to: Some(at.to_path_buf()),
+                }
+            )),
+            ["/d\u{200B}/cfg", "/a\u{200B}t"]
+        );
+        assert_eq!(
+            values(&repository_write_refusal(copy, &fs_error())),
+            ["/a\u{200B}t"]
+        );
+        assert_eq!(
+            values(&spec_save_failure(
+                &PackageRepoError::FileSystemError(fs_error()),
+                copy,
+                &CopyRemoval::Failed(fs_error()),
+            )),
+            ["/a\u{200B}t", "/d\u{200B}/cfg", "/a\u{200B}t"]
+        );
+        assert_eq!(
+            values(&track_target_refusal(
+                "t\u{200B}",
+                TargetRejection::Relative
+            )),
+            ["t\u{200B}"]
+        );
+    }
+
+    // The remedy for a target one package deploys is a command part, so the CLI
+    // shows it runnable with its note rather than as text.
+    #[test]
+    fn a_tracked_elsewhere_remedy_is_a_command_part() {
+        let message = tracked_elsewhere_refusal(
+            "~/t\u{200B}",
+            &[Tracker {
+                spec_name: "bat".to_string(),
+                spec_path: PathBuf::from("/p/bat.yml"),
+                target: "~/t\u{200B}".to_string(),
+                origin: SpecOrigin::PackageDirectory,
+            }],
+        );
+
+        let commands: Vec<String> = message
+            .parts()
+            .into_iter()
+            .filter_map(|part| match part {
+                crate::parts::Part::Command(command) => Some(command.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands, ["selfie package track-dotfile bat '~/t\u{200B}'"]);
+    }
+
+    // A cause ending in a path gets exactly one stop from the frame: only a text
+    // loses a final stop, so a path keeps every character it has, a final dot
+    // included.
+    #[test]
+    fn a_cause_ending_in_a_path_gets_one_stop() {
+        use crate::fs::{AbsentReason, DirectoryState};
+        let save = |points_to: &str| {
+            spec_save_failure(
+                &PackageRepoError::PackageListError(crate::package::port::PackageListError::new(
+                    PathBuf::from("/d/dots"),
+                    DirectoryState::Absent(AbsentReason::DanglingSymlink {
+                        points_to: Some(PathBuf::from(points_to)),
+                    }),
+                )),
+                Path::new("/d/dots/cfg"),
+                &CopyRemoval::Removed,
+            )
+            .to_string()
+        };
+
+        assert!(
+            save("/d/gone").contains("it points at /d/gone. The copy at"),
+            "{}",
+            save("/d/gone")
+        );
+        assert!(
+            save("/d/gone.").contains("it points at /d/gone.. The copy at"),
+            "{}",
+            save("/d/gone.")
+        );
     }
 }

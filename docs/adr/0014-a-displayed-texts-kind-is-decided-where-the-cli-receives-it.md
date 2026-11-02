@@ -329,12 +329,12 @@ writer escapes every escape sequence (§1.8).
    | `Name(Cow<str>)`  | an environment, package or spec name                                            |
    | `Path(Cow<Path>)` | a path, including one spelled as the spec spells it, such as `~/.bashrc`        |
    | `Command(..)`     | a command for the user to run: a program from a closed enum, `selfie` with a    |
-   |                   | subcommand or `mkdir -p --`, and one operand                                    |
+   |                   | subcommand or `mkdir -p --`, and one or two operands                            |
 
    A part says what a value is, never how to escape it.
 2. A `Composed` type's sentence is its `parts`, and its `Display` writes those parts and nothing
    else: a `Text` or a `Name` as it is, a `Path` through `Path::display`, and a `Command` as its
-   program's words followed by the operand's shell word (§9.5), `selfie <subcommand> <word>` or
+   program's words followed by the operands' shell words (§9.5), `selfie <subcommand> <words>` or
    `mkdir -p -- <word>`. A `Composed` type has no other source for its sentence: it takes its
    `Display` from the one shared implementation that writes its parts, and has no `#[error]`
    attribute and no `Display` arm of its own. An error type among them implements
@@ -356,14 +356,15 @@ writer escapes every escape sequence (§1.8).
    before escaping. The match has no catch-all, so a new part fails to compile until the CLI says
    how to show it. A `Composed` type is not a `Sentence` (§2.2), so `sentence()` refuses it at
    compile time, and a source rule (§7.4) keeps every `Composed` type off the list of `Sentence`s.
-5. A `Command` part is a `SuggestedCommand`, built only by its two constructors.
+5. A `Command` part is a `SuggestedCommand`, built only by its three constructors.
    `SuggestedCommand::selfie` quotes a name as one shell word through `selfie::fs::shell_operand`;
    `make_directory` quotes a path through `selfie::fs::shell_quote`, which keeps a leading `~/`
-   outside the quotes. Each refuses an operand that holds NUL, since no shell word can carry one. A
-   part therefore always holds a word, and the CLI shows that word and never quotes the operand
-   again, so the library's `Display` and the CLI quote it once, the same way. A sentence that offers
-   a command leaves out the clause offering it when the constructor refuses. The program is a closed
-   enum, and the CLI's match over it has no catch-all.
+   outside the quotes; `track_dotfile` quotes a spec name and a target each as one shell word, with
+   one `--` ahead of both when either starts with a dash. Each refuses an operand that holds NUL,
+   since no shell word can carry one. A part therefore always holds its operands' words, and the CLI
+   shows them and never quotes an operand again, so the library's `Display` and the CLI quote each
+   once, the same way. A sentence that offers a command leaves out the clause offering it when the
+   constructor refuses. The program is a closed enum, and the CLI's match over it has no catch-all.
 6. The MCP server writes each value's `Display`, which is its parts written raw. It therefore shows
    the same words as the CLI, without the CLI's escapes.
 7. These types are `Composed`: `OperationSuccess`; the deploy state's `StateLoadFailure`,
@@ -375,8 +376,9 @@ writer escapes every escape sequence (§1.8).
    `TrackDirectoryRefusal` a standalone track gives over a directory it could not use; the
    `ApplyStop` an apply with `stop_on_error` gives for a stop other than the deploy state's; the
    `Message` a dotfile entry's `Refusal` carries as its sentence and its `Failure` as its sentence
-   and its error; and a validation issue's message, `IssueMessage`, which is its own text, the
-   deploy state's notice or a `DirectoryIssue`.
+   and its error, and the `Message` a track's `OperationFailure::Track` carries; and a validation
+   issue's message, `IssueMessage`, which is its own text, the deploy state's notice or a
+   `DirectoryIssue`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as

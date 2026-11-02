@@ -168,21 +168,26 @@ pub(crate) fn suggested(command: &SuggestedCommand) -> Command {
     // No catch-all, so a program the library adds fails to compile here until
     // the CLI says how to show it.
     match command.program() {
-        Program::Selfie(subcommand) => Command::with_quoted(
-            &[lit!("selfie"), subcommand_word(subcommand)],
-            command.word(),
-        ),
+        Program::Selfie(subcommand) => {
+            Command::with_quoted(selfie_words(subcommand), command.word())
+        }
         Program::MakeDirectory => {
             Command::with_quoted(&[lit!("mkdir"), lit!("-p"), lit!("--")], command.word())
         }
     }
 }
 
-// The word that names `subcommand` on a command line.
-fn subcommand_word(subcommand: Subcommand) -> Literal {
+// The words that run `subcommand` on a command line, `selfie` first.
+fn selfie_words(subcommand: Subcommand) -> &'static [Literal] {
+    // `lit!` takes a literal token, so these words cannot be read from the
+    // library's spelling; the parity test that every suggested command reads as
+    // its Display is what keeps the two in step.
+    const APPLY: &[Literal] = &[lit!("selfie"), lit!("apply")];
+    const TRACK_DOTFILE: &[Literal] = &[lit!("selfie"), lit!("package"), lit!("track-dotfile")];
     // No catch-all, so a subcommand the library adds fails to compile here
     // until the CLI says how to show it.
     match subcommand {
-        Subcommand::Apply => lit!("apply"),
+        Subcommand::Apply => APPLY,
+        Subcommand::PackageTrackDotfile => TRACK_DOTFILE,
     }
 }
