@@ -1605,6 +1605,19 @@ mod tests {
                 );
                 continue;
             }
+            // A spec's command shows on one line, its line break escaped and
+            // its U+200B kept so it still pastes, with a note spelling it out.
+            if message
+                .parts()
+                .into_iter()
+                .any(|part| matches!(part, Part::SpecCommand(_)))
+            {
+                assert_eq!(
+                    shown, "Run /d/t\u{200B}x\\ny\nEscaped: /d/t\\u{200b}x\\ny",
+                    "{shown:?}"
+                );
+                continue;
+            }
             // Another program's text keeps its own line breaks, and escapes the
             // rest of each line as a name.
             if message

@@ -692,6 +692,13 @@ it would cost more in marker text than it saved.
 The 2000 counts what the command wrote, not the length of the message you read: invalid UTF-8 is
 replaced character by character, so binary output can render longer than the bytes it came from.
 
+A failure that names the command itself, such as a check that timed out, cuts a command longer than
+2000 bytes the same way, inside the command, so the words around it stay whole. A failure that also
+names a working directory selfie could not enter gives the command, the directory and the reason a
+share each of the 2000 bytes. One short enough to fit its share is kept whole and leaves the rest to
+the others; one that is cut keeps the same number of bytes at each end, and adds the marker naming
+how many went. A cut directory is shown as text, since it no longer names a file.
+
 Where that standard error travels depends on which report carries it. An install or check failure
 shows it in the terminal only — the value an MCP client receives names the command and its exit code
 and stops there. An `audit` error is different: its message reaches a connected MCP client as well,

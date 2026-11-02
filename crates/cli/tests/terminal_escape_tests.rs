@@ -1988,3 +1988,72 @@ fn a_failed_temporary_files_path_shows_escaped() {
     assert!(line.contains(r#"r\u{2800}o/.selfie-"#), "{line}");
     assert!(!line.contains('\u{2800}'), "{line:?}");
 }
+
+// A spec's command inside a failure shows on its line as written, so it still
+// pastes, and the line after it spells out the character that reads as
+// another: a check that timed out, in its failure and in package list's
+// status cell, and an install that failed.
+#[test]
+fn a_spec_command_in_a_failure_is_noted() {
+    let temp = setup_default_test_config();
+    let spec = |name: &str, commands: &str| {
+        format!("name: {name}\nenvironments:\n  {SELFIE_ENV}:\n{commands}")
+    };
+    hostile_package_directory(
+        &temp,
+        &[
+            (
+                "s.yml",
+                &spec(
+                    "s",
+                    "    install: \"true\"\n    check: \"sleep 5 #\\u200Bs\"\n",
+                ),
+            ),
+            ("f.yml", &spec("f", "    install: \"false #\\u200Bf\"\n")),
+        ],
+    );
+    let config = temp.path().join(".config/selfie/config.yaml");
+    let mut settings = fs::read_to_string(&config).unwrap();
+    settings.push_str("command_timeout: 1\n");
+    fs::write(&config, settings).unwrap();
+
+    let cases: [(&[&str], &str, &str); 3] = [
+        (
+            &["package", "check", "s"],
+            "timed out after 1 second",
+            r"sleep 5 #\u{200b}s",
+        ),
+        (
+            &["package", "list"],
+            "timed out after 1 second",
+            r"sleep 5 #\u{200b}s",
+        ),
+        (
+            &["package", "install", "f"],
+            "Command error: Command `",
+            r"false #\u{200b}f",
+        ),
+    ];
+    for (args, marker, escaped) in cases {
+        let printed = printed(&temp, args);
+        let lines: Vec<&str> = printed.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains(marker))
+            .unwrap_or_else(|| panic!("{args:?}: {printed}"));
+        assert!(
+            lines[at + 1].contains(&format!("Escaped: {escaped}")),
+            "{args:?}: {printed}"
+        );
+    }
+
+    // The note is a line of the status cell, so every line of the table is as
+    // wide as the rest. The command shows its U+200B as written, at no width.
+    let listed = printed(&temp, &["package", "list"]);
+    let widths: std::collections::BTreeSet<usize> = listed
+        .lines()
+        .filter(|line| line.starts_with(['╭', '│', '╞', '╰']))
+        .map(|line| line.chars().filter(|&c| c != '\u{200B}').count())
+        .collect();
+    assert_eq!(widths.len(), 1, "{listed}");
+}

@@ -908,16 +908,11 @@ mod tests {
                         );
                         // 'Z' appears only in the oversized command string, so
                         // the count measures surviving input and nothing else.
-                        // The sentence around the command eats into the budget,
-                        // which is why this is not simply the bound.
-                        let around = crate::commands::runner::TimedOut::new(
-                            "",
-                            std::time::Duration::from_secs(5),
-                        )
-                        .to_string();
+                        // The command is bounded on its own, so the sentence
+                        // around it takes nothing from the budget.
                         assert_eq!(
                             message.chars().filter(|c| *c == 'Z').count(),
-                            MAX_BOUNDED_BYTES - around.len(),
+                            MAX_BOUNDED_BYTES,
                             "the head and tail together should come to the bound"
                         );
                     }

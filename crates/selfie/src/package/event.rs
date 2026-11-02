@@ -1807,27 +1807,27 @@ impl std::fmt::Display for OperationFailure {
     }
 }
 
-impl std::fmt::Display for CommandFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use crate::commands::BoundedText;
+crate::parts::display_from_parts!(CommandFailure);
 
-        // Every sentence here embeds the spec's own `command:` string, which is
-        // unbounded. `TimedOut` and `UnusableDirectory` bound their own; the
-        // execution failure's sentence is bounded in its arm.
+impl Composed for CommandFailure {
+    // Every sentence here names the spec's own `command:` string, which is
+    // unbounded; its part bounds it.
+    fn parts(&self) -> Parts<'_> {
         match self {
             CommandFailure::ExecutionFailed {
-                command,
-                exit_code: Some(code),
-                ..
-            } => f.write_str(
-                BoundedText::of(&format!("Command `{command}` failed with exit code {code}"))
-                    .as_str(),
-            ),
-            CommandFailure::ExecutionFailed { command, .. } => {
-                f.write_str(BoundedText::of(&format!("Command `{command}` failed")).as_str())
+                command, exit_code, ..
+            } => {
+                let parts = Parts::new()
+                    .text("Command `")
+                    .spec_command(command)
+                    .text("` failed");
+                match exit_code {
+                    Some(code) => parts.text(format!(" with exit code {code}")),
+                    None => parts,
+                }
             }
-            CommandFailure::TimedOut(timed_out) => write!(f, "{timed_out}"),
-            CommandFailure::WorkingDirectoryUnusable(unusable) => write!(f, "{unusable}"),
+            CommandFailure::TimedOut(timed_out) => timed_out.parts(),
+            CommandFailure::WorkingDirectoryUnusable(unusable) => unusable.parts(),
         }
     }
 }
@@ -3133,6 +3133,15 @@ impl OperationFailure {
             Self::UnusableDotfilesDirectory(refusal) => Message::of(refusal),
             Self::Stopped(stop) => Message::of(stop),
             Self::Track(message) => message.clone(),
+            // The sentence alone, as `Display` words it: the directory, not the
+            // command, is what failed.
+            Self::CommandError(unusable @ CommandFailure::WorkingDirectoryUnusable(_)) => {
+                Message::of(unusable)
+            }
+            Self::CommandError(failure) => Parts::new()
+                .text("Command error: ")
+                .append(failure.parts())
+                .into(),
             Self::Git(failure) => Message::of(failure),
             Self::PushDisabled => crate::git::sync_provider::commit_disabled().into(),
             Self::UnreadableSpec {
@@ -5249,6 +5258,163 @@ mod tests {
         }
     }
 
+    // A command failure names the spec's command as a spec command and the
+    // directory as a path, in its message as in its parts.
+    #[test]
+    fn a_command_failures_values_are_parts() {
+        use crate::commands::runner::UnusableDirectory;
+        use crate::parts::Part;
+
+        let kinds = |failure: &OperationFailure| -> Vec<(&'static str, String)> {
+            failure
+                .message()
+                .parts()
+                .into_iter()
+                .filter_map(|part| match part {
+                    Part::SpecCommand(command) => Some(("spec command", command.as_str().into())),
+                    Part::Path(path) => Some(("path", path.display().to_string())),
+                    Part::Name(name) => Some(("name", name.to_string())),
+                    Part::Text(_) | Part::Command(_) | Part::Foreign(_) => None,
+                })
+                .collect()
+        };
+        let command = || ("spec command", "c\u{200B}md".to_string());
+        let cases = [
+            (
+                CommandFailure::ExecutionFailed {
+                    command: "c\u{200B}md".to_string(),
+                    exit_code: Some(1),
+                    stderr: crate::commands::BoundedText::bound(b""),
+                },
+                vec![command()],
+            ),
+            (
+                CommandFailure::TimedOut(TimedOut::new(
+                    "c\u{200B}md",
+                    std::time::Duration::from_secs(1),
+                )),
+                vec![command()],
+            ),
+            (
+                CommandFailure::WorkingDirectoryUnusable(UnusableDirectory::new(
+                    "c\u{200B}md",
+                    "/g\u{200B}ne",
+                    std::sync::Arc::new(std::io::Error::other("missing")),
+                )),
+                vec![command(), ("path", "/g\u{200B}ne".to_string())],
+            ),
+        ];
+        for (failure, expected) in cases {
+            assert_eq!(kinds(&OperationFailure::CommandError(failure)), expected);
+        }
+    }
+
+    // A command longer than a diagnostic keeps is cut inside its own part,
+    // keeping both ends, so the sentence around it stays whole and bounded.
+    #[test]
+    fn a_long_command_is_bounded_inside_its_part() {
+        let long = format!("head{}tail", "x".repeat(3000));
+        let sentence = TimedOut::new(long, std::time::Duration::from_secs(1)).to_string();
+
+        assert!(sentence.starts_with("`head"), "{sentence}");
+        assert!(
+            sentence.ends_with("tail` timed out after 1 second, the limit `command_timeout` sets"),
+            "{sentence}"
+        );
+        assert!(sentence.contains("bytes elided"), "{sentence}");
+        assert!(
+            sentence.len() < crate::commands::runner::MAX_BOUNDED_BYTES + 200,
+            "{} bytes",
+            sentence.len()
+        );
+    }
+
+    // An unusable directory's sentence names three values that can each be
+    // long. They split one diagnostic's bound: the short command keeps its
+    // length, the directory and the cause each keep the same number of bytes
+    // at both ends and add one marker, and the cut directory names no file, so
+    // it is a name rather than a path.
+    #[test]
+    fn a_long_directory_and_cause_share_the_bound() {
+        use crate::commands::runner::{MAX_BOUNDED_BYTES, UnusableDirectory};
+        use crate::parts::Part;
+
+        let directory = format!("/dhead{}dtail", "d".repeat(3000));
+        let cause = format!("chead{}ctail", "c".repeat(3000));
+        let unusable = UnusableDirectory::new(
+            "true",
+            directory.clone(),
+            std::sync::Arc::new(std::io::Error::other(cause.clone())),
+        );
+        let sentence = unusable.to_string();
+
+        // "true" keeps 4 bytes, and the other two split what is left.
+        let end = (MAX_BOUNDED_BYTES - 4) / 2 / 2;
+        let cut = |value: &str| {
+            format!(
+                "{}… ({} bytes elided) …{}",
+                &value[..end],
+                value.len() - 2 * end,
+                &value[value.len() - end..]
+            )
+        };
+        assert_eq!(
+            sentence,
+            format!("Cannot run 'true' in {}: {}", cut(&directory), cut(&cause))
+        );
+        let kinds: Vec<&str> = unusable
+            .parts()
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::Path(_) => Some("path"),
+                Part::Name(_) => Some("name"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["name"]);
+    }
+
+    // A cause that ends in a line break is shown without it, since the
+    // sentence could go on after it.
+    #[test]
+    fn a_trimmed_cause_of_an_unusable_directory() {
+        let unusable = crate::commands::runner::UnusableDirectory::new(
+            "true",
+            "/d",
+            std::sync::Arc::new(std::io::Error::other("gone\r\n")),
+        );
+
+        assert_eq!(unusable.to_string(), "Cannot run 'true' in /d: gone");
+    }
+
+    // A directory that is not valid UTF-8 cannot be shown as itself, so even
+    // when it is short it enters as a name.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_that_is_not_utf8_is_a_name() {
+        use crate::commands::runner::UnusableDirectory;
+        use crate::parts::Part;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = std::path::Path::new(std::ffi::OsStr::from_bytes(b"/d\xffx"));
+        let unusable = UnusableDirectory::new(
+            "true",
+            directory,
+            std::sync::Arc::new(std::io::Error::other("gone")),
+        );
+
+        let names: Vec<String> = unusable
+            .parts()
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::Name(name) => Some(name.to_string()),
+                Part::Path(path) => panic!("a path: {path:?}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["/d\u{FFFD}x"]);
+    }
+
     // The one sentence for a timeout: it says the command timed out, how long it
     // had in whole units, and which setting to raise.
     #[test]
@@ -6870,6 +7036,7 @@ mod settle_tests {
                     Part::Name(value) => Some(("name", value.to_string())),
                     Part::Path(value) => Some(("path", value.display().to_string())),
                     Part::Foreign(value) => Some(("foreign", value.to_string())),
+                    Part::SpecCommand(value) => Some(("spec command", value.as_str().to_string())),
                     Part::Text(_) | Part::Command(_) => None,
                 })
                 .collect();

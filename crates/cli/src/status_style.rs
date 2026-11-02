@@ -77,7 +77,7 @@ pub(crate) fn format_list_status(
         })) => styled_text(lit!("Canceled"), use_colors, |s| s.yellow()),
         EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(
             timed_out,
-        ))) => styled_text(crate::received::sentence(timed_out), use_colors, |s| {
+        ))) => styled_text(crate::received::composed(timed_out), use_colors, |s| {
             s.red()
         }),
         EnvironmentStatus::Unknown(reason) => {

@@ -2,9 +2,9 @@
 //! the library's own values or from a string the library hands over as a
 //! sentence, or a [`Shown`] built from a library value's parts.
 
+use std::borrow::Cow;
 use std::fmt::Display;
 
-use selfie::commands::runner::TimedOut;
 use selfie::config::ConfigLoadError;
 use selfie::namespace::NamespaceConflict;
 use selfie::package::event::{
@@ -49,7 +49,6 @@ sentences!(
     ParseFailure,
     SkipReason,
     SpecStatus,
-    TimedOut,
     UncheckedSource,
     UnknownStatus,
     selfie::yaml::SerializeFailure,
@@ -77,12 +76,15 @@ pub(crate) fn composed(value: &impl Composed) -> Shown {
 }
 
 /// `parts` as the CLI shows them: a name as a [`Name`], a path as a
-/// [`DisplayPath`], another program's text one [`Name`] per line, and the words
-/// around them as [`Prose`]. Line breaks at the end of a sentence that ends in
-/// words are left out, as [`message`] leaves them out; a name or a path shows
-/// its own line breaks escaped. A
-/// command that shows any character escaped is followed by a line saying so,
-/// as [`noted_suggestion`] notes it, under the line that holds the command.
+/// [`DisplayPath`], another program's text one [`Name`] per line, a command
+/// selfie suggests as [`suggested`] shows it, a spec's command on one line with
+/// its line breaks and tabs escaped, and the words around them as [`Prose`].
+/// Line breaks at the end of a sentence that ends in words are left out, as
+/// [`message`] leaves them out; a name or a path shows its own line breaks
+/// escaped.
+///
+/// A command that shows any character escaped is followed by a line saying
+/// so, as [`noted_suggestion`] notes it, under the line that holds the command.
 /// Show a value whose parts can hold a command at the end of its line, or the
 /// last note lands under text that is not its own.
 pub(crate) fn rendered(parts: &Parts) -> Shown {
@@ -90,7 +92,8 @@ pub(crate) fn rendered(parts: &Parts) -> Shown {
     // after it, or at the end of the sentence, and its notes go there.
     let mut parts = parts.into_iter().peekable();
     let mut line: Vec<Shown> = Vec::new();
-    let mut commands: Vec<(&SuggestedCommand, Command)> = Vec::new();
+    // Each command as the library wrote it, beside the command as shown.
+    let mut commands: Vec<(Cow<'_, str>, Command)> = Vec::new();
     while let Some(part) = parts.next() {
         // No catch-all, so a part the library adds must choose here how it
         // is shown.
@@ -125,7 +128,14 @@ pub(crate) fn rendered(parts: &Parts) -> Shown {
             Part::Command(command) => {
                 let shown = suggested(command);
                 line.push(shown.clone().into());
-                commands.push((command, shown));
+                commands.push((command.to_string().into(), shown));
+            }
+            // On one line inside a sentence, a line break or a tab shown as an
+            // escape, so the sentence stays one line and its note follows it.
+            Part::SpecCommand(command) => {
+                let shown = Command::one_line(command.as_str());
+                line.push(shown.clone().into());
+                commands.push((command.as_str().into(), shown));
             }
         }
     }
@@ -134,11 +144,11 @@ pub(crate) fn rendered(parts: &Parts) -> Shown {
 
 // `line` joined, followed by the note of each of `commands`, which it holds,
 // in order. Empties `commands`.
-fn noted_line(line: Vec<Shown>, commands: &mut Vec<(&SuggestedCommand, Command)>) -> Shown {
+fn noted_line(line: Vec<Shown>, commands: &mut Vec<(Cow<'_, str>, Command)>) -> Shown {
     commands
         .drain(..)
-        .fold(Shown::join(line, lit!("")), |text, (command, shown)| {
-            noted_suggestion(text, command, &shown)
+        .fold(Shown::join(line, lit!("")), |text, (written, shown)| {
+            noted_as_written(text, &written, &shown)
         })
 }
 
@@ -149,12 +159,20 @@ fn noted_line(line: Vec<Shown>, commands: &mut Vec<(&SuggestedCommand, Command)>
 /// control character such as a line feed or a tab, which the command already
 /// shows escaped, so the command as shown does not run as written.
 pub(crate) fn noted_suggestion(text: Shown, command: &SuggestedCommand, shown: &Command) -> Shown {
-    // A command whose operand holds a control character shows it escaped,
-    // which leaves nothing for the strict escape of the note to change, so the
-    // note is the command as shown.
+    noted_as_written(text, &command.to_string(), shown)
+}
+
+// `text`, followed by the note for `shown`, a command whose words the library
+// wrote as `written`, when what the line shows is not what it wrote. Unlike
+// `terminal_text::noted`, it also notes a command whose control characters
+// already show escaped.
+fn noted_as_written(text: Shown, written: &str, shown: &Command) -> Shown {
+    // A command holding a control character shows it escaped, which leaves
+    // nothing for the strict escape of the note to change, so the note is the
+    // command as shown.
     let note = shown
         .note()
-        .or_else(|| (shown.to_string() != command.to_string()).then(|| shown.clone().into()));
+        .or_else(|| (shown.to_string() != written).then(|| shown.clone().into()));
     match note {
         Some(note) => shown!("{}\n{}: {}", text, ESCAPED, note),
         None => text,

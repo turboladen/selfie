@@ -1280,7 +1280,7 @@ mod tests {
                     Part::Text(_) => "text".to_string(),
                     Part::Path(_) => "path".to_string(),
                     Part::Foreign(text) => format!("foreign {text}"),
-                    Part::Name(_) | Part::Command(_) => "other".to_string(),
+                    Part::Name(_) | Part::Command(_) | Part::SpecCommand(_) => "other".to_string(),
                 })
                 .collect()
         };

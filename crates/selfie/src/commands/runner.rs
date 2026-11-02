@@ -389,7 +389,7 @@ impl std::fmt::Display for OutputStream {
 /// A command that could not enter the directory it was to run in: it is
 /// missing, not a directory, or not searchable. No part of the command ran.
 ///
-/// [`Display`](std::fmt::Display) names the command, the directory and why.
+/// Its sentence names the command, the directory and why.
 #[derive(Debug, Clone)]
 pub struct UnusableDirectory {
     command: String,
@@ -432,16 +432,29 @@ impl UnusableDirectory {
     }
 }
 
-impl std::fmt::Display for UnusableDirectory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Bounded here for the reason `timed_out_sentence` is.
-        let sentence = format!(
-            "Cannot run '{}' in {}: {}",
-            self.command,
-            self.working_directory.display(),
-            self.cause
+crate::parts::display_from_parts!(UnusableDirectory);
+
+impl crate::parts::Composed for UnusableDirectory {
+    // The command is the spec's own and the directory a path, so each is a part
+    // of its own. Either can be long, and so can the cause, so the three share
+    // the bound one diagnostic keeps.
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        let cause = crate::parts::cause_words(&*self.cause);
+        let [command, directory, why] = crate::parts::shares(
+            [
+                self.command.len(),
+                self.working_directory.as_os_str().len(),
+                cause.len(),
+            ],
+            MAX_BOUNDED_BYTES,
         );
-        f.write_str(BoundedText::of(&sentence).as_str())
+        crate::parts::Parts::new()
+            .text("Cannot run '")
+            .spec_command_within(&self.command, command)
+            .text("' in ")
+            .path_within(&self.working_directory, directory)
+            .text(": ")
+            .cause_within(&cause, why)
     }
 }
 
@@ -475,16 +488,20 @@ impl TimedOut {
     }
 }
 
-impl std::fmt::Display for TimedOut {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&timed_out_sentence(&self.command, self.timeout))
+crate::parts::display_from_parts!(TimedOut);
+
+impl crate::parts::Composed for TimedOut {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        timed_out_parts(&self.command, self.timeout)
     }
 }
 
 // The one place this sentence is written: `TimedOut` and `CommandError::Timeout`
 // both render it, so every path a timeout reaches the user by says the same.
-// Every runner selfie builds takes its timeout from `command_timeout`.
-fn timed_out_sentence(command: &str, timeout: Duration) -> String {
+// Every runner selfie builds takes its timeout from `command_timeout`. The
+// command is the spec's own, and its part bounds it, since it is unbounded and
+// every adapter renders the sentence.
+fn timed_out_parts(command: &str, timeout: Duration) -> crate::parts::Parts<'_> {
     // `command_timeout` is whole seconds, so only a test builds anything else.
     let (amount, unit) = if timeout.subsec_nanos() == 0 {
         (timeout.as_secs(), "second")
@@ -495,12 +512,12 @@ fn timed_out_sentence(command: &str, timeout: Duration) -> String {
         )
     };
     let plural = if amount == 1 { "" } else { "s" };
-    let sentence = format!(
-        "`{command}` timed out after {amount} {unit}{plural}, the limit `command_timeout` sets"
-    );
-    // Bounded here, inside the type, because the sentence embeds the spec's own
-    // `command:` string, which is unbounded, and every adapter renders it.
-    BoundedText::of(&sentence).into_string()
+    crate::parts::Parts::new()
+        .text("`")
+        .spec_command(command)
+        .text(format!(
+            "` timed out after {amount} {unit}{plural}, the limit `command_timeout` sets"
+        ))
 }
 
 /// Errors that can occur during command execution
@@ -510,7 +527,7 @@ fn timed_out_sentence(command: &str, timeout: Duration) -> String {
 #[derive(Error, Debug, Clone)]
 pub enum CommandError {
     /// Command execution exceeded the specified timeout
-    #[error("{}", timed_out_sentence(command, *timeout))]
+    #[error("{}", timed_out_parts(command, *timeout))]
     Timeout {
         command: String,
         timeout: Duration,
@@ -650,7 +667,7 @@ pub struct BoundedText(String);
 impl BoundedText {
     /// Bound `bytes`, keeping **both ends** and eliding the middle.
     ///
-    /// Keeps the first and last `BOUNDED_END_BYTES` and replaces what is
+    /// Keeps the first and the last `BOUNDED_END_BYTES` and replaces what is
     /// between them with a marker naming how many bytes went. Both ends, because
     /// a failing command puts its diagnosis at the end — `brew` prints pages of
     /// `==> Downloading` and then one `Error:` line — while the head is where a
@@ -675,16 +692,28 @@ impl BoundedText {
     // matter what this does.
     #[must_use]
     pub fn bound(bytes: &[u8]) -> Self {
+        Self::keeping_ends(bytes, BOUNDED_END_BYTES)
+    }
+
+    // `bound` for one of several values a sentence names, which share the
+    // sentence's bound: it keeps `share / 2` bytes at each end, so at most
+    // `share` bytes of the input, and adds one marker when it cuts.
+    pub(crate) fn bound_within(bytes: &[u8], share: usize) -> Self {
+        Self::keeping_ends(bytes, share / 2)
+    }
+
+    // Keeps `end` input bytes at each end, the same number at both.
+    fn keeping_ends(bytes: &[u8], end: usize) -> Self {
         // Borrowed, not allocated, whenever the input is valid UTF-8.
         let whole = String::from_utf8_lossy(bytes);
 
-        if bytes.len() <= MAX_BOUNDED_BYTES {
+        if bytes.len() <= 2 * end {
             return Self(whole.into_owned());
         }
 
-        let elided = bytes.len() - MAX_BOUNDED_BYTES;
-        let head = String::from_utf8_lossy(&bytes[..BOUNDED_END_BYTES]);
-        let tail = String::from_utf8_lossy(&bytes[bytes.len() - BOUNDED_END_BYTES..]);
+        let elided = bytes.len() - 2 * end;
+        let head = String::from_utf8_lossy(&bytes[..end]);
+        let tail = String::from_utf8_lossy(&bytes[bytes.len() - end..]);
         let cut = format!("{head}… ({elided} bytes elided) …{tail}");
 
         if cut.len() < whole.len() {
