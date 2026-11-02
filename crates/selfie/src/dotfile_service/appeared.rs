@@ -113,3 +113,28 @@ fn gone_again(target: &TargetPath) -> Failure {
     )
     .with_remedy("Run apply again.")
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::fs::target::repository_path;
+
+    // What appeared and left again fails the write in these words, whole.
+    #[test]
+    fn a_target_gone_again_is_worded_whole() {
+        let failure = gone_again(&repository_path(Path::new("/home/u/my rc")));
+
+        assert_eq!(
+            failure.message,
+            "Failed to write '/home/u/my rc': something appeared there while selfie was writing \
+             it, and is gone again; nothing was written. Run apply again."
+        );
+        assert_eq!(
+            failure.error,
+            "something appeared there while selfie was writing it, and is gone again; nothing \
+             was written"
+        );
+    }
+}

@@ -616,4 +616,220 @@ mod tests {
             FileSystemError::SymlinkedTarget { .. }
         ));
     }
+
+    // The source and target every pin below names, with a space and a `~/` so
+    // each sentence's quoting is pinned with them.
+    const SOURCE: &str = "app/my creds";
+    const TARGET: &str = "/home/u/my app/creds";
+
+    fn pinned_target() -> TargetPath {
+        repository_path(Path::new(TARGET))
+    }
+
+    fn io(kind: io::ErrorKind) -> Arc<io::Error> {
+        Arc::new(io::Error::from(kind))
+    }
+
+    const DEPLOY: Unrun = Unrun {
+        unwritten: ", so selfie will not write a credential there",
+        unrun: " No command was run.",
+    };
+
+    // A write's refusal for each error the writer can give, whole.
+    #[test]
+    fn a_refused_write_is_worded_whole() {
+        let message = |error: FileSystemError| {
+            classify_write(SOURCE, &pinned_target(), &error).map(|refusal| refusal.message)
+        };
+        let some = |text: &str| Some(text.to_string());
+
+        assert_eq!(
+            message(FileSystemError::SymlinkedTarget {
+                path: PathBuf::from(TARGET),
+                points_to: Some(PathBuf::from("~/elsewhere")),
+            }),
+            some(
+                "Skipping 'app/my creds': /home/u/my app/creds: target is a symlink to \
+                 '~/elsewhere' and selfie will not write through it"
+            )
+        );
+        assert_eq!(
+            message(FileSystemError::IrregularTarget {
+                path: PathBuf::from(TARGET),
+                kind: "named pipe (fifo)",
+            }),
+            some(
+                "Skipping 'app/my creds': /home/u/my app/creds: target resolves to a named pipe \
+                 (fifo) and selfie will not write to it"
+            )
+        );
+        assert_eq!(
+            message(FileSystemError::BelowNonDirectory {
+                path: PathBuf::from(TARGET),
+                parent: Some(PathBuf::from("/home/u/my app")),
+                cause: io(io::ErrorKind::NotADirectory),
+            }),
+            some(
+                "Skipping 'app/my creds': the target '/home/u/my app/creds' is below \
+                 /home/u/my app, which is not a directory."
+            )
+        );
+        assert_eq!(
+            message(FileSystemError::BelowNonDirectory {
+                path: PathBuf::from(TARGET),
+                parent: None,
+                cause: io(io::ErrorKind::NotADirectory),
+            }),
+            some(
+                "Skipping 'app/my creds': the target '/home/u/my app/creds' is below a \
+                 component that is not a directory."
+            )
+        );
+        assert_eq!(
+            message(FileSystemError::DirectoryTarget {
+                path: PathBuf::from(TARGET),
+                cause: io(io::ErrorKind::IsADirectory),
+            }),
+            some(
+                "Skipping 'app/my creds': a directory is at the target '/home/u/my app/creds', \
+                 and a file cannot replace a directory. Remove it or point the entry somewhere \
+                 else."
+            )
+        );
+    }
+
+    // A read's refusal for each state the read can find, whole.
+    #[test]
+    fn a_refused_read_is_worded_whole() {
+        let message = |state: TargetState| {
+            readable_or_refusal(SOURCE, &pinned_target(), state)
+                .expect_err("refused")
+                .message
+        };
+        let link = |points_to: Option<&str>| Link {
+            path: PathBuf::from(TARGET),
+            points_to: points_to.map(PathBuf::from),
+        };
+
+        assert_eq!(
+            message(TargetState::BelowNonDirectory { parent: None }),
+            "Skipping 'app/my creds': the target '/home/u/my app/creds' is below a component \
+             that is not a directory."
+        );
+        assert_eq!(
+            message(TargetState::Directory),
+            "Skipping 'app/my creds': a directory is at the target '/home/u/my app/creds', and \
+             a file cannot replace a directory. Remove it or point the entry somewhere else."
+        );
+        assert_eq!(
+            message(TargetState::Link(link(None))),
+            "Skipping 'app/my creds': /home/u/my app/creds: target is a symlink and selfie will \
+             not write through it"
+        );
+        assert_eq!(
+            message(TargetState::Irregular(FileSystemError::IrregularTarget {
+                path: PathBuf::from(TARGET),
+                kind: "socket",
+            })),
+            "Skipping 'app/my creds': /home/u/my app/creds: target resolves to a socket and \
+             selfie will not write to it"
+        );
+        assert_eq!(
+            message(TargetState::Unreadable(io(io::ErrorKind::PermissionDenied))),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: permission denied"
+        );
+        assert_eq!(
+            message(TargetState::Undetermined(FileSystemError::IoError(
+                crate::fs::IoFailure::at(Path::new("/home/u/my app"), io(io::ErrorKind::Other))
+            ))),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: /home/u/my app: other error"
+        );
+    }
+
+    // What stands in the way of a file, with and without the clauses a deploy
+    // adds, whole.
+    #[test]
+    fn a_path_in_the_way_is_worded_whole() {
+        let message = |state: DirectoryState, extra: Unrun| {
+            path_state_refusal(SOURCE, &pinned_target(), &state, extra)
+                .expect("refused")
+                .message
+        };
+        let below = || {
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory {
+                parent: PathBuf::from("/home/u/my app"),
+            })
+        };
+
+        assert_eq!(
+            message(DirectoryState::Directory, Unrun::NOTHING),
+            "Skipping 'app/my creds': a directory is at the target '/home/u/my app/creds', and \
+             a file cannot replace a directory. Remove it or point the entry somewhere else."
+        );
+        assert_eq!(
+            message(
+                DirectoryState::Unlistable(io(io::ErrorKind::PermissionDenied)),
+                DEPLOY
+            ),
+            "Skipping 'app/my creds': a directory is at the target '/home/u/my app/creds', and \
+             a file cannot replace a directory. Remove it or point the entry somewhere else. No \
+             command was run."
+        );
+        assert_eq!(
+            message(below(), Unrun::NOTHING),
+            "Skipping 'app/my creds': the target '/home/u/my app/creds' is below /home/u/my \
+             app, which is not a directory."
+        );
+        assert_eq!(
+            message(below(), DEPLOY),
+            "Skipping 'app/my creds': the target '/home/u/my app/creds' is below /home/u/my \
+             app, which is not a directory, so selfie will not write a credential there. No \
+             command was run."
+        );
+        assert_eq!(
+            message(
+                DirectoryState::Unknown(io(io::ErrorKind::Other)),
+                Unrun::NOTHING
+            ),
+            "Skipping 'app/my creds': selfie could not determine what is at the target. The \
+             check failed with: IO error: other error"
+        );
+        assert_eq!(
+            message(DirectoryState::Unknown(io(io::ErrorKind::Other)), DEPLOY),
+            "Skipping 'app/my creds': selfie could not determine what is at the target, so \
+             selfie will not write a credential there. No command was run. The check failed \
+             with: IO error: other error"
+        );
+    }
+
+    // A target that would not open, and one the rule refuses, whole.
+    #[test]
+    fn an_unopenable_or_ruled_out_target_is_worded_whole() {
+        let unopenable = |refusal: OpenRefusal| {
+            unreadable_target_refusal(SOURCE, &pinned_target(), &refusal).message
+        };
+
+        assert_eq!(
+            unopenable(OpenRefusal::Unreadable(io(io::ErrorKind::PermissionDenied))),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: permission denied"
+        );
+        assert_eq!(
+            unopenable(OpenRefusal::Undetermined(io(io::ErrorKind::Other))),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: other error"
+        );
+        assert_eq!(
+            target_refusal("my app/creds", TargetRejection::Relative).message,
+            "Skipping 'my app/creds': target path is not absolute; it must be absolute or start \
+             with '~/'"
+        );
+        assert_eq!(
+            target_refusal("~other/creds", TargetRejection::NamedUserHome).message,
+            "Skipping '~other/creds': target uses the '~user' form; selfie does not resolve \
+             another user's home directory"
+        );
+    }
 }

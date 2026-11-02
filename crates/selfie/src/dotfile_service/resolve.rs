@@ -1092,4 +1092,32 @@ mod tests {
 
         assert!(err.to_string().contains("no content to resolve"), "{err}");
     }
+
+    // An escaping template and an irregular one refuse their entry in these
+    // words, whole.
+    #[test]
+    fn a_refused_template_is_worded_whole() {
+        let escapes = ResolveError::TemplateEscapesPackage {
+            template: "../my.tpl".to_string(),
+        };
+        let mut fs = MockFileSystem::default();
+        fs.expect_irregular_target_refusal().returning(|path| {
+            Some(crate::fs::filesystem::FileSystemError::IrregularTarget {
+                path: path.path().to_path_buf(),
+                kind: "socket",
+            })
+        });
+        let irregular =
+            read_template(&fs, "my.tpl", Path::new("/pkg/my.tpl")).expect_err("refused");
+
+        assert_eq!(
+            escapes.as_refusal("~/my rc").expect("a refusal").message,
+            "Skipping '~/my rc': dotfile template '../my.tpl' escapes the package directory"
+        );
+        assert_eq!(
+            irregular.refusal("~/my rc").message,
+            "Skipping '~/my rc': dotfile template 'my.tpl' cannot be read: the repository file \
+             is a socket and selfie will not read it. Replace it with a regular file."
+        );
+    }
 }
