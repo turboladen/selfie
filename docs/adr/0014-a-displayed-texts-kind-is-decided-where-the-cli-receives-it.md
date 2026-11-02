@@ -149,8 +149,8 @@ Options considered:
    - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
    - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
      or `OperationFailure` holding one, into a `String`, such as a warning that `spec create` or
-     `spec remove` sends, a failed recommend's reason, `sync status`'s drift error, and the warning
-     that a run did not check collisions with a directory it could not list;
+     `spec remove` sends, `sync status`'s drift error, and the warning that a run did not check
+     collisions with a directory it could not list;
    - an `io::Error` that `tempfile` built, whose message names its temporary file and enters a
      sentence as `Text`;
    - an unknown key a validation issue names, whose message is still a `String`.
@@ -381,23 +381,26 @@ writer escapes every escape sequence (§1.8).
    and its error, and the `Message` a track's `OperationFailure::Track` carries; the
    `ComposedWarning` a `PackageEvent::ComposedWarning` carries; a package's `PackageError`; a
    repository's `PackageRepoError`, with the `UnwritableReason` it carries, and the `LookupFailure`
-   that holds one; a spec file's read failure, `PackageParseError`, and the `PackageParseKind` it
-   holds, with the `RefusedSpecFile`, `UnreadableSpecFile` and `SymlinkReason` that kind carries;
-   the `Message` a not-found failure appends to name a spec file declaring the name; the
-   `CollectionRefusal` a collection gives; the `Message` that words an unknown key, naming it as a
-   `Name`; and a validation issue's message, `IssueMessage`, which is its own text, the deploy
-   state's notice or a `DirectoryIssue`.
+   that holds one; a `DependencyFailure`, with the `Message` an unreadable dependency's reason is; a
+   spec file's read failure, `PackageParseError`, and the `PackageParseKind` it holds, with the
+   `RefusedSpecFile`, `UnreadableSpecFile` and `SymlinkReason` that kind carries; the `Message` a
+   not-found failure appends to name a spec file declaring the name; the `CollectionRefusal` a
+   collection gives; the `Message` that words an unknown key, naming it as a `Name`; and a
+   validation issue's message, `IssueMessage`, which is its own text, the deploy state's notice or a
+   `DirectoryIssue`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as
    a `String`, such as a warning or a refused package's reason, moves to a `Message` when it is next
-   changed, and until then `message` shows it as `Prose`. A new or changed warning that names a
-   path, a file or a name is worded from parts and sent through `send_composed_warning`. A warning
-   worded from parts travels as `PackageEvent::ComposedWarning`. Its `ComposedWarning` has a variant
-   of its own only for a kind an adapter tells apart, the deploy state's or the dotfiles
-   directory's, and is otherwise a `Message`. It is named for the mechanism while the `Warning`
-   event still carries Strings, and becomes `Warning` once that event is gone. These stay plain
-   strings: a suggestion, a step's progress text, and a sentence the CLI words itself.
+   changed, and until then `message` shows it as `Prose`. An event may carry an `OperationFailure`
+   itself, as a failed recommend does, when the CLI shows it through `received::failure`. A new or
+   changed warning that names a path, a file or a name is worded from parts and sent through
+   `send_composed_warning`. A warning worded from parts travels as `PackageEvent::ComposedWarning`.
+   Its `ComposedWarning` has a variant of its own only for a kind an adapter tells apart, the deploy
+   state's or the dotfiles directory's, and is otherwise a `Message`. It is named for the mechanism
+   while the `Warning` event still carries Strings, and becomes `Warning` once that event is gone.
+   These stay plain strings: a suggestion, a step's progress text, and a sentence the CLI words
+   itself.
 
 ## Consequences
 
