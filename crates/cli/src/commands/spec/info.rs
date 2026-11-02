@@ -202,14 +202,19 @@ pub(crate) fn create_environment_table(
     }
 
     // A checked list shows each name with its status, an unchecked one the
-    // names alone.
+    // names alone, one to a line either way. A status can end in a note under
+    // its line, which must not land between two entries, so no two entries
+    // share a line.
     let listed = |checked: &[(Name, EnvironmentStatus)], names: Vec<Name>| -> Option<Shown> {
         if !checked.is_empty() {
-            Some(crate::formatters::comma_joined(checked.iter().map(
-                |(name, status)| format_dependency_with_status(name, status, use_colors),
-            )))
+            Some(Shown::join(
+                checked
+                    .iter()
+                    .map(|(name, status)| format_dependency_with_status(name, status, use_colors)),
+                lit!("\n"),
+            ))
         } else if !names.is_empty() {
-            Some(crate::formatters::comma_joined(names))
+            Some(Shown::join(names, lit!("\n")))
         } else {
             None
         }
@@ -229,7 +234,8 @@ pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Sho
         EnvironmentStatus::Installed => status_style::format_installed(use_colors),
         EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
         EnvironmentStatus::Unknown(reason) => status_style::styled_text(
-            shown!("Unknown ({})", received::unknown_status(reason)),
+            // The reason ends its line, so a note after it lands under it.
+            shown!("Unknown: {}", received::unknown_status(reason)),
             use_colors,
             |s| s.yellow().italic(),
         ),
@@ -252,7 +258,8 @@ mod tests {
     use test_common::TEST_ENV;
 
     // Dependencies and recommends whose statuses were not checked are listed
-    // by name, so an invisible character in one shows as an escape.
+    // by name, one to a line, so an invisible character in one shows as an
+    // escape.
     #[test]
     fn unchecked_dependencies_are_listed_as_names() {
         let config = CliConfig::wrap_for_test(test_common::test_config());
@@ -270,9 +277,56 @@ mod tests {
 
         let table = create_environment_table(&env_status, &config).to_string();
 
-        assert!(table.contains(r"z\u{200b}w, git"), "{table}");
+        // One name to a line.
+        let lines: Vec<&str> = table.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains(r"z\u{200b}w"))
+            .unwrap_or_else(|| panic!("{table}"));
+        assert!(!lines[at].contains("git"), "{table}");
+        assert!(lines[at + 1].contains("git"), "{table}");
         assert!(table.contains(r"r\u{200b}s"), "{table}");
         assert!(!table.contains('\u{200B}'), "{table:?}");
+    }
+
+    // Checked dependencies and recommends are listed one to a line too, each
+    // with its status, so a note after one status lands under its own entry.
+    #[test]
+    fn checked_dependencies_are_listed_one_to_a_line() {
+        let config = CliConfig::wrap_for_test(test_common::test_config());
+        let mut env_status = EnvironmentStatusData {
+            environment_name: TEST_ENV.to_string(),
+            is_current: true,
+            install_command: None,
+            check_command: None,
+            dependencies: Vec::new(),
+            dependency_statuses: Vec::new(),
+            recommends: Vec::new(),
+            recommend_statuses: Vec::new(),
+            status: EnvironmentStatus::Installed,
+        };
+        env_status.dependency_statuses = vec![
+            DependencyStatus {
+                name: "x".to_string(),
+                status: EnvironmentStatus::Unknown(
+                    selfie::package::event::UnknownStatus::NoCheckCommand,
+                ),
+            },
+            DependencyStatus {
+                name: "y".to_string(),
+                status: EnvironmentStatus::Installed,
+            },
+        ];
+
+        let table = create_environment_table(&env_status, &config).to_string();
+
+        let lines: Vec<&str> = table.lines().collect();
+        let at = lines
+            .iter()
+            .position(|line| line.contains("x: Unknown: no check command"))
+            .unwrap_or_else(|| panic!("{table}"));
+        assert!(lines[at + 1].contains("y: "), "{table}");
+        assert!(!lines[at].contains("y: "), "{table}");
     }
 
     // An install command that reads as another gets an `Escaped` row right
@@ -390,7 +444,7 @@ mod tests {
             format_dependency_with_status(&Name::new(&missing.name), &missing.status, false);
         assert!(result.starts_with("missing: "), "{result}");
         assert!(
-            result.contains("Unknown (Package `missing` not found in path /packages)"),
+            result.contains("Unknown: Package `missing` not found in path /packages"),
             "{result}"
         );
 
@@ -413,7 +467,7 @@ mod tests {
             )),
         };
         let result = format_dependency_with_status(&Name::new(&broken.name), &broken.status, false);
-        assert!(result.starts_with("broken: Unknown ("), "{result}");
+        assert!(result.starts_with("broken: Unknown: "), "{result}");
         assert!(result.contains("/packages/broken.yml"), "{result}");
     }
 }
