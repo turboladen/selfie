@@ -2337,6 +2337,194 @@ async fn test_apply_conflict_resolver_skip() {
     assert_eq!(content, "key = \"user-modified\"");
 }
 
+// A resolver prints from its own thread, so it must not start while the
+// consumer still has earlier rows to render. The consumer here is slow on
+// tokio's paused clock, and the clock does not move while the resolver runs,
+// so a resolver called early sees the rows unread every time. The fixtures run
+// no real command: on the paused clock its timeout would fire at once.
+//
+// Applies with a resolver that snapshots what the consumer has taken each time
+// it is asked, and skips. Returns the snapshots and every event taken, as
+// `Debug` text.
+async fn apply_with_a_slow_consumer(
+    service: &impl DotfileService,
+) -> (Vec<Vec<String>>, Vec<String>) {
+    use selfie::dotfile_service::port::{ConflictDetail, ConflictResolution, ConflictResolver};
+    use std::sync::{Arc, Mutex};
+
+    struct Snapshot {
+        taken: Arc<Mutex<Vec<String>>>,
+        seen: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+    impl ConflictResolver for Snapshot {
+        fn resolve(&self, _target: &str, _detail: ConflictDetail<'_>) -> ConflictResolution {
+            let taken = self.taken.lock().unwrap().clone();
+            self.seen.lock().unwrap().push(taken);
+            ConflictResolution::Skip
+        }
+    }
+
+    let taken = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let options = ApplyOptions {
+        conflict_resolver: Some(Arc::new(Snapshot {
+            taken: Arc::clone(&taken),
+            seen: Arc::clone(&seen),
+        })),
+        ..Default::default()
+    };
+    let mut stream = service.apply_all(options).await;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let Some(event) = stream.next().await else {
+            break;
+        };
+        taken.lock().unwrap().push(format!("{event:?}"));
+    }
+    let seen = seen.lock().unwrap().clone();
+    let taken = taken.lock().unwrap().clone();
+    (seen, taken)
+}
+
+// Assert the resolver was asked once, having seen exactly the events before the
+// declined conflict, and return those events.
+fn every_earlier_event<'a>(seen: &[Vec<String>], taken: &'a [String]) -> &'a [String] {
+    let conflict = taken
+        .iter()
+        .position(|e| e.starts_with("DotfileConflict") && e.contains("declined: true"))
+        .expect("no declined conflict was reported");
+    let before = &taken[..conflict];
+    assert_eq!(seen.len(), 1, "the resolver was asked {} times", seen.len());
+    assert_eq!(
+        seen[0], before,
+        "the resolver ran with earlier events unread"
+    );
+    before
+}
+
+// Set up one package whose entries walk a (up to date), b (new) and c (a
+// conflict), and return c's target.
+async fn three_entries_ending_in_a_conflict(dirs: &TestDirs) -> PathBuf {
+    let source_dir = dirs.package_dir.join("app");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    for name in ["a", "b", "c"] {
+        std::fs::write(source_dir.join(name), format!("{name} from the repository")).unwrap();
+    }
+    let target = |name: &str| dirs.target_dir.join(name).to_str().unwrap().to_string();
+    let (a, b, c) = (target("a"), target("b"), target("c"));
+
+    // a and c deploy first; b joins afterwards, so the second run deploys it.
+    create_package_with_dotfiles(&dirs.package_dir, "app", &[("app/a", &a), ("app/c", &c)]);
+    let _ = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "app",
+        &[("app/a", &a), ("app/b", &b), ("app/c", &c)],
+    );
+    std::fs::write(&c, "c edited at the target").unwrap();
+    std::fs::write(source_dir.join("c"), "c edited in the repository").unwrap();
+    PathBuf::from(c)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conflict_is_put_to_the_resolver_only_after_every_earlier_event_is_taken() {
+    let dirs = TestDirs::new();
+    three_entries_ending_in_a_conflict(&dirs).await;
+
+    let (seen, taken) = apply_with_a_slow_consumer(&dirs.service()).await;
+    let before = every_earlier_event(&seen, &taken);
+
+    // The fixture reaches both earlier outcomes, so the snapshot has rows to miss.
+    assert!(
+        before
+            .iter()
+            .any(|e| e.contains("DotfileSkipped") && e.contains("UpToDate")),
+        "{before:#?}"
+    );
+    assert!(
+        before.iter().any(|e| e.contains("DotfileDeployed")),
+        "{before:#?}"
+    );
+}
+
+// Applies with a counting resolver while a slow consumer cancels `token` as it
+// takes each event. The consumer takes its first event only once the run is
+// waiting for it. Returns how often the resolver was asked, and the events.
+async fn apply_canceling_at_the_first_event(
+    service: &impl DotfileService,
+    token: &CancellationToken,
+) -> (usize, Vec<PackageEvent>) {
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut stream = service.apply_all(counting_resolver(&asked)).await;
+    let mut events = Vec::new();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        let Some(event) = stream.next().await else {
+            break;
+        };
+        token.cancel();
+        events.push(event);
+    }
+    (asked.load(std::sync::atomic::Ordering::SeqCst), events)
+}
+
+// Assert a run canceled before its prompt never asked, and stopped at the
+// conflicted entry as a canceled run stops at any entry.
+fn assert_canceled_before_the_prompt(asked: usize, events: &[PackageEvent]) {
+    assert_eq!(asked, 0, "the resolver was asked on a canceled run");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::Canceled { .. })),
+        "{events:#?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, PackageEvent::DotfileConflict { .. })),
+        "a canceled entry is not counted as a conflict: {events:#?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_run_canceled_before_its_prompt_never_asks_the_resolver() {
+    let dirs = TestDirs::new();
+    let c = three_entries_ending_in_a_conflict(&dirs).await;
+    let token = CancellationToken::new();
+    let service = dirs.service_with_runner_and_token(FakeCommandRunner::new(), token.clone());
+
+    let (asked, events) = apply_canceling_at_the_first_event(&service, &token).await;
+
+    assert_canceled_before_the_prompt(asked, &events);
+    assert_eq!(
+        std::fs::read_to_string(&c).unwrap(),
+        "c edited at the target"
+    );
+}
+
+// A run whose stream is dropped while it waits for the consumer never prompts:
+// nothing reads the stream to show the prompt beside.
+#[tokio::test(start_paused = true)]
+async fn a_run_whose_stream_is_dropped_before_its_prompt_never_asks_the_resolver() {
+    let dirs = TestDirs::new();
+    let c = three_entries_ending_in_a_conflict(&dirs).await;
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut stream = dirs.service().apply_all(counting_resolver(&asked)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    assert!(stream.next().await.is_some());
+    drop(stream);
+    // Lets the run finish. The clock does not move while a resolver runs, so
+    // this cannot return before one would have answered.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read_to_string(&c).unwrap(),
+        "c edited at the target"
+    );
+}
+
 // A drift event names the repository file the target was compared against,
 // relative to the package directory, so a reader can see which entry drifted.
 // Two entries, one drifted, so a source taken from the wrong entry fails too.
@@ -6832,6 +7020,65 @@ mod secret_bearing {
             }
             ConflictResolution::Accept
         }
+    }
+
+    // Set up a repository file that deploys, then a command entry whose target
+    // already holds other bytes, and return that target.
+    fn a_deployed_file_then_a_secret_conflict(dirs: &TestDirs) -> PathBuf {
+        std::fs::create_dir_all(dirs.package_dir.join("app")).unwrap();
+        std::fs::write(dirs.package_dir.join("app/a"), "a from the repository").unwrap();
+        let a = dirs.target_dir.join("a");
+        let creds = dirs.target_dir.join("credentials");
+        std::fs::write(&creds, "previous-credential").unwrap();
+        let yaml = format!(
+            "name: app\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: \"app/a\"\n    target: \"{}\"\n  \
+             - command: \"op read x\"\n    target: \"{}\"\n",
+            a.display(),
+            creds.display()
+        );
+        std::fs::write(dirs.package_dir.join("app.yml"), yaml).unwrap();
+        creds
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_secret_run_canceled_before_its_prompt_never_asks_the_resolver() {
+        let dirs = TestDirs::new();
+        let creds = a_deployed_file_then_a_secret_conflict(&dirs);
+        let token = CancellationToken::new();
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let service = dirs.service_with_runner_and_token(runner, token.clone());
+
+        let (asked, events) = apply_canceling_at_the_first_event(&service, &token).await;
+
+        assert_canceled_before_the_prompt(asked, &events);
+        assert_eq!(
+            std::fs::read_to_string(&creds).unwrap(),
+            "previous-credential"
+        );
+    }
+
+    // The secret path puts its conflict to the resolver only after every earlier
+    // event is taken, as the repository-file path does.
+    #[tokio::test(start_paused = true)]
+    async fn a_secret_conflict_is_put_to_the_resolver_only_after_every_earlier_event_is_taken() {
+        let dirs = TestDirs::new();
+        let creds = a_deployed_file_then_a_secret_conflict(&dirs);
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+
+        let (seen, taken) = apply_with_a_slow_consumer(&dirs.service_with_runner(runner)).await;
+        let before = every_earlier_event(&seen, &taken);
+
+        // The entry before the conflict deployed, so the snapshot has a row to miss.
+        assert!(
+            before.iter().any(|e| e.contains("DotfileDeployed")),
+            "{before:#?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&creds).unwrap(),
+            "previous-credential",
+            "a skipped conflict must keep the target"
+        );
     }
 
     #[tokio::test]

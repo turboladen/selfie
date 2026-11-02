@@ -16,7 +16,7 @@ use crate::{
     config::SelfieConfig,
     dotfile_service::{
         deploy::{DeployDecision, compute_checksum, deploy_decision},
-        port::{ConflictDetail, ConflictResolution, put_to_resolver},
+        port::{Asked, ConflictDetail, ConflictResolution, put_to_resolver},
         state::DeployState,
     },
     fs::filesystem::FileSystem,
@@ -24,7 +24,7 @@ use crate::{
         Package,
         event::{
             Condition, DriftType, EventSender, Location, OperationFailure, OperationResult,
-            OperationSuccess, Refusal, StepCount,
+            OperationSuccess, Refusal, Settle, StepCount,
         },
         refusal::refuse_up_front,
     },
@@ -229,7 +229,7 @@ impl ApplyTally {
 
 /// Everything an apply needs that does not vary from package to package.
 ///
-/// Grouped because they travel together: `handle_apply` needs all six, and
+/// Grouped because they travel together: `handle_apply` needs all seven, and
 /// builds a [`SecretApply`] from them once per package.
 // Passed individually, these exceed clippy's too_many_arguments limit.
 #[derive(Clone, Copy)]
@@ -239,6 +239,8 @@ pub(super) struct ApplyContext<'a, F, CR> {
     pub(super) config: &'a SelfieConfig,
     pub(super) sender: &'a EventSender,
     pub(super) options: &'a ApplyOptions,
+    /// Waited on before a conflict is put to the resolver.
+    pub(super) settle: &'a Settle,
     /// The caller's live token. See [`SecretApply::token`].
     pub(super) token: &'a CancellationToken,
 }
@@ -264,6 +266,7 @@ where
         config,
         sender,
         options,
+        settle,
         token,
     } = *ctx;
 
@@ -491,6 +494,7 @@ where
             config,
             sender,
             options,
+            settle,
             token,
         };
 
@@ -738,7 +742,7 @@ where
                             let src = event_source.clone();
                             let tgt = target_path.display().to_string();
                             let d = rendered.get_or_insert_with(&render).clone();
-                            let answer = put_to_resolver(resolver, move |r| {
+                            let answer = put_to_resolver(resolver, settle, token, move |r| {
                                 r.resolve(
                                     &tgt,
                                     ConflictDetail::Diff {
@@ -748,8 +752,13 @@ where
                                 )
                             })
                             .await;
-                            declined = answer == Some(ConflictResolution::Skip);
-                            let accepted = answer == Some(ConflictResolution::Accept);
+                            // A run canceled before the prompt ends here, as a
+                            // canceled run ends at any other entry.
+                            if answer == Asked::Canceled {
+                                break 'entry EntryOutcome::Canceled;
+                            }
+                            declined = answer == Asked::Answered(ConflictResolution::Skip);
+                            let accepted = answer == Asked::Answered(ConflictResolution::Accept);
                             if accepted {
                                 overwrite = Overwrite::Accepted;
                             }

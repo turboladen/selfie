@@ -7,7 +7,8 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::package::event::{DotfileSource, EventStream};
+use crate::package::event::{DotfileSource, EventStream, Settle, SettleOutcome};
+use tokio_util::sync::CancellationToken;
 
 /// The user's chosen resolution for a dotfile conflict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +79,13 @@ pub trait ConflictResolver: Send + Sync {
     /// A resolver that cannot present conflicts should not be supplied. A
     /// conflict a resolver gave no answer for, as when it panicked, is reported
     /// undeclined and skipped.
+    ///
+    /// Called only once the run's event stream has handed over every event sent
+    /// before the conflict and its consumer has asked for the next. A consumer
+    /// that handles each event before asking for the next has then handled
+    /// them all. A consumer that reads ahead of what it has handled gets no
+    /// such guarantee. Not called at all once the run is canceled or its stream
+    /// is dropped: the conflict then goes unasked.
     fn resolve(&self, target: &str, detail: ConflictDetail<'_>) -> ConflictResolution;
 
     /// Hear the entries an apply is about to walk, before any of them can be
@@ -88,20 +96,42 @@ pub trait ConflictResolver: Send + Sync {
     fn planned(&self, _entries: &[crate::package::event::PlannedEntry]) {}
 }
 
+/// What came of putting a conflict to a resolver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asked {
+    /// The resolver answered.
+    Answered(ConflictResolution),
+    /// Nobody answered: the resolver panicked, or nothing read the stream, so
+    /// it was not asked.
+    Unanswered,
+    /// The run was canceled before the resolver was asked.
+    Canceled,
+}
+
 /// Put a conflict to `resolver` off the async runtime, since a resolver
-/// blocks on whoever decides, and return its answer: `None` when it gave none,
-/// as when it panicked. `ask` builds the detail and calls the resolver.
+/// blocks on whoever decides, and say what came of it. `ask` builds the detail
+/// and calls the resolver.
 pub(crate) async fn put_to_resolver<F>(
     resolver: &Arc<dyn ConflictResolver>,
+    settle: &Settle,
+    token: &CancellationToken,
     ask: F,
-) -> Option<ConflictResolution>
+) -> Asked
 where
     F: FnOnce(&dyn ConflictResolver) -> ConflictResolution + Send + 'static,
 {
+    // A resolver runs on a blocking thread and may present output, which would
+    // interleave with a consumer still rendering earlier events. With nothing
+    // reading the stream, there is nobody to present the conflict to.
+    match settle.settled(token).await {
+        SettleOutcome::CaughtUp => {}
+        SettleOutcome::Canceled => return Asked::Canceled,
+        SettleOutcome::Dropped => return Asked::Unanswered,
+    }
     let resolver = Arc::clone(resolver);
     tokio::task::spawn_blocking(move || ask(resolver.as_ref()))
         .await
-        .ok()
+        .map_or(Asked::Unanswered, Asked::Answered)
 }
 
 /// Options for dotfile apply operations
@@ -122,6 +152,12 @@ pub struct ApplyOptions {
     /// to accept an overwrite: `auto_accept` is not consulted there at all, so a
     /// caller that supplies no resolver always gets the conflict reported and
     /// skipped.
+    ///
+    /// With a resolver, the run waits at each conflict until the stream's
+    /// consumer has taken every earlier event and asked for the next. A
+    /// consumer that keeps the stream but stops reading it holds the run there.
+    /// Dropping the stream ends the wait and leaves the conflict unasked;
+    /// canceling the run ends the wait and stops the run at that entry.
     pub conflict_resolver: Option<Arc<dyn ConflictResolver>>,
 }
 

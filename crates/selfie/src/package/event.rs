@@ -281,7 +281,8 @@ use futures::Stream;
 
 use crate::commands::runner::TimedOut;
 use crate::parts::{Composed, Parts};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 /// Type alias for a stream of package events
@@ -302,15 +303,121 @@ where
     F: FnOnce(mpsc::Sender<PackageEvent>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send,
 {
-    let (tx, rx) = mpsc::channel(32);
-
-    tokio::spawn(async move {
-        f(tx).await;
-    });
-
+    let rx = spawn_producer(f);
     Box::pin(futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|event| (event, rx))
     }))
+}
+
+// The event channel and the task filling it, shared by both stream constructors.
+fn spawn_producer<F, Fut>(f: F) -> mpsc::Receiver<PackageEvent>
+where
+    F: FnOnce(mpsc::Sender<PackageEvent>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let (tx, rx) = mpsc::channel(32);
+    tokio::spawn(async move {
+        f(tx).await;
+    });
+    rx
+}
+
+/// Create an event stream as [`create_event_stream`] does, also handing the
+/// closure a [`Settle`] that waits for the stream's consumer to catch up.
+pub(crate) fn create_settling_event_stream<F, Fut>(f: F) -> EventStream
+where
+    F: FnOnce(mpsc::Sender<PackageEvent>, Settle) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    let (settle_tx, settle) = mpsc::channel(1);
+    let events = spawn_producer(move |tx| f(tx, Settle(settle_tx)));
+
+    // `held` is a request that arrived while an event was still buffered.
+    Box::pin(futures::stream::unfold(
+        (events, settle, None),
+        |(mut events, mut settle, mut held): (_, _, Option<oneshot::Sender<()>>)| async move {
+            loop {
+                // Biased toward events, so a settle is answered only once the
+                // buffer is empty and the consumer is back for the next one.
+                // `recv` is cancel safe: a settle that wins took no event. A
+                // closed settle channel disables only its own arm.
+                tokio::select! {
+                    biased;
+                    event = events.recv() => {
+                        return event.map(|event| (event, (events, settle, held)));
+                    }
+                    () = std::future::ready(()), if held.is_some() => {
+                        if let Some(done) = held.take() {
+                            let _ = done.send(());
+                        }
+                    }
+                    Some(done) = settle.recv(), if held.is_none() => {
+                        // An event pushed between the two arms' polls is visible
+                        // now, since the request was pushed after it, so the
+                        // request waits for the buffer to empty. That window is
+                        // a race between two threads, so no deterministic test
+                        // reaches it.
+                        if events.is_empty() {
+                            let _ = done.send(());
+                        } else {
+                            held = Some(done);
+                        }
+                    }
+                }
+            }
+        },
+    ))
+}
+
+/// A handle that waits for a stream's consumer to catch up. Only
+/// [`create_settling_event_stream`] makes one.
+pub(crate) struct Settle(mpsc::Sender<oneshot::Sender<()>>);
+
+/// How a [`Settle::settled`] wait ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettleOutcome {
+    /// The consumer took every earlier event and asked for the next.
+    CaughtUp,
+    /// The run was canceled first.
+    Canceled,
+    /// The stream was dropped, so nothing reads it.
+    Dropped,
+}
+
+impl Settle {
+    /// Wait until the consumer has taken every event sent before the call and
+    /// asked for the next one, and say how the wait ended. A canceled `token`
+    /// ends it as [`SettleOutcome::Canceled`], even when the consumer has also caught
+    /// up. While the consumer holds the stream without reading it, only the
+    /// token ends the wait.
+    pub(crate) async fn settled(&self, token: &CancellationToken) -> SettleOutcome {
+        let (done, answered) = oneshot::channel();
+        // A request left unanswered by an earlier canceled wait can still fill
+        // the channel, so the send waits on the token too.
+        tokio::select! {
+            () = token.cancelled() => return SettleOutcome::Canceled,
+            sent = self.0.send(done) => {
+                if sent.is_err() {
+                    return SettleOutcome::Dropped;
+                }
+            }
+        }
+        // `closed` as well as the answer: a request pushed while the stream
+        // is being dropped can land after the drop drained the channel, and
+        // its oneshot sender then lives as long as this handle does. That
+        // window is a race between two threads, between the send's reserve
+        // and its push, so no deterministic test reaches it. Biased toward the
+        // token, so a canceled run never reports that it caught up.
+        tokio::select! {
+            biased;
+            () = token.cancelled() => SettleOutcome::Canceled,
+            answer = answered => match answer {
+                Ok(()) => SettleOutcome::CaughtUp,
+                Err(_) => SettleOutcome::Dropped,
+            },
+            () = self.0.closed() => SettleOutcome::Dropped,
+        }
+    }
 }
 
 /// Internal event sender for package operations
@@ -6056,5 +6163,172 @@ mod tests {
         assert!(!none.contains("failed"), "{none}");
         assert!(none.ends_with("1 refused"), "{none}");
         assert!(one.contains("0 refused, 1 failed"), "{one}");
+    }
+}
+
+// These run on tokio's paused clock, where time moves only once every task is
+// idle, so a timeout that elapses shows the producer ran as far as it could.
+// No fixture here runs a command or sleeps for real.
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    fn sender(tx: mpsc::Sender<PackageEvent>) -> EventSender {
+        EventSender::new_with_context(
+            tx,
+            metadata::OperationType::DotfileApply,
+            String::new(),
+            "test".to_string(),
+            OperationContext::default(),
+        )
+    }
+
+    fn message(event: Option<PackageEvent>) -> String {
+        match event {
+            Some(PackageEvent::Trace { message, .. }) => message,
+            other => panic!("expected a trace event, got {other:?}"),
+        }
+    }
+
+    // This says whether `signal` is still unsent once every other task has run
+    // as far as it can.
+    async fn not_yet<T>(signal: &mut oneshot::Receiver<T>) -> bool {
+        tokio::time::timeout(Duration::from_secs(1), signal)
+            .await
+            .is_err()
+    }
+
+    // This returns what `signal` carried, if it was sent by the time every other
+    // task ran as far as it can.
+    async fn arrives<T>(signal: &mut oneshot::Receiver<T>) -> Option<T> {
+        tokio::time::timeout(Duration::from_secs(1), signal)
+            .await
+            .ok()?
+            .ok()
+    }
+
+    // Repeated so that an unbiased select, which answers a settle before a
+    // buffered event half the time, fails here too.
+    #[tokio::test(start_paused = true)]
+    async fn a_settle_waits_until_the_consumer_asks_after_the_last_event() {
+        for _ in 0..32 {
+            let (passed_tx, mut passed) = oneshot::channel();
+            let mut stream = create_settling_event_stream(move |tx, settle| async move {
+                let sender = sender(tx);
+                sender.send_trace("a").await;
+                sender.send_trace("b").await;
+                let _ = passed_tx.send(settle.settled(&CancellationToken::new()).await);
+                sender.send_trace("c").await;
+            });
+
+            assert!(
+                not_yet(&mut passed).await,
+                "settled before anything was read"
+            );
+            assert_eq!(message(stream.next().await), "a");
+            assert!(not_yet(&mut passed).await, "settled with b unread");
+            assert_eq!(message(stream.next().await), "b");
+            assert!(
+                not_yet(&mut passed).await,
+                "settled before the consumer asked again"
+            );
+            assert_eq!(message(stream.next().await), "c");
+            assert_eq!(passed.try_recv(), Ok(SettleOutcome::CaughtUp));
+            assert!(stream.next().await.is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stream_whose_settle_is_dropped_yields_every_event() {
+        let stream = create_settling_event_stream(|tx, settle| async move {
+            drop(settle);
+            let sender = sender(tx);
+            for n in 0..40 {
+                sender.send_trace(n).await;
+            }
+        });
+
+        let messages: Vec<String> = stream
+            .map(|event| message(Some(event)))
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(messages, (0..40).map(|n| n.to_string()).collect::<Vec<_>>());
+    }
+
+    // A settle asked for before the stream is dropped, and one asked for after,
+    // both return. The race where a request lands after the drop has drained the
+    // channel needs two threads, so no test here reaches it.
+    #[tokio::test(start_paused = true)]
+    async fn a_settle_returns_once_the_stream_is_dropped() {
+        for asked_after_drop in [false, true] {
+            let (go_tx, go) = oneshot::channel::<()>();
+            let (returned_tx, mut returned) = oneshot::channel();
+            let mut stream = create_settling_event_stream(move |tx, settle| async move {
+                sender(tx).send_trace("a").await;
+                if asked_after_drop {
+                    let _ = go.await;
+                }
+                let _ = returned_tx.send(settle.settled(&CancellationToken::new()).await);
+            });
+
+            assert_eq!(message(stream.next().await), "a");
+            drop(stream);
+            let _ = go_tx.send(());
+
+            assert_eq!(
+                arrives(&mut returned).await,
+                Some(SettleOutcome::Dropped),
+                "asked after the drop: {asked_after_drop}"
+            );
+        }
+    }
+
+    // A consumer that holds the stream without reading it cannot hold the run
+    // past a cancellation. The second wait finds the first one's request still
+    // in the channel, so it is the send that has to give way to the token.
+    #[tokio::test(start_paused = true)]
+    async fn a_canceled_token_ends_a_settle_the_consumer_never_answers() {
+        let token = CancellationToken::new();
+        let run_token = token.clone();
+        let (returned_tx, mut returned) = oneshot::channel();
+        let _stream = create_settling_event_stream(move |tx, settle| async move {
+            sender(tx).send_trace("a").await;
+            let first = settle.settled(&run_token).await;
+            let second = settle.settled(&run_token).await;
+            let _ = returned_tx.send((first, second));
+        });
+
+        assert!(not_yet(&mut returned).await, "settled with nothing read");
+        token.cancel();
+
+        assert_eq!(
+            arrives(&mut returned).await,
+            Some((SettleOutcome::Canceled, SettleOutcome::Canceled))
+        );
+    }
+
+    // A canceled run never settles as caught up, even when the consumer has
+    // answered too. Repeated so that an unbiased select, which picks between
+    // ready arms at random, fails here too.
+    #[tokio::test(start_paused = true)]
+    async fn a_canceled_run_settles_as_canceled_when_the_consumer_has_answered() {
+        for _ in 0..32 {
+            let token = CancellationToken::new();
+            let run_token = token.clone();
+            let (returned_tx, mut returned) = oneshot::channel();
+            let mut stream = create_settling_event_stream(move |_tx, settle| async move {
+                let _ = returned_tx.send(settle.settled(&run_token).await);
+            });
+
+            assert!(not_yet(&mut returned).await, "settled with nothing read");
+            token.cancel();
+            // Answers the waiting request before the producer runs again.
+            assert!(stream.next().await.is_none());
+
+            assert_eq!(arrives(&mut returned).await, Some(SettleOutcome::Canceled));
+        }
     }
 }
