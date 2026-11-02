@@ -43,11 +43,9 @@ fn init_tracing(verbose: bool) {
         // stderr, so a verbose run's stdout holds only the command's answer.
         // The log is plain whatever stderr's colors: its writer escapes every
         // escape sequence, so one tracing styled would show as text.
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(display_manager::VerboseLog)
-            .with_ansi(false)
-            .init();
+        tracing_subscriber::util::SubscriberInitExt::init(display_manager::verbose_subscriber(
+            display_manager::VerboseLog,
+        ));
     } else {
         // Use a no-op subscriber to disable output while keeping trace calls
         let subscriber = tracing_subscriber::registry();
@@ -173,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
         let use_colors = !args.no_color && section.as_ref().is_none_or(|s| s.use_colors);
         let verbose = args.verbose || section.as_ref().is_some_and(|s| s.verbose);
         init_tracing(verbose);
-        debug!("CLI arguments: {:#?}", &args);
+        debug!("CLI arguments: {:?}", &args);
         let display = DisplayManager::new(use_colors).with_verbosity(Verbosity::from(verbose));
         process::exit(commands::config::handle_validate(&display, &fs).code());
     }
@@ -248,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .map_or(args.verbose, |(config, _)| config.verbose()),
     );
-    debug!("CLI arguments: {:#?}", &args);
+    debug!("CLI arguments: {:?}", &args);
     if let Some(line) = config_debug {
         debug!("{line}");
     }
@@ -262,7 +260,7 @@ async fn main() -> anyhow::Result<()> {
             process::exit(event_processor::Exit::Failed.code());
         }
     };
-    debug!("Final config: {:#?}", &config);
+    debug!("Final config: {:?}", &config);
 
     let cancellation_token = CancellationToken::new();
     let display = DisplayManager::new(config.use_colors())

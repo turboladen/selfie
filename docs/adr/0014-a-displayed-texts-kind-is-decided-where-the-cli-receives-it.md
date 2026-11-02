@@ -15,6 +15,9 @@ directory selfie cannot use, and a command part can be `mkdir -p`.
 
 Amended 2026-11-01: §9 covers why an apply with `stop_on_error` stopped.
 
+Amended 2026-11-01: §1.8 and §3.5 escape each verbose log record with the strict set, so a record is
+one line.
+
 ## Context
 
 `selfie-cli` prints text from outside selfie: spec, package and environment names, paths, spec
@@ -91,7 +94,7 @@ Options considered:
    `Strict`, which `Name` and `DisplayPath` share; `Content`; `Prose`; `Output`; `CommandLine`, for
    a command selfie composes (§5.3); and `Guard`, which the printer's guard and a command a spec's
    author wrote (§5.4) share, since they escape the same set. The kind constructors and the guard
-   are its only callers.
+   are its only callers, with the verbose log's record escape (§1.8).
 4. Three sets, each decided by one function and pinned by one test table:
    - the **guard set**, what can act on the terminal or reorder text: general category Cc other than
      a newline and a tab, Zl, Zp, the bidi controls (U+061C, U+200E, U+200F, U+202A to U+202E,
@@ -114,11 +117,15 @@ Options considered:
 7. A list of names is shown by joining `Name` values with a `Literal` separator. No function escapes
    and joins in one step.
 8. The verbose log is the one writer whose input is not a `Shown`. tracing formats each event
-   itself, so `VerboseLog` holds the whole event and writes it through `guard_unstyled`, which
-   escapes every escape sequence along with the rest of the guard set. The log is never colored
-   (§8), so no styling has to survive, and nothing of an event that passes through the writer
-   reaches the terminal raw, whichever field it came from. The MCP server's own log is outside this
-   decision.
+   itself, so `VerboseLog` holds the whole record and escapes it with the strict set, every escape
+   sequence, line break and tab included, keeping only the line break that ends it. Once tracing has
+   formatted a message, a value inside it cannot be told from the format string, so selfie's own
+   text in a record is escaped the same way. The log is never colored (§8), so no styling has to
+   survive, and nothing of an event that passes through the writer reaches the terminal raw,
+   whichever field it came from and whether tracing formatted it with `Display` or `Debug`. A value
+   can still hold text that reads as another field, such as `key=value`, inside its own record, and
+   a value holding a backslash and an `n` reads like one holding a line feed: the log is for
+   reading, not for recovering a value's bytes. The MCP server's own log is outside this decision.
 
 ### 2. The kind is decided where the CLI receives a value
 
@@ -160,10 +167,10 @@ Options considered:
    the layout adds only its column. Printed at column 0, it is unchanged.
 4. A block whose lines must stay together, such as a diff, is rendered whole and then written in one
    draw, so no other line lands between two of its rows and a spinner does not redraw inside it.
-5. The verbose log hangs each event's lines after its first by four columns, so a line break in a
-   logged value cannot start a line that passes for a log line or for selfie's result line. It uses
-   `hang_text`, the `&str` loop `Shown::hang` calls, which the same source rule confines to the
-   layout modules (§7.4).
+5. A verbose log record is one line: every line break in it is escaped (§1.8), so a logged value
+   cannot start a line that passes for a log line or for selfie's result line, and the log indents
+   nothing. A log macro therefore never formats a value with pretty `Debug` (`{:#?}`), whose line
+   breaks would show as escapes.
 
 ### 4. One table style
 
@@ -272,8 +279,11 @@ when it is pasted.
    call. A clippy ban does not fit: it fires on the paths tests format into fixtures, and an
    `#[expect]` over a test module silences the CLI's other method bans along with it. The same walk
    holds the rest of this decision where no type can:
-   - only the layout modules call `Shown::hang` or `hang_text`, and no `lit!` or `shown!` literal
-     outside them indents the line after a line break (§3);
+   - only the layout modules call `Shown::hang`, whose loop `hang_text` is private to
+     `terminal_text.rs`, and no `lit!` or `shown!` literal outside them indents the line after a
+     line break (§3);
+   - no tracing macro in the CLI or the library formats a value with pretty `Debug` (`{:#?}`), since
+     a verbose log record is one line (§3.5);
    - the hidden constructors are called only in `terminal_text.rs`, test code included (§7.3), and
      only `tables.rs` builds a comfy-table table (§4.1);
    - a kind is built from one value, never from a string composed by `format!` or a join (§1.7);

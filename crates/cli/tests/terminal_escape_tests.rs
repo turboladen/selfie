@@ -9,10 +9,10 @@ pub mod common;
 
 use std::fs;
 
-use icu_properties::CodePointMapData;
-use icu_properties::props::GeneralCategory;
+use icu_properties::props::{DefaultIgnorableCodePoint, GeneralCategory};
+use icu_properties::{CodePointMapData, CodePointSetData};
 
-use common::{SELFIE_ENV, git, sandboxed_std_command, setup_default_test_config};
+use common::{FAILED, SELFIE_ENV, git, sandboxed_std_command, setup_default_test_config};
 
 // What each fixture field carries, written as YAML double-quoted escapes: CSI
 // (clear screen), OSC (retitle, ended by BEL), a right-to-left override, a
@@ -196,6 +196,25 @@ fn raw_leaks(output: &str, colored: bool, tabs: bool) -> Vec<String> {
         rest = &rest[c.len_utf8()..];
     }
     leaks
+}
+
+// Whether `c` is in the strict set but not `hostile`: a format or
+// default-ignorable character, a blank other than a space, or U+2800.
+fn strict_only(c: char) -> bool {
+    let category = CodePointMapData::<GeneralCategory>::new().get(c);
+    category == GeneralCategory::Format
+        || (category == GeneralCategory::SpaceSeparator && c != ' ')
+        || c == '\u{2800}'
+        || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
+}
+
+// What the verbose log holds raw that the strict set escapes, other than each
+// record's own line break.
+fn strict_leaks(log: &str) -> Vec<String> {
+    log.chars()
+        .filter(|&c| c != '\n' && (hostile(c) || strict_only(c)))
+        .map(|c| format!("U+{:04X}", c as u32))
+        .collect()
 }
 
 struct Run {
@@ -452,45 +471,95 @@ fn the_verbose_log_shows_a_spec_value_escaped_with_color() {
     check_the_log_escapes_a_spec_value(true);
 }
 
-// A check command over several lines is logged as one message, which keeps its
-// line breaks. Each line after the first is indented, so none can pass for a
-// log line of its own or start at the left margin with selfie's result mark.
+// A check command over several lines is logged as one message. Its line breaks
+// show escaped on the record's own line, so no line of it can pass for a log
+// line of its own or start at the left margin with selfie's result mark.
 #[test]
-fn a_logged_value_on_several_lines_starts_no_line_of_its_own() {
+fn a_logged_value_on_several_lines_stays_on_its_records_line() {
+    // A line that passes for a log record of its own.
+    let forged = "2026-10-31T00:00:00.000000Z  INFO forged";
     let temp = setup_default_test_config();
     fs::write(
         temp.path().join("packages").join("lines.yml"),
         format!(
             "name: lines\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    check: \": '\\n✓ fake \
-             line\\u202E\\U000E0041\\rz\\n2026-10-31T00:00:00.000000Z  INFO forged\\n'\"\n"
+             line\\u202E\\U000E0041\\rz\\n{forged}\\n'\"\n"
         ),
     )
     .unwrap();
     let run = run(&temp, &["--verbose", "package", "check", "lines"], false);
-    let forged: Vec<&str> = run
-        .log
+    let starts: Vec<&str> = run
+        .both
         .lines()
-        .filter(|line| line.contains("forged"))
+        .filter(|line| line.starts_with(forged))
         .collect();
-    assert!(forged.is_empty(), "{forged:#?}");
+    assert!(starts.is_empty(), "{starts:#?}");
     let fake: Vec<&str> = run
         .both
         .lines()
         .filter(|line| line.starts_with("✓ fake"))
         .collect();
     assert!(fake.is_empty(), "{fake:#?}");
-    // A later line of an event is guarded as its first is.
+    let leaks = strict_leaks(&run.log);
+    assert!(leaks.is_empty(), "{leaks:#?}");
     let leaks = raw_leaks(&run.both, false, false);
     assert!(leaks.is_empty(), "{leaks:#?}");
-    // Control: the command's lines reached the log, indented under its first,
-    // its override, tag character and carriage return escaped.
-    assert!(
-        run.both.contains(
-            "\n    ✓ fake line\\u{202e}\\u{e0041}\\rz\n    2026-10-31T00:00:00.000000Z  INFO forged\n"
+    // Control: the whole command reached the log, each record holding it on
+    // its own line, its line breaks, override, tag character and carriage
+    // return escaped.
+    let found: Vec<&str> = run
+        .log
+        .lines()
+        .filter(|line| line.contains("Found check command"))
+        .collect();
+    assert!(!found.is_empty(), "{}", run.both);
+    let whole = format!(r"'\n✓ fake line\u{{202e}}\u{{e0041}}\rz\n{forged}\n'");
+    for line in found {
+        assert!(line.contains(&whole), "{line}");
+    }
+}
+
+// A refusal logs its sentence in a field named `message`, which tracing formats
+// with Display. A target holding a zero-width space, an override and a line
+// feed shows them escaped on the warning's own line.
+fn check_a_refused_target_is_logged_escaped_on_one_line(command: &[&str]) {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::write(packages.join("zw"), "z\n").unwrap();
+    fs::write(
+        packages.join("zw.yaml"),
+        format!(
+            "name: zw\ndotfiles:\n  - source: zw\n    target: \"~/t\\u200B\\u202E\\nx\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
         ),
+    )
+    .unwrap();
+    // A directory at the target, which apply refuses to replace.
+    fs::create_dir_all(temp.path().join("t\u{200b}\u{202e}\nx")).unwrap();
+
+    let run = run(&temp, &[&["--verbose"], command].concat(), false);
+    assert_eq!(run.code, Some(FAILED), "{}", run.both);
+    // The sentence quotes the target with `'`; the `spec_target` field beside
+    // it is Debug, quoted with `"`, so only the sentence matches.
+    assert!(
+        run.log
+            .lines()
+            .any(|line| line.contains(" WARN ") && line.contains(r"t\u{200b}\u{202e}\nx'")),
         "{}",
         run.both
     );
+    let leaks = strict_leaks(&run.log);
+    assert!(leaks.is_empty(), "{leaks:#?}");
+}
+
+#[test]
+fn apply_logs_a_refused_target_escaped_on_one_line() {
+    check_a_refused_target_is_logged_escaped_on_one_line(&["apply"]);
+}
+
+#[test]
+fn drift_logs_a_refused_target_escaped_on_one_line() {
+    check_a_refused_target_is_logged_escaped_on_one_line(&["dotfiles", "drift"]);
 }
 
 // The log is plain on a colored stderr: it holds no escape sequence, raw or
