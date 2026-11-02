@@ -3129,7 +3129,8 @@ async fn a_name_in_both_directories_differing_in_case_deploys_only_the_packages_
     assert!(
         events.iter().any(|e| matches!(
             e,
-            PackageEvent::Warning { message, .. } if message.contains("Duplicate name 'bat'")
+            PackageEvent::ComposedWarning { warning, .. }
+                if warning.to_string().contains("Duplicate name 'bat'")
         )),
         "the collision must be reported; events: {events:?}"
     );
@@ -3164,8 +3165,8 @@ async fn an_unparsable_packages_spec_keeps_its_dotfiles_namesake_from_deploying(
     assert!(
         all.iter().any(|e| matches!(
             e,
-            PackageEvent::Warning { message, .. }
-                if message.contains("Not using 'bat' from dotfiles/")
+            PackageEvent::ComposedWarning { warning, .. }
+                if warning.to_string().contains("Not using 'bat' from dotfiles/")
         )),
         "the skipped namesake must be reported; events: {all:?}"
     );
@@ -18107,8 +18108,11 @@ mod collection_findings {
         };
         let duplicate = events
             .iter()
-            .position(|e| matches!(e,
-                PackageEvent::Warning { message, .. } if message.starts_with("Duplicate name 'mmm'")))
+            .position(|e| {
+                matches!(e,
+                PackageEvent::ComposedWarning { warning, .. }
+                    if warning.to_string().starts_with("Duplicate name 'mmm'"))
+            })
             .expect("the duplicate-name warning");
         let aaa = refused_name("aaa").expect("the packages/ ambiguity");
         let zzz = refused_name("zzz").expect("the dotfiles/ ambiguity");
@@ -23364,8 +23368,26 @@ mod warning_sentences {
         write_package_yaml(&broken.package_dir, "bat", "name: [unterminated\n");
         write_package_yaml(&broken.dotfiles_dir, "bat", "name: bat\n");
 
-        let loaded = warning_messages(&applied(&loaded, FakeCommandRunner::new()).await);
-        let broken = warning_messages(&applied(&broken, FakeCommandRunner::new()).await);
+        let loaded_events = applied(&loaded, FakeCommandRunner::new()).await;
+        let broken_events = applied(&broken, FakeCommandRunner::new()).await;
+        // The name is a name part of the warning that says it.
+        for events in [&loaded_events, &broken_events] {
+            let named: Vec<Vec<String>> = events
+                .iter()
+                .filter_map(|event| match event {
+                    PackageEvent::ComposedWarning {
+                        warning: selfie::package::event::ComposedWarning::Message(message),
+                        ..
+                    } if message.to_string().contains("'bat'") => {
+                        Some(selfie::parts::values_of(message))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(named, [["bat"]], "{events:?}");
+        }
+        let loaded = warning_messages(&loaded_events);
+        let broken = warning_messages(&broken_events);
 
         assert!(
             loaded.contains(

@@ -6,6 +6,7 @@
 use std::path::PathBuf;
 
 use crate::package::event::OperationFailure;
+use crate::parts::Message;
 
 /// Something collecting packages found, in the order it found it.
 // One list for both kinds, so the events leave in the order the findings were
@@ -83,13 +84,13 @@ pub(crate) enum ApplyWarning {
         reason: crate::fs::AbsentReason,
     },
     /// Something worth saying about one package name, already worded.
-    Named { name: String, message: String },
+    Named { name: String, message: Message },
 }
 
 impl ApplyWarning {
     async fn send(&self, sender: &crate::package::event::EventSender) {
         // A skipped spec travels typed so each adapter renders it; everything else
-        // is already a sentence.
+        // is already worded.
         match self {
             Self::SkippedSpec(error) => sender.send_spec_skipped(error.clone()).await,
             Self::AbsentDotfilesDirectory { path, reason } => {
@@ -100,7 +101,7 @@ impl ApplyWarning {
                     })
                     .await;
             }
-            Self::Named { message, .. } => sender.send_warning(message.clone()).await,
+            Self::Named { message, .. } => sender.send_composed_warning(message.clone()).await,
         }
     }
 }
@@ -297,6 +298,7 @@ pub(crate) fn no_such_package(
 mod tests {
     use super::*;
     use crate::package::event::BaseKind;
+    use crate::parts::Parts;
 
     fn ambiguity(name: &str) -> Finding {
         Finding::Refusal(CollectionRefusal::AmbiguousName {
@@ -329,7 +331,7 @@ mod tests {
         let named = |name: &str| {
             Finding::Warning(ApplyWarning::Named {
                 name: name.to_string(),
-                message: String::new(),
+                message: Parts::new().into(),
             })
         };
 

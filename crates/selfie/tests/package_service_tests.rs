@@ -1791,12 +1791,9 @@ mod validate_all_covers_standalone_specs {
 
         assert_successful_operation(&events);
         assert_eq!(results(&events), [("gemrc".to_string(), Outcome::Clean)]);
-        let warnings: Vec<_> = events
+        let warnings: Vec<String> = events
             .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } => Some(message.as_str()),
-                _ => None,
-            })
+            .filter_map(test_common::warning_text)
             .collect();
         assert!(
             warnings
