@@ -216,6 +216,18 @@ impl<'a> Parts<'a> {
         self
     }
 
+    // The same parts with the first letter upper case, when they start with
+    // selfie's words. A sentence starting with a value keeps it as it is.
+    pub(crate) fn capitalized(mut self) -> Self {
+        if let Some(Part::Text(text)) = self.0.first_mut() {
+            let mut chars = text.chars();
+            if let Some(first) = chars.next() {
+                *text = Cow::Owned(first.to_uppercase().chain(chars).collect());
+            }
+        }
+        self
+    }
+
     // The same parts, holding their own copies of every value, with each run
     // of adjacent texts merged into one.
     fn into_owned(self) -> Parts<'static> {

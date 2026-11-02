@@ -207,8 +207,8 @@ impl InvalidEntry<'_> {
 
 crate::parts::display_from_parts!(InvalidEntry<'_>);
 
-// An unknown key enters as the text that words it, since that text is shared
-// with the other levels' refusals; a var name is a name.
+// An unknown key enters as the parts that word it, shared with the other
+// levels' refusals, with the key as a name; a var name is a name.
 impl crate::parts::Composed for InvalidEntry<'_> {
     fn parts(&self) -> crate::parts::Parts<'_> {
         let parts = crate::parts::Parts::new();
@@ -216,7 +216,7 @@ impl crate::parts::Composed for InvalidEntry<'_> {
             Self::Shape => parts.text(
                 "set exactly one of 'source' or 'command', with 'vars' only alongside 'source'",
             ),
-            Self::UnknownKeys(keys) => parts.text(describe_unknown_keys::<DotfileField>(keys)),
+            Self::UnknownKeys(keys) => parts.append(describe_unknown_keys::<DotfileField>(keys)),
             Self::VarName(name) => parts.text("dotfile var name '").name(*name).text(
                 "' cannot be substituted, so the placeholder would deploy verbatim; names must \
                  match [A-Za-z_][A-Za-z0-9_]*",
@@ -617,8 +617,8 @@ pub(crate) fn dotfile_field(index: usize) -> String {
 pub struct UnknownKey {
     /// The key as the file spelled it, for a caller naming its path.
     pub(crate) key: String,
-    /// What is wrong with it and what to do about it.
-    pub(crate) message: String,
+    /// What is wrong with it and what to do about it, naming the key as a name.
+    pub(crate) message: crate::parts::Message,
     /// Whether the name collides with a real field of its level, which earns the
     /// level's [`KnownFields::ANCHOR_ADVICE`].
     pub(crate) shadows: bool,
@@ -634,59 +634,66 @@ impl UnknownKey {
     /// What is wrong with the key and what to do about it, without the anchor
     /// advice the whole refusal carries.
     #[must_use]
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> &crate::parts::Message {
         &self.message
     }
 }
 
 /// `keys` as [`describe_unknown_keys`] words them, without the anchor advice.
 pub(crate) fn unknown_key_messages(keys: &[UnknownKey]) -> String {
-    join_messages(keys.iter())
+    join_messages(keys).to_string()
 }
 
-fn join_messages<'a>(keys: impl Iterator<Item = &'a UnknownKey>) -> String {
-    let messages: Vec<&str> = keys.map(|key| key.message.as_str()).collect();
-    messages.join("; ")
+fn join_messages<'a>(keys: impl IntoIterator<Item = &'a UnknownKey>) -> crate::parts::Parts<'a> {
+    crate::parts::Parts::joined(keys, "; ", |key| {
+        crate::parts::Composed::parts(&key.message)
+    })
 }
 
 /// `keys`, found at level `F`: the keys named like a real field, then `F`'s anchor
 /// advice, then the plain misspellings, so the advice sits beside the keys it is
 /// about. Ends without a period, like every other reason selfie gives.
-pub(crate) fn describe_unknown_keys<F: KnownFields>(keys: &[UnknownKey]) -> String {
+pub(crate) fn describe_unknown_keys<F: KnownFields>(
+    keys: &[UnknownKey],
+) -> crate::parts::Parts<'_> {
     let (shadowing, plain): (Vec<&UnknownKey>, Vec<&UnknownKey>) =
         keys.iter().partition(|key| key.shadows);
     let mut sentences = Vec::new();
     if !shadowing.is_empty() {
-        let messages = join_messages(shadowing.into_iter());
-        sentences.push(format!("{messages}. {}", F::ANCHOR_ADVICE));
+        sentences.push(join_messages(shadowing).text(". ").text(F::ANCHOR_ADVICE));
     }
     if !plain.is_empty() {
-        sentences.push(join_messages(plain.into_iter()));
+        sentences.push(join_messages(plain));
     }
-    join_sentences(sentences)
+    join_sentence_parts(sentences)
 }
 
 // Joins clauses into sentences with ". ", capitalizing every one after the
 // first. Each clause starts lowercase, because the first follows a caller's
 // colon, so only the later ones need a capital.
 fn join_sentences(clauses: impl IntoIterator<Item = impl AsRef<str>>) -> String {
-    let mut joined = String::new();
-    for (i, clause) in clauses.into_iter().enumerate() {
-        if i == 0 {
-            joined.push_str(clause.as_ref());
-        } else {
-            joined.push_str(". ");
-            joined.push_str(&capitalize(clause.as_ref()));
-        }
-    }
-    joined
+    join_sentence_parts(
+        clauses
+            .into_iter()
+            .map(|clause| crate::parts::Parts::new().text(clause.as_ref().to_string())),
+    )
+    .to_string()
 }
 
-fn capitalize(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
+// The rule `join_sentences` states, for clauses built from parts.
+pub(crate) fn join_sentence_parts<'a>(
+    clauses: impl IntoIterator<Item = crate::parts::Parts<'a>>,
+) -> crate::parts::Parts<'a> {
+    clauses
+        .into_iter()
+        .enumerate()
+        .fold(crate::parts::Parts::new(), |joined, (i, clause)| {
+            if i == 0 {
+                joined.append(clause)
+            } else {
+                joined.text(". ").append(clause.capitalized())
+            }
+        })
 }
 
 // Asserts that `fragments` occur in `haystack` in this order, each after the
@@ -720,14 +727,14 @@ pub(crate) fn unknown_key<F: KnownFields>(key: &str) -> Option<UnknownKey> {
 
     Some(UnknownKey {
         key: key.to_string(),
-        message: describe_unknown_key_in::<F>(key),
+        message: describe_unknown_key_in::<F>(key).into(),
         shadows,
     })
 }
 
 /// Say what is wrong with one unrecognized key at level `F`, and what to do about
 /// it, naming `F`'s fields.
-fn describe_unknown_key_in<F: KnownFields>(key: &str) -> String {
+fn describe_unknown_key_in<F: KnownFields>(key: &str) -> crate::parts::Parts<'_> {
     // The one wording for an unrecognized key at a level, reached through
     // `unknown_key`, so no two surfaces describe the same key differently.
     //
@@ -737,15 +744,15 @@ fn describe_unknown_key_in<F: KnownFields>(key: &str) -> String {
     // `_target: &t` anchor aliased by `target: *t`. So it names the ambiguity and
     // gives the remedy for each reading.
     if let Some(field) = key.strip_prefix('_').filter(|_| shadows_field::<F>(key)) {
-        format!(
-            "'{key}' cannot be told apart from a misspelling of the '{field}' field; \
-             rename it, or correct it to '{field}'"
-        )
+        crate::parts::Parts::new().text("'").name(key).text(format!(
+            "' cannot be told apart from a misspelling of the '{field}' field; rename it, \
+                 or correct it to '{field}'"
+        ))
     } else {
-        format!(
-            "unknown field '{key}'; expected one of: {}",
-            F::NAMES.join(", ")
-        )
+        crate::parts::Parts::new()
+            .text("unknown field '")
+            .name(key)
+            .text(format!("'; expected one of: {}", F::NAMES.join(", ")))
     }
 }
 
@@ -2082,7 +2089,7 @@ mod package_tests {
     #[test]
     fn a_shadowing_key_s_advice_names_its_own_level() {
         fn advice<F: KnownFields>(key: &str) -> String {
-            describe_unknown_keys::<F>(&[unknown_key::<F>(key).unwrap()])
+            describe_unknown_keys::<F>(&[unknown_key::<F>(key).unwrap()]).to_string()
         }
         assert!(advice::<PackageField>("_dotfiles").contains("a top-level field"));
         assert!(advice::<EnvironmentField>("_check").contains("a field of this environment"));
@@ -2513,14 +2520,14 @@ vars: {}
     // list for its own level.
     #[test]
     fn an_unknown_key_is_described_against_the_list_in_force() {
-        let shadowed = describe_unknown_key_in::<PackageField>("_dotfiles");
+        let shadowed = describe_unknown_key_in::<PackageField>("_dotfiles").to_string();
         assert!(
             shadowed.contains("cannot be told apart from a misspelling of the 'dotfiles' field"),
             "got: {shadowed}"
         );
         assert!(shadowed.contains("rename it"), "got: {shadowed}");
 
-        let plain = describe_unknown_key_in::<PackageField>("configs");
+        let plain = describe_unknown_key_in::<PackageField>("configs").to_string();
         assert!(plain.contains("unknown field 'configs'"), "got: {plain}");
         assert!(
             plain.contains("dotfiles"),
@@ -2570,7 +2577,7 @@ environments:
     install: "echo hi"
 "#;
         let keys = checked_keys(yaml);
-        let messages: Vec<&str> = keys.iter().map(|key| key.message.as_str()).collect();
+        let messages: Vec<String> = keys.iter().map(|key| key.message.to_string()).collect();
 
         assert_eq!(
             messages.len(),
@@ -2643,7 +2650,7 @@ environments:
         };
         assert_eq!(keys.len(), 1, "{keys:?}");
         assert!(
-            keys[0].message.contains("_dotfiles"),
+            keys[0].message.to_string().contains("_dotfiles"),
             "got: {}",
             keys[0].message
         );

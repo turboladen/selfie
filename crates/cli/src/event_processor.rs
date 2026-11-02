@@ -443,7 +443,7 @@ impl EventProcessor {
                                     self.display.print_error(shown!(
                                         "Parse error in package `{}`: {}",
                                         Name::new(&name),
-                                        received::sentence(other)
+                                        received::composed(other)
                                     ));
                                 }
                             }

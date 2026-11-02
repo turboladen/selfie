@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use crate::package::event::OperationFailure;
-use crate::parts::Message;
+use crate::parts::{Composed, Message};
 
 /// Something collecting packages found, in the order it found it.
 // One list for both kinds, so the events leave in the order the findings were
@@ -136,6 +136,22 @@ pub enum CollectionRefusal {
     },
 }
 
+crate::parts::display_from_parts!(CollectionRefusal);
+
+// A spec that could not be loaded is its parse error's own sentence, which
+// leaves out the file's path.
+impl Composed for CollectionRefusal {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        match self {
+            Self::UnreadableDotfilesDirectory(unreadable) => unreadable.parts(),
+            Self::AmbiguousName { name, paths, .. } => {
+                crate::package::port::ambiguous_files_parts(name, paths)
+            }
+            Self::UnloadableSpec { error, .. } => error.parts(),
+        }
+    }
+}
+
 impl CollectionRefusal {
     /// What a run could not compare its targets with because of this refusal:
     /// the file, every file of an ambiguous name, or the dotfiles directory.
@@ -173,18 +189,10 @@ impl CollectionRefusal {
         matches!(self, Self::UnreadableDotfilesDirectory(_))
     }
 
-    /// This refusal as a sentence for a person. A spec that could not be loaded
-    /// is its parse error's own [`Display`](std::fmt::Display), which leaves out
-    /// the file's path.
+    /// This refusal as a sentence for a person, as its parts write it.
     #[must_use]
     pub fn sentence(&self) -> String {
-        match self {
-            Self::UnreadableDotfilesDirectory(unreadable) => unreadable.to_string(),
-            Self::AmbiguousName { name, paths, .. } => {
-                crate::package::port::ambiguous_files_sentence(name, paths)
-            }
-            Self::UnloadableSpec { error, .. } => error.to_string(),
-        }
+        self.to_string()
     }
 
     // Each refusal leaves as the event its kind calls for: a directory as its

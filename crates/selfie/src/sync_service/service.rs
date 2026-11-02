@@ -2261,9 +2261,14 @@ mod tests {
     async fn collect_drift_summary_keeps_warnings_and_skipped_specs_in_order() {
         let skipped = crate::package::port::PackageParseError::new(
             PathBuf::from("/packages/bat.yml"),
-            crate::package::port::PackageParseKind::Unreadable {
-                reason: "not valid YAML".to_string(),
-            },
+            crate::package::port::PackageParseKind::Unreadable(
+                crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                    directory: "/packages".into(),
+                    cause: std::sync::Arc::new(std::io::Error::from(
+                        std::io::ErrorKind::PermissionDenied,
+                    )),
+                },
+            ),
         );
         let events = vec![
             PackageEvent::Warning {
@@ -2739,9 +2744,14 @@ mod tests {
             let operation_info = test_operation_info();
             let skipped = crate::package::port::PackageParseError::new(
                 PathBuf::from("/packages/bat.yml"),
-                crate::package::port::PackageParseKind::Unreadable {
-                    reason: "not valid YAML".to_string(),
-                },
+                crate::package::port::PackageParseKind::Unreadable(
+                    crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                        directory: "/packages".into(),
+                        cause: std::sync::Arc::new(std::io::Error::from(
+                            std::io::ErrorKind::PermissionDenied,
+                        )),
+                    },
+                ),
             );
             let events = vec![
                 PackageEvent::Warning {
@@ -2946,9 +2956,14 @@ mod tests {
                 operation_info: operation_info.clone(),
                 error: crate::package::port::PackageParseError::new(
                     PathBuf::from(format!("/packages/{name}.yml")),
-                    crate::package::port::PackageParseKind::Unreadable {
-                        reason: "not valid YAML".to_string(),
-                    },
+                    crate::package::port::PackageParseKind::Unreadable(
+                        crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                            directory: "/packages".into(),
+                            cause: std::sync::Arc::new(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied,
+                            )),
+                        },
+                    ),
                 ),
             };
             let events = vec![
@@ -3200,9 +3215,14 @@ mod tests {
                 operation_info: operation_info.clone(),
                 error: crate::package::port::PackageParseError::new(
                     PathBuf::from(format!("/packages/{name}.yml")),
-                    crate::package::port::PackageParseKind::Unreadable {
-                        reason: "not valid YAML".to_string(),
-                    },
+                    crate::package::port::PackageParseKind::Unreadable(
+                        crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                            directory: "/packages".into(),
+                            cause: std::sync::Arc::new(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied,
+                            )),
+                        },
+                    ),
                 ),
             };
             let events = vec![

@@ -378,9 +378,14 @@ mod tests {
             warning(Shortfall::Refused(CollectionRefusal::UnloadableSpec {
                 error: crate::package::port::PackageParseError::new(
                     "/p/my broken.yml",
-                    crate::package::port::PackageParseKind::Unreadable {
-                        reason: "a fifo".to_string(),
-                    },
+                    crate::package::port::PackageParseKind::Unreadable(
+                        crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                            directory: "/packages".into(),
+                            cause: std::sync::Arc::new(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied
+                            )),
+                        }
+                    ),
                 ),
                 base: BaseKind::PackageDirectory,
             })),
@@ -429,9 +434,14 @@ mod tests {
             values(Shortfall::Refused(CollectionRefusal::UnloadableSpec {
                 error: crate::package::port::PackageParseError::new(
                     "/p/b\u{200B}roken.yml",
-                    crate::package::port::PackageParseKind::Unreadable {
-                        reason: "a fifo".to_string(),
-                    },
+                    crate::package::port::PackageParseKind::Unreadable(
+                        crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                            directory: "/packages".into(),
+                            cause: std::sync::Arc::new(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied
+                            )),
+                        }
+                    ),
                 ),
                 base: BaseKind::PackageDirectory,
             })),

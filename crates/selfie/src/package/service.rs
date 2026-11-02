@@ -804,9 +804,9 @@ mod tests {
             ),
             (
                 "Unreadable",
-                PackageParseKind::Unreadable {
-                    reason: "the home directory could not be determined".to_string(),
-                },
+                PackageParseKind::Unreadable(
+                    crate::package::port::UnreadableSpecFile::HomeDirectory,
+                ),
             ),
             (
                 "IrregularFile",
@@ -816,9 +816,9 @@ mod tests {
             ),
             (
                 "Refused",
-                PackageParseKind::Refused {
-                    reason: "it is a symlink".to_string(),
-                },
+                PackageParseKind::Refused(crate::package::port::RefusedSpecFile::Symlink(
+                    crate::package::port::SymlinkReason { to: None },
+                )),
             ),
             (
                 "InvalidName",
@@ -836,9 +836,9 @@ mod tests {
         }
     }
 
-    // The boundary of the invariant above. `Io`, `Refused` and `Unreadable` carry
-    // free text, so a payload can arrive already naming the file, and the warning
-    // then says it twice.
+    // The boundary of the invariant above. `Io`, `Refused` and `Unreadable` can
+    // carry a path of their own, so a payload can arrive already naming the file,
+    // and the warning then says it twice.
     //
     // Left open deliberately: closing it means inspecting a payload's text for the
     // path before prefixing, which is the string-matching this area was rewritten
@@ -860,15 +860,20 @@ mod tests {
             ),
             (
                 "Refused",
-                PackageParseKind::Refused {
-                    reason: format!("{} is a symlink", path.display()),
-                },
+                PackageParseKind::Refused(crate::package::port::RefusedSpecFile::Symlink(
+                    crate::package::port::SymlinkReason {
+                        to: Some(path.clone()),
+                    },
+                )),
             ),
             (
                 "Unreadable",
-                PackageParseKind::Unreadable {
-                    reason: format!("{} could not be opened", path.display()),
-                },
+                PackageParseKind::Unreadable(
+                    crate::package::port::UnreadableSpecFile::CannotCreateIn {
+                        directory: path.clone(),
+                        cause: std::io::Error::other("could not be opened").into(),
+                    },
+                ),
             ),
         ];
 

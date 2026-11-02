@@ -93,7 +93,7 @@ fn display_spec_list(data: &SpecListData, config: &CliConfig, display: &DisplayM
         let text = shown!(
             "Invalid: {} — {}",
             DisplayPath::of(invalid.package_path()),
-            crate::received::parse_error(invalid)
+            crate::received::composed(invalid)
         );
         print_issue_line(display, text, use_colors);
     }

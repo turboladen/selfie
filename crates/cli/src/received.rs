@@ -275,24 +275,11 @@ fn spec_name_rule() -> Prose {
     Prose::new(selfie::package::SPEC_NAME_RULE)
 }
 
-// Why a spec file did not load, without its path. A file whose name breaks the
-// rule names it as a name, as the listing beside it does.
-fn parse_kind(kind: &PackageParseKind) -> Shown {
-    match kind {
-        PackageParseKind::InvalidName { name } => shown!(
-            "its name '{}' is not a valid spec name. Rename the file: {}.",
-            Name::new(name),
-            spec_name_rule()
-        ),
-        other => sentence(other).into(),
-    }
-}
-
 /// Why a spec file did not load, without where in it.
 pub(crate) fn parse_reason(error: &PackageParseError) -> Shown {
     match error.kind() {
         PackageParseKind::Yaml { .. } => message(error.reason()).into(),
-        other => parse_kind(other),
+        other => composed(other),
     }
 }
 
@@ -342,7 +329,7 @@ pub(crate) fn package_error(error: &PackageError) -> Shown {
             "Parse error in package `{}` from {}: {}",
             Name::new(name),
             DisplayPath::of(failed_file),
-            parse_error(cause)
+            composed(cause)
         ),
         PackageError::UnreadableFile {
             name,
@@ -353,7 +340,7 @@ pub(crate) fn package_error(error: &PackageError) -> Shown {
             "Cannot read package `{}` from {}: {}",
             Name::new(name),
             DisplayPath::of(failed_file),
-            parse_error(cause)
+            composed(cause)
         ),
         PackageError::UnusableName {
             name,
@@ -364,7 +351,7 @@ pub(crate) fn package_error(error: &PackageError) -> Shown {
             "Cannot use package `{}` from {}: {}",
             Name::new(name),
             DisplayPath::of(failed_file),
-            parse_error(cause)
+            composed(cause)
         ),
         PackageError::MultiplePackagesFound {
             name,
@@ -383,7 +370,7 @@ pub(crate) fn package_error(error: &PackageError) -> Shown {
                 "Package `{}` not found in path {}{}",
                 Name::new(name),
                 DisplayPath::of(packages_path),
-                message(&hint)
+                composed(&hint)
             )
         }
         other => sentence(other).into(),
@@ -468,7 +455,7 @@ fn skipping(path: &std::path::Path, reason: impl Into<Shown>) -> Shown {
 
 /// The warning for a spec file a run skips because it does not parse.
 pub(crate) fn skipped_spec(error: &PackageParseError) -> Shown {
-    skipping(error.package_path(), parse_error(error))
+    skipping(error.package_path(), composed(error))
 }
 
 /// The warning for a spec file a listing leaves out because several files
@@ -651,11 +638,6 @@ impl From<&EnvironmentStatusData> for Environment {
             recommend_statuses: statuses(&data.recommend_statuses),
         }
     }
-}
-
-/// A spec file that did not load, as the library words its failure.
-pub(crate) fn parse_error(error: &PackageParseError) -> Shown {
-    parse_kind(error.kind())
 }
 
 /// One spec in `spec list`.
@@ -1071,7 +1053,7 @@ mod tests {
                 name: "a b".to_string(),
             },
         );
-        assert_eq!(parse_error(&invalid).as_str(), invalid.to_string());
+        assert_eq!(composed(&invalid).as_str(), invalid.to_string());
         assert_eq!(
             skipped_spec(&invalid).as_str(),
             selfie::package::service::skipped_spec_warning(&invalid)
@@ -1414,9 +1396,14 @@ mod tests {
             ApplyStop::Collection(CollectionRefusal::UnloadableSpec {
                 error: PackageParseError::new(
                     format!("{root}/bad.yml"),
-                    PackageParseKind::Unreadable {
-                        reason: "a fifo".to_string(),
-                    },
+                    PackageParseKind::Unreadable(
+                        selfie::package::port::UnreadableSpecFile::CannotCreateIn {
+                            directory: "/packages".into(),
+                            cause: std::sync::Arc::new(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied,
+                            )),
+                        },
+                    ),
                 ),
                 base: BaseKind::PackageDirectory,
             }),
