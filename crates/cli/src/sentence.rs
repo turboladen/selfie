@@ -161,10 +161,10 @@ pub(crate) fn noted_suggestion(text: Shown, command: &SuggestedCommand, shown: &
 }
 
 /// `command`, a command the library suggests, as the CLI shows it: its
-/// program's words, then its operand's.
+/// program's words, then the words of its operand or operands.
 pub(crate) fn suggested(command: &SuggestedCommand) -> Command {
-    // The library quoted the operand when it built the command, so the word is
-    // shown as it is and never quoted again.
+    // The library quoted the operand or operands when it built the command, so
+    // the words are shown as they are and never quoted again.
     // No catch-all, so a program the library adds fails to compile here until
     // the CLI says how to show it.
     match command.program() {

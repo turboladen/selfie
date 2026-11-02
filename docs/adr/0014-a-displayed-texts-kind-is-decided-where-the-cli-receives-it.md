@@ -357,7 +357,7 @@ writer escapes every escape sequence (§1.8).
    how to show it. A `Composed` type is not a `Sentence` (§2.2), so `sentence()` refuses it at
    compile time, and a source rule (§7.4) keeps every `Composed` type off the list of `Sentence`s.
 5. A `Command` part is a `SuggestedCommand`, built only by its three constructors.
-   `SuggestedCommand::selfie` quotes a name as one shell word through `selfie::fs::shell_operand`;
+   `SuggestedCommand::apply` quotes a name as one shell word through `selfie::fs::shell_operand`;
    `make_directory` quotes a path through `selfie::fs::shell_quote`, which keeps a leading `~/`
    outside the quotes; `track_dotfile` quotes a spec name and a target each as one shell word, with
    one `--` ahead of both when either starts with a dash. Each refuses an operand that holds NUL,

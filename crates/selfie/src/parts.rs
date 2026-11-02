@@ -45,7 +45,7 @@ impl Subcommand {
     }
 }
 
-/// What a suggested command runs, before its operand.
+/// What a suggested command runs, before its operand or operands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Program {
     /// `selfie` and a subcommand.
@@ -55,7 +55,8 @@ pub enum Program {
 }
 
 impl fmt::Display for Program {
-    /// Writes the words before the operand: `selfie apply`, `mkdir -p --`.
+    /// Writes the words before the operand or operands: `selfie apply`,
+    /// `mkdir -p --`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Selfie(subcommand) => write!(f, "selfie {}", subcommand.word()),
@@ -77,13 +78,13 @@ pub struct SuggestedCommand {
 }
 
 impl SuggestedCommand {
-    /// The command running `subcommand` on `operand`, quoted as one shell word
+    /// The command running `selfie apply` on `operand`, quoted as one shell word
     /// after `--` when it starts with a dash, or `None` when `operand` holds
     /// NUL, which no shell word can carry.
     #[must_use]
-    pub fn selfie(subcommand: Subcommand, operand: &str) -> Option<Self> {
+    pub fn apply(operand: &str) -> Option<Self> {
         crate::fs::shell_operand(operand).map(|word| Self {
-            program: Program::Selfie(subcommand),
+            program: Program::Selfie(Subcommand::Apply),
             word,
         })
     }
@@ -127,7 +128,7 @@ impl SuggestedCommand {
 }
 
 impl fmt::Display for SuggestedCommand {
-    /// Writes the program's words, then the operand's.
+    /// Writes the program's words, then the words of its operand or operands.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.program, self.word)
     }
@@ -425,9 +426,7 @@ mod tests {
         let mkdir = |path: &str| {
             SuggestedCommand::make_directory(Path::new(path)).map(|command| command.to_string())
         };
-        let apply = |name: &str| {
-            SuggestedCommand::selfie(Subcommand::Apply, name).map(|command| command.to_string())
-        };
+        let apply = |name: &str| SuggestedCommand::apply(name).map(|command| command.to_string());
         let some = |text: &str| Some(text.to_string());
 
         assert_eq!(

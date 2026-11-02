@@ -45,8 +45,8 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// The spec as a sentence names it, as parts with its name a name:
-    /// `package 'ruby'` or `standalone dotfile 'gemrc'`.
+    /// The spec's label as a sentence names it, such as `package 'ruby'` or
+    /// `standalone dotfile 'gemrc'`, as parts with the spec's name as a name.
     #[must_use]
     pub(crate) fn label(&self) -> Parts<'_> {
         let kind = match self.origin {
