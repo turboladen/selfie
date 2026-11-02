@@ -45,8 +45,8 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// The spec as a sentence names it, as parts with its name a name:
-    /// `package 'ruby'` or `standalone dotfile 'gemrc'`.
+    /// The spec's label as a sentence names it, such as `package 'ruby'` or
+    /// `standalone dotfile 'gemrc'`, as parts with the spec's name as a name.
     #[must_use]
     pub(crate) fn label(&self) -> Parts<'_> {
         let kind = match self.origin {
@@ -267,7 +267,7 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> Me
 pub fn already_tracked_refusal<F: FileSystem>(
     filesystem: &F,
     target: &TargetPath,
-) -> Option<String> {
+) -> Option<Message> {
     guard_refusal(filesystem, target)
         .as_ref()
         .map(already_tracked_refusal_warning)
@@ -283,8 +283,11 @@ pub fn already_tracked_refusal<F: FileSystem>(
 // kind: a repository-file entry is refused, while a secret-bearing one is written
 // by `write_file_private`, which replaces a symlink at the final component. This
 // breaks the silence and leaves the verdict to the command that has one.
-fn already_tracked_refusal_warning(refusal: &FileSystemError) -> String {
-    format!("{refusal}. The entry stays as it is, and this command wrote nothing.")
+fn already_tracked_refusal_warning(refusal: &FileSystemError) -> Message {
+    refusal
+        .parts()
+        .text(". The entry stays as it is, and this command wrote nothing.")
+        .into()
 }
 
 // Where an entry's repository file sits, for the already-tracked answer.
@@ -615,7 +618,7 @@ where
         // deploy. With matching content drift answers `None` and has no line to
         // carry a reason either, so both commands were silent about it.
         if let Some(warning) = already_tracked_refusal(filesystem, &expanded_target) {
-            sender.send_warning(warning).await;
+            sender.send_composed_warning(warning).await;
         }
 
         // The entry's own paths, not the argument and not the target: "already
@@ -738,7 +741,7 @@ where
         match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
             StateLoad::Usable(loaded) => {
                 if let Some(warning) = loaded.directory_warning() {
-                    sender.send_deploy_state_warning(warning.clone()).await;
+                    sender.send_composed_warning(warning.clone()).await;
                 }
                 Recorder::new(loaded)
             }
@@ -1088,7 +1091,9 @@ mod tests {
             })
         });
 
-        let warning = already_tracked_refusal(&fs, &target).expect("both stats answered");
+        let warning = already_tracked_refusal(&fs, &target)
+            .expect("both stats answered")
+            .to_string();
         assert!(
             warning.contains("symlink"),
             "the symlink must answer first: {warning}"
@@ -1520,6 +1525,65 @@ mod tests {
             save("/d/gone.").contains("it points at /d/gone.. The copy at"),
             "{}",
             save("/d/gone.")
+        );
+    }
+
+    // An already-tracked target that is a symlink or a fifo is reported in these
+    // words, whole.
+    #[test]
+    fn an_already_tracked_refusal_is_worded_whole() {
+        let target = repository_path(Path::new("/home/u/my rc"));
+        let warning = |link: bool| {
+            let mut fs = MockFileSystem::default();
+            fs.expect_symlink_refusal().returning(move |path| {
+                link.then(|| FileSystemError::SymlinkedTarget {
+                    path: path.path().to_path_buf(),
+                    points_to: Some(PathBuf::from("/home/u/my vault")),
+                })
+            });
+            fs.expect_irregular_target_refusal().returning(|path| {
+                Some(FileSystemError::IrregularTarget {
+                    path: path.path().to_path_buf(),
+                    kind: "named pipe (fifo)",
+                })
+            });
+            already_tracked_refusal(&fs, &target).map(|warning| warning.to_string())
+        };
+
+        assert_eq!(
+            warning(true),
+            Some(
+                "/home/u/my rc: target is a symlink to '/home/u/my vault' and selfie will not \
+                 write through it. The entry stays as it is, and this command wrote nothing."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            warning(false),
+            Some(
+                "/home/u/my rc: target resolves to a named pipe (fifo) and selfie will not write \
+                 to it. The entry stays as it is, and this command wrote nothing."
+                    .to_string()
+            )
+        );
+    }
+
+    // An already-tracked target and a link's destination are path parts.
+    #[test]
+    fn an_already_tracked_refusal_names_its_paths_as_parts() {
+        let target = repository_path(Path::new("/h/r\u{200B}c"));
+        let mut fs = MockFileSystem::default();
+        fs.expect_symlink_refusal().returning(|path| {
+            Some(FileSystemError::SymlinkedTarget {
+                path: path.path().to_path_buf(),
+                points_to: Some(PathBuf::from("/h/v\u{200B}ault")),
+            })
+        });
+        fs.expect_irregular_target_refusal().returning(|_| None);
+
+        assert_eq!(
+            crate::parts::values_of(&already_tracked_refusal(&fs, &target).expect("refused")),
+            ["/h/r\u{200B}c", "/h/v\u{200B}ault"]
         );
     }
 }

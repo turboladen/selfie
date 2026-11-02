@@ -310,7 +310,7 @@ async fn a_dependency_the_root_settled_is_not_checked_again_by_a_recommend() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, PackageEvent::Warning { .. })),
+            .any(|event| test_common::warning_text(event).is_some()),
         "{events:#?}"
     );
 }

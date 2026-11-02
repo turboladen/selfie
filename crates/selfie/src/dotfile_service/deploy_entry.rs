@@ -366,7 +366,7 @@ async fn perform_deploy<F: FileSystem>(
     if let Some(kept) = kept
         && let Some(stale) = kept.prune_earlier(filesystem)
     {
-        sender.send_warning(stale).await;
+        sender.send_composed_warning(stale).await;
     }
 
     sender
@@ -531,7 +531,7 @@ pub(super) async fn record_and_save<F: FileSystem>(
     };
     let target = unit.target_path.path().to_path_buf();
     sender
-        .send_deploy_state_warning(DeployStateWarning::NotRecorded {
+        .send_composed_warning(DeployStateWarning::NotRecorded {
             recorded,
             target: target.clone(),
             error: e,

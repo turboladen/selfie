@@ -37,7 +37,7 @@ use super::refusal::{
     refusal_for,
 };
 use super::state_file::StateLoadFailure;
-use crate::parts::{Composed as _, Parts};
+use crate::parts::{Composed as _, Message, Parts};
 
 /// The program a command runs: its first word after any leading `NAME=value`
 /// assignments, as the shell reads it, or `None` for a command the shell would
@@ -141,19 +141,25 @@ enum Found {
 //
 // Names the link alone when the destination could not be read. Printing "unknown"
 // would be a fact about selfie rather than about their file.
-fn replaced_link_warning(target: &SecretEntry<'_>, link: &Link) -> String {
+fn replaced_link_warning(target: &SecretEntry<'_>, link: &Link) -> Message {
+    let what = Parts::new()
+        .text("'")
+        .path(target.path.path())
+        .text("', which was a symlink");
     let what = match link.destination() {
-        Some(dest) => format!(
-            "'{}', which was a symlink to '{}'",
-            target.path.display(),
-            dest.display()
-        ),
-        None => format!("'{}', which was a symlink", target.path.display()),
+        Some(dest) => what.text(" to '").path(dest).text("'"),
+        None => what,
     };
 
-    format!(
-        "Replaced {what}, with a regular file readable only by you. The credential was not written through the link. Remove the link or point the entry somewhere else if you meant it to survive."
-    )
+    Parts::new()
+        .text("Replaced ")
+        .append(what)
+        .text(
+            ", with a regular file readable only by you. The credential was not written through \
+             the link. Remove the link or point the entry somewhere else if you meant it to \
+             survive.",
+        )
+        .into()
 }
 
 /// Deploying the secret-bearing entries of one package.
@@ -297,7 +303,7 @@ where
         let outcome = self.write(target, resolved, overwrite).await;
         if matches!(outcome, SecretOutcome::Deployed) {
             self.sender
-                .send_warning(replaced_link_warning(target, link))
+                .send_composed_warning(replaced_link_warning(target, link))
                 .await;
         }
         outcome
@@ -864,7 +870,7 @@ where
         } else {
             self.apply
                 .sender
-                .send_warning(appeared::warning(
+                .send_composed_warning(appeared::warning(
                     &self.target.path,
                     appeared::During::Write,
                 ))
@@ -1014,8 +1020,8 @@ mod tests {
         // One target, two links: the calls differ only in the argument, so the
         // difference between the messages isolates the destination clause.
         let with_destination =
-            replaced_link_warning(&target, &link_to(Some("/home/u/.ssh/id_ed25519")));
-        let without = replaced_link_warning(&target, &link_to(None));
+            replaced_link_warning(&target, &link_to(Some("/home/u/.ssh/id_ed25519"))).to_string();
+        let without = replaced_link_warning(&target, &link_to(None)).to_string();
 
         assert!(
             with_destination.contains("symlink to '/home/u/.ssh/id_ed25519'"),
@@ -1031,6 +1037,62 @@ mod tests {
         assert!(
             without.contains("/home/u/.config/app/creds"),
             "the link itself is still named: {without}"
+        );
+    }
+
+    // The replaced-link warning, with and without the link's destination, whole.
+    #[test]
+    fn a_replacement_warning_is_worded_whole() {
+        let entry = DotfileEntry::new("creds.tpl", "~/my creds");
+        let target = SecretEntry {
+            entry: &entry,
+            source: crate::package::event::DotfileSource::Command("op read x".to_string()),
+            path: crate::fs::target::repository_path(std::path::Path::new("/home/u/my creds")),
+            link: None,
+        };
+        let link_to = |points_to: Option<&str>| {
+            classify_link(Some(crate::fs::FileSystemError::SymlinkedTarget {
+                path: std::path::PathBuf::from("/home/u/my creds"),
+                points_to: points_to.map(std::path::PathBuf::from),
+            }))
+            .expect("a symlink refusal")
+            .expect("is a link")
+        };
+
+        assert_eq!(
+            replaced_link_warning(&target, &link_to(Some("/home/u/my vault"))).to_string(),
+            "Replaced '/home/u/my creds', which was a symlink to '/home/u/my vault', with a \
+             regular file readable only by you. The credential was not written through the \
+             link. Remove the link or point the entry somewhere else if you meant it to survive."
+        );
+        assert_eq!(
+            replaced_link_warning(&target, &link_to(None)).to_string(),
+            "Replaced '/home/u/my creds', which was a symlink, with a regular file readable only \
+             by you. The credential was not written through the link. Remove the link or point \
+             the entry somewhere else if you meant it to survive."
+        );
+    }
+
+    // The replaced link and its destination are path parts.
+    #[test]
+    fn a_replacement_warning_names_its_paths_as_parts() {
+        let entry = DotfileEntry::new("creds.tpl", "~/c\u{200B}reds");
+        let target = SecretEntry {
+            entry: &entry,
+            source: crate::package::event::DotfileSource::Command("op read x".to_string()),
+            path: crate::fs::target::repository_path(std::path::Path::new("/h/c\u{200B}reds")),
+            link: None,
+        };
+        let link = classify_link(Some(crate::fs::FileSystemError::SymlinkedTarget {
+            path: std::path::PathBuf::from("/h/c\u{200B}reds"),
+            points_to: Some(std::path::PathBuf::from("/h/v\u{200B}ault")),
+        }))
+        .expect("a symlink refusal")
+        .expect("is a link");
+
+        assert_eq!(
+            crate::parts::values_of(&replaced_link_warning(&target, &link)),
+            ["/h/c\u{200B}reds", "/h/v\u{200B}ault"]
         );
     }
 }

@@ -13,6 +13,7 @@ use crate::{
         target::{HomeDir, TargetRejection, deploy_target},
     },
     package::{Package, event::EventSender},
+    parts::{Composed, Message, Parts},
 };
 
 use super::state::{DeployEntry, DeployState};
@@ -40,32 +41,34 @@ pub(crate) enum Shortfall {
     NothingProduced,
 }
 
-impl std::fmt::Display for Shortfall {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+crate::parts::display_from_parts!(Shortfall);
+
+impl Composed for Shortfall {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new();
         match self {
-            Self::Refused(CollectionRefusal::UnloadableSpec { error, .. }) => {
-                write!(
-                    f,
-                    "spec '{}' could not be loaded",
-                    error.package_path().display()
-                )
-            }
-            Self::Refused(CollectionRefusal::AmbiguousName { name, .. }) => {
-                write!(f, "several spec files claim the name '{name}'")
-            }
+            Self::Refused(CollectionRefusal::UnloadableSpec { error, .. }) => parts
+                .text("spec '")
+                .path(error.package_path())
+                .text("' could not be loaded"),
+            Self::Refused(CollectionRefusal::AmbiguousName { name, .. }) => parts
+                .text("several spec files claim the name '")
+                .name(name.as_str())
+                .text("'"),
             Self::Refused(CollectionRefusal::UnreadableDotfilesDirectory(_)) => {
-                f.write_str("the dotfiles directory could not be read")
+                parts.text("the dotfiles directory could not be read")
             }
-            Self::SetAside(name) => write!(
-                f,
-                "dotfiles/ spec '{name}' is unused because packages/ claims its name"
-            ),
-            Self::AbsentDotfilesDirectory => f.write_str("the dotfiles directory is not there"),
-            Self::RefusedPackage(name) => write!(f, "package '{name}' was refused"),
-            Self::NoHome => f.write_str("the home directory could not be determined"),
-            Self::NothingProduced => {
-                f.write_str("no package deploys a dotfile in this environment")
-            }
+            Self::SetAside(name) => parts
+                .text("dotfiles/ spec '")
+                .name(name.as_str())
+                .text("' is unused because packages/ claims its name"),
+            Self::AbsentDotfilesDirectory => parts.text("the dotfiles directory is not there"),
+            Self::RefusedPackage(name) => parts
+                .text("package '")
+                .name(name.as_str())
+                .text("' was refused"),
+            Self::NoHome => parts.text("the home directory could not be determined"),
+            Self::NothingProduced => parts.text("no package deploys a dotfile in this environment"),
         }
     }
 }
@@ -269,7 +272,7 @@ pub(super) async fn check<F: FileSystem>(
         // for, a short survey changes no answer.
         if !unproduced.is_empty() {
             sender
-                .send_warning(shortfall_warning(shortfall, unproduced.len()))
+                .send_composed_warning(shortfall_warning(shortfall, unproduced.len()))
                 .await;
         }
         // With nothing deployable in this environment there is nothing the check
@@ -327,18 +330,20 @@ fn resolved_for_comparison<F: FileSystem>(filesystem: &F, target: &str) -> Optio
 
 /// The warning for a check skipped because `shortfall` leaves `count` records
 /// in question.
-fn shortfall_warning(shortfall: &Shortfall, count: usize) -> String {
+fn shortfall_warning(shortfall: &Shortfall, count: usize) -> Message {
+    let skipped = Parts::new()
+        .text(format!(
+            "Not checking {count} deployed target(s) for orphans: "
+        ))
+        .append(shortfall.parts());
     match shortfall {
-        Shortfall::NothingProduced => format!(
-            "Not checking {count} deployed target(s) for orphans: {shortfall}. If \
-             package_directory points at the wrong directory, correct it; otherwise remove \
-             the files you no longer need yourself"
+        Shortfall::NothingProduced => skipped.text(
+            ". If package_directory points at the wrong directory, correct it; otherwise remove \
+             the files you no longer need yourself",
         ),
-        _ => format!(
-            "Not checking {count} deployed target(s) for orphans: {shortfall}, so selfie cannot \
-             tell whether an entry still deploys to them"
-        ),
+        _ => skipped.text(", so selfie cannot tell whether an entry still deploys to them"),
     }
+    .into()
 }
 
 /// Whether nothing is at `target`.
@@ -351,4 +356,94 @@ fn is_gone<F: FileSystem>(filesystem: &F, target: &Path) -> bool {
         filesystem.directory_state(target),
         DirectoryState::Absent(AbsentReason::Empty)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::event::BaseKind;
+
+    // Each reason an orphan check is skipped, in the warning it is sent in, whole.
+    #[test]
+    fn a_skipped_orphan_check_is_worded_whole() {
+        let warning = |shortfall: Shortfall| shortfall_warning(&shortfall, 2).to_string();
+        let skipped = |why: &str| {
+            format!(
+                "Not checking 2 deployed target(s) for orphans: {why}, so selfie cannot tell \
+                 whether an entry still deploys to them"
+            )
+        };
+
+        assert_eq!(
+            warning(Shortfall::Refused(CollectionRefusal::UnloadableSpec {
+                error: crate::package::port::PackageParseError::new(
+                    "/p/my broken.yml",
+                    crate::package::port::PackageParseKind::Unreadable {
+                        reason: "a fifo".to_string(),
+                    },
+                ),
+                base: BaseKind::PackageDirectory,
+            })),
+            skipped("spec '/p/my broken.yml' could not be loaded")
+        );
+        assert_eq!(
+            warning(Shortfall::Refused(CollectionRefusal::AmbiguousName {
+                name: "nv".to_string(),
+                paths: vec!["/p/nv.yaml".into(), "/p/nv.yml".into()],
+                base: BaseKind::PackageDirectory,
+            })),
+            skipped("several spec files claim the name 'nv'")
+        );
+        assert_eq!(
+            warning(Shortfall::SetAside("bat".to_string())),
+            skipped("dotfiles/ spec 'bat' is unused because packages/ claims its name")
+        );
+        assert_eq!(
+            warning(Shortfall::AbsentDotfilesDirectory),
+            skipped("the dotfiles directory is not there")
+        );
+        assert_eq!(
+            warning(Shortfall::RefusedPackage("my tool".to_string())),
+            skipped("package 'my tool' was refused")
+        );
+        assert_eq!(
+            warning(Shortfall::NoHome),
+            skipped("the home directory could not be determined")
+        );
+        assert_eq!(
+            warning(Shortfall::NothingProduced),
+            "Not checking 2 deployed target(s) for orphans: no package deploys a dotfile in this \
+             environment. If package_directory points at the wrong directory, correct it; \
+             otherwise remove the files you no longer need yourself"
+        );
+    }
+
+    // An unloadable spec's path is a path part, and a set-aside spec's and a
+    // refused package's names are name parts.
+    #[test]
+    fn a_skipped_orphan_check_names_its_values_as_parts() {
+        let values =
+            |shortfall: Shortfall| crate::parts::values_of(&shortfall_warning(&shortfall, 1));
+
+        assert_eq!(
+            values(Shortfall::Refused(CollectionRefusal::UnloadableSpec {
+                error: crate::package::port::PackageParseError::new(
+                    "/p/b\u{200B}roken.yml",
+                    crate::package::port::PackageParseKind::Unreadable {
+                        reason: "a fifo".to_string(),
+                    },
+                ),
+                base: BaseKind::PackageDirectory,
+            })),
+            ["/p/b\u{200B}roken.yml"]
+        );
+        assert_eq!(
+            values(Shortfall::RefusedPackage("t\u{200B}ool".to_string())),
+            ["t\u{200B}ool"]
+        );
+        assert_eq!(
+            values(Shortfall::SetAside("b\u{200B}at".to_string())),
+            ["b\u{200B}at"]
+        );
+    }
 }

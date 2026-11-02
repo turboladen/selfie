@@ -9,7 +9,7 @@ use std::future::Future;
 use crate::{
     fs::target::TargetPath,
     package::event::{EntryOperation, EventSender, Failure},
-    parts::Parts,
+    parts::{Message, Parts},
 };
 
 /// The window in which something appeared at a target.
@@ -88,19 +88,25 @@ pub(super) async fn settle_present<A: Appeared + Send>(
     let outcome = entry.conflict(current).await;
     // After the conflict, so it reads as a note on it.
     let warning = warning(entry.target(), during);
-    entry.sender().send_warning(warning).await;
+    entry.sender().send_composed_warning(warning).await;
     outcome
 }
 
 /// The warning that what appeared at `target` during `during` was left for the
 /// next run. Names the path only, so it is safe for a secret target.
-pub(super) fn warning(target: &TargetPath, during: During) -> String {
-    let target = target.display();
+pub(super) fn warning(target: &TargetPath, during: During) -> Message {
     let what = match during {
-        During::Write => format!("Something appeared at '{target}' while selfie was writing it"),
-        During::Prompt => format!("'{target}' changed while selfie was asking about it"),
+        During::Write => Parts::new()
+            .text("Something appeared at '")
+            .path(target.path())
+            .text("' while selfie was writing it"),
+        During::Prompt => Parts::new()
+            .text("'")
+            .path(target.path())
+            .text("' changed while selfie was asking about it"),
     };
-    format!("{what}, and was left in place. Run apply again to settle it.")
+    what.text(", and was left in place. Run apply again to settle it.")
+        .into()
 }
 
 /// The failure of an entry whose target something appeared at during the write
@@ -142,5 +148,35 @@ mod tests {
             "something appeared there while selfie was writing it, and is gone again; nothing \
              was written"
         );
+    }
+
+    // What appeared during either window is reported in these words, whole.
+    #[test]
+    fn a_target_that_appeared_is_worded_whole() {
+        let target = repository_path(Path::new("/home/u/my rc"));
+
+        assert_eq!(
+            warning(&target, During::Write).to_string(),
+            "Something appeared at '/home/u/my rc' while selfie was writing it, and was left in \
+             place. Run apply again to settle it."
+        );
+        assert_eq!(
+            warning(&target, During::Prompt).to_string(),
+            "'/home/u/my rc' changed while selfie was asking about it, and was left in place. Run \
+             apply again to settle it."
+        );
+    }
+
+    // The target is a path part in both windows.
+    #[test]
+    fn a_target_that_appeared_is_a_path_part() {
+        let target = repository_path(Path::new("/h/r\u{200B}c"));
+
+        for during in [During::Write, During::Prompt] {
+            assert_eq!(
+                crate::parts::values_of(&warning(&target, during)),
+                ["/h/r\u{200B}c"]
+            );
+        }
     }
 }

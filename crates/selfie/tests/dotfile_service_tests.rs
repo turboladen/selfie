@@ -142,9 +142,9 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
     events
         .iter()
         .flat_map(|event| match event {
-            PackageEvent::Warning { message, .. } => vec![message.clone()],
-            PackageEvent::DeployStateWarning { warning, .. } => vec![warning.to_string()],
-            PackageEvent::DotfilesDirectoryWarning { warning, .. } => vec![warning.to_string()],
+            PackageEvent::Warning { .. } | PackageEvent::ComposedWarning { .. } => {
+                test_common::warning_text(event).into_iter().collect()
+            }
             PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.to_string()],
             PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.to_string()],
             PackageEvent::PackagesRefused {
@@ -3129,7 +3129,8 @@ async fn a_name_in_both_directories_differing_in_case_deploys_only_the_packages_
     assert!(
         events.iter().any(|e| matches!(
             e,
-            PackageEvent::Warning { message, .. } if message.contains("Duplicate name 'bat'")
+            PackageEvent::ComposedWarning { warning, .. }
+                if warning.to_string().contains("Duplicate name 'bat'")
         )),
         "the collision must be reported; events: {events:?}"
     );
@@ -3164,8 +3165,8 @@ async fn an_unparsable_packages_spec_keeps_its_dotfiles_namesake_from_deploying(
     assert!(
         all.iter().any(|e| matches!(
             e,
-            PackageEvent::Warning { message, .. }
-                if message.contains("Not using 'bat' from dotfiles/")
+            PackageEvent::ComposedWarning { warning, .. }
+                if warning.to_string().contains("Not using 'bat' from dotfiles/")
         )),
         "the skipped namesake must be reported; events: {all:?}"
     );
@@ -7723,6 +7724,7 @@ mod secret_bearing {
                     PackageEvent::DotfileFailed { .. }
                         | PackageEvent::DotfileRefused { .. }
                         | PackageEvent::Warning { .. }
+                        | PackageEvent::ComposedWarning { .. }
                 )),
                 "the canceled entry must not be reported: {events:?}"
             );
@@ -18106,8 +18108,11 @@ mod collection_findings {
         };
         let duplicate = events
             .iter()
-            .position(|e| matches!(e,
-                PackageEvent::Warning { message, .. } if message.starts_with("Duplicate name 'mmm'")))
+            .position(|e| {
+                matches!(e,
+                PackageEvent::ComposedWarning { warning, .. }
+                    if warning.to_string().starts_with("Duplicate name 'mmm'"))
+            })
             .expect("the duplicate-name warning");
         let aaa = refused_name("aaa").expect("the packages/ ambiguity");
         let zzz = refused_name("zzz").expect("the dotfiles/ ambiguity");
@@ -18153,9 +18158,18 @@ mod collection_findings {
 
         let carried_on =
             collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
-        let notice = warning_messages(&carried_on)
-            .into_iter()
-            .find(|w| w.starts_with("Not checking"))
+        // Read from the event worded from parts alone, so the warning sent as a
+        // String instead is not found.
+        let notice = carried_on
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::ComposedWarning { warning, .. }
+                    if warning.to_string().starts_with("Not checking") =>
+                {
+                    Some(warning.to_string())
+                }
+                _ => None,
+            })
             .expect("the orphan check names its shortfall");
         assert!(
             notice.contains("the dotfiles directory could not be read"),
@@ -19016,8 +19030,10 @@ mod orphans {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DeployStateWarning { warning, .. }
-                    if warning.to_string().contains("Could not tidy")
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::DeployState(warning),
+                    ..
+                } if warning.to_string().contains("Could not tidy")
             )),
             "{events:#?}"
         );
@@ -19120,9 +19136,13 @@ mod orphans {
         let events = apply_refusing_state_writes(dirs).await;
         assert_eq!(entries_skipped_count(&events), 1, "{events:#?}");
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, PackageEvent::DeployStateWarning { .. })),
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::DeployState(_),
+                    ..
+                }
+            )),
             "{events:#?}"
         );
     }
@@ -19209,9 +19229,13 @@ mod orphans {
 
         let events = apply_refusing_state_writes(&dirs).await;
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, PackageEvent::DeployStateWarning { .. })),
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::DeployState(_),
+                    ..
+                }
+            )),
             "{events:#?}"
         );
         assert_eq!(base_of(&dirs, &key), Some(BaseKind::DotfilesDirectory));
@@ -20861,10 +20885,13 @@ mod an_appearing_target_is_kept {
     }
 
     // How many warnings start with `opening` and say what they name was left in place.
+    // Counts only the event worded from parts, so a warning sent as a String
+    // instead is not counted.
     fn left_in_place_warnings(events: &[PackageEvent], opening: &str) -> usize {
         test_common::events::count_events_of_type(events, |event| {
-            matches!(event, PackageEvent::Warning { message, .. }
-                if message.starts_with(opening) && message.contains("left in place"))
+            matches!(event, PackageEvent::ComposedWarning { warning, .. }
+                if warning.to_string().starts_with(opening)
+                    && warning.to_string().contains("left in place"))
         })
     }
 
@@ -23310,5 +23337,164 @@ mod track_sentences {
             standalone(&dirs, "../x", &target).await,
             format!("Invalid name '../x': {}", selfie::package::SPEC_NAME_RULE)
         );
+    }
+}
+
+// The whole sentence of each warning an entry or a collection sends that no other
+// test pins whole, so a change to how one is built cannot change a word of it
+// unnoticed.
+mod warning_sentences {
+    use super::*;
+
+    const ALL: &str = "environments:\n  test:\n    install: \"echo i\"\n";
+
+    async fn applied(dirs: &TestDirs, runner: FakeCommandRunner) -> Vec<PackageEvent> {
+        collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await
+    }
+
+    // A name both directories claim, once with both specs loaded and once with the
+    // packages/ spec unloadable.
+    #[tokio::test]
+    async fn a_name_both_directories_claim_is_worded_whole() {
+        let loaded = TestDirs::new();
+        write_package_yaml(&loaded.package_dir, "bat", &format!("name: bat\n{ALL}"));
+        write_package_yaml(&loaded.dotfiles_dir, "bat", "name: bat\n");
+        let broken = TestDirs::new();
+        write_package_yaml(&broken.package_dir, "bat", "name: [unterminated\n");
+        write_package_yaml(&broken.dotfiles_dir, "bat", "name: bat\n");
+
+        let loaded_events = applied(&loaded, FakeCommandRunner::new()).await;
+        let broken_events = applied(&broken, FakeCommandRunner::new()).await;
+        // The name is a name part of the warning that says it.
+        for events in [&loaded_events, &broken_events] {
+            let named: Vec<Vec<String>> = events
+                .iter()
+                .filter_map(|event| match event {
+                    PackageEvent::ComposedWarning {
+                        warning: selfie::package::event::ComposedWarning::Message(message),
+                        ..
+                    } if message.to_string().contains("'bat'") => {
+                        Some(selfie::parts::values_of(message))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(named, [["bat"]], "{events:?}");
+        }
+        let loaded = warning_messages(&loaded_events);
+        let broken = warning_messages(&broken_events);
+
+        assert!(
+            loaded.contains(
+                &"Duplicate name 'bat' found in both packages/ and dotfiles/ — using the \
+                  packages/ version"
+                    .to_string()
+            ),
+            "{loaded:?}"
+        );
+        assert!(
+            broken.contains(
+                &"Not using 'bat' from dotfiles/: packages/ has a spec by that name that could \
+                  not be loaded"
+                    .to_string()
+            ),
+            "{broken:?}"
+        );
+    }
+
+    // A secret entry whose target is a symlink replaces the link and says so,
+    // naming the link and where it pointed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_replaced_link_is_worded_whole() {
+        let dirs = TestDirs::new();
+        let vault = dirs.target_dir.join("my vault");
+        std::fs::write(&vault, "old").unwrap();
+        let link = dirs.target_dir.join("my creds");
+        std::os::unix::fs::symlink(&vault, &link).unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "creds",
+            &format!(
+                "name: creds\n{ALL}dotfiles:\n  - command: \"op read x\"\n    target: \"{}\"\n",
+                link.display()
+            ),
+        );
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"secret-value");
+
+        let warnings = warning_messages(&applied(&dirs, runner).await);
+
+        assert!(
+            warnings.contains(&format!(
+                "Replaced '{}', which was a symlink to '{}', with a regular file readable only \
+                 by you. The credential was not written through the link. Remove the link or \
+                 point the entry somewhere else if you meant it to survive.",
+                link.display(),
+                vault.display()
+            )),
+            "{warnings:?}"
+        );
+    }
+
+    // A backup prune that cannot remove an earlier copy warns as a warning worded
+    // from parts, naming the copy as a path. A directory planted where the copies
+    // are kept cannot be removed as a file.
+    #[tokio::test]
+    async fn a_failed_prune_is_sent_as_a_composed_warning() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("rc");
+        std::fs::write(dirs.package_dir.join("rc"), "from the repo\n").unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "pk",
+            &format!(
+                "name: pk\n{ALL}dotfiles:\n  - source: rc\n    target: \"{}\"\n",
+                target.display()
+            ),
+        );
+        let accept = || ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        std::fs::write(&target, "edited\n").unwrap();
+        // The directory the first overwrite kept its copy in, as the apply reports
+        // it, so the planted directory sits beside the copies of this target.
+        let first = collect_events(dirs.service().apply_all(accept()).await).await;
+        let copy = first
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::DotfileDeployed {
+                    backup: Some(backup),
+                    ..
+                } => Some(std::path::PathBuf::from(backup)),
+                _ => None,
+            })
+            .expect("the first overwrite kept a copy");
+        let per_target = copy.parent().expect("a per-target backups directory");
+        let planted = per_target.join("e\u{200B}arlier");
+        std::fs::create_dir(&planted).unwrap();
+        std::fs::write(&target, "edited again\n").unwrap();
+
+        let events = collect_events(dirs.service().apply_all(accept()).await).await;
+
+        let pruned: Vec<Vec<String>> = events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::Message(message),
+                    ..
+                } if message.to_string().starts_with("Kept a copy") => {
+                    Some(selfie::parts::values_of(message))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pruned.len(), 1, "{events:?}");
+        assert_eq!(pruned[0][0], planted.display().to_string(), "{events:?}");
     }
 }

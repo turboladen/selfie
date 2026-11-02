@@ -835,3 +835,43 @@ fn a_tracked_elsewhere_remedy_carries_its_note() {
         "{stderr}"
     );
 }
+
+// An already-tracked target that is a symlink is reported with its path as a
+// path, by the CLI's own check before tracking and by the library's, so a U+200B
+// in it shows escaped.
+#[cfg(unix)]
+#[test]
+fn an_already_tracked_symlink_is_named_as_a_path() {
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    std::fs::write(home.join("elsewhere"), "x").unwrap();
+    let link = home.join("l\u{200B}nk");
+    std::os::unix::fs::symlink(home.join("elsewhere"), &link).unwrap();
+    let packages = home.join("packages");
+    std::fs::create_dir_all(packages.join("pk")).unwrap();
+    std::fs::write(packages.join("pk").join("rc"), "x").unwrap();
+    std::fs::write(
+        packages.join("pk.yaml"),
+        format!(
+            "name: pk\nenvironments:\n  {SELFIE_ENV}:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: pk/rc\n    target: \"~/l\\u200Bnk\"\n"
+        ),
+    )
+    .unwrap();
+    let spelled = format!("{}/l\\u{{200b}}nk: target is a symlink", home.display());
+
+    for args in [
+        vec!["track", link.to_str().unwrap()],
+        vec!["package", "track-dotfile", "pk", link.to_str().unwrap()],
+    ] {
+        let output = sandboxed_command(&temp)
+            .env("HOME", &home)
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(stderr.contains(&spelled), "{args:?}: {stderr}");
+        assert!(!stderr.contains('\u{200B}'), "{args:?}: {stderr:?}");
+    }
+}

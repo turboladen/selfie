@@ -1287,7 +1287,7 @@ mod tests {
     // the command to show.
     #[test]
     fn a_suggested_command_reads_as_the_library_writes_it() {
-        use selfie::parts::{Subcommand, SuggestedCommand};
+        use selfie::parts::SuggestedCommand;
         use std::path::Path;
 
         let mut commands: Vec<SuggestedCommand> = ["/a", "/a b", "~/x y", "-foo"]
@@ -1297,7 +1297,7 @@ mod tests {
         commands.extend(
             ["tool", "my app", "-x", "~t"]
                 .into_iter()
-                .filter_map(|name| SuggestedCommand::selfie(Subcommand::Apply, name)),
+                .filter_map(SuggestedCommand::apply),
         );
         commands.extend(
             [("bat", "~/.batrc"), ("my app", "/a b"), ("-x", "/y")]
@@ -1321,9 +1321,9 @@ mod tests {
     // follows.
     #[test]
     fn a_command_note_goes_under_the_line_that_holds_it() {
-        use selfie::parts::{Part, Parts, Subcommand, SuggestedCommand};
+        use selfie::parts::{Part, Parts, SuggestedCommand};
 
-        let apply = SuggestedCommand::selfie(Subcommand::Apply, "a\u{200B}b").expect("no NUL");
+        let apply = SuggestedCommand::apply("a\u{200B}b").expect("no NUL");
         let note = r"Escaped: selfie apply 'a\u{200b}b'";
         let broken: Parts = [
             Part::Text("Run `".into()),

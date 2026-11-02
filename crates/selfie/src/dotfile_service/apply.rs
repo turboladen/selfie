@@ -283,7 +283,7 @@ where
         match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
             StateLoad::Usable(loaded) => {
                 if let Some(warning) = loaded.directory_warning() {
-                    sender.send_deploy_state_warning(warning.clone()).await;
+                    sender.send_composed_warning(warning.clone()).await;
                 }
                 if options.dry_run {
                     // A missing directory's warning already says why it cannot be
@@ -292,7 +292,7 @@ where
                         && let Some(failure) = loaded.creation_refusal()
                     {
                         sender
-                            .send_deploy_state_warning(DeployStateWarning::DryRunWouldStop(
+                            .send_composed_warning(DeployStateWarning::DryRunWouldStop(
                                 failure.clone(),
                             ))
                             .await;
@@ -304,7 +304,7 @@ where
             }
             StateLoad::Unusable(failure) if options.dry_run => {
                 sender
-                    .send_deploy_state_warning(DeployStateWarning::ReadingPast(failure))
+                    .send_composed_warning(DeployStateWarning::ReadingPast(failure))
                     .await;
                 Ledger::Preview(None)
             }
@@ -471,11 +471,14 @@ where
             // answer.
             if matches!(scope, Scope::Named(..)) {
                 sender
-                    .send_warning(format!(
-                        "Package '{}' has no dotfiles for environment '{}'; nothing to apply",
-                        package.name(),
-                        config.environment()
-                    ))
+                    .send_composed_warning(
+                        Parts::new()
+                            .text("Package '")
+                            .name(package.name())
+                            .text("' has no dotfiles for environment '")
+                            .name(config.environment())
+                            .text("'; nothing to apply"),
+                    )
                     .await;
             }
             continue;
@@ -877,7 +880,7 @@ where
         // Every deployment is already recorded; only the housekeeping is lost,
         // and the next run redoes it.
         sender
-            .send_deploy_state_warning(DeployStateWarning::Untidied(e))
+            .send_composed_warning(DeployStateWarning::Untidied(e))
             .await;
     }
 

@@ -17,7 +17,7 @@ use crate::{
         filesystem::{FileSystem, FileSystemError, IfPresent},
         target::{StatePathError, TargetPath, state_file_path},
     },
-    parts::{Composed, Parts, Subcommand, SuggestedCommand},
+    parts::{Composed, Parts, SuggestedCommand},
     yaml::ParseFailure,
 };
 
@@ -540,15 +540,12 @@ impl Composed for DeployStateFailure {
                 copy,
             } => {
                 // A name holding NUL has no shell word, so no command is offered.
-                let remedy = SuggestedCommand::selfie(Subcommand::Apply, name).map_or_else(
-                    Parts::new,
-                    |command| {
-                        Parts::new().text(" Run `").command(command).text(
-                            "` once the state file can be written, and it records the \
-                             deployment.",
-                        )
-                    },
-                );
+                let remedy = SuggestedCommand::apply(name).map_or_else(Parts::new, |command| {
+                    Parts::new().text(" Run `").command(command).text(
+                        "` once the state file can be written, and it records the \
+                         deployment.",
+                    )
+                });
                 parts
                     .text("Tracked '")
                     .path(Path::new(target))

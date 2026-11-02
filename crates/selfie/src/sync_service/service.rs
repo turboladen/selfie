@@ -197,11 +197,8 @@ where
             for relayed in summary.relayed {
                 match relayed {
                     RelayedDriftEvent::Warning(message) => sender.send_warning(message).await,
-                    RelayedDriftEvent::DeployState(warning) => {
-                        sender.send_deploy_state_warning(warning).await;
-                    }
-                    RelayedDriftEvent::DotfilesDirectory(warning) => {
-                        sender.send_dotfiles_directory_warning(warning).await;
+                    RelayedDriftEvent::Composed(warning) => {
+                        sender.send_composed_warning(warning).await;
                     }
                     RelayedDriftEvent::SkippedSpec(error) => {
                         sender.send_spec_skipped(error).await;
@@ -1399,8 +1396,7 @@ fn remote_label(repo_info: &crate::git::sync_provider::RepoInfo) -> String {
 #[derive(Debug)]
 enum RelayedDriftEvent {
     Warning(String),
-    DeployState(crate::dotfile_service::DeployStateWarning),
-    DotfilesDirectory(crate::package::event::DotfilesDirectoryWarning),
+    Composed(crate::package::event::ComposedWarning),
     SkippedSpec(crate::package::port::PackageParseError),
     PackagesRefused {
         kind: crate::package::event::RefusalKind,
@@ -1466,17 +1462,9 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                 summary.warned += 1;
                 summary.relayed.push(RelayedDriftEvent::Warning(message));
             }
-            PackageEvent::DeployStateWarning { warning, .. } => {
+            PackageEvent::ComposedWarning { warning, .. } => {
                 summary.warned += 1;
-                summary
-                    .relayed
-                    .push(RelayedDriftEvent::DeployState(warning));
-            }
-            PackageEvent::DotfilesDirectoryWarning { warning, .. } => {
-                summary.warned += 1;
-                summary
-                    .relayed
-                    .push(RelayedDriftEvent::DotfilesDirectory(warning));
+                summary.relayed.push(RelayedDriftEvent::Composed(warning));
             }
             PackageEvent::SpecSkipped { error, .. } => {
                 summary.relayed.push(RelayedDriftEvent::SkippedSpec(error));
@@ -2429,9 +2417,9 @@ mod tests {
                 operation_info: test_operation_info(),
                 message: "first warning".to_string(),
             },
-            PackageEvent::DotfilesDirectoryWarning {
+            PackageEvent::ComposedWarning {
                 operation_info: test_operation_info(),
-                warning: warning.clone(),
+                warning: warning.clone().into(),
             },
         ];
 
@@ -2441,8 +2429,9 @@ mod tests {
         assert!(
             matches!(
                 &summary.relayed[1],
-                RelayedDriftEvent::DotfilesDirectory(relayed)
-                    if relayed.to_string() == warning.to_string()
+                RelayedDriftEvent::Composed(
+                    crate::package::event::ComposedWarning::DotfilesDirectory(relayed)
+                ) if relayed.to_string() == warning.to_string()
             ),
             "{summary:?}"
         );
@@ -2463,9 +2452,9 @@ mod tests {
                 operation_info: test_operation_info(),
                 message: "first warning".to_string(),
             },
-            PackageEvent::DeployStateWarning {
+            PackageEvent::ComposedWarning {
                 operation_info: test_operation_info(),
-                warning: warning.clone(),
+                warning: warning.clone().into(),
             },
         ];
 
@@ -2475,8 +2464,9 @@ mod tests {
         assert!(
             matches!(
                 &summary.relayed[1],
-                RelayedDriftEvent::DeployState(relayed)
-                    if relayed.to_string() == warning.to_string()
+                RelayedDriftEvent::Composed(
+                    crate::package::event::ComposedWarning::DeployState(relayed)
+                ) if relayed.to_string() == warning.to_string()
             ),
             "{summary:?}"
         );
@@ -2766,6 +2756,13 @@ mod tests {
                     operation_info: operation_info.clone(),
                     message: "second warning".to_string(),
                 },
+                PackageEvent::ComposedWarning {
+                    operation_info: operation_info.clone(),
+                    warning: crate::parts::Message::from(
+                        crate::parts::Parts::new().text("a composed warning"),
+                    )
+                    .into(),
+                },
                 PackageEvent::Completed {
                     operation_info,
                     result: OperationResult::Success(OperationSuccess::DotfileDriftChecked {
@@ -2881,12 +2878,14 @@ mod tests {
             .filter(|e| {
                 matches!(
                     e,
-                    PackageEvent::Warning { .. } | PackageEvent::SpecSkipped { .. }
+                    PackageEvent::Warning { .. }
+                        | PackageEvent::SpecSkipped { .. }
+                        | PackageEvent::ComposedWarning { .. }
                 )
             })
             .collect();
 
-        assert_eq!(relayed_before_summary.len(), 3, "{events:?}");
+        assert_eq!(relayed_before_summary.len(), 4, "{events:?}");
         assert!(
             matches!(
                 relayed_before_summary[0],
@@ -2902,6 +2901,17 @@ mod tests {
             matches!(
                 relayed_before_summary[2],
                 PackageEvent::Warning { message, .. } if message == "second warning"
+            ),
+            "{events:?}"
+        );
+        // A warning worded from parts is re-sent as one, not as its words.
+        assert!(
+            matches!(
+                relayed_before_summary[3],
+                PackageEvent::ComposedWarning {
+                    warning: crate::package::event::ComposedWarning::Message(message),
+                    ..
+                } if message.to_string() == "a composed warning"
             ),
             "{events:?}"
         );

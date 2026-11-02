@@ -12,7 +12,7 @@ use crate::fs::{
     target::repository_path,
 };
 use crate::package::event::{EntryOperation, Failure};
-use crate::parts::{Composed, Parts};
+use crate::parts::{Composed, Message, Parts};
 
 /// How many characters of the target's own file name the directory carries.
 const READABLE_LEN: usize = 40;
@@ -37,7 +37,7 @@ impl Kept {
     /// Call it only once the overwrite this copy protects has actually landed.
     /// Returns a sentence to report when an earlier copy could not be removed,
     /// which is untidy rather than unsafe: this copy is on disk either way.
-    pub(super) fn prune_earlier<F: FileSystem>(&self, filesystem: &F) -> Option<String> {
+    pub(super) fn prune_earlier<F: FileSystem>(&self, filesystem: &F) -> Option<Message> {
         // Selects by name inequality rather than by picking the newest, so it does
         // not depend on enumeration order -- `readdir` is sorted-ish on APFS and
         // hash-ordered on ext4.
@@ -47,31 +47,34 @@ impl Kept {
         let entries = match filesystem.list_directory(&self.directory) {
             Ok(entries) => entries,
             Err(e) => {
-                return Some(format!(
-                    "Kept a copy of the previous content, but cannot list '{}' to remove \
-                     earlier copies: {e}",
-                    self.directory.display()
-                ));
+                return Some(
+                    Parts::new()
+                        .text("Kept a copy of the previous content, but cannot list '")
+                        .path(self.directory.as_path())
+                        .text("' to remove earlier copies: ")
+                        .append(e.parts())
+                        .into(),
+                );
             }
         };
 
-        let failed: Vec<String> = entries
+        let failed: Vec<(&PathBuf, FileSystemError)> = entries
             .iter()
             .filter(|entry| *entry != &self.path)
-            .filter_map(|entry| {
-                filesystem
-                    .remove_file(entry)
-                    .err()
-                    .map(|e| format!("'{}': {e}", entry.display()))
-            })
+            .filter_map(|entry| filesystem.remove_file(entry).err().map(|e| (entry, e)))
             .collect();
 
         (!failed.is_empty()).then(|| {
-            format!(
-                "Kept a copy of the previous content, but cannot remove an earlier copy \
-                 beside it: {}",
-                failed.join("; ")
-            )
+            Parts::new()
+                .text("Kept a copy of the previous content, but cannot remove an earlier copy beside it: ")
+                .append(Parts::joined(&failed, "; ", |(entry, e)| {
+                    Parts::new()
+                        .text("'")
+                        .path(entry.as_path())
+                        .text("': ")
+                        .append(e.parts())
+                }))
+                .into()
         })
     }
 }
@@ -461,7 +464,8 @@ mod tests {
         .expect("kept");
         let stale = kept
             .prune_earlier(&fs)
-            .expect("the failure must be reported");
+            .expect("the failure must be reported")
+            .to_string();
 
         assert!(
             stale.contains("earlier")
@@ -786,6 +790,88 @@ mod tests {
         assert_eq!(
             crate::parts::values_of(&failure.message),
             [target, written, blocked].map(|path| path.display().to_string())
+        );
+    }
+
+    // A prune that could not list the directory, and one that could not remove two
+    // earlier copies, report it in these words, whole.
+    #[test]
+    fn a_failed_prune_is_worded_whole() {
+        let kept = Kept {
+            path: PathBuf::from("/s/backups/my dir/new"),
+            directory: PathBuf::from("/s/backups/my dir"),
+        };
+        let denied = || FileSystemError::IoError(std::io::Error::other("denied").into());
+        let mut unlistable = MockFileSystem::default();
+        unlistable
+            .expect_list_directory()
+            .returning(move |_| Err(denied()));
+        let mut stuck = MockFileSystem::default();
+        stuck.expect_list_directory().returning(|dir| {
+            Ok(vec![
+                dir.join("new"),
+                dir.join("old one"),
+                dir.join("old two"),
+            ])
+        });
+        stuck.expect_remove_file().returning(move |_| Err(denied()));
+
+        assert_eq!(
+            kept.prune_earlier(&unlistable)
+                .map(|warning| warning.to_string()),
+            Some(
+                "Kept a copy of the previous content, but cannot list '/s/backups/my dir' to \
+                 remove earlier copies: IO error: denied"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            kept.prune_earlier(&stuck)
+                .map(|warning| warning.to_string()),
+            Some(
+                "Kept a copy of the previous content, but cannot remove an earlier copy beside \
+                 it: '/s/backups/my dir/old one': IO error: denied; '/s/backups/my dir/old two': \
+                 IO error: denied"
+                    .to_string()
+            )
+        );
+    }
+
+    // The backups directory, each copy and each nested error's path are path parts.
+    #[test]
+    fn a_failed_prune_names_its_paths_as_parts() {
+        let kept = Kept {
+            path: PathBuf::from("/s/b\u{200B}ackups/new"),
+            directory: PathBuf::from("/s/b\u{200B}ackups"),
+        };
+        let at = |path: &Path| {
+            FileSystemError::IoError(crate::fs::IoFailure::at(
+                path,
+                std::io::Error::other("denied"),
+            ))
+        };
+        let mut unlistable = MockFileSystem::default();
+        unlistable
+            .expect_list_directory()
+            .returning(move |dir| Err(at(dir)));
+        let mut stuck = MockFileSystem::default();
+        stuck
+            .expect_list_directory()
+            .returning(|dir| Ok(vec![dir.join("new"), dir.join("o\u{200B}ld")]));
+        stuck
+            .expect_remove_file()
+            .returning(move |path| Err(at(path)));
+
+        assert_eq!(
+            crate::parts::values_of(&kept.prune_earlier(&unlistable).expect("reported")),
+            ["/s/b\u{200B}ackups", "/s/b\u{200B}ackups"]
+        );
+        assert_eq!(
+            crate::parts::values_of(&kept.prune_earlier(&stuck).expect("reported")),
+            [
+                "/s/b\u{200B}ackups/o\u{200B}ld",
+                "/s/b\u{200B}ackups/o\u{200B}ld"
+            ]
         );
     }
 }

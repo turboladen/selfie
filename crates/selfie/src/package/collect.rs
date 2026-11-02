@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::fs::target::{HomeDir, TargetPath, expand_target_path};
 use crate::package::{Package, ScopedEntry, SpecOrigin, event::BaseKind, port::PackageRepository};
+use crate::parts::Parts;
 
 pub(crate) mod directory;
 pub(crate) mod unchecked;
@@ -309,25 +310,24 @@ impl Listed {
                 // The packages/ spec may deploy nothing this one does, so nothing
                 // collected stands in for this file's entries.
                 set_aside.push(name.to_string());
+                let not_using = || {
+                    Parts::new()
+                        .text("Not using '")
+                        .name(name)
+                        .text("' from dotfiles/: ")
+                };
                 let why = if in_packages.len() > 1 {
-                    format!(
-                        "Not using '{name}' from dotfiles/: packages/ has more than one spec by that \
-                         name"
-                    )
+                    not_using().text("packages/ has more than one spec by that name")
                 } else if !loaded_in_packages.contains(name) {
-                    format!(
-                        "Not using '{name}' from dotfiles/: packages/ has a spec by that name that \
-                         could not be loaded"
-                    )
+                    not_using().text("packages/ has a spec by that name that could not be loaded")
                 } else {
-                    format!(
-                        "Duplicate name '{name}' found in both packages/ and dotfiles/ — using the \
-                         packages/ version"
+                    Parts::new().text("Duplicate name '").name(name).text(
+                        "' found in both packages/ and dotfiles/ — using the packages/ version",
                     )
                 };
                 findings.push(Finding::Warning(ApplyWarning::Named {
                     name: name.to_string(),
-                    message: why,
+                    message: why.into(),
                 }));
             } else if let Claim::Ambiguous(paths) = claim {
                 let ambiguity = (
@@ -636,7 +636,7 @@ impl<'c> CrossSpecGroup<'c> {
 
     /// Every member, as `package 'bat' (dotfiles[0])`, in the order collected, and
     /// the target they share, as one clause.
-    pub(crate) fn describe(&self) -> crate::parts::Parts<'_> {
+    pub(crate) fn describe(&self) -> Parts<'_> {
         let names = self
             .members
             .iter()
@@ -653,7 +653,7 @@ impl<'c> CrossSpecGroup<'c> {
 
 /// How a refusal names a spec: by the name lookup resolves it by, and as a package
 /// or a standalone dotfile spec.
-pub(crate) fn spec_label(package: &Package) -> crate::parts::Parts<'static> {
+pub(crate) fn spec_label(package: &Package) -> Parts<'static> {
     let name = package
         .spec_name()
         .unwrap_or_else(|| package.name().to_string());
@@ -661,7 +661,7 @@ pub(crate) fn spec_label(package: &Package) -> crate::parts::Parts<'static> {
         SpecOrigin::DotfilesDirectory => "standalone dotfile '",
         SpecOrigin::PackageDirectory | SpecOrigin::Memory => "package '",
     };
-    crate::parts::Parts::new().text(kind).name(name).text("'")
+    Parts::new().text(kind).name(name).text("'")
 }
 
 #[cfg(test)]
