@@ -630,7 +630,7 @@ where
     // helps nobody, and apply still refuses a collision it would make.
     for unchecked in &others.unchecked {
         sender
-            .send_warning(unchecked.sentence(Checking::Track))
+            .send_composed_warning(unchecked.sentence(Checking::Track))
             .await;
     }
     // The spec this track writes is not another spec: an existing one answered

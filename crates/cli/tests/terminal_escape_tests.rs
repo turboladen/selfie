@@ -807,6 +807,37 @@ fn package_status_names_an_unconfigured_environment_escaped() {
     assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
 }
 
+// A spec file a validation could not compare with is named by its label, such
+// as `packages/<file>`, as a name, so a U+200B in its file name shows escaped.
+#[test]
+fn spec_validate_names_a_spec_it_could_not_check_escaped() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::write(
+        packages.join("a.yml"),
+        format!(
+            "name: a\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    dotfiles:\n\
+             \x20     - source: rc\n        target: ~/.rc\n"
+        ),
+    )
+    .unwrap();
+    fs::write(packages.join("x\u{200B}.yml"), "name: [unclosed\n").unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "spec", "validate", "a"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains(r"Could not check packages/x\u{200b}.yml for an entry")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
 // A conflict's diff shows each line of content with its escape sequences as
 // escapes and its tabs as tabs, and a content line starting `-- ` or `++ ` as
 // content, not as a header.

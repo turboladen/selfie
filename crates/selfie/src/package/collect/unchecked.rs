@@ -13,6 +13,7 @@ use crate::package::{
     event::{BaseKind, EventSender, UncheckedSource},
     port::{PackageListError, PackageRepository},
 };
+use crate::parts::{Composed, Message, Parts};
 
 /// A place a command could not check for an entry sharing a target with its own.
 pub(crate) enum Unchecked {
@@ -71,11 +72,14 @@ impl Checking {
         }
     }
 
-    /// How the command names the spec file at `path`, in the directory `base`.
-    fn name(self, path: &Path, base: BaseKind) -> String {
+    /// How the command names the spec file at `path`, in the directory `base`:
+    /// by its path, or by a label such as `packages/<file>`.
+    fn name(self, path: &Path, base: BaseKind) -> Parts<'static> {
         match self {
-            Self::Track => path.display().to_string(),
-            Self::Apply | Self::Validate => UncheckedSource::spec_file(path, base).to_string(),
+            Self::Track => Parts::new().path(path.to_path_buf()),
+            Self::Apply | Self::Validate => {
+                Parts::new().name(UncheckedSource::spec_file(path, base).to_string())
+            }
         }
     }
 
@@ -113,31 +117,28 @@ impl Unchecked {
     }
 
     /// The warning `checking` sends about this place.
-    pub(crate) fn sentence(&self, checking: Checking) -> String {
+    pub(crate) fn sentence(&self, checking: Checking) -> Message {
         let subject = checking.subject();
+        let could_not_check = Parts::new().text("Could not check ");
         match self {
-            Self::Unloadable { path, base } => format!(
-                "Could not check {} for {subject}: it could not be loaded",
-                checking.name(path, *base)
-            ),
-            Self::Ambiguous { name, paths, base } => {
-                let files: Vec<String> = paths
-                    .iter()
-                    .map(|path| checking.name(path, *base))
-                    .collect();
-                format!(
-                    "Could not check {} for {subject}: they all claim the name '{name}', so none \
-                     of them is used",
-                    files.join(" and ")
-                )
-            }
-            Self::PackageDirectory(error) => {
-                format!("Could not check the package specs for {subject}: {error}")
-            }
-            Self::DotfilesDirectory(error) => {
-                format!("Could not check the standalone dotfiles for {subject}: {error}")
-            }
+            Self::Unloadable { path, base } => could_not_check
+                .append(checking.name(path, *base))
+                .text(format!(" for {subject}: it could not be loaded")),
+            Self::Ambiguous { name, paths, base } => could_not_check
+                .append(Parts::joined(paths, " and ", |path| {
+                    checking.name(path, *base)
+                }))
+                .text(format!(" for {subject}: they all claim the name '"))
+                .name(name)
+                .text("', so none of them is used"),
+            Self::PackageDirectory(error) => could_not_check
+                .text(format!("the package specs for {subject}: "))
+                .append(error.parts()),
+            Self::DotfilesDirectory(error) => could_not_check
+                .text(format!("the standalone dotfiles for {subject}: "))
+                .append(error.parts()),
         }
+        .into()
     }
 }
 
@@ -191,7 +192,9 @@ pub(crate) async fn send_unchecked_warnings(
             continue;
         }
         named.extend(files.into_iter().cloned());
-        sender.send_warning(unchecked.sentence(checking)).await;
+        sender
+            .send_composed_warning(unchecked.sentence(checking))
+            .await;
     }
 }
 
@@ -478,5 +481,52 @@ mod tests {
         for (place, checking, words) in worded {
             assert_eq!(place.sentence(checking).to_string(), words);
         }
+    }
+
+    // Each spec file a place names is a part: a label such as `packages/<file>`
+    // as a name, a full path as a path, and a name the files claim as a name,
+    // so the CLI escapes them.
+    #[test]
+    fn the_unchecked_warnings_name_their_files_as_parts() {
+        let kinds = |place: &Unchecked, checking| -> Vec<(&'static str, String)> {
+            place
+                .sentence(checking)
+                .parts()
+                .into_iter()
+                .filter_map(|part| match part {
+                    crate::parts::Part::Name(name) => Some(("name", name.to_string())),
+                    crate::parts::Part::Path(path) => Some(("path", path.display().to_string())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let unloadable = Unchecked::Unloadable {
+            path: PathBuf::from("/p\u{200B}k/x\u{200B}.yml"),
+            base: BaseKind::PackageDirectory,
+        };
+        assert_eq!(
+            kinds(&unloadable, Checking::Validate),
+            [("name", "packages/x\u{200B}.yml".to_string())]
+        );
+        assert_eq!(
+            kinds(&unloadable, Checking::Track),
+            [("path", "/p\u{200B}k/x\u{200B}.yml".to_string())]
+        );
+        let ambiguous = Unchecked::Ambiguous {
+            name: "n\u{200B}m".to_string(),
+            paths: vec![
+                PathBuf::from("/d/n\u{200B}.yml"),
+                PathBuf::from("/d/n\u{200B}.yaml"),
+            ],
+            base: BaseKind::DotfilesDirectory,
+        };
+        assert_eq!(
+            kinds(&ambiguous, Checking::Apply),
+            [
+                ("name", "dotfiles/n\u{200B}.yml".to_string()),
+                ("name", "dotfiles/n\u{200B}.yaml".to_string()),
+                ("name", "n\u{200B}m".to_string()),
+            ]
+        );
     }
 }

@@ -575,7 +575,7 @@ pub(super) mod tests {
     async fn a_validated_spec_that_cannot_be_placed_still_answers() {
         use crate::package::{
             DotfileEntry, GetPackage, PackageBuilder, SpecOrigin,
-            event::{OperationContext, PackageEvent, metadata::OperationType},
+            event::{OperationContext, metadata::OperationType},
             port::{MockPackageRepository, PackageError, PackageListError},
         };
         let gem = PackageBuilder::default()
@@ -636,9 +636,7 @@ pub(super) mod tests {
         assert!(matches!(result, OperationResult::Success(_)), "{result:?}");
         let mut warnings = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let PackageEvent::Warning { message, .. } = event {
-                warnings.push(message);
-            }
+            warnings.extend(crate::package::event::warning_text(&event));
         }
         assert!(
             warnings
