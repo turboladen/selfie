@@ -742,6 +742,35 @@ fn a_replaced_link_warning_names_its_paths_as_paths() {
     assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
 }
 
+// A named package with nothing to apply in the environment names both as names,
+// so a U+200B in the environment shows escaped.
+#[test]
+fn a_package_with_nothing_to_apply_names_the_environment_as_a_name() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::create_dir_all(&packages).unwrap();
+    fs::write(
+        packages.join("pk.yaml"),
+        "name: pk\nenvironments:\n  \"t\\u200Best\":\n    install: \"true\"\n",
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "--environment", "t\u{200B}est", "apply", "pk"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line
+                .contains(r"Package 'pk' has no dotfiles for environment 't\u{200b}est'")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
 // A conflict's diff shows each line of content with its escape sequences as
 // escapes and its tabs as tabs, and a content line starting `-- ` or `++ ` as
 // content, not as a header.

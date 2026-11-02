@@ -471,11 +471,14 @@ where
             // answer.
             if matches!(scope, Scope::Named(..)) {
                 sender
-                    .send_warning(format!(
-                        "Package '{}' has no dotfiles for environment '{}'; nothing to apply",
-                        package.name(),
-                        config.environment()
-                    ))
+                    .send_composed_warning(
+                        Parts::new()
+                            .text("Package '")
+                            .name(package.name())
+                            .text("' has no dotfiles for environment '")
+                            .name(config.environment())
+                            .text("'; nothing to apply"),
+                    )
                     .await;
             }
             continue;
