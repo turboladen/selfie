@@ -849,3 +849,59 @@ where
         tally.into_success(config.environment()),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::DirectoryState;
+    use crate::package::collect::directory::UnreadableDotfilesDirectory;
+    use crate::package::event::BaseKind;
+    use crate::package::port::{PackageListError, PackageParseError, PackageParseKind};
+
+    // Each stop's sentence, whole, as the run's failure words it.
+    #[test]
+    fn every_stop_is_worded_as_pinned() {
+        let denied =
+            || std::sync::Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let stops = [
+            Stop::Entry("~/.toolrc".to_string()),
+            Stop::Package("tool".to_string()),
+            Stop::Collection(CollectionRefusal::UnreadableDotfilesDirectory(
+                UnreadableDotfilesDirectory::Unlistable(PackageListError::new(
+                    "/d/dots".into(),
+                    DirectoryState::Unlistable(denied()),
+                )),
+            )),
+            Stop::Collection(CollectionRefusal::AmbiguousName {
+                name: "bat".to_string(),
+                paths: vec!["/p/bat.yml".into(), "/p/bat.yaml".into()],
+                base: BaseKind::PackageDirectory,
+            }),
+            Stop::Collection(CollectionRefusal::UnloadableSpec {
+                error: PackageParseError::new(
+                    "/p/bad.yml",
+                    PackageParseKind::Unreadable {
+                        reason: "a fifo".to_string(),
+                    },
+                ),
+                base: BaseKind::PackageDirectory,
+            }),
+        ];
+        let shown: Vec<String> = stops
+            .into_iter()
+            .map(|stop| stop.into_failure().expect("a failure").to_string())
+            .collect();
+
+        assert_eq!(
+            shown,
+            [
+                "Stopped after failing to apply dotfile '~/.toolrc' (stop_on_error is enabled)",
+                "Stopped before applying anything: package 'tool' is refused (stop_on_error is enabled)",
+                "Stopped before applying anything: the standalone dotfiles directory could not be read (stop_on_error is enabled)",
+                "Stopped before applying anything: several spec files claim the name 'bat' (stop_on_error is enabled)",
+                "Stopped before applying anything: spec '/p/bad.yml' could not be loaded (stop_on_error is enabled)",
+            ]
+        );
+        assert!(Stop::Canceled.into_failure().is_none());
+    }
+}
