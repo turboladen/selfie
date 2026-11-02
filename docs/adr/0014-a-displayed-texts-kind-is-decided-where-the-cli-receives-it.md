@@ -13,6 +13,8 @@ Amended 2026-11-01: §9 covers the deploy state's sentences and the filesystem e
 Amended 2026-11-01: §9 covers a directory listing's error and the sentences about a dotfiles
 directory selfie cannot use, and a command part can be `mkdir -p`.
 
+Amended 2026-11-01: §9 covers why an apply with `stop_on_error` stopped.
+
 ## Context
 
 `selfie-cli` prints text from outside selfie: spec, package and environment names, paths, spec
@@ -356,7 +358,8 @@ writer escapes every escape sequence (§1.8).
    directory listing's `PackageListError` and the `DirectoryState` it holds; the name check's
    `NamespaceValidationError`; the `UnreadableDotfilesDirectory` a collection refuses; the
    `DotfilesDirectoryWarning` a command reading standalone dotfiles sends; the
-   `TrackDirectoryRefusal` a standalone track gives over a directory it could not use; and a
+   `TrackDirectoryRefusal` a standalone track gives over a directory it could not use; the
+   `ApplyStop` an apply with `stop_on_error` gives for a stop other than the deploy state's; and a
    validation issue's message, `IssueMessage`, which is its own text, the deploy state's notice or a
    `DirectoryIssue`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
