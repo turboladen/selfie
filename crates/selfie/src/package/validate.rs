@@ -3313,4 +3313,120 @@ environments:
         let issues = package.validate_filename_consistency();
         assert!(issues.is_empty(), "got: {issues:?}");
     }
+
+    // The hostile-value fixtures for the messages that name a value: a package
+    // under `p<U+200B>k` with `name: n<U+200B>m`, environments `w<U+200B>k` and
+    // `t`, a shared entry and an environment entry each overriding it, another
+    // overriding it under one home, two entries colliding, and a bad var name.
+    fn hostile_package() -> Package {
+        let mut package = package_from_yaml(
+            "name: \"n\\u200Bm\"\ndotfiles:\n  - source: a\n    target: \"~/s\\u200Bx\"\n\
+             environments:\n  \"w\\u200Bk\":\n    install: \"true\"\n    dotfiles:\n\
+             \x20     - source: b\n        target: \"~/s\\u200Bx\"\n\
+             \x20     - source: c\n        target: \"/h\\u200Bm/s\\u200Bx\"\n\
+             \x20     - source: d\n        target: \"~/c\\u200Bx\"\n\
+             \x20     - source: e\n        target: \"~/c\\u200Bx\"\n\
+             \x20     - source: f\n        target: \"~/v\"\n        vars:\n          \"b\\u200Bad\": x\n",
+        );
+        package.set_source(
+            PathBuf::from("/p\u{200B}k/n.yml"),
+            String::new(),
+            crate::package::SpecOrigin::PackageDirectory,
+        );
+        package
+    }
+
+    // The validation messages and suggestions that name a value, whole, so a
+    // change to how they are built cannot change their words.
+    #[test]
+    fn the_messages_naming_a_value_are_worded_whole() {
+        let package = hostile_package();
+        let mut issues = package.validate_environments_contents("e\u{200B}x");
+        issues.extend(package.validate_dotfiles());
+        issues.extend(package.validate_filename_consistency());
+        let vars = BTreeMap::from([("u\u{200B}v".to_string(), "x".to_string())]);
+        let reference = TemplateReference {
+            field: "dotfiles[0]".to_string(),
+            source: "t\u{200B}pl",
+            vars: &vars,
+        };
+        issues.extend(validate_template_vars("{{ other }}", &reference));
+        issues.push(unreadable_template_issue(
+            &reference,
+            &crate::fs::FileSystemError::CannotCreateIn {
+                path: "/p\u{200B}k".into(),
+                cause: std::sync::Arc::new(std::io::Error::other("the cause")),
+            },
+        ));
+        let spec = |name: &str| {
+            let mut spec = package_from_yaml(&format!(
+                "name: {name}\nenvironments:\n  \"w\\u200Bk\":\n    install: \"true\"\n    \
+                 dotfiles:\n      - source: a\n        target: \"~/t\\u200Bx\"\n"
+            ));
+            spec.set_source(
+                PathBuf::from(format!("/p\u{200B}k/{name}.yml")),
+                String::new(),
+                crate::package::SpecOrigin::PackageDirectory,
+            );
+            spec
+        };
+        let specs = [spec("a"), spec("s")];
+        let environments = BTreeSet::from(["w\u{200B}k"]);
+        for collision in cross_spec_collisions(&specs, &environments) {
+            issues.extend(collision.into_issues_at(Path::new("/p\u{200B}k/a.yml")));
+        }
+        let worded: Vec<(String, Option<String>)> = issues
+            .iter()
+            .filter(|issue| !issue.message().starts_with("'selfie apply' executes"))
+            .map(|issue| (issue.message().into_owned(), issue.suggestion().cloned()))
+            .collect();
+        let pinned = [
+            (
+                "Current environment 'e\u{200B}x' is not configured",
+                Some("Add an environment section for 'e\u{200B}x' if needed for this environment."),
+            ),
+            (
+                "Environment 'w\u{200B}k' overrides the shared dotfile for target '~/s\u{200B}x'",
+                Some(
+                    "This is allowed; the environment-specific source is used in that environment.",
+                ),
+            ),
+            (
+                "Dotfile var name 'b\u{200B}ad' is not valid",
+                Some("Names must match [A-Za-z_][A-Za-z0-9_]*."),
+            ),
+            (
+                "Dotfile entries environments.w\u{200B}k.dotfiles[2] and \
+                 environments.w\u{200B}k.dotfiles[3] both deploy to '~/c\u{200B}x', so apply \
+                 deploys none of them",
+                Some("Keep one entry per target."),
+            ),
+            (
+                "Package name 'n\u{200B}m' does not match filename 'n.yml'",
+                Some(
+                    "Consider renaming to match: either set name to 'n' or rename the file to \
+                     'n\u{200B}m.yml'",
+                ),
+            ),
+            (
+                "Dotfile var 'u\u{200B}v' is declared but never used in template 't\u{200B}pl'",
+                Some("Check for a misspelling in the template or in the var name."),
+            ),
+            (
+                "Dotfile template 't\u{200B}pl' cannot be read: /p\u{200B}k: the cause",
+                Some("Templates are read during validation to check their placeholders."),
+            ),
+            (
+                "Dotfile entries package 'a' (environments.w\u{200B}k.dotfiles[0]) and package \
+                 's' (environments.w\u{200B}k.dotfiles[0]) both deploy to '~/t\u{200B}x' in \
+                 environment 'w\u{200B}k', so apply deploys none of them there",
+                Some("Keep one entry for this target, in one spec."),
+            ),
+        ];
+        let pinned: Vec<(String, Option<String>)> = pinned
+            .into_iter()
+            .map(|(message, suggestion)| (message.to_string(), suggestion.map(str::to_string)))
+            .collect();
+        assert_eq!(worded, pinned);
+    }
 }
