@@ -774,6 +774,39 @@ fn a_package_with_nothing_to_apply_names_the_environment_as_a_name() {
     assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
 }
 
+// A package with no configuration for the environment in use names the
+// environment as a name, so a U+200B and a right-to-left override in it show
+// escaped.
+#[test]
+fn package_status_names_an_unconfigured_environment_escaped() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("pk.yml"),
+        format!("name: pk\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args([
+            "--no-color",
+            "--environment",
+            "w\u{200B}o\u{202E}k",
+            "package",
+            "status",
+            "pk",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.lines().any(|line| line
+            .contains(r"Package 'pk' has no configuration for environment 'w\u{200b}o\u{202e}k'")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
 // A conflict's diff shows each line of content with its escape sequences as
 // escapes and its tabs as tabs, and a content line starting `-- ` or `++ ` as
 // content, not as a header.

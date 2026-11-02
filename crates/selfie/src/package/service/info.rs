@@ -24,6 +24,7 @@ use crate::{
         port::PackageRepository,
         service::ProgressTracker,
     },
+    parts::{Message, Parts},
 };
 
 // A repository's home directory, asked as `HomeDir` asks for one.
@@ -281,8 +282,13 @@ where
         gaps
     } else {
         sender
-            .send_warning(format!(
-                "Package '{package_name}' has no configuration for environment '{current_env}'"
+            .send_composed_warning(Message::from(
+                Parts::new()
+                    .text("Package '")
+                    .name(package_name)
+                    .text("' has no configuration for environment '")
+                    .name(current_env)
+                    .text("'"),
             ))
             .await;
         Vec::new()
@@ -1272,13 +1278,34 @@ environments:
         .await;
 
         drop(sender);
-        let mut warnings = Vec::new();
+        let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
-            warnings.extend(crate::package::event::warning_text(&event));
+            events.push(event);
         }
+        let warnings: Vec<String> = events
+            .iter()
+            .filter_map(crate::package::event::warning_text)
+            .collect();
         assert_eq!(
             warnings,
             ["Package 'test-pkg' has no configuration for environment 'w\u{200B}k'"]
         );
+        // The package and the environment are names, so the CLI escapes them.
+        let names: Vec<String> = events
+            .iter()
+            .flat_map(|event| match event {
+                PackageEvent::ComposedWarning { warning, .. } => {
+                    crate::parts::Composed::parts(warning)
+                        .into_iter()
+                        .filter_map(|part| match part {
+                            crate::parts::Part::Name(name) => Some(name.to_string()),
+                            _ => None,
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(names, ["test-pkg", "w\u{200B}k"]);
     }
 }

@@ -449,6 +449,22 @@ fn warnings_starting(events: &[PackageEvent], prefix: &str) -> usize {
         .count()
 }
 
+// The values each warning sent composed names as parts. A warning sent as
+// finished text is not one of them. Its twin for the crate's unit tests is
+// `warning_values` in src/package/event.rs, which panics on a text warning
+// instead; keep the two in step.
+fn warning_values(events: &[PackageEvent]) -> Vec<Vec<String>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::ComposedWarning { warning, .. } => Some(selfie::parts::values_of(
+                &selfie::parts::Message::from(selfie::parts::Composed::parts(warning)),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 // Counts the warnings worded `words`, whole.
 fn warnings_worded(events: &[PackageEvent], words: &str) -> usize {
     events
@@ -535,6 +551,9 @@ async fn a_recommend_whose_post_install_check_times_out_leaves_the_run_clean() {
         1,
         "{events:?}"
     );
+    // The check's failure stays text until selfie-2kwj makes it Composed, so
+    // only the recommend is a part here.
+    assert_eq!(warning_values(&events), [["rec"]]);
 }
 
 // A recommend's own dependency is named as installed for the recommend, not
@@ -561,6 +580,9 @@ async fn a_recommends_dependency_is_named_for_the_recommend() {
         1,
         "{events:?}"
     );
+    // The check's failure stays text until selfie-2kwj makes it Composed, so
+    // only the two packages are parts here.
+    assert_eq!(warning_values(&events), [["lib", "rec"]]);
 }
 
 // An install command that fails is a warning naming the package, whole, so a
@@ -579,6 +601,7 @@ async fn a_failed_install_command_is_worded_whole() {
         1,
         "{events:?}"
     );
+    assert_eq!(warning_values(&events), [["pkg"]]);
 }
 
 // Each `SettledEarlier` event as (package, recommend, how), in order.

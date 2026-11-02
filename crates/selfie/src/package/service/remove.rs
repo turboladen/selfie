@@ -10,6 +10,7 @@ use crate::{
         port::{PackageParseError, PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
+    parts::{Composed, Message, Parts},
 };
 
 /// What a removal of one spec found before anything is removed: the spec as it
@@ -106,7 +107,11 @@ where
     let plan = plan_removal(package_name, shown, repo);
     if let Some(err) = &plan.scan_failure {
         sender
-            .send_warning(format!("Failed to check for dependent packages: {err}"))
+            .send_composed_warning(Message::from(
+                Parts::new()
+                    .text("Failed to check for dependent packages: ")
+                    .append(err.parts()),
+            ))
             .await;
     }
     // A spec selfie could not read may name this package, so an empty dependent
@@ -554,10 +559,14 @@ mod tests {
         .await;
 
         drop(sender);
-        let mut warnings = Vec::new();
+        let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
-            warnings.extend(crate::package::event::warning_text(&event));
+            events.push(event);
         }
+        let warnings: Vec<String> = events
+            .iter()
+            .filter_map(crate::package::event::warning_text)
+            .collect();
         assert_eq!(
             warnings,
             [format!(
@@ -565,5 +574,11 @@ mod tests {
                 scan_failure()
             )]
         );
+        // The directory is a part, so the CLI escapes it.
+        let values: Vec<Vec<String>> = events
+            .iter()
+            .filter_map(crate::package::event::warning_values)
+            .collect();
+        assert_eq!(values, [["/p\u{200B}k"]]);
     }
 }
