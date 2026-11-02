@@ -16,9 +16,7 @@ use selfie::package::event::{
     EnvironmentStatus, EnvironmentStatusData, LinkAtTarget, OperationInfo, PackageInfoData,
     RefusedSpec, SkipReason, SpecListItem, Uncreatable, ValidationIssueData, ValidationResultData,
 };
-use selfie::package::event::{
-    OperationFailure, OperationSuccess, RefusalKind, UncheckedSource, UnknownStatus,
-};
+use selfie::package::event::{OperationFailure, OperationSuccess, UncheckedSource, UnknownStatus};
 use selfie::package::port::{PackageParseError, PackageParseKind};
 use selfie::sync_service::port::PackageValidationIssue;
 use selfie::validation::{ValidationIssue, ValidationLevel};
@@ -283,40 +281,6 @@ pub(crate) fn parse_reason(error: &PackageParseError) -> Shown {
     }
 }
 
-// This words "Multiple packages found ..." as the library does, with the name
-// a Name, the directory a DisplayPath and each file's name a Name.
-fn ambiguous_name(name: &str, directory: &std::path::Path, paths: &[std::path::PathBuf]) -> Shown {
-    let files = crate::formatters::comma_joined(paths.iter().map(|path| {
-        Name::new(
-            &path
-                .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy(),
-        )
-    }));
-    shown!(
-        "Multiple packages found with name `{}` in path {}: {}. Names are compared ignoring \
-         case, and `.yml` and `.yaml` name the same package, so these files all claim one name. \
-         Rename or remove all but one.",
-        Name::new(name),
-        DisplayPath::of(directory),
-        files
-    )
-}
-
-/// Why a listing could not trust a spec. An ambiguity names the spec and the
-/// files that claim it.
-pub(crate) fn refusal_reason(row: &RefusedSpec) -> Shown {
-    match (row.kind, row.claimants.first()) {
-        (RefusalKind::AmbiguousName, Some(first)) => ambiguous_name(
-            &row.package_name,
-            first.parent().unwrap_or_else(|| std::path::Path::new(".")),
-            &row.claimants,
-        ),
-        _ => message(&row.reason).into(),
-    }
-}
-
 /// Why a dependency's status is unknown, with a lookup's error from its parts.
 pub(crate) fn unknown_status(status: &UnknownStatus) -> Shown {
     match status {
@@ -376,7 +340,7 @@ pub(crate) fn skipped_spec(error: &PackageParseError) -> Shown {
 /// The warning for a spec file a listing leaves out because several files
 /// claim its name.
 pub(crate) fn ambiguous_spec(row: &RefusedSpec) -> Shown {
-    skipping(&row.path, refusal_reason(row))
+    skipping(&row.path, composed(&row.reason))
 }
 
 /// Why `spec create` will not create `package_name`.
@@ -501,9 +465,9 @@ pub(crate) struct Info {
     pub(crate) description: Option<Prose>,
     pub(crate) homepage: Option<Name>,
     /// Why apply would refuse the spec here.
-    pub(crate) refusal: Option<Prose>,
+    pub(crate) refusal: Option<Shown>,
     /// Why apply would refuse the spec in another environment.
-    pub(crate) refusal_elsewhere: Option<Prose>,
+    pub(crate) refusal_elsewhere: Option<Shown>,
     pub(crate) current_environment: Name,
 }
 
@@ -513,8 +477,8 @@ impl From<&PackageInfoData> for Info {
             name: Name::new(&data.name),
             description: data.description.as_deref().map(Prose::new),
             homepage: data.homepage.as_deref().map(Name::new),
-            refusal: data.refusal.as_deref().map(message),
-            refusal_elsewhere: data.refusal_elsewhere.as_deref().map(message),
+            refusal: data.refusal.as_ref().map(composed),
+            refusal_elsewhere: data.refusal_elsewhere.as_ref().map(composed),
             current_environment: Name::new(&data.current_environment),
         }
     }
@@ -573,7 +537,7 @@ impl From<&SpecListItem> for SpecItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::package::event::UnknownStatus;
+    use selfie::package::event::{RefusalKind, UnknownStatus};
     use selfie::package::port::{PackageError, PackageRepoError};
 
     // A name that shows as written is pre-filled; one the prompt can only show
@@ -769,15 +733,6 @@ mod tests {
             assert_eq!(composed(error).as_str(), error.to_string());
         }
 
-        let ambiguous = RefusedSpec {
-            package_name: "tool".to_string(),
-            path: "/p/tool.yml".into(),
-            kind: RefusalKind::AmbiguousName,
-            reason: errors[3].to_string(),
-            claimants: vec!["/p/tool.yml".into(), "/p/Tool.yaml".into()],
-        };
-        assert_eq!(refusal_reason(&ambiguous).as_str(), ambiguous.reason);
-
         let sources = [
             UncheckedSource::SpecFile {
                 base: selfie::package::event::BaseKind::PackageDirectory,
@@ -912,21 +867,31 @@ mod tests {
     }
 
     // An ambiguity names the spec and each file that claims it as names, so an
-    // invisible character in either shows as an escape.
+    // invisible character in either shows as an escape. The reason is the
+    // library's own ambiguity sentence, as a refused row carries it.
     #[test]
     fn an_ambiguity_names_the_spec_and_its_files_escaped() {
+        let claimants: Vec<std::path::PathBuf> =
+            vec!["/p/t\u{200B}ool.yml".into(), "/p/T\u{200B}ool.yaml".into()];
+        let reason = selfie::parts::Message::of(&PackageError::MultiplePackagesFound {
+            name: "t\u{200B}ool".to_string(),
+            packages_path: "/p".into(),
+            conflicting_paths: claimants.clone(),
+            files_examined: 2,
+            search_patterns: Vec::new(),
+        });
         let row = RefusedSpec {
             package_name: "t\u{200B}ool".to_string(),
             path: "/p/t\u{200B}ool.yml".into(),
             kind: RefusalKind::AmbiguousName,
-            reason: String::new(),
-            claimants: vec!["/p/t\u{200B}ool.yml".into(), "/p/T\u{200B}ool.yaml".into()],
+            reason,
+            claimants,
         };
 
-        let shown = refusal_reason(&row);
+        let shown = ambiguous_spec(&row);
 
         assert!(
-            shown.as_str().starts_with(r"Multiple packages found with name `t\u{200b}ool` in path /p: t\u{200b}ool.yml, T\u{200b}ool.yaml."),
+            shown.as_str().starts_with(r"Skipping package file /p/t\u{200b}ool.yml: Multiple packages found with name `t\u{200b}ool` in path /p: t\u{200b}ool.yml, T\u{200b}ool.yaml."),
             "{shown}"
         );
     }
@@ -993,7 +958,7 @@ mod tests {
             package_name: "tool".to_string(),
             path: "/p/tool.yml".into(),
             kind: selfie::package::event::RefusalKind::UnknownTopLevelKeys,
-            reason: "several files claim it".to_string(),
+            reason: test_common::message("several files claim it"),
             claimants: Vec::new(),
         };
         assert_eq!(

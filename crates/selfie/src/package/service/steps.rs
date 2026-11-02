@@ -58,7 +58,7 @@ pub(super) fn refuse_unreadable_spec(
 
     Some(OperationResult::Failure(OperationFailure::UnreadableSpec {
         package_name: package_name.to_string(),
-        reason: refusal.to_string(),
+        reason: crate::parts::Message::of(&refusal),
     }))
 }
 

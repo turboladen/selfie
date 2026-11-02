@@ -1414,7 +1414,7 @@ enum RelayedDriftEvent {
     SkippedSpec(crate::package::port::PackageParseError),
     PackagesRefused {
         kind: crate::package::event::RefusalKind,
-        reason: String,
+        reason: crate::parts::Message,
         packages: Vec<crate::package::event::RefusedPackage>,
     },
     DotfileRefused {
@@ -2356,6 +2356,12 @@ mod tests {
             name: name.to_string(),
             paths: vec![PathBuf::from(format!("/packages/{name}.yml"))],
         };
+        // The reason names its key as a name, which the relay must keep.
+        let reason: crate::parts::Message = crate::parts::Parts::new()
+            .text("unknown field '")
+            .name("ver\u{200B}sion")
+            .text("'")
+            .into();
         let events = vec![
             PackageEvent::Warning {
                 operation_info: test_operation_info(),
@@ -2364,7 +2370,7 @@ mod tests {
             PackageEvent::PackagesRefused {
                 operation_info: test_operation_info(),
                 kind: RefusalKind::UnknownTopLevelKeys,
-                reason: "unknown field `version`".to_string(),
+                reason: reason.clone(),
                 packages: vec![package("a"), package("b"), package("c")],
             },
             PackageEvent::Warning {
@@ -2380,7 +2386,8 @@ mod tests {
         assert!(
             matches!(
                 &summary.relayed[1],
-                RelayedDriftEvent::PackagesRefused { packages, .. } if packages.len() == 3
+                RelayedDriftEvent::PackagesRefused { packages, reason: relayed, .. }
+                    if packages.len() == 3 && *relayed == reason
             ),
             "{summary:?}"
         );

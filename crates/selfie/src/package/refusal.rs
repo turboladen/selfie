@@ -457,6 +457,53 @@ mod tests {
         package
     }
 
+    // A refused spec's reason names its environment and its key as names, and
+    // an ambiguity's names its directory as a path, so a value holding U+200B
+    // never sits inside selfie's words. The kinds are checked as well as the
+    // values, since `values_of` cannot tell a name from a path.
+    #[test]
+    fn a_refused_specs_reason_names_its_values_as_parts() {
+        use crate::package::event::{OperationFailure, RefusedSpec};
+        use crate::parts::{Composed, Part, values_of};
+
+        let package = package_from(
+            "name: myapp\nenvironments:\n  \"w\\u200Bk\":\n    install: \"true\"\n    \
+             \"x\\u200By\": 1\n",
+        );
+        let refusal = package
+            .spec_refusal("w\u{200B}k")
+            .expect("the key refuses it");
+        let row = RefusedSpec::new(&package, &refusal);
+        assert_eq!(values_of(&row.reason), ["w\u{200B}k", "x\u{200B}y"]);
+        let parts = row.reason.parts();
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+        assert!(
+            parts.contains(&&Part::Name("w\u{200B}k".into())),
+            "{parts:?}"
+        );
+        assert!(
+            parts.contains(&&Part::Name("x\u{200B}y".into())),
+            "{parts:?}"
+        );
+
+        let failure = OperationFailure::UnreadableSpec {
+            package_name: "myapp".to_string(),
+            reason: row.reason.clone(),
+        };
+        assert_eq!(
+            values_of(&failure.message()),
+            ["myapp", "w\u{200B}k", "x\u{200B}y"]
+        );
+
+        let directory = std::path::Path::new("/p\u{200B}k");
+        let files = [directory.join("m.yml"), directory.join("m.yaml")];
+        let ambiguous = RefusedSpec::ambiguous_file("m", &files[0], &files);
+        let parts = ambiguous.reason.parts();
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+        assert!(parts.contains(&&Part::Path(directory.into())), "{parts:?}");
+        assert!(parts.contains(&&Part::Name("m".into())), "{parts:?}");
+    }
+
     // Two specs refused for the same reason are reported as one group, named by
     // that reason in its words, and a third refused for another reason as a
     // group of its own.

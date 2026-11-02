@@ -1755,3 +1755,38 @@ fn spec_validate_names_a_mismatched_name_escaped() {
     assert!(row.contains(r"Package name 'n\u{200b}m'"), "{row}");
     assert!(!row.contains('\u{200B}'), "{row:?}");
 }
+
+// Every command that names a refused spec's reason shows its unknown key, and
+// the environment the key sits in, escaped: a listing's row, a run's skipping
+// line, a single-package command's failure, and spec info's refusal.
+#[test]
+fn a_refused_specs_reason_names_its_key_and_environment_escaped() {
+    let temp = setup_default_test_config();
+    let keyed = format!(
+        "name: g\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \"w\\u200Bk\": 1\n"
+    );
+    let elsewhere = "name: e\nenvironments:\n  \"w\\u200Bv\":\n    install: \"true\"\n    \
+                     \"x\\u200By\": 1\n";
+    hostile_package_directory(&temp, &[("g.yml", &keyed), ("e.yml", elsewhere)]);
+    let key = r"unknown field 'w\u{200b}k'";
+    let cases: [(&[&str], &str, &str); 7] = [
+        (&["package", "list"], "refused (g.yml)", key),
+        (&["spec", "list"], "Refused: g", key),
+        (&["apply"], "Skipping package 'g'", key),
+        (&["dotfiles", "drift"], "Skipping package 'g'", key),
+        (&["package", "check", "g"], "Cannot use package `g`", key),
+        (&["spec", "info", "g"], "would refuse this spec here", key),
+        (
+            &["dotfiles", "list"],
+            "Cannot read the dotfiles in 'e'",
+            r"in environment 'w\u{200b}v': unknown field 'x\u{200b}y'",
+        ),
+    ];
+
+    for (args, marker, escaped) in cases {
+        let printed = printed(&temp, args);
+        let line = line_with(&printed, marker);
+        assert!(line.contains(escaped), "{args:?}: {line}");
+        assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
+    }
+}

@@ -15,7 +15,7 @@ use selfie::package::{
     },
     port::{PackageError, PackageParseKind},
 };
-use selfie::parts::SuggestedCommand;
+use selfie::parts::{Message, SuggestedCommand};
 
 use crate::display_manager::Channel;
 use crate::display_manager::{Diff, DisplayManager, ErrorDetail};
@@ -753,11 +753,11 @@ impl ToTitleCase for str {
 /// The warning lines for packages refused for `reason`: one line naming them
 /// all, or under `verbose` one line per package.
 pub(crate) fn refused_packages_lines(
-    reason: &str,
+    reason: &Message,
     packages: &[RefusedPackage],
     verbose: bool,
 ) -> Vec<Shown> {
-    let reason = received::message(reason);
+    let reason = received::composed(reason);
     let one = |package: &RefusedPackage| {
         shown!(
             "Skipping package '{}': {}",
@@ -1096,7 +1096,7 @@ mod tests {
         PackageEvent::PackagesRefused {
             operation_info: make_operation_info(""),
             kind: selfie::package::event::RefusalKind::UnknownTopLevelKeys,
-            reason: "unknown field 'version'".to_string(),
+            reason: test_common::message("unknown field 'version'"),
             packages: names
                 .iter()
                 .map(|name| RefusedPackage {

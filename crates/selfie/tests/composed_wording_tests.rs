@@ -241,9 +241,9 @@ fn every_directory_refusal_is_worded_as_pinned() {
     let (absent, unlistable, unknown) = (&errors[1], &errors[6], &errors[7]);
     let shown = [
         CollectionRefusal::UnreadableDotfilesDirectory(Unreadable::Unlistable(unlistable.clone()))
-            .sentence(),
+            .to_string(),
         CollectionRefusal::UnreadableDotfilesDirectory(Unreadable::Uncheckable(unknown.clone()))
-            .sentence(),
+            .to_string(),
         NamespaceValidationError::PackageDirectoryUnreadable(absent.clone()).to_string(),
         NamespaceValidationError::PackageDirectoryUnreadable(unlistable.clone()).to_string(),
         NamespaceValidationError::DotfilesDirectoryUnreadable(unknown.clone()).to_string(),

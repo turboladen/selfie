@@ -147,10 +147,11 @@ where
                 .map(
                     |(name, loaded_paths, _)| crate::package::event::PackageRefusal {
                         kind: crate::package::event::RefusalKind::AmbiguousName,
-                        reason: crate::package::port::ambiguous_files_sentence(
+                        reason: crate::package::port::ambiguous_files_parts(
                             name,
                             &names.ambiguous[*name],
-                        ),
+                        )
+                        .into(),
                         package: crate::package::event::RefusedPackage {
                             name: (*name).clone(),
                             paths: loaded_paths.clone(),

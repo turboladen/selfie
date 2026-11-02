@@ -341,7 +341,7 @@ fn refused_json(refused: &[selfie::package::event::RefusedSpec]) -> Vec<Value> {
                 "package": &r.package_name,
                 "path": r.path.display().to_string(),
                 "kind": label(r.kind),
-                "reason": &r.reason,
+                "reason": r.reason.to_string(),
             })
         })
         .collect()
@@ -421,7 +421,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                             .map(|path| path.display().to_string())
                             .collect::<Vec<_>>(),
                         "kind": label(*kind),
-                        "reason": reason,
+                        "reason": reason.to_string(),
                     })
                 })
                 .collect();
@@ -475,8 +475,8 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                 "environments": &package_info.environments,
                 "current_environment": &package_info.current_environment,
                 "git_status": package_info.git_status.as_ref().map(label),
-                "refusal": &package_info.refusal,
-                "refusal_elsewhere": &package_info.refusal_elsewhere,
+                "refusal": package_info.refusal.as_ref().map(ToString::to_string),
+                "refusal_elsewhere": package_info.refusal_elsewhere.as_ref().map(ToString::to_string),
                 "dotfiles": dotfiles,
                 "apply_commands": package_info.apply_commands,
             }))
@@ -1105,7 +1105,7 @@ fn status_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
     let refusal = match unknown {
         Some(UnknownStatus::Refused { kind, reason }) => serde_json::json!({
             "kind": label(*kind),
-            "reason": reason,
+            "reason": reason.to_string(),
         }),
         _ => Value::Null,
     };
@@ -2155,7 +2155,7 @@ mod tests {
 
         let gap = EnvironmentStatus::Unknown(UnknownStatus::Refused {
             kind: RefusalKind::UnknownTopLevelKeys,
-            reason: "an unknown key".to_string(),
+            reason: test_common::message("an unknown key"),
         })
         .gap("dep")
         .expect("a refused spec is a gap");
@@ -2745,7 +2745,7 @@ mod tests {
         let events = vec![PackageEvent::PackagesRefused {
             operation_info: test_op_info(),
             kind: RefusalKind::AmbiguousName,
-            reason: "several files claim it".to_string(),
+            reason: test_common::message("several files claim it"),
             packages: vec![
                 package("a", &["/p/a.yml", "/p/a.yaml"]),
                 package("b", &["/p/b.yml"]),
@@ -2860,7 +2860,7 @@ mod tests {
             let rows = event_to_json(&PackageEvent::PackagesRefused {
                 operation_info: test_op_info(),
                 kind,
-                reason: "r".to_string(),
+                reason: test_common::message("r"),
                 packages: vec![selfie::package::event::RefusedPackage {
                     name: "p".to_string(),
                     paths: vec![],
@@ -2998,7 +2998,7 @@ mod tests {
                     package_name: "shadowed".to_string(),
                     path: "/packages/shadowed.yml".into(),
                     kind: RefusalKind::UnknownTopLevelKeys,
-                    reason: "unrecognized top-level key `_dotfiles`".to_string(),
+                    reason: test_common::message("unrecognized top-level key `_dotfiles`"),
                     claimants: Vec::new(),
                 }],
                 package_directory: "/packages".to_string(),
@@ -3023,14 +3023,8 @@ mod tests {
         let refused = &row["refused"][0];
         assert_eq!(refused["package"], "shadowed");
         assert_eq!(refused["path"], "/packages/shadowed.yml");
-        assert!(
-            refused["reason"]
-                .as_str()
-                .expect("reason is a string")
-                .contains("_dotfiles"),
-            "the reason must survive to the caller, got: {}",
-            refused["reason"]
-        );
+        // The reason's words whole, as its parts write them.
+        assert_eq!(refused["reason"], "unrecognized top-level key `_dotfiles`");
     }
 
     // The listing rows carry the same shape as a skipped spec, so a caller learns
@@ -3120,7 +3114,7 @@ mod tests {
                     package_name: "shadowed".to_string(),
                     path: "/packages/shadowed.yml".into(),
                     kind: RefusalKind::UnknownTopLevelKeys,
-                    reason: "'_environments' is refused".to_string(),
+                    reason: test_common::message("'_environments' is refused"),
                     claimants: Vec::new(),
                 }],
                 current_environment: "test".to_string(),
@@ -3620,7 +3614,7 @@ mod tests {
             (
                 UnknownStatus::Refused {
                     kind: RefusalKind::NoEnvironments,
-                    reason: "r".to_string(),
+                    reason: test_common::message("r"),
                 },
                 "refused",
             ),
@@ -3655,7 +3649,7 @@ mod tests {
                 name: "refused".to_string(),
                 status: EnvironmentStatus::Unknown(UnknownStatus::Refused {
                     kind: RefusalKind::UnknownTopLevelKeys,
-                    reason: "unknown key".to_string(),
+                    reason: test_common::message("unknown key"),
                 }),
             },
             DependencyStatus {
@@ -3839,7 +3833,7 @@ mod tests {
             recommend_name: "b".to_string(),
             error: Box::new(OperationFailure::UnreadableSpec {
                 package_name: "b".to_string(),
-                reason: "unknown field 'bogus'".to_string(),
+                reason: test_common::message("unknown field 'bogus'"),
             }),
         });
 
