@@ -278,6 +278,14 @@ impl From<Parts<'_>> for Message {
     }
 }
 
+impl Message {
+    /// The sentence `value` words, with its own copy of every value it names.
+    #[must_use]
+    pub fn of(value: &(impl Composed + ?Sized)) -> Self {
+        value.parts().into()
+    }
+}
+
 crate::parts::display_from_parts!(Message);
 
 impl Composed for Message {

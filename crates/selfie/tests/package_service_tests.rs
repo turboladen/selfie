@@ -658,10 +658,12 @@ mod a_spec_selfie_cannot_read {
     // objected to is data rather than wording.
     fn assert_refused_over_the_shadowing_key(events: &[PackageEvent]) {
         let reason = match get_operation_result(events).expect("the operation must complete") {
-            OperationResult::Failure(OperationFailure::UnreadableSpec { reason, .. })
-            | OperationResult::Failure(OperationFailure::DependencyError(
+            OperationResult::Failure(OperationFailure::UnreadableSpec { reason, .. }) => {
+                reason.clone()
+            }
+            OperationResult::Failure(OperationFailure::DependencyError(
                 DependencyFailure::UnreadableSpec { reason, .. },
-            )) => reason.clone(),
+            )) => reason.to_string(),
             other => panic!("the spec must be refused as unreadable, got: {other:?}"),
         };
         assert!(
