@@ -31,6 +31,8 @@ pub enum Part<'a> {
 pub enum Subcommand {
     /// `selfie apply`.
     Apply,
+    /// `selfie package track-dotfile`.
+    PackageTrackDotfile,
 }
 
 impl Subcommand {
@@ -38,6 +40,7 @@ impl Subcommand {
     fn word(self) -> &'static str {
         match self {
             Self::Apply => "apply",
+            Self::PackageTrackDotfile => "package track-dotfile",
         }
     }
 }
@@ -61,10 +64,11 @@ impl fmt::Display for Program {
     }
 }
 
-/// A command a sentence suggests the user run: a [`Program`] and one operand,
-/// such as a spec name or a path, held as the shell words that pass it.
+/// A command a sentence suggests the user run: a [`Program`] and its one or
+/// two operands, such as a spec name or a path, held as the shell words that
+/// pass them.
 ///
-/// Its operand always has those words, so the command can always be written
+/// Its operands always have those words, so the command can always be written
 /// out to run as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuggestedCommand {
@@ -80,6 +84,17 @@ impl SuggestedCommand {
     pub fn selfie(subcommand: Subcommand, operand: &str) -> Option<Self> {
         crate::fs::shell_operand(operand).map(|word| Self {
             program: Program::Selfie(subcommand),
+            word,
+        })
+    }
+
+    /// The command tracking `target` into the package `spec`, each quoted as one
+    /// shell word, after one `--` when either starts with a dash, or `None` when
+    /// either holds NUL.
+    #[must_use]
+    pub fn track_dotfile(spec: &str, target: &str) -> Option<Self> {
+        crate::fs::shell_operands(&[spec, target]).map(|word| Self {
+            program: Program::Selfie(Subcommand::PackageTrackDotfile),
             word,
         })
     }
@@ -104,7 +119,7 @@ impl SuggestedCommand {
         self.program
     }
 
-    /// The shell words that pass the operand, as a command line shows them.
+    /// The shell words that pass the operands, as a command line shows them.
     #[must_use]
     pub fn word(&self) -> &str {
         &self.word
@@ -413,6 +428,36 @@ mod tests {
         assert_eq!(apply("~tool"), some("selfie apply '~tool'"));
         assert_eq!(apply("-x"), some("selfie apply -- -x"));
         assert_eq!(apply("a\0b"), None);
+    }
+
+    // A track command quotes each operand as one word, puts one `--` ahead of
+    // both when either starts with a dash, and does not exist when either holds
+    // NUL.
+    #[test]
+    fn a_track_command_quotes_each_operand_once() {
+        let track = |spec: &str, target: &str| {
+            SuggestedCommand::track_dotfile(spec, target).map(|command| command.to_string())
+        };
+        let some = |text: &str| Some(text.to_string());
+
+        assert_eq!(
+            track("bat", "/home/me/.batrc"),
+            some("selfie package track-dotfile bat /home/me/.batrc")
+        );
+        assert_eq!(
+            track("bat", "/home/me/my rc"),
+            some("selfie package track-dotfile bat '/home/me/my rc'")
+        );
+        assert_eq!(
+            track("-bat", "/x"),
+            some("selfie package track-dotfile -- -bat /x")
+        );
+        assert_eq!(
+            track("bat", "-x"),
+            some("selfie package track-dotfile -- bat -x")
+        );
+        assert_eq!(track("b\0at", "/x"), None);
+        assert_eq!(track("bat", "/x\0"), None);
     }
 
     // An empty text adds no part, so an absent clause leaves no trace.

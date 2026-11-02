@@ -193,11 +193,23 @@ pub fn shell_word(word: &str) -> Option<Cow<'_, str>> {
 /// `None` when it holds a NUL byte, which no shell word can carry.
 #[must_use]
 pub fn shell_operand(name: &str) -> Option<String> {
-    let word = shell_word(name)?;
-    Some(if name.starts_with('-') {
-        format!("-- {word}")
+    shell_operands(&[name])
+}
+
+/// `operands` as a command's operands: each quoted as one shell word, joined by
+/// spaces, after one `--` when any starts with a dash. Returns `None` when any
+/// holds a NUL byte.
+#[must_use]
+pub fn shell_operands(operands: &[&str]) -> Option<String> {
+    let words = operands
+        .iter()
+        .map(|operand| shell_word(operand))
+        .collect::<Option<Vec<_>>>()?;
+    let joined = words.join(" ");
+    Some(if operands.iter().any(|operand| operand.starts_with('-')) {
+        format!("-- {joined}")
     } else {
-        word.into_owned()
+        joined
     })
 }
 
