@@ -5190,6 +5190,65 @@ mod tests {
         }
     }
 
+    // Each command failure whole, through every type that carries it, and the
+    // failure's message in the same words as its Display.
+    #[test]
+    fn a_command_failures_words_are_pinned() {
+        use crate::commands::runner::{CommandError, UnusableDirectory};
+        use std::time::Duration;
+
+        let timed_out = TimedOut::new("sleep 5 #\u{200B}", Duration::from_secs(1));
+        let timed_out_words =
+            "`sleep 5 #\u{200B}` timed out after 1 second, the limit `command_timeout` sets";
+        assert_eq!(timed_out.to_string(), timed_out_words);
+        let timeout = CommandError::Timeout {
+            command: "sleep 5 #\u{200B}".to_string(),
+            timeout: Duration::from_secs(1),
+            working_directory: "/p".into(),
+        };
+        assert_eq!(timeout.to_string(), timed_out_words);
+
+        let unusable = UnusableDirectory::new(
+            "check #\u{200B}",
+            "/g\u{200B}ne",
+            std::sync::Arc::new(std::io::Error::other("missing")),
+        );
+        let unusable_words = "Cannot run 'check #\u{200B}' in /g\u{200B}ne: missing";
+        assert_eq!(unusable.to_string(), unusable_words);
+
+        let failures = [
+            (
+                CommandFailure::ExecutionFailed {
+                    command: "false #\u{200B}".to_string(),
+                    exit_code: Some(127),
+                    stderr: crate::commands::BoundedText::bound(b"e"),
+                },
+                "Command error: Command `false #\u{200B}` failed with exit code 127".to_string(),
+            ),
+            (
+                CommandFailure::ExecutionFailed {
+                    command: "false #\u{200B}".to_string(),
+                    exit_code: None,
+                    stderr: crate::commands::BoundedText::bound(b"e"),
+                },
+                "Command error: Command `false #\u{200B}` failed".to_string(),
+            ),
+            (
+                CommandFailure::TimedOut(timed_out),
+                format!("Command error: {timed_out_words}"),
+            ),
+            (
+                CommandFailure::WorkingDirectoryUnusable(unusable),
+                unusable_words.to_string(),
+            ),
+        ];
+        for (failure, words) in failures {
+            let failure = OperationFailure::CommandError(failure);
+            assert_eq!(failure.to_string(), words);
+            assert_eq!(failure.message().to_string(), words);
+        }
+    }
+
     // The one sentence for a timeout: it says the command timed out, how long it
     // had in whole units, and which setting to raise.
     #[test]
