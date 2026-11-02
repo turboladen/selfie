@@ -19,9 +19,9 @@ pub enum Part<'a> {
     /// a sentence, such as an I/O error's message.
     Text(Cow<'a, str>),
     /// An environment, package or spec name.
-    Name(&'a str),
+    Name(Cow<'a, str>),
     /// A path, including one spelled as a spec spells it, such as `~/.bashrc`.
-    Path(&'a Path),
+    Path(Cow<'a, Path>),
     /// A command for the user to run.
     Command(SuggestedCommand),
 }
@@ -144,13 +144,13 @@ impl<'a> Parts<'a> {
         self.text(text.trim_end_matches(['\r', '\n']).to_string())
     }
 
-    pub(crate) fn name(mut self, name: &'a str) -> Self {
-        self.0.push(Part::Name(name));
+    pub(crate) fn name(mut self, name: impl Into<Cow<'a, str>>) -> Self {
+        self.0.push(Part::Name(name.into()));
         self
     }
 
-    pub(crate) fn path(mut self, path: &'a Path) -> Self {
-        self.0.push(Part::Path(path));
+    pub(crate) fn path(mut self, path: impl Into<Cow<'a, Path>>) -> Self {
+        self.0.push(Part::Path(path.into()));
         self
     }
 
@@ -182,6 +182,63 @@ impl<'a> Parts<'a> {
     pub(crate) fn append(mut self, other: Parts<'a>) -> Self {
         self.0.extend(other.0);
         self
+    }
+
+    // The same parts, holding their own copies of every value, with each run
+    // of adjacent texts merged into one.
+    fn into_owned(self) -> Parts<'static> {
+        let mut owned: Vec<Part<'static>> = Vec::with_capacity(self.0.len());
+        for part in self.0 {
+            match (owned.last_mut(), part) {
+                (Some(Part::Text(before)), Part::Text(text)) => before.to_mut().push_str(&text),
+                (_, part) => owned.push(match part {
+                    Part::Text(text) => Part::Text(Cow::Owned(text.into_owned())),
+                    Part::Name(name) => Part::Name(Cow::Owned(name.into_owned())),
+                    Part::Path(path) => Part::Path(Cow::Owned(path.into_owned())),
+                    Part::Command(command) => Part::Command(command),
+                }),
+            }
+        }
+        Parts(owned)
+    }
+
+    // The same parts, borrowing every value from these.
+    fn borrowed(&self) -> Parts<'_> {
+        Parts(
+            self.0
+                .iter()
+                .map(|part| match part {
+                    Part::Text(text) => Part::Text(Cow::Borrowed(text)),
+                    Part::Name(name) => Part::Name(Cow::Borrowed(name)),
+                    Part::Path(path) => Part::Path(Cow::Borrowed(path)),
+                    Part::Command(command) => Part::Command(command.clone()),
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A sentence whose parts were fixed when it was built, holding its own copy
+/// of every value it names.
+// It exists for a sentence an event carries, such as an entry's refusal, which
+// has to outlive the values it was built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message(Parts<'static>);
+
+impl From<Parts<'_>> for Message {
+    /// Copies every value `parts` names. Adjacent texts become one, so two
+    /// messages with the same words and values are equal however each was
+    /// built.
+    fn from(parts: Parts<'_>) -> Self {
+        Self(parts.into_owned())
+    }
+}
+
+crate::parts::display_from_parts!(Message);
+
+impl Composed for Message {
+    fn parts(&self) -> Parts<'_> {
+        self.0.borrowed()
     }
 }
 
@@ -251,6 +308,33 @@ macro_rules! display_from_parts {
 }
 pub(crate) use display_from_parts;
 
+/// The names and paths `message` names, in order, each as its value's text.
+///
+/// # Panics
+///
+/// Panics when a text part of `message` holds U+200B.
+// A test's hostile values each hold U+200B, which no word of selfie's does, so a
+// value flattened into the sentence's text is not returned and fails the
+// assertion instead.
+#[cfg(any(test, feature = "with_mocks"))]
+#[track_caller]
+#[must_use]
+pub fn values_of(message: &Message) -> Vec<String> {
+    let parts = message.parts();
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Text(text) => {
+                assert!(!text.contains('\u{200B}'), "{text:?} in {parts:?}");
+                None
+            }
+            Part::Name(name) => Some(name.to_string()),
+            Part::Path(path) => Some(path.display().to_string()),
+            Part::Command(_) => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,7 +369,7 @@ mod tests {
             [
                 Part::Text("x ".into()),
                 Part::Text("at ".into()),
-                Part::Path(Path::new("/p")),
+                Part::Path(Path::new("/p").into()),
                 Part::Text(".".into()),
             ]
         );
@@ -336,6 +420,50 @@ mod tests {
     fn an_empty_text_adds_no_part() {
         let parts = Parts::new().text("").name("n").text(String::new());
 
-        assert_eq!(listed(&parts), [Part::Name("n")]);
+        assert_eq!(listed(&parts), [Part::Name("n".into())]);
+    }
+
+    // A message keeps each value's kind and place, writes the same words, and
+    // holds adjacent texts as one, so how a builder split its words does not
+    // make two messages differ.
+    #[test]
+    fn a_message_owns_its_parts_and_merges_adjacent_texts() {
+        let name = String::from("p\u{A0}k");
+        let path = std::path::PathBuf::from("/h/t\u{200B}x\ny");
+        let parts = Parts::new()
+            .text("Skipping '")
+            .path(path.as_path())
+            .text("' in package '")
+            .text(String::from(""))
+            .name(name.as_str())
+            .text("'")
+            .text(".");
+        let written = parts.to_string();
+
+        let message = Message::from(parts);
+        drop((name, path));
+
+        assert_eq!(
+            listed(&message.parts()),
+            [
+                Part::Text("Skipping '".into()),
+                Part::Path(Path::new("/h/t\u{200B}x\ny").into()),
+                Part::Text("' in package '".into()),
+                Part::Name("p\u{A0}k".into()),
+                Part::Text("'.".into()),
+            ]
+        );
+        assert_eq!(message.to_string(), written);
+        assert_eq!(
+            message,
+            Message::from(
+                Parts::new()
+                    .text("Skipping '")
+                    .path(Path::new("/h/t\u{200B}x\ny"))
+                    .text("' in package '")
+                    .name("p\u{A0}k")
+                    .text("'.")
+            )
+        );
     }
 }

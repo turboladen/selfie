@@ -145,8 +145,8 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
             PackageEvent::Warning { message, .. } => vec![message.clone()],
             PackageEvent::DeployStateWarning { warning, .. } => vec![warning.to_string()],
             PackageEvent::DotfilesDirectoryWarning { warning, .. } => vec![warning.to_string()],
-            PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.clone()],
-            PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.clone()],
+            PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.to_string()],
+            PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.to_string()],
             PackageEvent::PackagesRefused {
                 reason, packages, ..
             } => packages
@@ -158,25 +158,41 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
         .collect()
 }
 
-// What each refused entry was refused for, and where, in the order refused.
-fn refusals(events: &[PackageEvent]) -> Vec<(Condition, Location)> {
+// Each refused entry's refusal, in the order refused.
+fn refused(events: &[PackageEvent]) -> Vec<&selfie::package::event::Refusal> {
     events
         .iter()
         .filter_map(|event| match event {
-            PackageEvent::DotfileRefused { refusal, .. } => Some((refusal.condition, refusal.at)),
+            PackageEvent::DotfileRefused { refusal, .. } => Some(refusal),
             _ => None,
         })
         .collect()
 }
 
-// Which operation failed for each failed entry, in the order they failed.
-fn failures(events: &[PackageEvent]) -> Vec<EntryOperation> {
+// Each failed entry's failure, in the order they failed.
+fn failed(events: &[PackageEvent]) -> Vec<&selfie::package::event::Failure> {
     events
         .iter()
         .filter_map(|event| match event {
-            PackageEvent::DotfileFailed { failure, .. } => Some(failure.operation),
+            PackageEvent::DotfileFailed { failure, .. } => Some(failure),
             _ => None,
         })
+        .collect()
+}
+
+// What each refused entry was refused for, and where, in the order refused.
+fn refusals(events: &[PackageEvent]) -> Vec<(Condition, Location)> {
+    refused(events)
+        .into_iter()
+        .map(|refusal| (refusal.condition, refusal.at))
+        .collect()
+}
+
+// Which operation failed for each failed entry, in the order they failed.
+fn failures(events: &[PackageEvent]) -> Vec<EntryOperation> {
+    failed(events)
+        .into_iter()
+        .map(|failure| failure.operation)
         .collect()
 }
 
@@ -2759,7 +2775,7 @@ async fn test_apply_rejects_path_traversal() {
     // Should be refused specifically for path traversal
     let has_traversal_refusal = events.iter().any(|e| {
         matches!(e, PackageEvent::DotfileRefused { refusal, .. }
-            if refusal.message.contains("escapes YAML base directory"))
+            if refusal.message.to_string().contains("escapes YAML base directory"))
     });
     assert!(
         has_traversal_refusal,
@@ -17564,7 +17580,7 @@ mod cross_spec_collisions {
                 PackageEvent::DotfileRefused { refusal, .. }
                     if refusal.condition == Condition::Collision =>
                 {
-                    Some(refusal.message.clone())
+                    Some(refusal.message.to_string())
                 }
                 _ => None,
             })
@@ -22695,6 +22711,414 @@ mod a_spec_changed_after_it_was_loaded {
         assert!(
             !state.contains(target.to_str().unwrap()),
             "a refused track was recorded: {state}"
+        );
+    }
+}
+
+// The whole sentence of every entry refusal and failure an apply can reach, so a
+// change to how one is built cannot change a word of it unnoticed.
+mod entry_sentences {
+    use super::*;
+
+    // The events of an apply over `dirs` whose commands `runner` answers.
+    async fn applied(dirs: &TestDirs, runner: FakeCommandRunner) -> Vec<PackageEvent> {
+        let service = dirs.service_with_runner(runner);
+        collect_events(service.apply_all(ApplyOptions::default()).await).await
+    }
+
+    // Each refused entry's sentence, in the order refused.
+    fn refused_sentences(events: &[PackageEvent]) -> Vec<String> {
+        refused(events)
+            .into_iter()
+            .map(|refusal| refusal.message.to_string())
+            .collect()
+    }
+
+    // Each failed entry's sentence and error, in the order they failed.
+    fn failed_sentences(events: &[PackageEvent]) -> Vec<(String, String)> {
+        failed(events)
+            .into_iter()
+            .map(|failure| (failure.message.to_string(), failure.error.to_string()))
+            .collect()
+    }
+
+    // The target `name` under the test's target directory, as a sentence names it.
+    fn target(dirs: &TestDirs, name: &str) -> String {
+        dirs.target_dir.join(name).display().to_string()
+    }
+
+    fn package(dirs: &TestDirs, name: &str, entries: &str) {
+        write_package_yaml(
+            &dirs.package_dir,
+            name,
+            &format!(
+                "name: {name}\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n{entries}"
+            ),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_collision_in_one_package_is_worded_whole() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("my rc");
+        std::fs::write(dirs.package_dir.join("rc"), "x\n").unwrap();
+        let entry = format!("  - source: rc\n    target: \"{}\"\n", target.display());
+        package(&dirs, "dup", &entry.repeat(2));
+
+        let target = target.display();
+        let sentence = format!(
+            "Skipping '{target}' in package 'dup': dotfiles[0] and dotfiles[1] both deploy to \
+             '{target}', so none of them is applied. Keep one entry per target."
+        );
+        assert_eq!(
+            refused_sentences(&applied(&dirs, FakeCommandRunner::new()).await),
+            [sentence.clone(), sentence]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_collision_across_specs_is_worded_whole() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("my rc");
+        std::fs::write(dirs.package_dir.join("rc"), "x\n").unwrap();
+        let entry = format!("  - source: rc\n    target: \"{}\"\n", target.display());
+        package(&dirs, "alpha", &entry);
+        package(&dirs, "beta", &entry);
+
+        let target = target.display();
+        let clause = format!(
+            "package 'alpha' (dotfiles[0]) and package 'beta' (dotfiles[0]) both deploy to \
+             '{target}', so none of them is applied. Keep one entry for this target, in one spec."
+        );
+        assert_eq!(
+            refused_sentences(&applied(&dirs, FakeCommandRunner::new()).await),
+            [
+                format!("Skipping '{target}' in package 'alpha': {clause}"),
+                format!("Skipping '{target}' in package 'beta': {clause}"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_or_escaping_entry_is_worded_whole() {
+        let dirs = TestDirs::new();
+        package(
+            &dirs,
+            "bad",
+            &format!(
+                "  - source: \"../out side\"\n    target: \"{}\"\n  \
+                 - source: \"../my.tpl\"\n    target: \"{}\"\n    vars:\n      a: \"echo a\"\n  \
+                 - source: rc\n    command: \"echo x\"\n    target: \"{}\"\n  \
+                 - source: rc\n    target: \"my rc\"\n",
+                target(&dirs, "a"),
+                target(&dirs, "b"),
+                target(&dirs, "c"),
+            ),
+        );
+
+        assert_eq!(
+            refused_sentences(&applied(&dirs, FakeCommandRunner::new()).await),
+            [
+                "Skipping '../out side': source path escapes YAML base directory".to_string(),
+                format!(
+                    "Skipping '{}': dotfile template '../my.tpl' escapes the package directory",
+                    target(&dirs, "b")
+                ),
+                format!(
+                    "Skipping '{}': set exactly one of 'source' or 'command', with 'vars' only \
+                     alongside 'source'",
+                    target(&dirs, "c")
+                ),
+                "Skipping 'my rc': target path is not absolute; it must be absolute or start \
+                 with '~/'"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_source_is_worded_whole() {
+        let dirs = TestDirs::new();
+        let pipe = dirs.package_dir.join("my pipe");
+        nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        package(
+            &dirs,
+            "src",
+            &format!(
+                "  - source: \"my pipe\"\n    target: \"{}\"\n  \
+                 - source: \"not here\"\n    target: \"{}\"\n",
+                target(&dirs, "a"),
+                target(&dirs, "b"),
+            ),
+        );
+
+        assert_eq!(
+            refused_sentences(&applied(&dirs, FakeCommandRunner::new()).await),
+            [
+                "Skipping 'my pipe': the repository file is a named pipe (fifo) and selfie will \
+                 not read it. Replace it with a regular file."
+                    .to_string(),
+                format!(
+                    "Cannot read source '{}': IO error: No such file or directory (os error 2)",
+                    dirs.package_dir.join("not here").display()
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_template_is_worded_whole() {
+        let dirs = TestDirs::new();
+        package(
+            &dirs,
+            "tpl",
+            &format!(
+                "  - source: \"no tpl\"\n    target: \"{}\"\n    vars:\n      a: \"echo a\"\n",
+                target(&dirs, "a"),
+            ),
+        );
+
+        assert_eq!(
+            refused_sentences(&applied(&dirs, FakeCommandRunner::new()).await),
+            [format!(
+                "Skipping '{}': dotfile template 'no tpl' cannot be read: IO error: No such file \
+                 or directory (os error 2)",
+                target(&dirs, "a")
+            )]
+        );
+    }
+
+    // The failed resolve's error keeps the line break its stderr ends in, in the
+    // error and in the sentence, and the later entry running the same program
+    // is held back.
+    #[tokio::test]
+    async fn a_failed_resolve_and_the_entry_it_holds_back_are_worded_whole() {
+        let dirs = TestDirs::new();
+        package(
+            &dirs,
+            "creds",
+            &format!(
+                "  - command: \"op read a\"\n    target: \"{}\"\n  \
+                 - command: \"op read b\"\n    target: \"{}\"\n",
+                target(&dirs, "my a"),
+                target(&dirs, "my b"),
+            ),
+        );
+        let runner = FakeCommandRunner::new().failing("op read a", b"vault is locked\n");
+
+        let events = applied(&dirs, runner).await;
+
+        let error = "dotfile command 'op read a' failed: vault is locked\n";
+        assert_eq!(
+            failed_sentences(&events),
+            [(
+                format!("Failed to resolve '{}': {error}", target(&dirs, "my a")),
+                error.to_string()
+            )]
+        );
+        assert_eq!(
+            refused_sentences(&events),
+            [format!(
+                "Skipping '{}': an earlier `op` command failed; no command was run",
+                target(&dirs, "my b")
+            )]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_write_is_worded_whole() {
+        let dirs = TestDirs::new();
+        let shut = dirs.target_dir.join("shut in");
+        std::fs::create_dir_all(&shut).unwrap();
+        std::fs::write(dirs.package_dir.join("rc"), "x\n").unwrap();
+        package(
+            &dirs,
+            "w",
+            &format!(
+                "  - source: rc\n    target: \"{}\"\n",
+                shut.join("rc").display()
+            ),
+        );
+        let Some(_restore) = made_unwritable(&shut) else {
+            return;
+        };
+
+        // The temporary file's name is random, so its six random characters are
+        // masked before comparing.
+        let masked = |sentence: &str| match sentence.split_once(".selfie-") {
+            Some((head, tail)) => format!("{head}.selfie-XXXXXX{}", &tail[6..]),
+            None => sentence.to_string(),
+        };
+        let sentences: Vec<(String, String)> =
+            failed_sentences(&applied(&dirs, FakeCommandRunner::new()).await)
+                .iter()
+                .map(|(message, error)| (masked(message), masked(error)))
+                .collect();
+
+        let error = format!(
+            "IO error: {}: Permission denied (os error 13) at path \"{}\"",
+            shut.join("rc").display(),
+            shut.join(".selfie-XXXXXX").display()
+        );
+        assert_eq!(sentences, [(format!("Failed to write: {error}"), error)]);
+    }
+
+    // The values each refused entry's sentence names, in the order refused.
+    fn refusal_values(events: &[PackageEvent]) -> Vec<Vec<String>> {
+        refused(events)
+            .into_iter()
+            .map(|refusal| selfie::parts::values_of(&refusal.message))
+            .collect()
+    }
+
+    // Every path and name an apply's refusal names is a part of its own kind:
+    // the entry's target, source and template, the package's name, and the
+    // labels and target of a collision.
+    #[tokio::test]
+    async fn every_value_in_an_entry_refusal_is_a_part() {
+        let dirs = TestDirs::new();
+        std::fs::write(dirs.package_dir.join("r\u{200B}c"), "x\n").unwrap();
+        let pipe = dirs.package_dir.join("p\u{200B}ipe");
+        nix::unistd::mkfifo(&pipe, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let shared = target(&dirs, "c\u{200B}ol");
+        let collide = format!("  - source: \"r\u{200B}c\"\n    target: \"{shared}\"\n");
+        write_package_yaml(
+            &dirs.package_dir,
+            "dup",
+            &format!(
+                "name: \"d\u{200B}up\"\nenvironments:\n  test:\n    install: \"echo i\"\ndotfiles:\n{}",
+                collide.repeat(2)
+            ),
+        );
+        package(
+            &dirs,
+            "bad",
+            &format!(
+                "  - source: \"../o\u{200B}ut\"\n    target: \"{}\"\n  \
+                 - source: \"../t\u{200B}.tpl\"\n    target: \"{}\"\n    vars:\n      a: \"echo a\"\n  \
+                 - source: \"n\u{200B}o.tpl\"\n    target: \"{}\"\n    vars:\n      a: \"echo a\"\n  \
+                 - source: \"r\u{200B}c\"\n    command: \"echo x\"\n    target: \"{}\"\n  \
+                 - source: \"p\u{200B}ipe\"\n    target: \"{}\"\n  \
+                 - source: \"m\u{200B}issing\"\n    target: \"{}\"\n  \
+                 - source: \"r\u{200B}c\"\n    target: \"r\u{200B}el\"\n  \
+                 - source: \"r\u{200B}c\"\n    target: \"{}\"\n    vars:\n      \"v\u{200B}ar\": \"echo a\"\n",
+                target(&dirs, "a\u{200B}1"),
+                target(&dirs, "a\u{200B}2"),
+                target(&dirs, "a\u{200B}3"),
+                target(&dirs, "a\u{200B}4"),
+                target(&dirs, "a\u{200B}5"),
+                target(&dirs, "a\u{200B}6"),
+                target(&dirs, "a\u{200B}7"),
+            ),
+        );
+        std::fs::create_dir_all(dirs.target_dir.join("d\u{200B}ir")).unwrap();
+        package(
+            &dirs,
+            "taken",
+            &format!(
+                "  - source: \"r\u{200B}c\"\n    target: \"{}\"\n",
+                target(&dirs, "d\u{200B}ir")
+            ),
+        );
+
+        let service = dirs.service();
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let mut values = refusal_values(&events);
+        values.sort();
+
+        let mut expected = vec![
+            vec!["../o\u{200B}ut".to_string()],
+            vec![target(&dirs, "a\u{200B}2"), "../t\u{200B}.tpl".to_string()],
+            vec![target(&dirs, "a\u{200B}3"), "n\u{200B}o.tpl".to_string()],
+            vec![target(&dirs, "a\u{200B}4")],
+            vec!["p\u{200B}ipe".to_string()],
+            vec![
+                dirs.package_dir
+                    .join("m\u{200B}issing")
+                    .display()
+                    .to_string(),
+            ],
+            vec!["r\u{200B}el".to_string()],
+            vec![target(&dirs, "a\u{200B}7"), "v\u{200B}ar".to_string()],
+            vec!["r\u{200B}c".to_string(), target(&dirs, "d\u{200B}ir")],
+        ];
+        let collision = vec![shared.clone(), "d\u{200B}up".to_string(), shared.clone()];
+        expected.push(collision.clone());
+        expected.push(collision);
+        expected.sort();
+        assert_eq!(values, expected, "{events:?}");
+    }
+
+    // The program a failed command ran is a name in the refusal of a later entry
+    // that runs it, so a U+200B in it shows escaped.
+    #[tokio::test]
+    async fn the_program_a_held_back_entry_names_is_a_part() {
+        let dirs = TestDirs::new();
+        package(
+            &dirs,
+            "creds",
+            &format!(
+                "  - command: \"o\u{200B}p read a\"\n    target: \"{}\"\n  \
+                 - command: \"o\u{200B}p read b\"\n    target: \"{}\"\n",
+                target(&dirs, "a"),
+                target(&dirs, "b"),
+            ),
+        );
+        let runner = FakeCommandRunner::new().failing("o\u{200B}p read a", b"locked");
+
+        let events = applied(&dirs, runner).await;
+
+        assert_eq!(
+            refusal_values(&events),
+            [vec![target(&dirs, "b"), "o\u{200B}p".to_string()]]
+        );
+    }
+
+    // Every path a failed entry names is a part of the failure's sentence and
+    // of its error: the resolved entry's target, and the directory a write
+    // could not write in.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_path_in_an_entry_failure_is_a_part() {
+        let dirs = TestDirs::new();
+        let shut = dirs.target_dir.join("s\u{200B}hut");
+        std::fs::create_dir_all(&shut).unwrap();
+        std::fs::write(dirs.package_dir.join("rc"), "x\n").unwrap();
+        let resolved = target(&dirs, "c\u{200B}reds");
+        let written = shut.join("rc").display().to_string();
+        package(
+            &dirs,
+            "f",
+            &format!(
+                "  - command: \"op read a\"\n    target: \"{resolved}\"\n  \
+                 - source: rc\n    target: \"{written}\"\n"
+            ),
+        );
+        let Some(_restore) = made_unwritable(&shut) else {
+            return;
+        };
+        let runner = FakeCommandRunner::new().failing("op read a", b"locked\n");
+
+        let service = dirs.service_with_runner(runner);
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let values: Vec<(Vec<String>, Vec<String>)> = failed(&events)
+            .into_iter()
+            .map(|failure| {
+                (
+                    selfie::parts::values_of(&failure.message),
+                    selfie::parts::values_of(&failure.error),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            values,
+            [
+                (vec![resolved], vec![]),
+                (vec![written.clone()], vec![written]),
+            ],
+            "{events:?}"
         );
     }
 }

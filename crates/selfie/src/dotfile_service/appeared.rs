@@ -9,6 +9,7 @@ use std::future::Future;
 use crate::{
     fs::target::TargetPath,
     package::event::{EntryOperation, EventSender, Failure},
+    parts::Parts,
 };
 
 /// The window in which something appeared at a target.
@@ -107,9 +108,39 @@ pub(super) fn warning(target: &TargetPath, during: During) -> String {
 fn gone_again(target: &TargetPath) -> Failure {
     Failure::new(
         EntryOperation::Write,
-        format_args!("Failed to write '{}'", target.display()),
-        "something appeared there while selfie was writing it, and is gone again; nothing was \
-         written",
+        Parts::new()
+            .text("Failed to write '")
+            .path(target.path())
+            .text("'"),
+        Parts::new().text(
+            "something appeared there while selfie was writing it, and is gone again; nothing \
+             was written",
+        ),
     )
-    .with_remedy("Run apply again.")
+    .with_remedy(Parts::new().text("Run apply again."))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::fs::target::repository_path;
+
+    // What appeared and left again fails the write in these words, whole.
+    #[test]
+    fn a_target_gone_again_is_worded_whole() {
+        let failure = gone_again(&repository_path(Path::new("/home/u/my rc")));
+
+        assert_eq!(
+            failure.message.to_string(),
+            "Failed to write '/home/u/my rc': something appeared there while selfie was writing \
+             it, and is gone again; nothing was written. Run apply again."
+        );
+        assert_eq!(
+            failure.error.to_string(),
+            "something appeared there while selfie was writing it, and is gone again; nothing \
+             was written"
+        );
+    }
 }

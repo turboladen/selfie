@@ -143,7 +143,8 @@ Options considered:
      `spec remove` sends, a failed recommend's reason, `sync status`'s drift error, and the warning
      that a run did not check collisions with a directory it could not list;
    - an `io::Error` that `tempfile` built, whose message names its temporary file and enters a
-     sentence as `Text`.
+     sentence as `Text`;
+   - a dotfile entry's unknown key, which its refusal names as `Text`.
 
    Each of these moves to §9 when it is next changed.
 3. A name inside a sentence the CLI composes is a `Name`, whatever the sentence around it is.
@@ -308,17 +309,17 @@ writer escapes every escape sequence (§1.8).
 
 ### 9. A library sentence that names a value is handed over as parts
 
-1. `selfie::parts` defines `Part`, `Parts` and the trait `Composed`. A `Parts` is an ordered list of
-   `Part`s, and a `Part` is one of:
+1. `selfie::parts` defines `Part`, `Parts`, `Message` and the trait `Composed`. A `Parts` is an
+   ordered list of `Part`s, and a `Part` is one of:
 
-   | Part             | What it holds                                                                   |
-   | ---------------- | ------------------------------------------------------------------------------- |
-   | `Text(Cow<str>)` | selfie's words, a count it formats, or text from outside it read as a sentence, |
-   |                  | such as an `io::Error`'s message or a parse failure                             |
-   | `Name(&str)`     | an environment, package or spec name                                            |
-   | `Path(&Path)`    | a path, including one spelled as the spec spells it, such as `~/.bashrc`        |
-   | `Command(..)`    | a command for the user to run: a program from a closed enum, `selfie` with a    |
-   |                  | subcommand or `mkdir -p --`, and one operand                                    |
+   | Part              | What it holds                                                                   |
+   | ----------------- | ------------------------------------------------------------------------------- |
+   | `Text(Cow<str>)`  | selfie's words, a count it formats, or text from outside it read as a sentence, |
+   |                   | such as an `io::Error`'s message or a parse failure                             |
+   | `Name(Cow<str>)`  | an environment, package or spec name                                            |
+   | `Path(Cow<Path>)` | a path, including one spelled as the spec spells it, such as `~/.bashrc`        |
+   | `Command(..)`     | a command for the user to run: a program from a closed enum, `selfie` with a    |
+   |                   | subcommand or `mkdir -p --`, and one operand                                    |
 
    A part says what a value is, never how to escape it.
 2. A `Composed` type's sentence is its `parts`, and its `Display` writes those parts and nothing
@@ -327,7 +328,10 @@ writer escapes every escape sequence (§1.8).
    `mkdir -p -- <word>`. A `Composed` type has no other source for its sentence: it takes its
    `Display` from the one shared implementation that writes its parts, and has no `#[error]`
    attribute and no `Display` arm of its own. An error type among them implements
-   `std::error::Error` by hand.
+   `std::error::Error` by hand. A `Message` is a `Composed` value whose parts were fixed when it was
+   built, from the parts a builder wrote, for a sentence an event carries past the values it names.
+   It holds its own copy of each, is not derived from a typed value, and two are equal when their
+   words and values are, however a builder split its text.
 3. A sentence that embeds another `Composed` value appends that value's parts in place, so a path
    inside a nested cause stays a `Path`. A value that is not `Composed` enters as one `Text`.
 4. The CLI renders a `Parts` in one function in `sentence.rs`, and shows a `Composed` value by
@@ -359,14 +363,16 @@ writer escapes every escape sequence (§1.8).
    `NamespaceValidationError`; the `UnreadableDotfilesDirectory` a collection refuses; the
    `DotfilesDirectoryWarning` a command reading standalone dotfiles sends; the
    `TrackDirectoryRefusal` a standalone track gives over a directory it could not use; the
-   `ApplyStop` an apply with `stop_on_error` gives for a stop other than the deploy state's; and a
-   validation issue's message, `IssueMessage`, which is its own text, the deploy state's notice or a
-   `DirectoryIssue`.
+   `ApplyStop` an apply with `stop_on_error` gives for a stop other than the deploy state's; the
+   `Message` a dotfile entry's `Refusal` carries as its sentence and its `Failure` as its sentence
+   and its error; and a validation issue's message, `IssueMessage`, which is its own text, the
+   deploy state's notice or a `DirectoryIssue`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
-   is `Composed`. The CLI does not compose a new one from the value's fields. These stay plain
-   strings: a message an event carries as a `String`, such as a warning, a refusal reason or a
-   suggestion, which `message` shows as `Prose`; a step's progress text; and a sentence the CLI
-   words itself.
+   is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
+   or a warning an event carries is a `Message`, not a `String`. An event that still carries one as
+   a `String`, such as a warning or a refused package's reason, moves to a `Message` when it is next
+   changed, and until then `message` shows it as `Prose`. These stay plain strings: a suggestion, a
+   step's progress text, and a sentence the CLI words itself.
 
 ## Consequences
 

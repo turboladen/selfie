@@ -2394,7 +2394,9 @@ mod tests {
                 refusal: Refusal {
                     condition: Condition::Symlink,
                     at: Location::Target,
-                    message: "Skipping 'bat/config': a symlink".to_string(),
+                    message: crate::parts::Parts::new()
+                        .text("Skipping 'bat/config': a symlink")
+                        .into(),
                 },
             },
         ];

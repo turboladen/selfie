@@ -545,6 +545,95 @@ fn a_refusal_naming_a_hostile_path_shows_it_escaped() {
     );
 }
 
+// A refused entry names its source and target as paths, so on `apply` and
+// `dotfiles drift` a U+200B in one shows escaped, and a line feed in one does
+// not split the line.
+#[test]
+fn a_refusal_names_its_target_as_a_path() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::create_dir_all(packages.join("pk")).unwrap();
+    fs::write(packages.join("pk").join("rc"), "e\n").unwrap();
+    fs::write(
+        packages.join("pk.yaml"),
+        format!(
+            "name: pk\ndotfiles:\n  - source: pk/rc\n    target: \"~/t\\u200Bx\"\n  \
+             - source: pk/rc\n    target: \"~/l\\nf\"\nenvironments:\n  {SELFIE_ENV}:\n    \
+             install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+    // A directory at each target, which apply refuses to replace.
+    fs::create_dir_all(temp.path().join("t\u{200B}x")).unwrap();
+    fs::create_dir_all(temp.path().join("l\nf")).unwrap();
+
+    for command in [&["apply"][..], &["dotfiles", "drift"]] {
+        let output = sandboxed_std_command(&temp)
+            .arg("--no-color")
+            .args(command)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(!stderr.contains('\u{200B}'), "{command:?}: {stderr:?}");
+        assert!(
+            stderr.lines().any(|line| line.contains(r"t\u{200b}x'")),
+            "{command:?}: {stderr}"
+        );
+        assert!(
+            stderr.lines().any(|line| line.contains(r"l\nf'")),
+            "{command:?}: {stderr}"
+        );
+        assert!(
+            !stderr.lines().any(|line| line.starts_with("f'")),
+            "{command:?}: {stderr}"
+        );
+    }
+}
+
+// A failed write names the directory it could not write in as a path, so a
+// U+200B in it shows escaped on the error line.
+#[cfg(unix)]
+#[test]
+fn a_failed_write_names_its_path_as_a_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::create_dir_all(packages.join("pk")).unwrap();
+    fs::write(packages.join("pk").join("rc"), "e\n").unwrap();
+    fs::write(
+        packages.join("pk.yaml"),
+        format!(
+            "name: pk\ndotfiles:\n  - source: pk/rc\n    target: \"~/r\\u200Bo/rc\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+    let shut = temp.path().join("r\u{200B}o");
+    fs::create_dir_all(&shut).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o555)).unwrap();
+    // Root ignores the mode, so there is no failure to name.
+    if fs::write(shut.join("probe"), "x").is_ok() {
+        return;
+    }
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "apply"])
+        .output()
+        .unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o755)).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains("Failed to write") && line.contains(r"r\u{200b}o/rc")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
 // A conflict's diff shows each line of content with its escape sequences as
 // escapes and its tabs as tabs, and a content line starting `-- ` or `++ ` as
 // content, not as a header.

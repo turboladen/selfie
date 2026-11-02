@@ -180,7 +180,7 @@ pub(crate) fn cross_spec_collisions(
         .map(|((entries, group), environments)| CrossSpecCollision {
             entries,
             environments: environments.iter().map(ToString::to_string).collect(),
-            clause: group.describe(),
+            clause: group.describe().to_string(),
             members: group
                 .members()
                 .iter()
@@ -1788,6 +1788,11 @@ environments:
             assert!(message.contains(field), "{field} missing from: {message}");
         }
         assert!(message.contains("all deploy to"), "got: {message}");
+        assert_eq!(
+            message,
+            "Dotfile entries environments.work.dotfiles[0], environments.work.dotfiles[1] and \
+             environments.work.dotfiles[2] all deploy to '~/.x', so apply deploys none of them"
+        );
 
         let issues = package_from_yaml(yaml).validate_dotfiles();
         assert!(

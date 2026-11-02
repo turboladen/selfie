@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     config::SelfieConfig,
-    dotfile_service::{deploy::resolve_source_path, resolve::read_template},
+    dotfile_service::{
+        deploy::resolve_source_path,
+        resolve::{escaping_template_refusal, read_template},
+    },
     fs::{
         filesystem::{FileSystem, FileSystemError, repository_read_refusal},
         target::{HomeDir, TargetPath, deploy_target, repository_path},
@@ -23,13 +26,14 @@ use crate::{
             SourceBase,
         },
     },
+    parts::{Composed as _, Parts},
     paths::is_within,
 };
 
 use super::refusal::{
     Link, TargetGuard, Unrun, guard_refusal, guard_target, guarded, link_at, located,
-    path_state_refusal, readable_target, refusal_for, repository_condition, target_refusal,
-    unreadable_target_refusal,
+    path_state_refusal, readable_target, refusal_for, repository_condition, skipping, skipping_in,
+    target_refusal, unreadable_target_refusal,
 };
 
 /// An entry that passed every check decidable before its content is read or
@@ -183,13 +187,18 @@ pub(super) fn plan_entry<'e, H: HomeDir + ?Sized>(
     if let Some(collision) = collisions.groups.iter().find(|c| c.contains(&scoped)) {
         return Err(Refusal::found(
             (Condition::Collision, Location::Entry),
-            format!(
-                "Skipping '{}' in package '{}': {}, {consequence}. {}",
+            skipping_in(
                 entry.target(),
-                collisions.package.name(),
-                collision.describe(),
-                crate::package::KEEP_ONE_ENTRY
-            ),
+                Parts::new()
+                    .text("package '")
+                    .name(collisions.package.name())
+                    .text("'"),
+            )
+            .append(collision.describe())
+            .text(", ")
+            .text(consequence)
+            .text(". ")
+            .text(crate::package::KEEP_ONE_ENTRY),
         ));
     }
     // Across specs, for the same reason: the deploy state records one source per
@@ -201,13 +210,12 @@ pub(super) fn plan_entry<'e, H: HomeDir + ?Sized>(
     {
         return Err(Refusal::found(
             (Condition::Collision, Location::Entry),
-            format!(
-                "Skipping '{}' in {}: {}, {consequence}. {}",
-                entry.target(),
-                spec_label(collisions.package),
-                group.describe(),
-                crate::package::KEEP_ONE_ENTRY_ACROSS_SPECS
-            ),
+            skipping_in(entry.target(), spec_label(collisions.package))
+                .append(group.describe())
+                .text(", ")
+                .text(consequence)
+                .text(". ")
+                .text(crate::package::KEEP_ONE_ENTRY_ACROSS_SPECS),
         ));
     }
 
@@ -217,7 +225,7 @@ pub(super) fn plan_entry<'e, H: HomeDir + ?Sized>(
     let content = entry.content_source().map_err(|invalid| {
         Refusal::found(
             (Condition::InvalidEntry, Location::Entry),
-            format!("Skipping '{}': {invalid}", entry.target()),
+            skipping(entry.target()).append(invalid.parts()),
         )
     })?;
 
@@ -232,7 +240,7 @@ pub(super) fn plan_entry<'e, H: HomeDir + ?Sized>(
             let Some(source_path) = within_package(base_dir, source) else {
                 return Err(Refusal::found(
                     (Condition::Escapes, Location::Source),
-                    format!("Skipping '{source}': source path escapes YAML base directory"),
+                    skipping(source).text("source path escapes YAML base directory"),
                 ));
             };
             (
@@ -247,14 +255,7 @@ pub(super) fn plan_entry<'e, H: HomeDir + ?Sized>(
         // resolve.
         ContentSource::Template { source, vars } => {
             let Some(path) = within_package(base_dir, source) else {
-                return Err(Refusal::found(
-                    (Condition::Escapes, Location::Template),
-                    format!(
-                        "Skipping '{}': dotfile template '{source}' escapes the package \
-                         directory",
-                        entry.target()
-                    ),
-                ));
+                return Err(escaping_template_refusal(entry.target(), Path::new(source)));
             };
             let event_source = template_source(source_base, &path, vars.keys().cloned().collect());
             (event_source, PlannedContent::Template { source, path })
@@ -569,16 +570,9 @@ fn pre_command_refusal<F: FileSystem>(
     if let Some(refusal) = path_state_refusal(source, path, &state, extra) {
         return Some(refusal);
     }
-    filesystem.open_for_read_refusal(path).map(|error| {
-        let mut refusal = unreadable_target_refusal(source, path, &error);
-        // The error ends its sentence without a period, so one goes before
-        // the next sentence.
-        if !extra.unrun.is_empty() {
-            refusal.message.push('.');
-            refusal.message.push_str(extra.unrun);
-        }
-        refusal
-    })
+    filesystem
+        .open_for_read_refusal(path)
+        .map(|error| unreadable_target_refusal(source, path, &error, extra.unrun))
 }
 
 /// What a repository-file entry's source and target hold, read for a decision.
@@ -607,17 +601,21 @@ pub(super) fn read_repo_file<F: FileSystem>(
     if let Some(refusal) = filesystem.irregular_target_refusal(&repository_path(source_path)) {
         return Err(Refusal::found(
             located(guarded(&refusal), Location::Source),
-            format!(
-                "Skipping '{source}': {}. Replace it with a regular file.",
-                repository_read_refusal(&refusal)
-            ),
+            skipping(source)
+                .append(repository_read_refusal(&refusal))
+                .text(". Replace it with a regular file."),
         ));
     }
 
     let source_content = filesystem.read_repository_file(source_path).map_err(|e| {
+        // The read's error names no path, so its own words enter as one text.
         Refusal::found(
             (repository_condition(&e), Location::Source),
-            format!("Cannot read source '{}': {e}", source_path.display()),
+            Parts::new()
+                .text("Cannot read source '")
+                .path(source_path)
+                .text("': ")
+                .text(e.to_string()),
         )
     })?;
 

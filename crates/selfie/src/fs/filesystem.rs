@@ -944,17 +944,19 @@ pub enum OpenRefusal {
 //
 // Worded for a *source*. `IrregularTarget`'s own `Display` describes a deploy
 // target, and here the problem is a file in the repository the user syncs.
-pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> String {
+pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> Parts<'_> {
     match refusal {
-        FileSystemError::IrregularTarget { kind, .. } => {
-            format!("the repository file is a {kind} and selfie will not read it")
-        }
+        FileSystemError::IrregularTarget { kind, .. } => Parts::new().text(format!(
+            "the repository file is a {kind} and selfie will not read it"
+        )),
         // Fails **closed**, and deliberately not a `_ => {}` that would skip the
         // guard. `irregular_target_refusal` returns only `IrregularTarget` today,
         // so nothing reaches this arm; a wildcard would silently let a future
         // variant through and un-guard the read, which is the failure this whole
         // guard exists to prevent. Refuse on anything it reports.
-        other => format!("selfie will not read the repository file: {other}"),
+        other => Parts::new()
+            .text("selfie will not read the repository file: ")
+            .append(other.parts()),
     }
 }
 
@@ -1218,7 +1220,8 @@ mod tests {
         let message = repository_read_refusal(&FileSystemError::SymlinkedTarget {
             path: PathBuf::from("/pkgs/myapp/config.toml"),
             points_to: None,
-        });
+        })
+        .to_string();
         assert!(!message.is_empty(), "the guard fell through silently");
         assert!(message.contains("repository file"), "got: {message}");
     }

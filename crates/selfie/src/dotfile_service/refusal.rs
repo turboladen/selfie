@@ -19,6 +19,7 @@ use crate::{
         target::{TargetPath, TargetRejection},
     },
     package::event::{Condition, Location, Refusal},
+    parts::{Composed, Message, Parts},
 };
 
 /// A symlink at a target's final component.
@@ -313,48 +314,83 @@ pub(super) fn readable_or_refusal(
     target: &TargetPath,
     state: TargetState,
 ) -> Result<Option<Vec<u8>>, Refusal> {
-    let (condition, message) = match state {
+    Err(match state {
         TargetState::Absent => return Ok(None),
         TargetState::Readable(bytes) => return Ok(Some(bytes)),
         TargetState::BelowNonDirectory { parent } => {
-            return Err(below_non_directory_refusal(
+            below_non_directory_refusal(source, target, parent.as_deref())
+        }
+        TargetState::Directory => {
+            at_target(Condition::Directory, directory_message(source, target))
+        }
+        TargetState::Link(link) => {
+            at_target(Condition::Symlink, refusal_message(source, &link.refusal()))
+        }
+        TargetState::Irregular(refusal) => {
+            at_target(Condition::Irregular, refusal_message(source, &refusal))
+        }
+        TargetState::Unreadable(error) => at_target(
+            Condition::Unreadable,
+            unreadable_message(
                 source,
                 target,
-                parent.as_deref(),
-            ));
-        }
-        TargetState::Directory => (Condition::Directory, directory_message(source, target)),
-        TargetState::Link(link) => (Condition::Symlink, refusal_message(source, &link.refusal())),
-        TargetState::Irregular(refusal) => {
-            (Condition::Irregular, refusal_message(source, &refusal))
-        }
-        TargetState::Unreadable(error) => (
-            Condition::Unreadable,
-            unreadable_message(source, target, &FileSystemError::IoError(error.into())),
+                FileSystemError::IoError(error.into()).parts(),
+            ),
         ),
-        TargetState::Undetermined(error) => (
+        TargetState::Undetermined(error) => at_target(
             Condition::Undetermined,
-            unreadable_message(source, target, &error),
+            unreadable_message(source, target, error.parts()),
         ),
-    };
-    Err(Refusal::found(
-        located(condition, Location::Target),
-        message,
-    ))
+    })
+}
+
+// The refusal of what was found at the target, or above it, worded by `message`.
+fn at_target(condition: Condition, message: impl Into<Message>) -> Refusal {
+    Refusal::found(located(condition, Location::Target), message)
 }
 
 /// What a directory at a target means and what to do about it, as one clause, so
 /// every path that meets one words it the same way.
-pub(super) fn directory_at_target(target: &TargetPath) -> String {
-    format!(
-        "a directory is at the target '{}', and a file cannot replace a directory. Remove it \
-         or point the entry somewhere else.",
-        target.display()
-    )
+pub(super) fn directory_at_target(target: &TargetPath) -> Parts<'_> {
+    Parts::new()
+        .text("a directory is at the target '")
+        .path(target.path())
+        .text(
+            "', and a file cannot replace a directory. Remove it or point the entry somewhere \
+             else.",
+        )
 }
 
-fn directory_message(source: &str, target: &TargetPath) -> String {
-    format!("Skipping '{source}': {}", directory_at_target(target))
+// The head of every refusal of an entry: "Skipping '<source>': ". `source` is how
+// the refusal names the entry, which is a path as the package file spells it.
+pub(super) fn skipping(source: &str) -> Parts<'_> {
+    Parts::new()
+        .text("Skipping '")
+        .path(Path::new(source))
+        .text("': ")
+}
+
+// The head of a refusal that names where the entry is, such as "Skipping
+// '<source>' in package 'bat': ".
+pub(super) fn skipping_in<'a>(source: &'a str, place: Parts<'a>) -> Parts<'a> {
+    Parts::new()
+        .text("Skipping '")
+        .path(Path::new(source))
+        .text("' in ")
+        .append(place)
+        .text(": ")
+}
+
+fn directory_message<'a>(source: &'a str, target: &'a TargetPath) -> Parts<'a> {
+    skipping(source).append(directory_at_target(target))
+}
+
+// "the target '<target>' ", ahead of a clause about what is at it.
+fn the_target(target: &TargetPath) -> Parts<'_> {
+    Parts::new()
+        .text("the target '")
+        .path(target.path())
+        .text("' ")
 }
 
 // The refusal of a target below a component that is not a directory, from a read or
@@ -364,19 +400,19 @@ fn below_non_directory_refusal(
     target: &TargetPath,
     parent: Option<&Path>,
 ) -> Refusal {
-    let clause = match parent {
-        Some(parent) => AbsentReason::ParentNotADirectory {
-            parent: parent.to_path_buf(),
-        }
-        .to_string(),
-        None => "is below a component that is not a directory".to_string(),
+    let reason = parent.map(|parent| AbsentReason::ParentNotADirectory {
+        parent: parent.to_path_buf(),
+    });
+    let clause = match &reason {
+        Some(reason) => reason.parts(),
+        None => Parts::new().text("is below a component that is not a directory"),
     };
     Refusal::found(
         located(Condition::NotADirectory, Location::Target),
-        format!(
-            "Skipping '{source}': the target '{}' {clause}.",
-            target.display()
-        ),
+        skipping(source)
+            .append(the_target(target))
+            .append(clause)
+            .text("."),
     )
 }
 
@@ -403,20 +439,27 @@ impl Unrun {
 // from `found`, the one mapping every path shares; only the sentence is built here.
 fn path_refusal(source: &str, target: &TargetPath, found: &InTheWay<'_>, extra: Unrun) -> Refusal {
     let Unrun { unwritten, unrun } = extra;
-    let message = match found {
-        InTheWay::Directory => format!("{}{unrun}", directory_message(source, target)),
-        InTheWay::NotADirectory(reason) => format!(
-            "Skipping '{source}': the target '{}' {}{unwritten}.{unrun}",
-            target.display(),
-            reason
-        ),
-        InTheWay::Undetermined(error) => format!(
-            "Skipping '{source}': selfie could not determine what is at the target{unwritten}.\
-             {unrun} The check failed with: {}",
-            FileSystemError::IoError(Arc::clone(error).into())
-        ),
+    let message: Message = match found {
+        InTheWay::Directory => directory_message(source, target).text(unrun).into(),
+        InTheWay::NotADirectory(reason) => then_unrun(
+            skipping(source)
+                .append(the_target(target))
+                .append(reason.parts())
+                .text(unwritten),
+            unrun,
+        )
+        .into(),
+        InTheWay::Undetermined(error) => then_unrun(
+            skipping(source)
+                .text("selfie could not determine what is at the target")
+                .text(unwritten),
+            unrun,
+        )
+        .text(" The check failed with: ")
+        .append(FileSystemError::IoError(Arc::clone(error).into()).parts())
+        .into(),
     };
-    Refusal::found(located(found.condition(), Location::Target), message)
+    at_target(found.condition(), message)
 }
 
 /// The refusal for what `directory_state` reports at `target`, worded with
@@ -431,11 +474,10 @@ pub(super) fn path_state_refusal(
 }
 
 // Every site that words a refused deploy shares this, so apply, drift and the
-// writer cannot describe the same refusal differently. Format it here rather than
-// at a call site — no test pins this wrapper at the write site, so a copy there
-// could drift unnoticed.
-fn refusal_message(source: &str, refusal: &FileSystemError) -> String {
-    format!("Skipping '{source}': {refusal}")
+// writer cannot describe the same refusal differently. `a_refused_write_is_worded_whole`
+// pins it at the write site.
+fn refusal_message<'a>(source: &'a str, refusal: &'a FileSystemError) -> Parts<'a> {
+    skipping(source).append(refusal.parts())
 }
 
 /// The refusal of the entry `source` for what a guard found at its target.
@@ -446,28 +488,42 @@ pub(super) fn refusal_for(source: &str, refusal: &FileSystemError) -> Refusal {
     )
 }
 
-fn unreadable_message(source: &str, target: &TargetPath, error: &dyn std::fmt::Display) -> String {
-    format!(
-        "Skipping '{source}': target '{}' could not be read: {error}",
-        target.display()
-    )
+fn unreadable_message<'a>(source: &'a str, target: &'a TargetPath, error: Parts<'a>) -> Parts<'a> {
+    skipping(source)
+        .text("target '")
+        .path(target.path())
+        .text("' could not be read: ")
+        .append(error)
 }
 
 // Why an entry whose target would not open is refused, worded the same by apply
-// and drift.
+// and drift, with `unrun` after it. The error ends the sentence without a stop, so
+// the sentence gets one only when `unrun` follows it.
 pub(super) fn unreadable_target_refusal(
     source: &str,
     target: &TargetPath,
     refusal: &OpenRefusal,
+    unrun: &'static str,
 ) -> Refusal {
     let condition = match refusal {
         OpenRefusal::Unreadable(_) => Condition::Unreadable,
         OpenRefusal::Undetermined(_) => Condition::Undetermined,
     };
-    Refusal::found(
-        located(condition, Location::Target),
-        unreadable_message(source, target, refusal),
-    )
+    // `OpenRefusal` names no path, so its own words enter as one text.
+    let message = unreadable_message(source, target, Parts::new().text(refusal.to_string()));
+    let message = if unrun.is_empty() {
+        message
+    } else {
+        then_unrun(message, unrun)
+    };
+    Refusal::found(located(condition, Location::Target), message)
+}
+
+// Ends the sentence `parts` holds with its stop and puts `unrun` after it. Every
+// refusal that ends a sentence of its own before `Unrun::unrun` ends it here, so
+// the stop between the two is decided once.
+fn then_unrun<'a>(parts: Parts<'a>, unrun: &'static str) -> Parts<'a> {
+    parts.text(".").text(unrun)
 }
 
 // The target's bytes if the entry can go on to a decision: `None` for an absent
@@ -487,7 +543,7 @@ pub(super) fn readable_target<F: FileSystem>(
 pub(super) fn target_refusal(target: &str, rejection: TargetRejection) -> Refusal {
     Refusal::found(
         (Condition::TargetRule, Location::Entry),
-        format!("Skipping '{target}': {}", rejection.message()),
+        skipping(target).text(rejection.message()),
     )
 }
 
@@ -615,5 +671,362 @@ mod tests {
             link.refusal(),
             FileSystemError::SymlinkedTarget { .. }
         ));
+    }
+
+    // The source and target every pin below names, with a space and a `~/` so
+    // each sentence's quoting is pinned with them.
+    const SOURCE: &str = "app/my creds";
+    const TARGET: &str = "/home/u/my app/creds";
+
+    fn pinned_target() -> TargetPath {
+        repository_path(Path::new(TARGET))
+    }
+
+    fn io(kind: io::ErrorKind) -> Arc<io::Error> {
+        Arc::new(io::Error::from(kind))
+    }
+
+    const DEPLOY: Unrun = Unrun {
+        unwritten: ", so selfie will not write a credential there",
+        unrun: " No command was run.",
+    };
+
+    // A write's refusal for each error the writer can give, whole.
+    #[test]
+    fn a_refused_write_is_worded_whole() {
+        let message = |error: FileSystemError| {
+            classify_write(SOURCE, &pinned_target(), &error)
+                .map(|refusal| refusal.message.to_string())
+        };
+        let some = |text: &str| Some(text.to_string());
+
+        assert_eq!(
+            message(FileSystemError::SymlinkedTarget {
+                path: PathBuf::from(TARGET),
+                points_to: Some(PathBuf::from("~/elsewhere")),
+            }),
+            some(
+                "Skipping 'app/my creds': /home/u/my app/creds: target is a symlink to \
+                 '~/elsewhere' and selfie will not write through it"
+            )
+        );
+        assert_eq!(
+            message(FileSystemError::IrregularTarget {
+                path: PathBuf::from(TARGET),
+                kind: "named pipe (fifo)",
+            }),
+            some(
+                "Skipping 'app/my creds': /home/u/my app/creds: target resolves to a named pipe \
+                 (fifo) and selfie will not write to it"
+            )
+        );
+        assert_eq!(
+            message(FileSystemError::BelowNonDirectory {
+                path: PathBuf::from(TARGET),
+                parent: Some(PathBuf::from("/home/u/my app")),
+                cause: io(io::ErrorKind::NotADirectory),
+            }),
+            some(
+                "Skipping 'app/my creds': the target '/home/u/my app/creds' is below \
+                 /home/u/my app, which is not a directory."
+            )
+        );
+        assert_eq!(
+            message(FileSystemError::BelowNonDirectory {
+                path: PathBuf::from(TARGET),
+                parent: None,
+                cause: io(io::ErrorKind::NotADirectory),
+            }),
+            some(
+                "Skipping 'app/my creds': the target '/home/u/my app/creds' is below a \
+                 component that is not a directory."
+            )
+        );
+        assert_eq!(
+            message(FileSystemError::DirectoryTarget {
+                path: PathBuf::from(TARGET),
+                cause: io(io::ErrorKind::IsADirectory),
+            }),
+            some(
+                "Skipping 'app/my creds': a directory is at the target '/home/u/my app/creds', \
+                 and a file cannot replace a directory. Remove it or point the entry somewhere \
+                 else."
+            )
+        );
+    }
+
+    // A read's refusal for each state the read can find, whole.
+    #[test]
+    fn a_refused_read_is_worded_whole() {
+        let message = |state: TargetState| {
+            readable_or_refusal(SOURCE, &pinned_target(), state)
+                .expect_err("refused")
+                .message
+                .to_string()
+        };
+        let link = |points_to: Option<&str>| Link {
+            path: PathBuf::from(TARGET),
+            points_to: points_to.map(PathBuf::from),
+        };
+
+        assert_eq!(
+            message(TargetState::BelowNonDirectory { parent: None }),
+            "Skipping 'app/my creds': the target '/home/u/my app/creds' is below a component \
+             that is not a directory."
+        );
+        assert_eq!(
+            message(TargetState::Directory),
+            "Skipping 'app/my creds': a directory is at the target '/home/u/my app/creds', and \
+             a file cannot replace a directory. Remove it or point the entry somewhere else."
+        );
+        assert_eq!(
+            message(TargetState::Link(link(None))),
+            "Skipping 'app/my creds': /home/u/my app/creds: target is a symlink and selfie will \
+             not write through it"
+        );
+        assert_eq!(
+            message(TargetState::Irregular(FileSystemError::IrregularTarget {
+                path: PathBuf::from(TARGET),
+                kind: "socket",
+            })),
+            "Skipping 'app/my creds': /home/u/my app/creds: target resolves to a socket and \
+             selfie will not write to it"
+        );
+        assert_eq!(
+            message(TargetState::Unreadable(io(io::ErrorKind::PermissionDenied))),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: permission denied"
+        );
+        assert_eq!(
+            message(TargetState::Undetermined(FileSystemError::IoError(
+                crate::fs::IoFailure::at(Path::new("/home/u/my app"), io(io::ErrorKind::Other))
+            ))),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: /home/u/my app: other error"
+        );
+    }
+
+    // What stands in the way of a file, with and without the clauses a deploy
+    // adds, whole.
+    #[test]
+    fn a_path_in_the_way_is_worded_whole() {
+        let message = |state: DirectoryState, extra: Unrun| {
+            path_state_refusal(SOURCE, &pinned_target(), &state, extra)
+                .expect("refused")
+                .message
+                .to_string()
+        };
+        let below = || {
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory {
+                parent: PathBuf::from("/home/u/my app"),
+            })
+        };
+
+        assert_eq!(
+            message(DirectoryState::Directory, Unrun::NOTHING),
+            "Skipping 'app/my creds': a directory is at the target '/home/u/my app/creds', and \
+             a file cannot replace a directory. Remove it or point the entry somewhere else."
+        );
+        assert_eq!(
+            message(
+                DirectoryState::Unlistable(io(io::ErrorKind::PermissionDenied)),
+                DEPLOY
+            ),
+            "Skipping 'app/my creds': a directory is at the target '/home/u/my app/creds', and \
+             a file cannot replace a directory. Remove it or point the entry somewhere else. No \
+             command was run."
+        );
+        assert_eq!(
+            message(below(), Unrun::NOTHING),
+            "Skipping 'app/my creds': the target '/home/u/my app/creds' is below /home/u/my \
+             app, which is not a directory."
+        );
+        assert_eq!(
+            message(below(), DEPLOY),
+            "Skipping 'app/my creds': the target '/home/u/my app/creds' is below /home/u/my \
+             app, which is not a directory, so selfie will not write a credential there. No \
+             command was run."
+        );
+        assert_eq!(
+            message(
+                DirectoryState::Unknown(io(io::ErrorKind::Other)),
+                Unrun::NOTHING
+            ),
+            "Skipping 'app/my creds': selfie could not determine what is at the target. The \
+             check failed with: IO error: other error"
+        );
+        assert_eq!(
+            message(DirectoryState::Unknown(io(io::ErrorKind::Other)), DEPLOY),
+            "Skipping 'app/my creds': selfie could not determine what is at the target, so \
+             selfie will not write a credential there. No command was run. The check failed \
+             with: IO error: other error"
+        );
+    }
+
+    // A target that would not open, and one the rule refuses, whole.
+    #[test]
+    fn an_unopenable_or_ruled_out_target_is_worded_whole() {
+        let unopenable = |refusal: OpenRefusal| {
+            unreadable_target_refusal(SOURCE, &pinned_target(), &refusal, Unrun::NOTHING.unrun)
+                .message
+                .to_string()
+        };
+
+        assert_eq!(
+            unopenable(OpenRefusal::Unreadable(io(io::ErrorKind::PermissionDenied))),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: permission denied"
+        );
+        assert_eq!(
+            unopenable(OpenRefusal::Undetermined(io(io::ErrorKind::Other))),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: other error"
+        );
+        // A deploy's sentence follows the error's, after a stop of its own.
+        assert_eq!(
+            unreadable_target_refusal(
+                SOURCE,
+                &pinned_target(),
+                &OpenRefusal::Unreadable(io(io::ErrorKind::PermissionDenied)),
+                DEPLOY.unrun,
+            )
+            .message
+            .to_string(),
+            "Skipping 'app/my creds': target '/home/u/my app/creds' could not be read: IO \
+             error: permission denied. No command was run."
+        );
+        assert_eq!(
+            target_refusal("my app/creds", TargetRejection::Relative)
+                .message
+                .to_string(),
+            "Skipping 'my app/creds': target path is not absolute; it must be absolute or start \
+             with '~/'"
+        );
+        assert_eq!(
+            target_refusal("~other/creds", TargetRejection::NamedUserHome)
+                .message
+                .to_string(),
+            "Skipping '~other/creds': target uses the '~user' form; selfie does not resolve \
+             another user's home directory"
+        );
+    }
+
+    // Asserts each of `paths` is a value `message` names as a part.
+    #[track_caller]
+    fn assert_values_are_parts(message: &Message, paths: &[&str]) {
+        let values = crate::parts::values_of(message);
+        for path in paths {
+            assert!(
+                values.iter().any(|value| value == path),
+                "{path:?} is not a part of {message:?}"
+            );
+        }
+    }
+
+    // Every path a refusal names, its own or one inside a nested cause, is a
+    // path part, whichever builder words it.
+    #[test]
+    fn every_path_in_a_refusal_is_a_path_part() {
+        const SRC: &str = "s\u{200B}rc";
+        const T: &str = "/h/t\u{200B}x\ny";
+        const PARENT: &str = "/h/p\u{200B}ar\nent";
+        const DEST: &str = "/h/d\u{200B}est";
+        const FS: &str = "/h/f\u{200B}s";
+        let target = repository_path(Path::new(T));
+        let symlinked = || FileSystemError::SymlinkedTarget {
+            path: PathBuf::from(T),
+            points_to: Some(PathBuf::from(DEST)),
+        };
+        let irregular = || FileSystemError::IrregularTarget {
+            path: PathBuf::from(T),
+            kind: "socket",
+        };
+        let write = |error: FileSystemError| {
+            classify_write(SRC, &target, &error)
+                .expect("refused")
+                .message
+        };
+        let read = |state: TargetState| {
+            readable_or_refusal(SRC, &target, state)
+                .expect_err("refused")
+                .message
+        };
+        let in_the_way = |state: DirectoryState| {
+            path_state_refusal(SRC, &target, &state, DEPLOY)
+                .expect("refused")
+                .message
+        };
+        let below = DirectoryState::Absent(AbsentReason::ParentNotADirectory {
+            parent: PathBuf::from(PARENT),
+        });
+
+        let cases: Vec<(Message, Vec<&str>)> = vec![
+            (write(symlinked()), vec![SRC, T, DEST]),
+            (write(irregular()), vec![SRC, T]),
+            (
+                write(FileSystemError::BelowNonDirectory {
+                    path: PathBuf::from(T),
+                    parent: Some(PathBuf::from(PARENT)),
+                    cause: io(io::ErrorKind::NotADirectory),
+                }),
+                vec![SRC, T, PARENT],
+            ),
+            (
+                write(FileSystemError::DirectoryTarget {
+                    path: PathBuf::from(T),
+                    cause: io(io::ErrorKind::IsADirectory),
+                }),
+                vec![SRC, T],
+            ),
+            (
+                read(TargetState::BelowNonDirectory {
+                    parent: Some(PathBuf::from(PARENT)),
+                }),
+                vec![SRC, T, PARENT],
+            ),
+            (read(TargetState::Directory), vec![SRC, T]),
+            (
+                read(TargetState::Link(Link {
+                    path: PathBuf::from(T),
+                    points_to: Some(PathBuf::from(DEST)),
+                })),
+                vec![SRC, T, DEST],
+            ),
+            (read(TargetState::Irregular(irregular())), vec![SRC, T]),
+            (
+                read(TargetState::Unreadable(io(io::ErrorKind::PermissionDenied))),
+                vec![SRC, T],
+            ),
+            (
+                read(TargetState::Undetermined(FileSystemError::IoError(
+                    crate::fs::IoFailure::at(Path::new(FS), io(io::ErrorKind::Other)),
+                ))),
+                vec![SRC, T, FS],
+            ),
+            (in_the_way(DirectoryState::Directory), vec![SRC, T]),
+            (in_the_way(below), vec![SRC, T, PARENT]),
+            (
+                in_the_way(DirectoryState::Unknown(io(io::ErrorKind::Other))),
+                vec![SRC],
+            ),
+            (
+                unreadable_target_refusal(
+                    SRC,
+                    &target,
+                    &OpenRefusal::Unreadable(io(io::ErrorKind::PermissionDenied)),
+                    DEPLOY.unrun,
+                )
+                .message,
+                vec![SRC, T],
+            ),
+            (
+                target_refusal(T, TargetRejection::Relative).message,
+                vec![T],
+            ),
+        ];
+
+        for (message, paths) in &cases {
+            assert_values_are_parts(message, paths);
+        }
     }
 }

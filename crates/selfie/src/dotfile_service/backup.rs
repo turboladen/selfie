@@ -3,7 +3,6 @@
 //! One copy per target, under `backups/` in the state directory, replacing any
 //! earlier copy of the same target.
 
-use std::fmt;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -13,6 +12,7 @@ use crate::fs::{
     target::repository_path,
 };
 use crate::package::event::{EntryOperation, Failure};
+use crate::parts::{Composed, Parts};
 
 /// How many characters of the target's own file name the directory carries.
 const READABLE_LEN: usize = 40;
@@ -154,19 +154,24 @@ fn failure<F: FileSystem>(
     let remedy = remedy(filesystem, root, directory, error);
     Failure::new(
         EntryOperation::Backup,
-        format_args!(
-            "Failed to keep a copy of '{}' before overwriting it",
-            target.display()
-        ),
-        error,
+        Parts::new()
+            .text("Failed to keep a copy of '")
+            .path(target)
+            .text("' before overwriting it"),
+        error.parts(),
     )
-    .with_remedy(&format!(
-        "The target is unchanged. {remedy} To keep copies elsewhere instead, point \
-         state_directory at a writable directory. Then run apply again."
-    ))
+    .with_remedy(
+        Parts::new()
+            .text("The target is unchanged. ")
+            .append(remedy.parts())
+            .text(
+                " To keep copies elsewhere instead, point state_directory at a writable \
+                 directory. Then run apply again.",
+            ),
+    )
 }
 
-/// What to do about a copy that could not be made. Its `Display` is one complete
+/// What to do about a copy that could not be made. Its sentence is one complete
 /// sentence, an instruction naming the path to act on.
 enum Remedy {
     /// A directory that refuses a new entry, or that may not be searched.
@@ -181,27 +186,18 @@ enum Remedy {
     Other(PathBuf),
 }
 
-impl fmt::Display for Remedy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Denied(path) => write!(
-                f,
-                "Give your user write and search access to '{}'.",
-                path.display()
-            ),
-            Self::ReadOnly(path) => write!(
-                f,
-                "Remount the file system holding '{}' read-write.",
-                path.display()
-            ),
-            Self::InTheWay(path) => write!(f, "Move '{}' out of the way.", path.display()),
-            Self::Full(path) => write!(
-                f,
-                "Free space on the file system holding '{}'.",
-                path.display()
-            ),
-            Self::Other(path) => write!(f, "Check that selfie can write to '{}'.", path.display()),
-        }
+crate::parts::display_from_parts!(Remedy);
+
+impl Composed for Remedy {
+    fn parts(&self) -> Parts<'_> {
+        let (before, path, after) = match self {
+            Self::Denied(path) => ("Give your user write and search access to '", path, "'."),
+            Self::ReadOnly(path) => ("Remount the file system holding '", path, "' read-write."),
+            Self::InTheWay(path) => ("Move '", path, "' out of the way."),
+            Self::Full(path) => ("Free space on the file system holding '", path, "'."),
+            Self::Other(path) => ("Check that selfie can write to '", path, "'."),
+        };
+        Parts::new().text(before).path(path).text(after)
     }
 }
 
@@ -648,6 +644,7 @@ mod tests {
             error,
         )
         .message
+        .to_string()
     }
 
     // Each cause names its own path and fix. A blocked `/state` is neither the
@@ -761,9 +758,34 @@ mod tests {
         assert!(
             failure
                 .message
+                .to_string()
                 .contains("Give your user write and search access to '/elsewhere'."),
             "{}",
             failure.message
+        );
+    }
+
+    // The failure names the target, the path the write failed on and the path
+    // its remedy acts on as path parts, so none of them reaches a sentence's
+    // text, where a U+200B in it would print raw.
+    #[test]
+    fn every_path_in_a_backup_failure_is_a_path_part() {
+        let target = Path::new("/h/t\u{200B}x");
+        let blocked = Path::new("/s\u{200B}tate");
+        let written = Path::new("/s\u{200B}tate/backups");
+        let mut fs = MockFileSystem::default();
+        fs.expect_file_creation_refusal()
+            .return_once(|_| refused(Path::new("/s\u{200B}tate"), ErrorKind::PermissionDenied));
+        let error = FileSystemError::IoError(crate::fs::IoFailure::at(
+            written,
+            std::io::Error::from(ErrorKind::PermissionDenied),
+        ));
+
+        let failure = failure(&fs, Path::new(ROOT), &copy_directory(), target, &error);
+
+        assert_eq!(
+            crate::parts::values_of(&failure.message),
+            [target, written, blocked].map(|path| path.display().to_string())
         );
     }
 }

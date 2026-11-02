@@ -547,11 +547,10 @@ where
                         {
                             let refusal = Refusal::found(
                                 (Condition::EarlierProgramFailed, Location::Entry),
-                                format!(
-                                    "Skipping '{}': an earlier `{program}` command failed; no \
-                                     command was run",
-                                    entry.target()
-                                ),
+                                super::refusal::skipping(entry.target())
+                                    .text("an earlier `")
+                                    .name(program.as_str())
+                                    .text("` command failed; no command was run"),
                             );
                             sender
                                 .send_dotfile_refused(package.name(), entry.target(), refusal)

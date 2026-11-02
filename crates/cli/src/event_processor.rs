@@ -277,10 +277,11 @@ impl EventProcessor {
             // The run's result counts each, so the exit code comes from there.
             PackageEvent::DotfileRefused { refusal, .. } => {
                 self.display
-                    .print_warning(received::message(refusal.message));
+                    .print_warning(received::composed(&refusal.message));
             }
             PackageEvent::DotfileFailed { failure, .. } => {
-                self.display.print_error(received::message(failure.message));
+                self.display
+                    .print_error(received::composed(&failure.message));
             }
 
             PackageEvent::Completed {
@@ -1622,7 +1623,7 @@ mod tests {
             refusal: Refusal {
                 condition: Condition::Symlink,
                 at: Location::Target,
-                message: "Skipping 'bat/config': a symlink is there".to_string(),
+                message: test_common::message("Skipping 'bat/config': a symlink is there"),
             },
         };
         let failed = PackageEvent::DotfileFailed {
@@ -1631,8 +1632,8 @@ mod tests {
             spec_target: "~/.creds".to_string(),
             failure: Failure {
                 operation: EntryOperation::Resolve,
-                error: "no session".to_string(),
-                message: "Failed to resolve '~/.creds': no session".to_string(),
+                error: test_common::message("no session"),
+                message: test_common::message("Failed to resolve '~/.creds': no session"),
             },
         };
         let printed = printed_for(DisplayManager::new(false), vec![refused, failed]).await;
