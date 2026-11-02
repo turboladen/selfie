@@ -28,6 +28,7 @@ use crate::{
         },
         refusal::refuse_up_front,
     },
+    parts::{Composed, Parts},
 };
 
 use super::classify::{
@@ -63,21 +64,15 @@ pub(super) const APPLY_CANCELED: &str = "Apply canceled";
 
 /// Why an apply stopped before its last entry.
 ///
-/// Each stop other than the deploy state's is worded once, in
-/// [`into_failure`](Self::into_failure), so no two sites that stop a run can
-/// describe the same stop differently. The deploy state's stop is a
-/// [`DeployStateFailure`], worded by its own `Display`.
+/// Each stop other than the deploy state's is worded once, as an
+/// [`ApplyStop`], so no two sites that stop a run can describe the same stop
+/// differently. The deploy state's stop is a [`DeployStateFailure`].
 enum Stop {
     /// The caller canceled the run.
     Canceled,
-    /// An entry was refused or failed while `stop_on_error` is on. Carries the
-    /// entry's target as the package file spells it.
-    Entry(String),
-    /// A package was refused whole while `stop_on_error` is on. Carries its name.
-    /// Packages are judged before any is walked, so nothing has deployed.
-    Package(String),
-    /// Collecting the packages refused something while `stop_on_error` is on.
-    Collection(CollectionRefusal),
+    /// An entry, a package or a collection refusal stopped the run while
+    /// `stop_on_error` is on.
+    Refused(ApplyStop),
     /// The deploy state could not be written, before a write or after one.
     /// Stops the run whatever `stop_on_error` says.
     Unrecorded(DeployStateFailure),
@@ -86,33 +81,57 @@ enum Stop {
 impl Stop {
     /// The run's failure, or `None` for a canceled run, which reports none.
     fn into_failure(self) -> Option<OperationFailure> {
-        let sentence = match self {
-            Self::Canceled => return None,
-            Self::Unrecorded(failure) => return Some(OperationFailure::DeployState(failure)),
-            Self::Entry(target) => format!(
-                "Stopped after failing to apply dotfile '{target}' (stop_on_error is enabled)"
-            ),
-            Self::Package(name) => format!(
-                "Stopped before applying anything: package '{name}' is refused (stop_on_error is \
-                 enabled)"
-            ),
-            Self::Collection(
-                CollectionRefusal::UnlistableDotfilesDirectory(_)
-                | CollectionRefusal::UncheckableDotfilesDirectory(_),
-            ) => "Stopped before applying anything: the standalone dotfiles directory could not \
-                  be read (stop_on_error is enabled)"
-                .to_string(),
-            Self::Collection(CollectionRefusal::AmbiguousName { name, .. }) => format!(
-                "Stopped before applying anything: several spec files claim the name '{name}' \
-                 (stop_on_error is enabled)"
-            ),
-            Self::Collection(CollectionRefusal::UnloadableSpec { error, .. }) => format!(
-                "Stopped before applying anything: spec '{}' could not be loaded (stop_on_error \
-                 is enabled)",
-                error.package_path().display()
-            ),
+        match self {
+            Self::Canceled => None,
+            Self::Unrecorded(failure) => Some(OperationFailure::DeployState(failure)),
+            Self::Refused(stop) => Some(OperationFailure::Stopped(stop)),
+        }
+    }
+}
+
+/// Why an apply with `stop_on_error` on stopped, other than over the deploy
+/// state: after a refused or failed entry, or before applying anything.
+#[derive(Debug, Clone)]
+pub enum ApplyStop {
+    /// An entry was refused or failed.
+    Entry {
+        /// The entry's target, as the package file spells it.
+        target: PathBuf,
+    },
+    /// A package was refused whole. Packages are judged before any is walked,
+    /// so nothing was applied.
+    Package {
+        /// The package's name.
+        name: String,
+    },
+    /// Collecting the packages refused something, before anything was applied.
+    Collection(CollectionRefusal),
+}
+
+crate::parts::display_from_parts!(ApplyStop);
+
+impl Composed for ApplyStop {
+    fn parts(&self) -> Parts<'_> {
+        let before = || Parts::new().text("Stopped before applying anything: ");
+        let parts = match self {
+            Self::Entry { target } => Parts::new()
+                .text("Stopped after failing to apply dotfile '")
+                .path(target)
+                .text("'"),
+            Self::Package { name } => before().text("package '").name(name).text("' is refused"),
+            Self::Collection(CollectionRefusal::UnreadableDotfilesDirectory(_)) => {
+                before().text("the standalone dotfiles directory could not be read")
+            }
+            Self::Collection(CollectionRefusal::AmbiguousName { name, .. }) => before()
+                .text("several spec files claim the name '")
+                .name(name)
+                .text("'"),
+            Self::Collection(CollectionRefusal::UnloadableSpec { error, .. }) => before()
+                .text("spec '")
+                .path(error.package_path())
+                .text("' could not be loaded"),
         };
-        Some(OperationFailure::Generic(sentence))
+        parts.text(" (stop_on_error is enabled)")
     }
 }
 
@@ -336,7 +355,7 @@ where
             Unfinished::Refused,
             config,
             token,
-            Stop::Collection(refusal.clone()),
+            Stop::Refused(ApplyStop::Collection(refusal.clone())),
         );
         if stopped.is_some() {
             break;
@@ -388,7 +407,9 @@ where
                 Unfinished::Refused,
                 config,
                 token,
-                Stop::Package(package.name().to_string()),
+                Stop::Refused(ApplyStop::Package {
+                    name: package.name().to_string(),
+                }),
             );
             if stopped.is_some() {
                 break;
@@ -485,7 +506,11 @@ where
             }
             // The stop any refusal of this entry calls for, when `stop_on_error`
             // is on.
-            let failed = || Stop::Entry(entry.target().to_string());
+            let failed = || {
+                Stop::Refused(ApplyStop::Entry {
+                    target: entry.target().into(),
+                })
+            };
 
             // Settled once for the entry, and tallied once below, so every way an
             // entry can end reports, counts and stops through one place.
@@ -851,4 +876,24 @@ where
     Some(OperationResult::Success(
         tally.into_success(config.environment()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A refused stop is the run's failure, worded by its ApplyStop, and a
+    // canceled run reports none.
+    #[test]
+    fn a_stop_is_the_runs_failure() {
+        let stop = ApplyStop::Package {
+            name: "tool".to_string(),
+        };
+
+        assert!(matches!(
+            Stop::Refused(stop).into_failure(),
+            Some(OperationFailure::Stopped(ApplyStop::Package { name })) if name == "tool"
+        ));
+        assert!(Stop::Canceled.into_failure().is_none());
+    }
 }

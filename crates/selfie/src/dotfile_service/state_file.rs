@@ -17,7 +17,7 @@ use crate::{
         filesystem::{FileSystem, FileSystemError, IfPresent},
         target::{StatePathError, TargetPath, state_file_path},
     },
-    parts::{Composed, Parts, SelfieCommand, Subcommand},
+    parts::{Composed, Parts, Subcommand, SuggestedCommand},
     yaml::ParseFailure,
 };
 
@@ -540,7 +540,7 @@ impl Composed for DeployStateFailure {
                 copy,
             } => {
                 // A name holding NUL has no shell word, so no command is offered.
-                let remedy = SelfieCommand::new(Subcommand::Apply, name).map_or_else(
+                let remedy = SuggestedCommand::selfie(Subcommand::Apply, name).map_or_else(
                     Parts::new,
                     |command| {
                         Parts::new().text(" Run `").command(command).text(

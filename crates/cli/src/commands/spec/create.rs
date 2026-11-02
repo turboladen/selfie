@@ -224,7 +224,7 @@ pub(super) fn name_check_refusal(name: &str, error: &NamespaceValidationError) -
         | NamespaceValidationError::DotfilesDirectoryUnreadable(_) => shown!(
             "Cannot create '{}': {}",
             Name::new(name),
-            crate::received::sentence(error)
+            crate::received::composed(error)
         ),
     }
 }
@@ -635,7 +635,7 @@ fn available_dependency_names(
         Err(listing) if listing.may_be_created() => Ok((Vec::new(), Vec::new())),
         Err(e) => Err(shown!(
             "Failed to list packages: {}",
-            crate::received::sentence(e)
+            crate::received::composed(&e)
         )),
     }
 }

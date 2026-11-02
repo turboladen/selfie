@@ -171,3 +171,41 @@ fn a_state_directory_not_there_yet_is_a_note_not_a_warning() {
         .stdout(predicates::str::contains("Configuration is valid."))
         .stderr(predicates::str::contains("Validation failed.").not());
 }
+
+// A package directory that is not there is offered `mkdir -p` in the issue's
+// message, with the path in the command as the shell reads it and a note
+// under it spelling the command out. Its suggestion is only the correction,
+// so no cell shows the path raw.
+#[test]
+fn a_missing_package_directory_offers_mkdir_with_its_note() {
+    let temp_dir = setup_default_test_config();
+    let packages = temp_dir.path().join("p\u{200B}kgs");
+    std::fs::write(
+        temp_dir.path().join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {}\npackage_directory: {}\n",
+            common::SELFIE_ENV,
+            packages.display()
+        ),
+    )
+    .unwrap();
+
+    let output = common::run_sandboxed(&temp_dir, &["--no-color", "config", "validate"]);
+    let both = format!("{}{}", output.stdout, output.stderr);
+
+    let raw: Vec<&str> = both
+        .lines()
+        .filter(|line| line.contains('\u{200B}'))
+        .collect();
+    assert_eq!(raw.len(), 1, "{both}");
+    assert!(raw[0].contains("Create it with: mkdir -p -- "), "{both}");
+    assert!(
+        both.lines()
+            .any(|line| line.contains(r"Escaped: mkdir -p -- ") && line.contains(r"p\u{200b}kgs")),
+        "{both}"
+    );
+    assert!(
+        both.contains("Correct the setting if the path is a typo"),
+        "{both}"
+    );
+}

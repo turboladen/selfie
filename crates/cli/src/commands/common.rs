@@ -240,7 +240,7 @@ pub(crate) fn name_check_message(
         // name, and telling the user they cannot use it sends them off to pick another
         // one, which fails in exactly the same way.
         Invalid::PackageDirectoryUnreadable(_) | Invalid::DotfilesDirectoryUnreadable(_) => {
-            crate::received::sentence(error).into()
+            crate::received::composed(error)
         }
     }
 }

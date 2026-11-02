@@ -98,18 +98,19 @@ pub enum AbsentReason {
     },
 }
 
-impl DirectoryState {
-    /// What is at the path, as a clause that follows the path: "does not exist",
-    /// "could not be listed: …".
-    #[must_use]
-    pub fn clause(&self) -> String {
-        // Shared so every sentence about one directory describes it in the same
-        // words.
+// A directory state's sentence is a clause that follows the path: "does not
+// exist", "could not be listed: …". Shared so every sentence about one directory
+// describes it in the same words.
+crate::parts::display_from_parts!(DirectoryState);
+
+impl Composed for DirectoryState {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new();
         match self {
-            Self::Directory => "is a directory".to_string(),
-            Self::Absent(reason) => reason.to_string(),
-            Self::Unlistable(error) => format!("could not be listed: {error}"),
-            Self::Unknown(error) => format!("could not be checked: {error}"),
+            Self::Directory => parts.text("is a directory"),
+            Self::Absent(reason) => reason.parts(),
+            Self::Unlistable(error) => parts.text("could not be listed: ").cause(error),
+            Self::Unknown(error) => parts.text("could not be checked: ").cause(error),
         }
     }
 }
@@ -139,24 +140,6 @@ impl Composed for AbsentReason {
 }
 
 impl AbsentReason {
-    /// The command that would create the directory at `path`, or `None` when no
-    /// single command is the remedy.
-    ///
-    /// Only [`Empty`](Self::Empty) has one. `mkdir -p` fails with "File exists"
-    /// against a plain file and "No such file or directory" against a dangling
-    /// symlink, so offering it for those sends the user to a command that cannot
-    /// work. The path is shell-quoted, because the sentence exists to be pasted.
-    #[must_use]
-    pub fn remedy(&self, path: &Path) -> Option<String> {
-        // `--` ends the option list. Without it a dotfiles directory named `-p` or
-        // `-foo` is read by mkdir as options, so the command fails or creates
-        // something the user did not ask for.
-        if !self.creatable() {
-            return None;
-        }
-        shell_quote(path).map(|path| format!("Create it with: mkdir -p -- {path}"))
-    }
-
     /// Reports whether `mkdir -p` creates the directory, which it does only when
     /// nothing is at the path.
     #[must_use]

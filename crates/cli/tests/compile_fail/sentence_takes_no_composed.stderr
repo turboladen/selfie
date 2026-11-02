@@ -12,10 +12,10 @@ error[E0277]: `OperationSuccess` is not one of the library's values, so sentence
              CheckFailure
              ConfigLoadError
              NamespaceConflict
-             NamespaceValidationError
              OperationFailure
              OperationType
              PackageParseKind
+             PackageRepoError
            and $N others
 note: required for `&OperationSuccess` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs

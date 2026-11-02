@@ -656,6 +656,10 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "type": "warning",
             "message": warning.to_string(),
         })),
+        PackageEvent::DotfilesDirectoryWarning { warning, .. } => Some(serde_json::json!({
+            "type": "warning",
+            "message": warning.to_string(),
+        })),
         // A warning row like any other, so a caller reading warnings reads it.
         PackageEvent::CollisionsUnchecked { sources, .. } => Some(serde_json::json!({
             "type": "warning",
@@ -3330,6 +3334,96 @@ mod tests {
                 .is_some_and(|error| error.starts_with("Stopped with nothing written.")),
             "{}",
             typed.data
+        );
+    }
+
+    // A dotfiles directory's warning and a track's refusal over one travel
+    // typed, and their JSON is the JSON of a plain warning and a generic
+    // failure carrying the same sentences.
+    #[tokio::test]
+    async fn a_dotfiles_directory_warning_and_refusal_collect_as_their_sentences() {
+        use selfie::fs::{AbsentReason, DirectoryState};
+        use selfie::package::event::{DotfilesDirectoryWarning, TrackDirectoryRefusal};
+        use selfie::package::port::PackageListError;
+
+        let warning = DotfilesDirectoryWarning::Absent {
+            path: "/d/dots".into(),
+            reason: AbsentReason::Empty,
+        };
+        let refusal = TrackDirectoryRefusal::Unreadable(PackageListError::new(
+            "/d/dots".into(),
+            DirectoryState::Absent(AbsentReason::Empty),
+        ));
+        let typed = vec![
+            PackageEvent::DotfilesDirectoryWarning {
+                operation_info: test_op_info(),
+                warning: warning.clone(),
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Failure(OperationFailure::UnusableDotfilesDirectory(
+                    refusal.clone(),
+                )),
+            },
+        ];
+        let worded = vec![
+            PackageEvent::Warning {
+                operation_info: test_op_info(),
+                message: warning.to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Failure(OperationFailure::Generic(refusal.to_string())),
+            },
+        ];
+
+        let typed = collect_events(Box::pin(stream::iter(typed))).await;
+        let worded = collect_events(Box::pin(stream::iter(worded))).await;
+
+        assert_eq!(typed.data, worded.data);
+        assert_eq!(typed.success, worded.success);
+        // Control: the rows are there, so the equality is not two empty payloads.
+        assert_eq!(warning_rows(&typed.data).len(), 1, "{}", typed.data);
+        assert!(
+            typed.data["result"]["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("Cannot track a standalone dotfile:")),
+            "{}",
+            typed.data
+        );
+    }
+
+    // An apply's stop travels typed, and its JSON is the JSON of a generic
+    // failure carrying the same sentence.
+    #[tokio::test]
+    async fn an_apply_stop_collects_as_its_sentence() {
+        use selfie::dotfile_service::ApplyStop;
+
+        let stop = ApplyStop::Entry {
+            target: "~/.toolrc".into(),
+        };
+        let completed = |failure| {
+            vec![PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Failure(failure),
+            }]
+        };
+
+        let typed = collect_events(Box::pin(stream::iter(completed(
+            OperationFailure::Stopped(stop.clone()),
+        ))))
+        .await;
+        let worded = collect_events(Box::pin(stream::iter(completed(
+            OperationFailure::Generic(stop.to_string()),
+        ))))
+        .await;
+
+        assert_eq!(typed.data, worded.data);
+        assert_eq!(typed.success, worded.success);
+        // Control: the error is there, so the equality is not two empty payloads.
+        assert_eq!(
+            typed.data["result"]["error"],
+            "Stopped after failing to apply dotfile '~/.toolrc' (stop_on_error is enabled)"
         );
     }
 

@@ -10,6 +10,7 @@ pub mod deploy_state;
 pub mod events;
 pub mod fixtures;
 pub mod git;
+pub mod listing;
 pub mod locked;
 pub mod package;
 pub mod plant;
@@ -39,6 +40,7 @@ pub use fixtures::{
     create_test_package_file,
 };
 pub use git::{isolated_git, isolated_git_adapter};
+pub use listing::{every_directory_state, every_listing_error};
 pub use locked::LockedDir;
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use plant::{PLANTED, Plant, PlantsBeforeWrite, Rewrite};

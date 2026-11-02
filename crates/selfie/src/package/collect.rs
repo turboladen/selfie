@@ -239,11 +239,8 @@ impl Listed {
                             reason,
                         }))
                     }
-                    Unlisted::Unlistable(error) => findings.push(Finding::Refusal(
-                        CollectionRefusal::UnlistableDotfilesDirectory(error),
-                    )),
-                    Unlisted::Unknown(error) => findings.push(Finding::Refusal(
-                        CollectionRefusal::UncheckableDotfilesDirectory(error),
+                    Unlisted::Unreadable(unreadable) => findings.push(Finding::Refusal(
+                        CollectionRefusal::UnreadableDotfilesDirectory(unreadable),
                     )),
                 }
             }
@@ -889,7 +886,9 @@ mod tests {
         assert!(matches!(
             collected.findings.as_slice(),
             [Finding::Refusal(
-                CollectionRefusal::UncheckableDotfilesDirectory(_)
+                CollectionRefusal::UnreadableDotfilesDirectory(
+                    directory::UnreadableDotfilesDirectory::Uncheckable(_)
+                )
             )]
         ));
     }
