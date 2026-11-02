@@ -366,7 +366,7 @@ async fn perform_deploy<F: FileSystem>(
     if let Some(kept) = kept
         && let Some(stale) = kept.prune_earlier(filesystem)
     {
-        sender.send_warning(stale).await;
+        sender.send_composed_warning(stale).await;
     }
 
     sender

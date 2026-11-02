@@ -20872,10 +20872,13 @@ mod an_appearing_target_is_kept {
     }
 
     // How many warnings start with `opening` and say what they name was left in place.
+    // Counts only the event worded from parts, so a warning sent as a String
+    // instead is not counted.
     fn left_in_place_warnings(events: &[PackageEvent], opening: &str) -> usize {
         test_common::events::count_events_of_type(events, |event| {
-            matches!(event, PackageEvent::Warning { message, .. }
-                if message.starts_with(opening) && message.contains("left in place"))
+            matches!(event, PackageEvent::ComposedWarning { warning, .. }
+                if warning.to_string().starts_with(opening)
+                    && warning.to_string().contains("left in place"))
         })
     }
 
@@ -23405,5 +23408,62 @@ mod warning_sentences {
             )),
             "{warnings:?}"
         );
+    }
+
+    // A backup prune that cannot remove an earlier copy warns as a warning worded
+    // from parts, naming the copy as a path. A directory planted where the copies
+    // are kept cannot be removed as a file.
+    #[tokio::test]
+    async fn a_failed_prune_is_sent_as_a_composed_warning() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("rc");
+        std::fs::write(dirs.package_dir.join("rc"), "from the repo\n").unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "pk",
+            &format!(
+                "name: pk\n{ALL}dotfiles:\n  - source: rc\n    target: \"{}\"\n",
+                target.display()
+            ),
+        );
+        let accept = || ApplyOptions {
+            auto_accept: true,
+            ..Default::default()
+        };
+        std::fs::write(&target, "edited\n").unwrap();
+        // The directory the first overwrite kept its copy in, as the apply reports
+        // it, so the planted directory sits beside the copies of this target.
+        let first = collect_events(dirs.service().apply_all(accept()).await).await;
+        let copy = first
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::DotfileDeployed {
+                    backup: Some(backup),
+                    ..
+                } => Some(std::path::PathBuf::from(backup)),
+                _ => None,
+            })
+            .expect("the first overwrite kept a copy");
+        let per_target = copy.parent().expect("a per-target backups directory");
+        let planted = per_target.join("e\u{200B}arlier");
+        std::fs::create_dir(&planted).unwrap();
+        std::fs::write(&target, "edited again\n").unwrap();
+
+        let events = collect_events(dirs.service().apply_all(accept()).await).await;
+
+        let pruned: Vec<Vec<String>> = events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::Message(message),
+                    ..
+                } if message.to_string().starts_with("Kept a copy") => {
+                    Some(selfie::parts::values_of(message))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pruned.len(), 1, "{events:?}");
+        assert_eq!(pruned[0][0], planted.display().to_string(), "{events:?}");
     }
 }

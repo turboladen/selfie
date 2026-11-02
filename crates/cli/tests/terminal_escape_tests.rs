@@ -703,6 +703,45 @@ fn a_failed_write_names_its_path_as_a_path() {
     assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
 }
 
+// A secret entry over a symlink replaces the link and warns, naming the link
+// and its destination as paths, so a U+200B in either shows escaped.
+#[cfg(unix)]
+#[test]
+fn a_replaced_link_warning_names_its_paths_as_paths() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::create_dir_all(&packages).unwrap();
+    fs::write(
+        packages.join("pk.yaml"),
+        format!(
+            "name: pk\ndotfiles:\n  - command: \"echo hi\"\n    target: \"~/s\\u200Bl\"\n\
+             environments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(temp.path().join("v\u{200B}ault"), "old").unwrap();
+    std::os::unix::fs::symlink(
+        temp.path().join("v\u{200B}ault"),
+        temp.path().join("s\u{200B}l"),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "apply"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.lines().any(
+            |line| line.contains(r"s\u{200b}l', which was a symlink to '")
+                && line.contains(r"v\u{200b}ault'")
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
 // A conflict's diff shows each line of content with its escape sequences as
 // escapes and its tabs as tabs, and a content line starting `-- ` or `++ ` as
 // content, not as a header.

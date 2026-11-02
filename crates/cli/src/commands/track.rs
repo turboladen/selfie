@@ -234,9 +234,9 @@ fn report_existing_tracker(
     // tracked and mentioned by nothing. Shares the library's wording so the two
     // cannot describe one situation differently.
     if let Some(warning) = selfie::dotfile_service::track::already_tracked_refusal(&fs, &expanded)
-        && warned.insert(warning.clone())
+        && warned.insert(warning.to_string())
     {
-        display.print_warning(crate::received::message(warning));
+        display.print_warning(crate::received::composed(&warning));
     }
 
     display.print_info(shown!(
