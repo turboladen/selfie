@@ -370,22 +370,11 @@ fn copy_fate<'a>(copy: &'a Path, removal: &'a CopyRemoval) -> Parts<'a> {
 // counting rather than by checking presence, so a variant that stops naming the
 // spec fails a test instead of going quiet.
 fn spec_save_failure(error: &PackageRepoError, copy: &Path, removal: &CopyRemoval) -> Message {
-    // A file system error and a listing error append their parts, so the path each
-    // names is a path part. Every other repository error enters as its own words,
-    // and a path it names stays inside that text until PackageRepoError is
-    // Composed (selfie-z00o).
-    let cause = match error {
-        PackageRepoError::FileSystemError(error) => Parts::new()
-            .text("File system error: ")
-            .append(error.parts()),
-        PackageRepoError::PackageListError(error) => error.parts(),
-        other => Parts::new().text(other.to_string()),
-    };
     // Several errors end their own sentence, so the frame does not add a second
     // period. Only one is stripped: an error ending in an ellipsis keeps it.
     Parts::new()
         .text("Cannot save the spec: ")
-        .append(cause.without_final('.'))
+        .append(error.parts().without_final('.'))
         .text(". ")
         .append(copy_fate(copy, removal))
         .into()
@@ -1463,6 +1452,16 @@ mod tests {
             ["/a\u{200B}t", "/d\u{200B}/cfg", "/a\u{200B}t"]
         );
         assert_eq!(
+            values(&spec_save_failure(
+                &PackageRepoError::Occupied {
+                    path: PathBuf::from("/p\u{200B}/c.yml"),
+                },
+                copy,
+                &CopyRemoval::Removed,
+            )),
+            ["/p\u{200B}/c.yml", "/d\u{200B}/cfg"]
+        );
+        assert_eq!(
             values(&track_target_refusal(
                 "t\u{200B}",
                 TargetRejection::Relative
@@ -1585,5 +1584,23 @@ mod tests {
             crate::parts::values_of(&already_tracked_refusal(&fs, &target).expect("refused")),
             ["/h/r\u{200B}c", "/h/v\u{200B}ault"]
         );
+    }
+
+    // A cause that ends its own sentence, as an I/O error's message can, gets no
+    // second period from the frame.
+    #[test]
+    fn a_failed_spec_save_ends_a_cause_with_one_period() {
+        let error = PackageRepoError::IoError(std::sync::Arc::new(std::io::Error::other(
+            "the disk is full.",
+        )));
+
+        let message =
+            spec_save_failure(&error, Path::new("/d/cfg"), &CopyRemoval::Removed).to_string();
+
+        assert!(
+            message.starts_with("Cannot save the spec: IO error: the disk is full. The copy"),
+            "{message}"
+        );
+        assert!(!message.contains(".."), "{message}");
     }
 }
