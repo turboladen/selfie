@@ -1758,7 +1758,9 @@ fn spec_validate_names_a_mismatched_name_escaped() {
 
 // Every command that names a refused spec's reason shows its unknown key, and
 // the environment the key sits in, escaped: a listing's row, a run's skipping
-// line, a single-package command's failure, and spec info's refusal.
+// line, a single-package command's failure, and spec info's refusal here and
+// in another environment. A spec that does not parse is skipped with its file
+// named escaped, and each listing names an ambiguity's directory escaped.
 #[test]
 fn a_refused_specs_reason_names_its_key_and_environment_escaped() {
     let temp = setup_default_test_config();
@@ -1767,9 +1769,19 @@ fn a_refused_specs_reason_names_its_key_and_environment_escaped() {
     );
     let elsewhere = "name: e\nenvironments:\n  \"w\\u200Bv\":\n    install: \"true\"\n    \
                      \"x\\u200By\": 1\n";
-    hostile_package_directory(&temp, &[("g.yml", &keyed), ("e.yml", elsewhere)]);
+    hostile_package_directory(
+        &temp,
+        &[
+            ("g.yml", &keyed),
+            ("e.yml", elsewhere),
+            ("b.yml", "name: b\n  bad: [\n"),
+            ("m.yml", &plain_spec("m")),
+            ("m.yaml", &plain_spec("m")),
+        ],
+    );
+    let ambiguity = r"p\u{200b}k: m.yaml, m.yml";
     let key = r"unknown field 'w\u{200b}k'";
-    let cases: [(&[&str], &str, &str); 7] = [
+    let cases: [(&[&str], &str, &str); 12] = [
         (&["package", "list"], "refused (g.yml)", key),
         (&["spec", "list"], "Refused: g", key),
         (&["apply"], "Skipping package 'g'", key),
@@ -1780,6 +1792,19 @@ fn a_refused_specs_reason_names_its_key_and_environment_escaped() {
             &["dotfiles", "list"],
             "Cannot read the dotfiles in 'e'",
             r"in environment 'w\u{200b}v': unknown field 'x\u{200b}y'",
+        ),
+        (&["apply"], "Skipping package file", r"p\u{200b}k/b.yml"),
+        (
+            &["spec", "info", "e"],
+            "would refuse this spec in another environment",
+            r"in environment 'w\u{200b}v': unknown field 'x\u{200b}y'",
+        ),
+        (&["package", "list"], "refused (m.yaml)", ambiguity),
+        (&["spec", "list"], "m.yaml) — Multiple packages", ambiguity),
+        (
+            &["dotfiles", "list"],
+            "m.yaml): Multiple packages",
+            ambiguity,
         ),
     ];
 

@@ -323,24 +323,15 @@ pub(crate) fn collisions_unchecked(sources: &[UncheckedSource]) -> Shown {
     )
 }
 
-// This is the warning for a spec file a run leaves out, for `reason`.
-fn skipping(path: &std::path::Path, reason: impl Into<Shown>) -> Shown {
-    shown!(
-        "Skipping package file {}: {}",
-        DisplayPath::of(path),
-        reason.into()
-    )
-}
-
 /// The warning for a spec file a run skips because it does not parse.
 pub(crate) fn skipped_spec(error: &PackageParseError) -> Shown {
-    skipping(error.package_path(), composed(error))
+    composed(&selfie::package::service::skipped_spec_warning(error))
 }
 
 /// The warning for a spec file a listing leaves out because several files
 /// claim its name.
 pub(crate) fn ambiguous_spec(row: &RefusedSpec) -> Shown {
-    skipping(&row.path, composed(&row.reason))
+    composed(&selfie::package::service::ambiguous_spec_warning(row))
 }
 
 /// Why `spec create` will not create `package_name`.
@@ -952,7 +943,7 @@ mod tests {
         assert_eq!(composed(&invalid).as_str(), invalid.to_string());
         assert_eq!(
             skipped_spec(&invalid).as_str(),
-            selfie::package::service::skipped_spec_warning(&invalid)
+            selfie::package::service::skipped_spec_warning(&invalid).to_string()
         );
         let ambiguous = RefusedSpec {
             package_name: "tool".to_string(),
@@ -963,7 +954,7 @@ mod tests {
         };
         assert_eq!(
             ambiguous_spec(&ambiguous).as_str(),
-            selfie::package::service::ambiguous_spec_warning(&ambiguous)
+            selfie::package::service::ambiguous_spec_warning(&ambiguous).to_string()
         );
         let link = SkipReason::SecretDryRun {
             commands: 3,

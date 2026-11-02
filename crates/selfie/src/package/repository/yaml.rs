@@ -1781,7 +1781,7 @@ mod tests {
         let invalid: Vec<_> = output.invalid_packages().collect();
         assert_eq!(invalid.len(), 1, "the spec must be reported as invalid");
 
-        let message = crate::package::service::skipped_spec_warning(invalid[0]);
+        let message = crate::package::service::skipped_spec_warning(invalid[0]).to_string();
         let path = ghost.display().to_string();
         assert_eq!(
             message.matches(path.as_str()).count(),

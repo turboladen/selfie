@@ -1313,7 +1313,8 @@ mod tests {
                 // The typed event, not a `Warning`: the service reports the
                 // failure and the adapter decides how to say it.
                 crate::package::event::PackageEvent::SpecSkipped { error, .. } => {
-                    warnings.push(crate::package::service::skipped_spec_warning(&error));
+                    warnings
+                        .push(crate::package::service::skipped_spec_warning(&error).to_string());
                 }
                 crate::package::event::PackageEvent::AuditResultCompleted { .. } => {
                     audit_results += 1;
