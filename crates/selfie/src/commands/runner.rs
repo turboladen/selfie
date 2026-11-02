@@ -442,7 +442,8 @@ impl crate::parts::Composed for UnusableDirectory {
         let [command, directory, why] = crate::parts::shares(
             [
                 self.command.len(),
-                self.working_directory.as_os_str().len(),
+                // Measured as shown: a byte that is not UTF-8 shows as U+FFFD.
+                self.working_directory.to_string_lossy().len(),
                 cause.len(),
             ],
             MAX_BOUNDED_BYTES,
@@ -766,6 +767,30 @@ impl BoundedText {
         Self::keeping_ends(bytes, share / 2)
     }
 
+    // `bound_within` for text already decoded, such as a path decoded lossily.
+    // It cuts on character boundaries, so the text cannot grow when it is cut,
+    // and each end keeps at most `share / 2` of its bytes.
+    pub(crate) fn text_within(text: &str, share: usize) -> Self {
+        let end = share / 2;
+        if text.len() <= 2 * end {
+            return Self(text.to_string());
+        }
+        let mut head = end;
+        while !text.is_char_boundary(head) {
+            head -= 1;
+        }
+        let mut tail = text.len() - end;
+        while !text.is_char_boundary(tail) {
+            tail += 1;
+        }
+        Self::elided(
+            Cow::Borrowed(text),
+            &text[..head],
+            tail - head,
+            &text[tail..],
+        )
+    }
+
     // Keeps `end` input bytes at each end, the same number at both.
     fn keeping_ends(bytes: &[u8], end: usize) -> Self {
         // Borrowed, not allocated, whenever the input is valid UTF-8.
@@ -775,11 +800,15 @@ impl BoundedText {
             return Self(whole.into_owned());
         }
 
-        let elided = bytes.len() - 2 * end;
         let head = String::from_utf8_lossy(&bytes[..end]);
         let tail = String::from_utf8_lossy(&bytes[bytes.len() - end..]);
-        let cut = format!("{head}… ({elided} bytes elided) …{tail}");
+        Self::elided(whole, &head, bytes.len() - 2 * end, &tail)
+    }
 
+    // `head`, the marker naming the `elided` bytes between, then `tail`; or
+    // `whole`, when the marker would cost more bytes than the cut saved.
+    fn elided(whole: Cow<'_, str>, head: &str, elided: usize, tail: &str) -> Self {
+        let cut = format!("{head}… ({elided} bytes elided) …{tail}");
         if cut.len() < whole.len() {
             Self(cut)
         } else {

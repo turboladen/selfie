@@ -294,7 +294,11 @@ impl<'a> Parts<'a> {
         if bytes.len() <= share && path.to_str().is_some() {
             return self.path(path);
         }
-        let bounded = crate::commands::BoundedText::bound_within(bytes, share);
+        // Decoded before it is cut: each byte that is not UTF-8 decodes to a
+        // three-byte U+FFFD, so cutting the bytes first would show up to three
+        // times the share.
+        let decoded = path.to_string_lossy();
+        let bounded = crate::commands::BoundedText::text_within(&decoded, share);
         self.name(bounded.into_string())
     }
 
