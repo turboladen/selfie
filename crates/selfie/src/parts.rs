@@ -24,6 +24,9 @@ pub enum Part<'a> {
     Path(Cow<'a, Path>),
     /// A command for the user to run.
     Command(SuggestedCommand),
+    /// Text another program or library wrote, such as git's error, which can
+    /// quote a path or a name selfie cannot pull out as a part of its own.
+    Foreign(Cow<'a, str>),
 }
 
 /// A `selfie` subcommand a sentence offers.
@@ -170,6 +173,14 @@ impl<'a> Parts<'a> {
         self
     }
 
+    // Git's own text, which `GitMessage` has already redacted and bounded. It is
+    // the one source of a foreign part from the git side, so a credential in
+    // git's stderr cannot reach a part without passing through the redaction.
+    pub(crate) fn git(mut self, text: &'a crate::git::GitMessage) -> Self {
+        self.0.push(Part::Foreign(Cow::Borrowed(text.as_str())));
+        self
+    }
+
     // The parts `part` gives for each of `items`, with `separator` between
     // two of them.
     pub(crate) fn joined<T>(
@@ -240,6 +251,7 @@ impl<'a> Parts<'a> {
                     Part::Name(name) => Part::Name(Cow::Owned(name.into_owned())),
                     Part::Path(path) => Part::Path(Cow::Owned(path.into_owned())),
                     Part::Command(command) => Part::Command(command),
+                    Part::Foreign(text) => Part::Foreign(Cow::Owned(text.into_owned())),
                 }),
             }
         }
@@ -256,6 +268,7 @@ impl<'a> Parts<'a> {
                     Part::Name(name) => Part::Name(Cow::Borrowed(name)),
                     Part::Path(path) => Part::Path(Cow::Borrowed(path)),
                     Part::Command(command) => Part::Command(command.clone()),
+                    Part::Foreign(text) => Part::Foreign(Cow::Borrowed(text)),
                 })
                 .collect(),
         )
@@ -313,8 +326,8 @@ impl<'p, 'a> IntoIterator for &'p Parts<'a> {
 }
 
 impl fmt::Display for Parts<'_> {
-    /// Writes each part as it is, a path through [`Path::display`] and a
-    /// command as [`SuggestedCommand`] writes it.
+    /// Writes each part as it is, a path through [`Path::display`], a
+    /// command as [`SuggestedCommand`] writes it, and foreign text raw.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for part in self {
             match part {
@@ -322,6 +335,7 @@ impl fmt::Display for Parts<'_> {
                 Part::Name(name) => f.write_str(name)?,
                 Part::Path(path) => write!(f, "{}", path.display())?,
                 Part::Command(command) => write!(f, "{command}")?,
+                Part::Foreign(text) => f.write_str(text)?,
             }
         }
         Ok(())
@@ -360,7 +374,8 @@ macro_rules! display_from_parts {
 }
 pub(crate) use display_from_parts;
 
-/// The names and paths `message` names, in order, each as its value's text.
+/// The names, paths and foreign texts `message` names, in order, each as its
+/// value's text.
 ///
 /// # Panics
 ///
@@ -382,6 +397,7 @@ pub fn values_of(message: &Message) -> Vec<String> {
             }
             Part::Name(name) => Some(name.to_string()),
             Part::Path(path) => Some(path.display().to_string()),
+            Part::Foreign(text) => Some(text.to_string()),
             Part::Command(_) => None,
         })
         .collect()

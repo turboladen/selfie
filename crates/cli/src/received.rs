@@ -1605,6 +1605,16 @@ mod tests {
                 );
                 continue;
             }
+            // Another program's text keeps its own line breaks, and escapes the
+            // rest of each line as a name.
+            if message
+                .parts()
+                .into_iter()
+                .any(|part| matches!(part, Part::Foreign(_)))
+            {
+                assert_eq!(shown, "git says: /d/t\\u{200b}x\ny", "{shown:?}");
+                continue;
+            }
 
             assert!(!shown.contains('\u{200B}'), "{shown:?}");
             assert_eq!(
@@ -1615,6 +1625,45 @@ mod tests {
             named += library.matches(value).count();
         }
         assert!(named > 0, "no message names the value");
+    }
+
+    // Foreign text's own line breaks stay, a CRLF one included, and so does a
+    // blank line inside it.
+    #[test]
+    fn foreign_text_keeps_crlf_and_interior_blank_lines() {
+        use selfie::parts::{Message, Part, Parts};
+
+        let message: Message = [
+            Part::Text("git: ".into()),
+            Part::Foreign("a\r\nb\n\nc".into()),
+        ]
+        .into_iter()
+        .collect::<Parts>()
+        .into();
+
+        assert_eq!(composed(&message).as_str(), "git: a\nb\n\nc");
+    }
+
+    // Another program's text shows each line as a name: an invisible character,
+    // a bidi control and a tab escaped, its line breaks kept, and none of the
+    // blank lines at its end, so the words after it stay on its last line.
+    #[test]
+    fn foreign_text_shows_each_line_escaped() {
+        use selfie::parts::{Message, Part, Parts};
+
+        let message: Message = [
+            Part::Text("git: ".into()),
+            Part::Foreign("a\u{200B}b\u{202E}\tc\nd\n\n".into()),
+            Part::Text(". Then more.".into()),
+        ]
+        .into_iter()
+        .collect::<Parts>()
+        .into();
+
+        assert_eq!(
+            composed(&message).as_str(),
+            "git: a\\u{200b}b\\u{202e}\\tc\nd. Then more."
+        );
     }
 
     // Two package errors that no command renders itself are shown with their

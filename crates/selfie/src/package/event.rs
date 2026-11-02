@@ -1565,6 +1565,11 @@ pub enum OperationFailure {
     /// A track refused or failed: what was in the way of the copy or the spec,
     /// and what became of anything it had already written.
     Track(crate::parts::Message),
+    /// A sync command's git step failed.
+    Git(crate::sync_service::port::GitFailure),
+    /// `sync push` refused to commit, since committing is disabled. Nothing
+    /// was staged or committed.
+    PushDisabled,
     /// Generic failure with a freeform message
     Generic(String),
 }
@@ -1793,6 +1798,10 @@ impl std::fmt::Display for OperationFailure {
             OperationFailure::UnusableDotfilesDirectory(refusal) => write!(f, "{refusal}"),
             OperationFailure::Stopped(stop) => write!(f, "{stop}"),
             OperationFailure::Track(message) => write!(f, "{message}"),
+            OperationFailure::Git(failure) => write!(f, "{failure}"),
+            OperationFailure::PushDisabled => {
+                write!(f, "{}", crate::git::sync_provider::commit_disabled())
+            }
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
@@ -3124,6 +3133,8 @@ impl OperationFailure {
             Self::UnusableDotfilesDirectory(refusal) => Message::of(refusal),
             Self::Stopped(stop) => Message::of(stop),
             Self::Track(message) => message.clone(),
+            Self::Git(failure) => Message::of(failure),
+            Self::PushDisabled => crate::git::sync_provider::commit_disabled().into(),
             Self::UnreadableSpec {
                 package_name,
                 reason,
@@ -6799,6 +6810,7 @@ mod settle_tests {
                 .filter_map(|part| match part {
                     Part::Name(value) => Some(("name", value.to_string())),
                     Part::Path(value) => Some(("path", value.display().to_string())),
+                    Part::Foreign(value) => Some(("foreign", value.to_string())),
                     Part::Text(_) | Part::Command(_) => None,
                 })
                 .collect();

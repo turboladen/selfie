@@ -7,51 +7,83 @@
 
 use std::path::{Path, PathBuf};
 
-use thiserror::Error;
-
 use super::message::GitMessage;
+use crate::parts::{Composed, Parts};
 
 /// Errors from git sync operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone)]
 pub enum GitSyncError {
     /// The given path is not inside a git repository.
-    #[error("not a git repository: {path}")]
     NotARepo { path: PathBuf },
 
     /// No remote is configured for the current branch.
-    #[error("no remote configured for branch '{branch}'")]
     NoRemote { branch: String },
 
     /// Working tree has uncommitted changes.
-    #[error("working tree is dirty — commit or stash changes first")]
     DirtyWorkingTree,
 
     /// Fast-forward is not possible (histories have diverged).
-    #[error("remote has diverged — resolve manually with git")]
     Diverged,
 
     /// The remote has commits the local branch lacks, so the push was refused.
-    #[error("the remote has new commits. Run 'selfie sync pull' first")]
     PushRejected,
 
     /// Committing is disabled, so no commit was created.
-    #[error(
-        "sync push is disabled: its commit can record every tracked file as deleted. \
-         Commit and push the repository with git until this is fixed"
-    )]
     CommitDisabled,
 
     /// A git operation failed. `operation` names it in selfie's own words, and
     /// `message` is git's text, redacted and bounded by its [`GitMessage`] type.
     // `message` carries git's stderr, which a non-interactive git can fill with
-    // a remote URL carrying a credential, so only a `GitMessage` can hold it.
-    // `operation` is a `&'static str`, so no argument list, which can hold a URL
-    // or a commit ID, can become the label.
-    #[error("{operation}: {message}")]
+    // a remote URL carrying a credential, so only a `GitMessage` can hold it,
+    // and it enters the sentence only through `Parts::git`. `operation` is a
+    // `&'static str`, so no argument list, which can hold a URL or a commit ID,
+    // can become the label.
     OperationFailed {
         operation: &'static str,
         message: GitMessage,
     },
+}
+
+crate::parts::display_from_parts!(error GitSyncError);
+
+impl Composed for GitSyncError {
+    // The repository's path is a path and the branch a name. Git's own text is
+    // foreign, since it can quote any path git touched.
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::NotARepo { path } => not_a_repository(path),
+            Self::NoRemote { branch } => Parts::new()
+                .text("no remote configured for branch '")
+                .name(branch)
+                .text("'"),
+            Self::DirtyWorkingTree => {
+                Parts::new().text("working tree is dirty — commit or stash changes first")
+            }
+            Self::Diverged => Parts::new().text("remote has diverged — resolve manually with git"),
+            Self::PushRejected => {
+                Parts::new().text("the remote has new commits. Run 'selfie sync pull' first")
+            }
+            Self::CommitDisabled => commit_disabled(),
+            Self::OperationFailed { operation, message } => {
+                Parts::new().text(*operation).text(": ").git(message)
+            }
+        }
+    }
+}
+
+/// The sentence saying sync push will not commit, since committing is
+/// disabled. Both the error and the operation's refusal word it with this.
+pub(crate) fn commit_disabled() -> Parts<'static> {
+    Parts::new().text(
+        "sync push is disabled: its commit can record every tracked file as deleted. \
+         Commit and push the repository with git until this is fixed",
+    )
+}
+
+/// The sentence saying no git repository holds `path`, with the path a part
+/// of its own.
+pub(crate) fn not_a_repository(path: &Path) -> Parts<'_> {
+    Parts::new().text("not a git repository: ").path(path)
 }
 
 /// Information about a discovered git repository.

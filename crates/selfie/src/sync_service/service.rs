@@ -26,8 +26,8 @@ use crate::{
 };
 
 use super::port::{
-    ConfirmedCommit, NotARepository, PendingCommit, PrepareResult, PushOptions, SyncError,
-    SyncService,
+    ConfirmedCommit, GitFailure, GitStep, NotARepository, PendingCommit, PrepareResult,
+    PushOptions, SyncError, SyncService,
 };
 
 /// Concrete implementation of [`SyncService`].
@@ -147,8 +147,8 @@ where
                 Ok(info) => info,
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to discover repository: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Discover, e),
                         )))
                         .await;
                     return;
@@ -165,8 +165,8 @@ where
                 Ok(status) => status,
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to get repo status: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Status, e),
                         )))
                         .await;
                     return;
@@ -287,7 +287,7 @@ where
         .await
         .map_err(|e| match e {
             GitSyncError::NotARepo { path } => SyncError::NotARepo(NotARepository { path }),
-            other => SyncError::GitError(other.to_string()),
+            other => SyncError::GitError(other),
         })?;
 
         let status = blocking_git("repo_status", {
@@ -296,7 +296,7 @@ where
             move || git.repo_status(&root)
         })
         .await
-        .map_err(|e| SyncError::GitError(e.to_string()))?;
+        .map_err(SyncError::GitError)?;
 
         let ahead = status.ahead;
 
@@ -397,9 +397,7 @@ where
             // already exist makes none, so an empty list still goes through.
             if !commits.is_empty() {
                 sender
-                    .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                        GitSyncError::CommitDisabled.to_string(),
-                    )))
+                    .send_completed(OperationResult::Failure(OperationFailure::PushDisabled))
                     .await;
                 return;
             }
@@ -414,8 +412,8 @@ where
                 Ok(info) => info,
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to discover repository: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Discover, e),
                         )))
                         .await;
                     return;
@@ -446,8 +444,8 @@ where
                 .await
                 {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to stage files: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Stage, e),
                         )))
                         .await;
                     return;
@@ -473,10 +471,21 @@ where
                             .await;
                         commits_created += 1;
                     }
+                    // The adapter refuses every commit while committing is
+                    // disabled, the refusal the check above already gives, so
+                    // it keeps that one kind and wording.
+                    Err(GitSyncError::CommitDisabled) => {
+                        sender
+                            .send_completed(OperationResult::Failure(
+                                OperationFailure::PushDisabled,
+                            ))
+                            .await;
+                        return;
+                    }
                     Err(e) => {
                         sender
-                            .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                                format!("Failed to commit: {e}"),
+                            .send_completed(OperationResult::Failure(OperationFailure::Git(
+                                GitFailure::at(GitStep::Commit, e),
                             )))
                             .await;
                         return;
@@ -512,8 +521,8 @@ where
             sender.send_step_ended(step, git_ending(&pushed)).await;
             if let Err(e) = pushed {
                 sender
-                    .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                        format!("Push failed: {e}. Your commits are preserved locally."),
+                    .send_completed(OperationResult::Failure(OperationFailure::Git(
+                        GitFailure::at(GitStep::Push, e),
                     )))
                     .await;
                 return;
@@ -566,8 +575,8 @@ where
                 Ok(info) => info,
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to discover repository: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Discover, e),
                         )))
                         .await;
                     return;
@@ -596,8 +605,8 @@ where
                 }
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to check repo status: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::CheckStatus, e),
                         )))
                         .await;
                     return;
@@ -618,8 +627,8 @@ where
             sender.send_step_ended(step, git_ending(&fetched)).await;
             if let Err(e) = fetched {
                 sender
-                    .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                        format!("Fetch failed: {e}"),
+                    .send_completed(OperationResult::Failure(OperationFailure::Git(
+                        GitFailure::at(GitStep::Fetch, e),
                     )))
                     .await;
                 return;
@@ -709,8 +718,8 @@ where
                 }
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Fast-forward failed: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::FastForward, e),
                         )))
                         .await;
                 }
@@ -3860,9 +3869,9 @@ mod credential_egress_tests {
                 events.iter().any(|e| matches!(
                     e,
                     PackageEvent::Completed {
-                        result: OperationResult::Failure(OperationFailure::Generic(message)),
+                        result: OperationResult::Failure(OperationFailure::PushDisabled),
                         ..
-                    } if message.contains("sync push is disabled")
+                    }
                 )),
                 "expected the disabled refusal: {events:?}"
             );
@@ -5628,6 +5637,72 @@ mod git_failure_words {
             )),
             "{events:?}"
         );
+    }
+
+    // The failure `events` end with.
+    fn failure_value(events: Vec<PackageEvent>) -> OperationFailure {
+        events
+            .into_iter()
+            .find_map(|event| match event {
+                PackageEvent::Completed {
+                    result: OperationResult::Failure(failure),
+                    ..
+                } => Some(failure),
+                _ => None,
+            })
+            .expect("the run must fail")
+    }
+
+    // Each of `parts`, by kind, leaving out selfie's words.
+    fn kinds(parts: &Parts<'_>) -> Vec<(&'static str, String)> {
+        use crate::parts::Part;
+
+        parts
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::Name(value) => Some(("name", value.to_string())),
+                Part::Path(value) => Some(("path", value.display().to_string())),
+                Part::Foreign(value) => Some(("foreign", value.to_string())),
+                Part::Text(_) | Part::Command(_) => None,
+            })
+            .collect()
+    }
+
+    // A git failure names the repository's directory as a path, a branch as a
+    // name, and git's own text as foreign, through each step's frame and
+    // through prepare's error. Push's discovery runs only after prepare's own
+    // discovery succeeded, so no command line reaches it, and it is checked
+    // here.
+    #[tokio::test]
+    async fn a_git_failure_names_its_values_as_parts() {
+        let foreign = || vec![("foreign", GIT_TEXT.to_string())];
+        let directory = || vec![("path", PACKAGES.to_string())];
+        let runs = [
+            (
+                service(Step::NoRepository).execute_push(vec![]).await,
+                directory(),
+            ),
+            (service(Step::NoRepository).status().await, directory()),
+            (service(Step::NoRepository).pull().await, directory()),
+            (service(Step::Status).status().await, foreign()),
+            (service(Step::Push).execute_push(vec![]).await, foreign()),
+            (service(Step::Fetch).pull().await, foreign()),
+        ];
+        for (stream, expected) in runs {
+            let failure = failure_value(stream.collect().await);
+            assert!(matches!(failure, OperationFailure::Git(_)), "{failure:?}");
+            assert_eq!(kinds(&failure.message().parts()), expected, "{failure}");
+        }
+
+        let error = service(Step::Status)
+            .prepare_push(&PushOptions::default())
+            .await
+            .expect_err("prepare must fail");
+        assert_eq!(kinds(&error.parts()), foreign());
+        let branch = GitSyncError::NoRemote {
+            branch: "m\u{200B}n".to_string(),
+        };
+        assert_eq!(kinds(&branch.parts()), [("name", "m\u{200B}n".to_string())]);
     }
 
     // Prepare's own git failures, with no frame of their own.
