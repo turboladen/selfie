@@ -9,8 +9,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use thiserror::Error;
-
 use super::message::GitMessage;
 
 /// Git status of a single file.
@@ -63,7 +61,7 @@ impl GitDirectoryStatus {
 }
 
 /// Errors that can occur when checking git status.
-#[derive(Debug, Error)]
+#[derive(Debug, Clone)]
 pub enum GitStatusError {
     /// Carries a [`GitMessage`] for symmetry with
     /// [`GitSyncError`](super::GitSyncError), **not** because a leak has been
@@ -72,8 +70,20 @@ pub enum GitStatusError {
     /// output — so there is no known exposure to close. It is typed because
     /// leaving one of two git error enums untyped is the asymmetry the next
     /// person copies.
-    #[error("failed to query git status: {0}")]
     StatusError(GitMessage),
+}
+
+crate::parts::display_from_parts!(error GitStatusError);
+
+impl crate::parts::Composed for GitStatusError {
+    // Git's own text is foreign, since it can quote any path git touched.
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        match self {
+            Self::StatusError(message) => crate::parts::Parts::new()
+                .text("failed to query git status: ")
+                .git(message),
+        }
+    }
 }
 
 /// Port for checking git status of files (Hexagonal Architecture).

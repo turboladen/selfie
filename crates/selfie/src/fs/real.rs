@@ -139,11 +139,10 @@ fn write_by_rename_with(
 
     // An IO error from the steps below names the target through
     // `IoFailure::at`, since the rename, the fsync and the chmod carry no path.
-    // tempfile's create and write errors also name the temporary file, which
-    // the operator never chose, so those name two paths (selfie-c2lb). A
-    // directory that cannot be created is named instead, and one blocked by a
+    // A directory that cannot be created is named instead, and one blocked by a
     // non-directory is `BelowNonDirectory`, whose message names it through
-    // `parent_dir`.
+    // `parent_dir`. tempfile's own create and write errors go through
+    // `tempfile_err` instead (below).
     let target_err = |e: io::Error| FileSystemError::IoError(IoFailure::at(path, e));
 
     // A target whose directory does not exist yet is created rather than refused.
@@ -234,13 +233,19 @@ fn write_by_rename_with(
         (Replacement::KeepingMode, Some(_)) => {}
     }
 
+    // tempfile's create and write errors also name the temporary file, which
+    // the operator never chose, so they name two paths (selfie-c2lb), and the
+    // second is tempfile's text. `IoFailure::from_tempfile` keeps that text a
+    // foreign part, which `target_err` would make selfie's own.
+    let tempfile_err = |e| FileSystemError::IoError(IoFailure::from_tempfile(path, e));
+
     // Randomly named and unlinked on drop, so it cannot collide with a concurrent
     // write and no *error* path leaves it behind. A crash is another matter: being
     // killed or losing power between here and the rename leaves a `.selfie-*` file
     // beside the target holding the complete content. For a secret it is mode
     // 0600, so this is debris rather than disclosure, but nothing sweeps it up.
-    let mut tmp = builder.tempfile_in(parent).map_err(target_err)?;
-    tmp.write_all(data).map_err(target_err)?;
+    let mut tmp = builder.tempfile_in(parent).map_err(tempfile_err)?;
+    tmp.write_all(data).map_err(tempfile_err)?;
     if let Some(mode) = existing_mode {
         tmp.as_file()
             .set_permissions(fs::Permissions::from_mode(mode))
@@ -423,8 +428,8 @@ fn holds(
         Ok(TargetRead::Unreadable(e)) => Err(tagged_error(e)),
         // A failure `read` already names a path for keeps it; one naming none
         // is named for `path`.
-        Err(FileSystemError::IoError(e)) if e.path.is_some() => Err(FileSystemError::IoError(e)),
-        Err(FileSystemError::IoError(e)) => Err(tagged_error(e.error)),
+        Err(FileSystemError::IoError(e)) if e.path().is_some() => Err(FileSystemError::IoError(e)),
+        Err(FileSystemError::IoError(e)) => Err(tagged_error(e.into_error())),
         Err(e) => Err(e),
     }
 }
@@ -1070,7 +1075,7 @@ mod tests {
         let directory = rename_failure(path, io::Error::from(io::ErrorKind::IsADirectory));
 
         assert!(
-            matches!(&refused, FileSystemError::IoError(failure) if failure.path.as_deref() == Some(path)),
+            matches!(&refused, FileSystemError::IoError(failure) if failure.path() == Some(path)),
             "{refused:?}"
         );
         assert_eq!(
@@ -1306,7 +1311,7 @@ mod tests {
 
         match result.unwrap_err() {
             FileSystemError::IoError(io_error) => {
-                assert_eq!(io_error.error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(io_error.error().kind(), std::io::ErrorKind::NotFound);
             }
             other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
@@ -1322,7 +1327,7 @@ mod tests {
 
         match result.unwrap_err() {
             FileSystemError::IoError(io_error) => {
-                assert_eq!(io_error.error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(io_error.error().kind(), std::io::ErrorKind::NotFound);
             }
             other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
@@ -1338,7 +1343,7 @@ mod tests {
 
         match result.unwrap_err() {
             FileSystemError::IoError(io_error) => {
-                assert_eq!(io_error.error.kind(), std::io::ErrorKind::NotFound);
+                assert_eq!(io_error.error().kind(), std::io::ErrorKind::NotFound);
             }
             other => panic!("Expected IoError with NotFound, got {other:?}"),
         }
@@ -1362,8 +1367,8 @@ mod tests {
 
         match fs_error {
             FileSystemError::IoError(inner) => {
-                assert_eq!(inner.error.kind(), std::io::ErrorKind::Other);
-                assert_eq!(inner.error.to_string(), "test error");
+                assert_eq!(inner.error().kind(), std::io::ErrorKind::Other);
+                assert_eq!(inner.error().to_string(), "test error");
             }
             other => panic!("Expected IoError variant, got {other:?}"),
         }
@@ -3451,7 +3456,7 @@ mod typed_failure_tests {
         ] {
             match error {
                 FileSystemError::IoError(failure) => {
-                    assert_eq!(failure.path.as_deref(), Some(named.as_path()));
+                    assert_eq!(failure.path(), Some(named.as_path()));
                 }
                 other => panic!("expected a plain IO error, got {other:?}"),
             }
@@ -3843,7 +3848,7 @@ mod replace_if_holding_tests {
         fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
         match result {
             Err(FileSystemError::IoError(e)) => {
-                assert_eq!(e.path.as_deref(), Some(target.as_path()), "{e:?}");
+                assert_eq!(e.path(), Some(target.as_path()), "{e:?}");
             }
             other => panic!("expected a read failure naming the file, got {other:?}"),
         }
@@ -3922,8 +3927,8 @@ mod replace_if_holding_tests {
 
         match held {
             Err(FileSystemError::IoError(e)) => {
-                assert_eq!(e.path.as_deref(), Some(file.as_path()));
-                assert_eq!(e.error.to_string(), "the read failed");
+                assert_eq!(e.path(), Some(file.as_path()));
+                assert_eq!(e.error().to_string(), "the read failed");
             }
             other => panic!("expected the read failure, got {other:?}"),
         }
@@ -3946,7 +3951,7 @@ mod replace_if_holding_tests {
 
         match held {
             Err(FileSystemError::IoError(e)) => {
-                assert_eq!(e.path.as_deref(), Some(other.as_path()))
+                assert_eq!(e.path(), Some(other.as_path()))
             }
             other => panic!("expected the read failure, got {other:?}"),
         }
@@ -4233,7 +4238,7 @@ mod remove_if_holding_tests {
         });
         match unlink_refused {
             Err(FileSystemError::IoError(e)) => {
-                assert_eq!(e.path.as_deref(), Some(file.as_path()), "{e:?}");
+                assert_eq!(e.path(), Some(file.as_path()), "{e:?}");
             }
             other => panic!("expected the unlink failure, got {other:?}"),
         }
@@ -4246,7 +4251,7 @@ mod remove_if_holding_tests {
         fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
         match unreadable {
             Err(FileSystemError::IoError(e)) => {
-                assert_eq!(e.path.as_deref(), Some(file.as_path()), "{e:?}");
+                assert_eq!(e.path(), Some(file.as_path()), "{e:?}");
             }
             other => panic!("expected the read failure, got {other:?}"),
         }

@@ -770,19 +770,61 @@ impl FileIdentity {
 /// the error is about.
 #[derive(Debug, Clone)]
 pub struct IoFailure {
-    /// Names the path the error is about, or is `None` when the operation
-    /// names no path.
-    pub path: Option<PathBuf>,
-    /// Holds the error the operation returned.
-    pub error: Arc<io::Error>,
+    path: Option<PathBuf>,
+    error: Arc<io::Error>,
+    // Private with the other two, so a failure cannot be rebuilt with its
+    // origin lost.
+    origin: IoOrigin,
+}
+
+// Who wrote the error's message, which decides how a sentence carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IoOrigin {
+    // The operating system, through std: a description and an error number,
+    // naming no path.
+    Os,
+    // The tempfile crate, which appends the temporary file's path to the
+    // operating system's message (`PathError`'s "{err} at path {path:?}").
+    Tempfile,
 }
 
 impl IoFailure {
+    /// The path the error is about, or `None` when the operation named no
+    /// path.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// The error the operation returned.
+    #[must_use]
+    pub fn error(&self) -> &io::Error {
+        &self.error
+    }
+
+    // The error, for a caller that names a path for a failure that named none.
+    // A tempfile failure always names one, so no origin is lost.
+    pub(crate) fn into_error(self) -> Arc<io::Error> {
+        self.error
+    }
+
     /// Wraps `error` together with the `path` it is about.
     pub fn at(path: &Path, error: impl Into<Arc<io::Error>>) -> Self {
         Self {
             path: Some(path.to_path_buf()),
             error: error.into(),
+            origin: IoOrigin::Os,
+        }
+    }
+
+    /// Wraps `error`, which the tempfile crate returned while creating or
+    /// writing a temporary file for `path`, together with `path`. Its message
+    /// names the temporary file itself, so a sentence carries it as foreign
+    /// text.
+    pub(crate) fn from_tempfile(path: &Path, error: io::Error) -> Self {
+        Self {
+            origin: IoOrigin::Tempfile,
+            ..Self::at(path, error)
         }
     }
 }
@@ -791,7 +833,30 @@ crate::parts::display_from_parts!(IoFailure);
 
 impl Composed for IoFailure {
     fn parts(&self) -> Parts<'_> {
-        io_parts(self.path.as_deref(), &self.error)
+        match self.origin {
+            IoOrigin::Os => io_parts(self.path.as_deref(), &self.error),
+            IoOrigin::Tempfile => match self.path.as_deref() {
+                Some(path) => Parts::new().path(path).text(": "),
+                None => Parts::new(),
+            }
+            .tempfile(TempfileText(&self.error)),
+        }
+    }
+}
+
+/// An error the tempfile crate built, whose message names its temporary file.
+///
+/// Only a tempfile failure's own sentence builds one, so a foreign part from
+/// outside git comes from tempfile and nowhere else.
+pub(crate) struct TempfileText<'a>(&'a io::Error);
+
+impl TempfileText<'_> {
+    /// The error's message, without the line breaks at its end.
+    pub(crate) fn text(&self) -> String {
+        self.0
+            .to_string()
+            .trim_end_matches(['\r', '\n'])
+            .to_string()
     }
 }
 
@@ -803,7 +868,11 @@ impl From<io::Error> for IoFailure {
 
 impl From<Arc<io::Error>> for IoFailure {
     fn from(error: Arc<io::Error>) -> Self {
-        Self { path: None, error }
+        Self {
+            path: None,
+            error,
+            origin: IoOrigin::Os,
+        }
     }
 }
 
@@ -1193,6 +1262,43 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    // An error tempfile built names its temporary file in its own text, so a
+    // sentence carries that text as foreign, whatever character the path
+    // holds. An operating system's error, which names no path, stays text.
+    #[test]
+    fn a_tempfile_errors_text_is_foreign() {
+        use crate::parts::Part;
+
+        let path = Path::new("/h/r\u{A0}o/f");
+        let text = "Permission denied (os error 13) at path \"/h/r\u{A0}o/.selfie-ab\"";
+        let kinds = |failure: &IoFailure| -> Vec<String> {
+            failure
+                .parts()
+                .into_iter()
+                .map(|part| match part {
+                    Part::Text(_) => "text".to_string(),
+                    Part::Path(_) => "path".to_string(),
+                    Part::Foreign(text) => format!("foreign {text}"),
+                    Part::Name(_) | Part::Command(_) => "other".to_string(),
+                })
+                .collect()
+        };
+
+        let tempfile = IoFailure::from_tempfile(path, io::Error::other(text));
+        assert_eq!(
+            kinds(&tempfile),
+            [
+                "path".to_string(),
+                "text".to_string(),
+                format!("foreign {text}")
+            ]
+        );
+        assert_eq!(tempfile.to_string(), format!("/h/r\u{A0}o/f: {text}"));
+
+        let os = IoFailure::at(path, io::Error::other(text));
+        assert_eq!(kinds(&os), ["path", "text", "text"]);
+    }
 
     // A file-system error names its cause once and does not also chain it, so a
     // consumer walking the chain does not print the cause twice.

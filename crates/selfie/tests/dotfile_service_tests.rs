@@ -23107,7 +23107,9 @@ mod entry_sentences {
 
     // Every path a failed entry names is a part of the failure's sentence and
     // of its error: the resolved entry's target, and the directory a write
-    // could not write in.
+    // could not write in. The write's error ends with tempfile's own text, which
+    // names the temporary file and so is a part too: foreign, since selfie did
+    // not write it.
     #[cfg(unix)]
     #[tokio::test]
     async fn every_path_in_an_entry_failure_is_a_part() {
@@ -23142,14 +23144,27 @@ mod entry_sentences {
             })
             .collect();
 
+        // The temporary file's name is random, so its text is matched by what
+        // tempfile always writes around it.
+        let tempfile = |value: &String| {
+            value.contains(" at path ") && value.contains("s\\u{200b}hut/.selfie-")
+        };
+        let [
+            (resolved_message, resolved_error),
+            (written_message, written_error),
+        ] = values.as_slice()
+        else {
+            panic!("two failures: {events:?}");
+        };
         assert_eq!(
-            values,
-            [
-                (vec![resolved], vec![]),
-                (vec![written.clone()], vec![written]),
-            ],
-            "{events:?}"
+            (resolved_message, resolved_error),
+            (&vec![resolved], &vec![])
         );
+        for values in [written_message, written_error] {
+            assert_eq!(values.len(), 2, "{values:?}");
+            assert_eq!(values[0], written, "{values:?}");
+            assert!(tempfile(&values[1]), "{values:?}");
+        }
     }
 }
 

@@ -15,8 +15,8 @@ fn built(parts: Vec<Part<'_>>) -> Message {
     parts.into_iter().collect::<Parts>().into()
 }
 
-/// Messages holding every kind of part, each name and path naming `value`,
-/// with a line break at the end of one and inside another.
+/// Messages holding every kind of part, each name, path and foreign text
+/// naming `value`, with a line break at the end of one and inside another.
 ///
 /// # Panics
 ///
@@ -38,6 +38,10 @@ pub fn every_message(value: &str) -> Vec<Message> {
         built(vec![
             Part::Text("Create it with: ".into()),
             Part::Command(command),
+        ]),
+        built(vec![
+            Part::Text("git says: ".into()),
+            Part::Foreign(value.into()),
         ]),
     ]
 }

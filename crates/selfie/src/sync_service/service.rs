@@ -26,8 +26,8 @@ use crate::{
 };
 
 use super::port::{
-    ConfirmedCommit, NotARepository, PendingCommit, PrepareResult, PushOptions, SyncError,
-    SyncService,
+    ConfirmedCommit, GitFailure, GitStep, NotARepository, PendingCommit, PrepareResult,
+    PushOptions, SyncError, SyncService,
 };
 
 /// Concrete implementation of [`SyncService`].
@@ -87,7 +87,7 @@ where
 /// Git operations do filesystem and network I/O that can block the async
 /// executor. This helper moves them to a dedicated thread via
 /// [`tokio::task::spawn_blocking`].
-async fn blocking_git<F, T>(op: &str, f: F) -> Result<T, GitSyncError>
+async fn blocking_git<F, T>(op: &'static str, f: F) -> Result<T, GitSyncError>
 where
     F: FnOnce() -> Result<T, GitSyncError> + Send + 'static,
     T: Send + 'static,
@@ -108,7 +108,7 @@ where
             format!("blocking task failed: {e}")
         };
         GitSyncError::OperationFailed {
-            operation: GitMessage::new(op),
+            operation: op,
             message: GitMessage::new(message),
         }
     })?
@@ -137,7 +137,7 @@ where
             sender.send_started().await;
 
             // Step 1: Get repo status
-            let repo_info = match blocking_git("discover_repo", {
+            let repo_info = match blocking_git("discover repository", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -147,15 +147,15 @@ where
                 Ok(info) => info,
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to discover repository: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Discover, e),
                         )))
                         .await;
                     return;
                 }
             };
 
-            let repo_status = match blocking_git("repo_status", {
+            let repo_status = match blocking_git("status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -165,8 +165,8 @@ where
                 Ok(status) => status,
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to get repo status: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Status, e),
                         )))
                         .await;
                     return;
@@ -279,7 +279,7 @@ where
             return Err(SyncError::Privilege(refusal));
         }
 
-        let repo_info = blocking_git("discover_repo", {
+        let repo_info = blocking_git("discover repository", {
             let git = self.git.clone();
             let dir = self.config.package_directory().to_path_buf();
             move || git.discover_repo(&dir)
@@ -287,16 +287,16 @@ where
         .await
         .map_err(|e| match e {
             GitSyncError::NotARepo { path } => SyncError::NotARepo(NotARepository { path }),
-            other => SyncError::GitError(other.to_string()),
+            other => SyncError::GitError(other),
         })?;
 
-        let status = blocking_git("repo_status", {
+        let status = blocking_git("status", {
             let git = self.git.clone();
             let root = repo_info.root.clone();
             move || git.repo_status(&root)
         })
         .await
-        .map_err(|e| SyncError::GitError(e.to_string()))?;
+        .map_err(SyncError::GitError)?;
 
         let ahead = status.ahead;
 
@@ -397,14 +397,12 @@ where
             // already exist makes none, so an empty list still goes through.
             if !commits.is_empty() {
                 sender
-                    .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                        GitSyncError::CommitDisabled.to_string(),
-                    )))
+                    .send_completed(OperationResult::Failure(OperationFailure::PushDisabled))
                     .await;
                 return;
             }
 
-            let repo_info = match blocking_git("discover_repo", {
+            let repo_info = match blocking_git("discover repository", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -414,8 +412,8 @@ where
                 Ok(info) => info,
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to discover repository: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Discover, e),
                         )))
                         .await;
                     return;
@@ -438,7 +436,7 @@ where
                     .await;
 
                 // Stage files — move `files` directly to avoid cloning Vec<PathBuf>
-                if let Err(e) = blocking_git("stage_files", {
+                if let Err(e) = blocking_git("stage", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
                     move || git.stage_files(&root, &files)
@@ -446,8 +444,8 @@ where
                 .await
                 {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to stage files: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Stage, e),
                         )))
                         .await;
                     return;
@@ -473,10 +471,21 @@ where
                             .await;
                         commits_created += 1;
                     }
+                    // The adapter refuses every commit while committing is
+                    // disabled, the refusal the check above already gives, so
+                    // it keeps that one kind and wording.
+                    Err(GitSyncError::CommitDisabled) => {
+                        sender
+                            .send_completed(OperationResult::Failure(
+                                OperationFailure::PushDisabled,
+                            ))
+                            .await;
+                        return;
+                    }
                     Err(e) => {
                         sender
-                            .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                                format!("Failed to commit: {e}"),
+                            .send_completed(OperationResult::Failure(OperationFailure::Git(
+                                GitFailure::at(GitStep::Commit, e),
                             )))
                             .await;
                         return;
@@ -485,7 +494,7 @@ where
             }
 
             // Snapshot ahead count before push to include pre-existing unpushed commits.
-            let ahead_before_push = blocking_git("repo_status", {
+            let ahead_before_push = blocking_git("status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -503,7 +512,7 @@ where
                 )
                 .await;
 
-            let pushed = blocking_git("push", {
+            let pushed = blocking_git(crate::git::adapter::PUSH.label, {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.push(&root)
@@ -512,8 +521,8 @@ where
             sender.send_step_ended(step, git_ending(&pushed)).await;
             if let Err(e) = pushed {
                 sender
-                    .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                        format!("Push failed: {e}. Your commits are preserved locally."),
+                    .send_completed(OperationResult::Failure(OperationFailure::Git(
+                        GitFailure::at(GitStep::Push, e),
                     )))
                     .await;
                 return;
@@ -556,7 +565,7 @@ where
             }
 
             // Step 1: Discover repo
-            let repo_info = match blocking_git("discover_repo", {
+            let repo_info = match blocking_git("discover repository", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
                 move || git.discover_repo(&dir)
@@ -566,8 +575,8 @@ where
                 Ok(info) => info,
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to discover repository: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::Discover, e),
                         )))
                         .await;
                     return;
@@ -578,7 +587,7 @@ where
             // Modified and untracked files are fine — git merge --ff-only handles
             // them safely (fails if they'd conflict). Only staged files indicate
             // an in-progress commit that shouldn't be disrupted.
-            match blocking_git("repo_status", {
+            match blocking_git("status", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.repo_status(&root)
@@ -596,8 +605,8 @@ where
                 }
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Failed to check repo status: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::CheckStatus, e),
                         )))
                         .await;
                     return;
@@ -609,7 +618,7 @@ where
             let step = sender
                 .send_waiting_progress(1, 3, format!("Fetching from {}", remote_label(&repo_info)))
                 .await;
-            let fetched = blocking_git("fetch", {
+            let fetched = blocking_git(crate::git::adapter::FETCH.label, {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.fetch(&root)
@@ -618,8 +627,8 @@ where
             sender.send_step_ended(step, git_ending(&fetched)).await;
             if let Err(e) = fetched {
                 sender
-                    .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                        format!("Fetch failed: {e}"),
+                    .send_completed(OperationResult::Failure(OperationFailure::Git(
+                        GitFailure::at(GitStep::Fetch, e),
                     )))
                     .await;
                 return;
@@ -630,7 +639,7 @@ where
             sender
                 .send_progress(2, 3, StepKind::Local, "Merging remote changes")
                 .await;
-            match blocking_git("fast_forward", {
+            match blocking_git("fast-forward", {
                 let git = git.clone();
                 let root = repo_info.root.clone();
                 move || git.fast_forward(&root)
@@ -652,7 +661,7 @@ where
                     commit_count,
                 }) => {
                     // Diff old HEAD vs new HEAD to see what changed
-                    let changed_files = match blocking_git("diff_commits", {
+                    let changed_files = match blocking_git(crate::git::adapter::DIFF_NAME_STATUS, {
                         let git = git.clone();
                         let root = repo_info.root.clone();
                         move || git.diff_commits(&root, &from, &to)
@@ -662,11 +671,11 @@ where
                         Ok(files) => files,
                         Err(e) => {
                             sender
-                                .send_log(
-                                    crate::package::event::LogLevel::Warning,
-                                    format!(
-                                        "Failed to compute diff: {e}. Change summary may be incomplete."
-                                    ),
+                                .send_composed_warning(
+                                    Parts::new()
+                                        .text("Failed to compute diff: ")
+                                        .append(e.parts())
+                                        .text(". Change summary may be incomplete."),
                                 )
                                 .await;
                             Vec::new()
@@ -709,8 +718,8 @@ where
                 }
                 Err(e) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            format!("Fast-forward failed: {e}"),
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::FastForward, e),
                         )))
                         .await;
                 }
@@ -3558,7 +3567,7 @@ mod credential_egress_tests {
     impl GitFailingWith {
         fn error(&self) -> GitSyncError {
             GitSyncError::OperationFailed {
-                operation: GitMessage::new("git push"),
+                operation: "git push",
                 message: GitMessage::from_stderr(leaky_git_stderr().as_bytes()),
             }
         }
@@ -3860,9 +3869,9 @@ mod credential_egress_tests {
                 events.iter().any(|e| matches!(
                     e,
                     PackageEvent::Completed {
-                        result: OperationResult::Failure(OperationFailure::Generic(message)),
+                        result: OperationResult::Failure(OperationFailure::PushDisabled),
                         ..
-                    } if message.contains("sync push is disabled")
+                    }
                 )),
                 "expected the disabled refusal: {events:?}"
             );
@@ -5354,5 +5363,380 @@ mod standalone_specs {
         let error = push(root.path(), &packages, &dotfiles, "dotfiles/gemrc.yml");
 
         assert!(error.is_empty(), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod git_failure_words {
+    // Each sync command's failure when one git step fails, whole, so a change to
+    // how a git failure is built cannot change its words.
+
+    use futures::StreamExt;
+
+    use super::credential_egress_tests::{RunningAs, UnusedDotfileService};
+    use super::*;
+    use crate::git::{
+        ChangedFile, CommitId, FastForwardResult, GitMessage, GitSyncError, GitSyncProvider,
+        RepoInfo, RepoStatus,
+    };
+    use crate::privilege::Elevation;
+    use crate::sync_service::port::PushOptions;
+
+    // The package directory every service here is configured with.
+    const PACKAGES: &str = "/tmp/selfie-packages";
+
+    // Git's text in every failure here, naming a directory git touched.
+    const GIT_TEXT: &str = "Failed to read the directory at '/q\u{200B}r'";
+
+    // Which git step fails, and how.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Step {
+        // Discovery finds no repository.
+        NoRepository,
+        // Discovery fails for another reason.
+        Discover,
+        Status,
+        // The status shows a staged file.
+        Staged,
+        Push,
+        Fetch,
+        FastForward,
+        Diverged,
+        // The fast-forward succeeds and the diff after it fails.
+        Diff,
+    }
+
+    #[derive(Clone)]
+    struct FailingAt(Step);
+
+    impl FailingAt {
+        fn failed(&self, operation: &'static str) -> GitSyncError {
+            GitSyncError::OperationFailed {
+                operation,
+                message: GitMessage::new(GIT_TEXT),
+            }
+        }
+    }
+
+    impl GitSyncProvider for FailingAt {
+        fn discover_repo(&self, path: &Path) -> Result<RepoInfo, GitSyncError> {
+            match self.0 {
+                Step::NoRepository => Err(GitSyncError::NotARepo {
+                    path: path.to_path_buf(),
+                }),
+                Step::Discover => Err(self.failed("discover repository")),
+                _ => Ok(RepoInfo {
+                    root: path.to_path_buf(),
+                    branch: Some("main".to_string()),
+                    remote_name: Some("origin".to_string()),
+                }),
+            }
+        }
+
+        fn repo_status(&self, _: &Path) -> Result<RepoStatus, GitSyncError> {
+            match self.0 {
+                Step::Status => Err(self.failed("status")),
+                Step::Staged => Ok(RepoStatus {
+                    staged: vec![PathBuf::from("a.yml")],
+                    ..Default::default()
+                }),
+                _ => Ok(RepoStatus::default()),
+            }
+        }
+
+        fn stage_files(&self, _: &Path, _: &[PathBuf]) -> Result<(), GitSyncError> {
+            Ok(())
+        }
+
+        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+            Ok(CommitId("abc1234def".to_string()))
+        }
+
+        fn push(&self, _: &Path) -> Result<(), GitSyncError> {
+            match self.0 {
+                Step::Push => Err(self.failed("git push --porcelain")),
+                _ => Ok(()),
+            }
+        }
+
+        fn fetch(&self, _: &Path) -> Result<(), GitSyncError> {
+            match self.0 {
+                Step::Fetch => Err(self.failed("git fetch")),
+                _ => Ok(()),
+            }
+        }
+
+        fn fast_forward(&self, _: &Path) -> Result<FastForwardResult, GitSyncError> {
+            match self.0 {
+                Step::FastForward => Err(self.failed("git merge --ff-only @{u}")),
+                Step::Diverged => Ok(FastForwardResult::Diverged),
+                Step::Diff => Ok(FastForwardResult::Advanced {
+                    from: CommitId("aaaaaaa".to_string()),
+                    to: CommitId("bbbbbbb".to_string()),
+                    commit_count: 1,
+                }),
+                _ => Ok(FastForwardResult::AlreadyUpToDate),
+            }
+        }
+
+        fn diff_commits(
+            &self,
+            _: &Path,
+            _: &CommitId,
+            _: &CommitId,
+        ) -> Result<Vec<ChangedFile>, GitSyncError> {
+            match self.0 {
+                Step::Diff => Err(self.failed("git diff --name-status")),
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+
+    fn service(step: Step) -> SyncServiceImpl<FailingAt, UnusedDotfileService, RunningAs> {
+        SyncServiceImpl::new(
+            FailingAt(step),
+            UnusedDotfileService,
+            crate::config::SelfieConfigBuilder::default()
+                .environment("test-env")
+                .package_directory(PACKAGES)
+                .build(),
+            SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
+        )
+    }
+
+    // The sentence of the failure `events` end with.
+    fn failure_of(events: &[PackageEvent]) -> String {
+        events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::Completed {
+                    result: OperationResult::Failure(failure),
+                    ..
+                } => Some(failure.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the run must fail: {events:?}"))
+    }
+
+    // Every warning's text in `events`, whichever event carries it.
+    fn warnings_of(events: &[PackageEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::Warning { message, .. } => Some(message.clone()),
+                PackageEvent::ComposedWarning { warning, .. } => Some(warning.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn each_git_step_fails_in_its_own_words() {
+        let not_a_repository = format!("not a git repository: {PACKAGES}");
+        let cases: Vec<(&str, Step, String)> = vec![
+            (
+                "status",
+                Step::NoRepository,
+                format!("Failed to discover repository: {not_a_repository}"),
+            ),
+            (
+                "status",
+                Step::Status,
+                format!("Failed to get repo status: status: {GIT_TEXT}"),
+            ),
+            (
+                "push",
+                Step::NoRepository,
+                format!("Failed to discover repository: {not_a_repository}"),
+            ),
+            (
+                "push",
+                Step::Push,
+                format!(
+                    "Push failed: git push --porcelain: {GIT_TEXT}. Your commits are preserved \
+                     locally."
+                ),
+            ),
+            (
+                "pull",
+                Step::NoRepository,
+                format!("Failed to discover repository: {not_a_repository}"),
+            ),
+            (
+                "pull",
+                Step::Discover,
+                format!("Failed to discover repository: discover repository: {GIT_TEXT}"),
+            ),
+            (
+                "pull",
+                Step::Status,
+                format!("Failed to check repo status: status: {GIT_TEXT}"),
+            ),
+            (
+                "pull",
+                Step::Staged,
+                "Staged changes detected. Commit or unstage them before pulling.".to_string(),
+            ),
+            (
+                "pull",
+                Step::Fetch,
+                format!("Fetch failed: git fetch: {GIT_TEXT}"),
+            ),
+            (
+                "pull",
+                Step::FastForward,
+                format!("Fast-forward failed: git merge --ff-only @{{u}}: {GIT_TEXT}"),
+            ),
+            (
+                "pull",
+                Step::Diverged,
+                "Remote has diverged. Resolve manually with git.".to_string(),
+            ),
+        ];
+        for (command, step, expected) in cases {
+            let service = service(step);
+            let stream = match command {
+                "status" => service.status().await,
+                "push" => service.execute_push(vec![]).await,
+                _ => service.pull().await,
+            };
+            let events: Vec<PackageEvent> = stream.collect().await;
+            assert_eq!(failure_of(&events), expected, "{command}");
+        }
+    }
+
+    // Push refuses to commit before git runs, in words that are its own.
+    #[tokio::test]
+    async fn a_push_with_commits_is_refused_in_its_own_words() {
+        let commit = crate::sync_service::port::ConfirmedCommit {
+            files: vec![PathBuf::from("a.yml")],
+            message: "m".to_string(),
+        };
+        let events: Vec<PackageEvent> = service(Step::Push)
+            .execute_push(vec![commit])
+            .await
+            .collect()
+            .await;
+
+        assert_eq!(
+            failure_of(&events),
+            "sync push is disabled: its commit can record every tracked file as deleted. Commit \
+             and push the repository with git until this is fixed"
+        );
+    }
+
+    // A diff that fails after a fast-forward warns, and the pull still succeeds.
+    #[tokio::test]
+    async fn a_failed_diff_after_a_pull_warns_in_its_own_words() {
+        let events: Vec<PackageEvent> = service(Step::Diff).pull().await.collect().await;
+
+        assert!(
+            warnings_of(&events).contains(&format!(
+                "Failed to compute diff: git diff --name-status: {GIT_TEXT}. Change summary may \
+                 be incomplete."
+            )),
+            "{events:?}"
+        );
+    }
+
+    // The failure `events` end with.
+    fn failure_value(events: Vec<PackageEvent>) -> OperationFailure {
+        events
+            .into_iter()
+            .find_map(|event| match event {
+                PackageEvent::Completed {
+                    result: OperationResult::Failure(failure),
+                    ..
+                } => Some(failure),
+                _ => None,
+            })
+            .expect("the run must fail")
+    }
+
+    // Each of `parts`, by kind, leaving out selfie's words.
+    fn kinds(parts: &Parts<'_>) -> Vec<(&'static str, String)> {
+        use crate::parts::Part;
+
+        parts
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::Name(value) => Some(("name", value.to_string())),
+                Part::Path(value) => Some(("path", value.display().to_string())),
+                Part::Foreign(value) => Some(("foreign", value.to_string())),
+                Part::Text(_) | Part::Command(_) => None,
+            })
+            .collect()
+    }
+
+    // A git failure names the repository's directory as a path, a branch as a
+    // name, and git's own text as foreign, through each step's frame and
+    // through prepare's error. Push's discovery runs only after prepare's own
+    // discovery succeeded, so no command line reaches it, and it is checked
+    // here.
+    #[tokio::test]
+    async fn a_git_failure_names_its_values_as_parts() {
+        let foreign = || vec![("foreign", GIT_TEXT.to_string())];
+        let directory = || vec![("path", PACKAGES.to_string())];
+        let runs = [
+            (
+                service(Step::NoRepository).execute_push(vec![]).await,
+                directory(),
+            ),
+            (service(Step::NoRepository).status().await, directory()),
+            (service(Step::NoRepository).pull().await, directory()),
+            (service(Step::Status).status().await, foreign()),
+            (service(Step::Push).execute_push(vec![]).await, foreign()),
+            (service(Step::Fetch).pull().await, foreign()),
+        ];
+        for (stream, expected) in runs {
+            let failure = failure_value(stream.collect().await);
+            assert!(matches!(failure, OperationFailure::Git(_)), "{failure:?}");
+            assert_eq!(kinds(&failure.message().parts()), expected, "{failure}");
+        }
+
+        let error = service(Step::Status)
+            .prepare_push(&PushOptions::default())
+            .await
+            .expect_err("prepare must fail");
+        assert_eq!(kinds(&error.parts()), foreign());
+        let branch = GitSyncError::NoRemote {
+            branch: "m\u{200B}n".to_string(),
+        };
+        assert_eq!(kinds(&branch.parts()), [("name", "m\u{200B}n".to_string())]);
+    }
+
+    // A failed diff after a pull warns as a composed warning, so git's text in
+    // it is a part of its own.
+    #[tokio::test]
+    async fn a_failed_diff_warns_with_gits_text_as_a_part() {
+        let events: Vec<PackageEvent> = service(Step::Diff).pull().await.collect().await;
+
+        let warning = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::ComposedWarning { warning, .. } => Some(warning),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no composed warning: {events:?}"));
+        assert_eq!(kinds(&warning.parts()), [("foreign", GIT_TEXT.to_string())]);
+    }
+
+    // Prepare's own git failures, with no frame of their own.
+    #[tokio::test]
+    async fn prepares_git_failures_are_worded_as_git_words_them() {
+        for (step, expected) in [
+            (Step::Discover, format!("discover repository: {GIT_TEXT}")),
+            (Step::Status, format!("status: {GIT_TEXT}")),
+            (
+                Step::NoRepository,
+                format!("not a git repository: {PACKAGES}"),
+            ),
+        ] {
+            let error = service(step)
+                .prepare_push(&PushOptions::default())
+                .await
+                .expect_err("prepare must fail");
+            assert_eq!(error.to_string(), expected);
+        }
     }
 }

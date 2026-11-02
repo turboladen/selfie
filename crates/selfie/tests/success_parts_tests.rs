@@ -51,6 +51,9 @@ impl Kinds {
                     assert!(names.contains(&command.word()), "{command:?} in {value:?}");
                     self.commands += 1;
                 }
+                Part::Foreign(text) => {
+                    panic!("a success names no foreign text: {text:?} in {value:?}")
+                }
                 Part::Text(text) => assert!(
                     !names
                         .iter()

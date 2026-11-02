@@ -1838,3 +1838,153 @@ fn a_name_field_hint_shows_the_declared_name_as_a_name() {
         assert!(hint.contains(r"p\u{200b}k/bar.yml"), "{asked:?}: {hint}");
     }
 }
+
+// A package directory outside any git repository is named escaped, by the
+// discovery step of every sync command that starts from it.
+#[test]
+fn a_sync_outside_a_repository_names_the_directory_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(&temp, &[("a.yml", &plain_spec("a"))]);
+    // Discovery walks up from the directory, so a TMPDIR inside a work tree
+    // would find that one.
+    let inside = common::isolated_git()
+        .arg("-C")
+        .arg(temp.path().join("p\u{200B}k"))
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .unwrap();
+    assert!(
+        !inside.status.success(),
+        "the sandbox {} is inside a git work tree, so this test cannot run here",
+        temp.path().display()
+    );
+
+    // Push's discovery runs in its preparation, which words the failure as the
+    // error alone, with no frame.
+    for args in [
+        &["sync", "status"][..],
+        &["sync", "pull"][..],
+        &["sync", "push", "--yes"][..],
+    ] {
+        let printed = printed(&temp, args);
+        let line = line_with(&printed, "not a git repository: ");
+        assert!(line.ends_with(r"/p\u{200b}k"), "{args:?}: {line}");
+        assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
+    }
+}
+
+// git's own text, naming a directory in the repository it could not read, shows
+// that directory escaped: in sync status's failure, sync push's, and the
+// warning spec info and spec list give when git status is unavailable.
+#[test]
+#[cfg(unix)]
+fn gits_own_text_names_a_directory_escaped() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = setup_default_test_config();
+    let repo = temp.path().join("repo");
+    let packages = repo.join("p\u{200B}k");
+    fs::create_dir_all(&packages).unwrap();
+    common::git(&repo, &["init", "-q"]);
+    fs::write(packages.join("a.yml"), plain_spec("a")).unwrap();
+    fs::write(
+        temp.path().join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: \"{}\"\n",
+            packages.display()
+        ),
+    )
+    .unwrap();
+    let unreadable = repo.join("q\u{200B}r");
+    fs::create_dir_all(&unreadable).unwrap();
+    fs::write(unreadable.join("f"), "x").unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    // Root, or a file system that ignores modes, reads it anyway, and then git
+    // does not fail.
+    if fs::read_dir(&unreadable).is_ok() {
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("SKIP: mode 0o000 is not honored here, so the directory stays readable");
+        return;
+    }
+
+    // Each line is found by selfie's own words where it has any, and by the
+    // escaped directory where git's text is all there is, never by git's or
+    // gix's wording, which changes with a release or a locale.
+    let cases: [(&[&str], &str); 4] = [
+        (&["sync", "status"], "Failed to get repo status: "),
+        (&["sync", "push", "--yes"], r"/q\u{200b}r"),
+        (&["spec", "info", "a"], "Git status unavailable: "),
+        (&["spec", "list"], "Git status unavailable: "),
+    ];
+    // git's own messages in the C locale, so a translated one cannot change
+    // which line holds the directory.
+    let printed = |args: &[&str]| {
+        let output = sandboxed_std_command(&temp)
+            .env("LC_ALL", "C")
+            .arg("--no-color")
+            .args(args)
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    let shown: Vec<String> = cases
+        .iter()
+        .map(|(args, marker)| line_with(&printed(args), marker).to_string())
+        .collect();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).unwrap();
+
+    for ((args, _), line) in cases.iter().zip(&shown) {
+        assert!(line.contains(r"/q\u{200b}r"), "{args:?}: {line}");
+        assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
+    }
+}
+
+// A write tempfile fails names the temporary file in tempfile's own text, and
+// that path shows its blank escaped too, not only the target's. U+2800 is the
+// blank tempfile's own `{:?}` leaves as it is, so only the CLI escapes it.
+#[test]
+#[cfg(unix)]
+fn a_failed_temporary_files_path_shows_escaped() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("pk");
+    fs::create_dir_all(&packages).unwrap();
+    fs::write(packages.join("rc"), "hi\n").unwrap();
+    fs::write(
+        packages.join("a.yml"),
+        format!(
+            "name: a\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  - \
+             source: rc\n    target: \"~/r\\u2800o/f\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: \"{}\"\n",
+            packages.display()
+        ),
+    )
+    .unwrap();
+    let locked = temp.path().join("r\u{2800}o");
+    fs::create_dir_all(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    // Root writes into it anyway, and then nothing fails.
+    if fs::write(locked.join("probe"), "x").is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("SKIP: running as root, so the directory is writable");
+        return;
+    }
+
+    let printed = printed(&temp, &["apply"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let line = line_with(&printed, " at path ");
+    assert!(line.contains(r#"r\u{2800}o/.selfie-"#), "{line}");
+    assert!(!line.contains('\u{2800}'), "{line:?}");
+}

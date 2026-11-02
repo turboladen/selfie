@@ -73,15 +73,15 @@ Options considered:
 
 ### 1. A kind is a type
 
-| Kind          | What it holds                                               | What it escapes                            |
-| ------------- | ----------------------------------------------------------- | ------------------------------------------ |
-| `Name`        | a spec, package, environment or file-stem name; a list item | the strict set, line breaks included       |
-| `DisplayPath` | a path or a dotfile source                                  | the strict set                             |
-| `Prose`       | a library sentence, description, note or refusal reason     | the guard set and a tab; line breaks kept  |
-| `Output`      | what a tool printed                                         | cleaned as rule 5 says, then the guard set |
-| `Content`     | one line of file content, as in a diff                      | the base set, a tab kept                   |
-| `Command`     | a command for the user to run, or one a spec runs           | §5                                         |
-| `Literal`     | selfie's own text                                           | nothing                                    |
+| Kind          | What it holds                                                                              | What it escapes                            |
+| ------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------ |
+| `Name`        | a spec, package, environment or file-stem name; a list item; a line of foreign text (§9.1) | the strict set, line breaks included       |
+| `DisplayPath` | a path or a dotfile source                                                                 | the strict set                             |
+| `Prose`       | a library sentence, description, note or refusal reason                                    | the guard set and a tab; line breaks kept  |
+| `Output`      | what a tool printed                                                                        | cleaned as rule 5 says, then the guard set |
+| `Content`     | one line of file content, as in a diff                                                     | the base set, a tab kept                   |
+| `Command`     | a command for the user to run, or one a spec runs                                          | §5                                         |
+| `Literal`     | selfie's own text                                                                          | nothing                                    |
 
 1. Every text from outside selfie reaches the terminal as one of these kinds. A printer, a table
    cell and a prompt accept a kind or a `Shown` for any text they show, never a `String`, a `&str`
@@ -145,17 +145,13 @@ Options considered:
    - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
    - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
      or `OperationFailure` holding one, into a `String`;
-   - the "Git status unavailable" warning that `spec info`, `spec list` and `spec search` send,
-     which holds git's error text, and with it any path git names, as text;
    - a refused dependency's status, which holds the refusal's reason as a `Message` but which the
      CLI shows through `UnknownStatus`'s sentence, as text;
    - the check failure that a recommend's "installed, but its check gave no answer" warning appends,
      which names the check command and its working directory as text;
    - the `OperationFailure` kinds `message()` words as text: `InvalidSpec`'s package name,
      `CommandError`'s command and working directory, and `Generic`'s free text, which can hold a
-     path;
-   - an `io::Error` that `tempfile` built, whose message names its temporary file and enters a
-     sentence as `Text`.
+     path.
 
    Each of these moves to §9 when it is next changed.
 3. A name inside a sentence the CLI composes is a `Name`, whatever the sentence around it is.
@@ -326,40 +322,58 @@ writer escapes every escape sequence (§1.8).
 1. `selfie::parts` defines `Part`, `Parts`, `Message` and the trait `Composed`. A `Parts` is an
    ordered list of `Part`s, and a `Part` is one of:
 
-   | Part              | What it holds                                                                   |
-   | ----------------- | ------------------------------------------------------------------------------- |
-   | `Text(Cow<str>)`  | selfie's words, a count it formats, or text from outside it read as a sentence, |
-   |                   | such as an `io::Error`'s message or a parse failure                             |
-   | `Name(Cow<str>)`  | an environment, package or spec name                                            |
-   | `Path(Cow<Path>)` | a path, including one spelled as the spec spells it, such as `~/.bashrc`        |
-   | `Command(..)`     | a command for the user to run: a program from a closed enum, `selfie` with a    |
-   |                   | subcommand or `mkdir -p --`, and one or two operands                            |
+   | Part                | What it holds                                                                |
+   | ------------------- | ---------------------------------------------------------------------------- |
+   | `Text(Cow<str>)`    | selfie's words, a count it formats, or text from outside it that carries no  |
+   |                     | value, such as an operating system's error or a gated parse failure          |
+   | `Name(Cow<str>)`    | an environment, package or spec name                                         |
+   | `Path(Cow<Path>)`   | a path, including one spelled as the spec spells it, such as `~/.bashrc`     |
+   | `Command(..)`       | a command for the user to run: a program from a closed enum, `selfie` with a |
+   |                     | subcommand or `mkdir -p --`, and one or two operands                         |
+   | `Foreign(Cow<str>)` | text another program or library wrote that can quote a value selfie cannot   |
+   |                     | pull out as a part of its own, such as git's error                           |
 
-   A part says what a value is, never how to escape it.
+   A part says what a value is, never how to escape it. Text from outside selfie is one of three, by
+   whether it can quote a value:
+   - `Text` is outside text that carries no value. An operating system's error, through std, is a
+     description and an error number and names no path; selfie names the path itself, as a `Path`. A
+     `ParseFailure` is gated to selfie's own vocabulary and carries no file content.
+   - `Foreign` is outside text that can quote a value: git's and gix's messages, which name any path
+     git touched, and an `io::Error` carrying a library's payload, such as the `PathError` the
+     `tempfile` crate appends its temporary file's path with. Git's text reaches a part only from a
+     `GitMessage`, which has already redacted and bounded it.
+   - `Output` is what a command the user wrote printed, relayed as that command's output. An audit
+     command's stderr stays `Output` inside the audit's failure sentence, because the cleaning §1.5
+     gives a tool's output is what makes it readable; the strict escape would show a colored tool's
+     escape sequences as escapes.
+
+   A library added later is sorted by the same test.
 2. A `Composed` type's sentence is its `parts`, and its `Display` writes those parts and nothing
-   else: a `Text` or a `Name` as it is, a `Path` through `Path::display`, and a `Command` as its
-   program's words followed by the operands' shell words (§9.5), `selfie <subcommand> <words>` or
-   `mkdir -p -- <word>`. A `Composed` type has no other source for its sentence: it takes its
-   `Display` from the one shared implementation that writes its parts, and has no `#[error]`
-   attribute and no `Display` arm of its own. An error type among them implements
-   `std::error::Error` by hand. A `Message` is a `Composed` value whose parts were fixed when it was
-   built, from the parts a builder wrote, for a sentence an event carries past the values it names.
-   It holds its own copy of each, is not derived from a typed value, and two are equal when their
-   words and values are, however a builder split its text.
+   else: a `Text`, a `Name` or a `Foreign` as it is, a `Path` through `Path::display`, and a
+   `Command` as its program's words followed by the operands' shell words (§9.5),
+   `selfie <subcommand> <words>` or `mkdir -p -- <word>`. A `Composed` type has no other source for
+   its sentence: it takes its `Display` from the one shared implementation that writes its parts,
+   and has no `#[error]` attribute and no `Display` arm of its own. An error type among them
+   implements `std::error::Error` by hand. A `Message` is a `Composed` value whose parts were fixed
+   when it was built, from the parts a builder wrote, for a sentence an event carries past the
+   values it names. It holds its own copy of each, is not derived from a typed value, and two are
+   equal when their words and values are, however a builder split its text.
 3. A sentence that embeds another `Composed` value appends that value's parts in place, so a path
    inside a nested cause stays a `Path`. A value that is not `Composed` enters as one `Text`.
 4. The CLI renders a `Parts` in one function in `sentence.rs`, and shows a `Composed` value by
-   rendering its parts: `Text` as `Prose`, `Name` as `Name`, `Path` as `DisplayPath`, and `Command`
-   as a `Command` of selfie's `Literal` words and the part's shell word, with the program's words
-   from an exhaustive match. A command that shows any character escaped is followed by a note under
-   the line that holds it, which ends at the first line break after the command or at the end of the
-   sentence: §5.5's note for a character the strict set escapes, and the command as shown for a
-   control character such as a line feed or a tab, which the command already shows escaped and so
-   does not run as shown. A value whose parts can hold a command therefore ends the line it is shown
-   on. A sentence that ends in a `Text` leaves out the line breaks at its end, as `message` does,
-   before escaping. The match has no catch-all, so a new part fails to compile until the CLI says
-   how to show it. A `Composed` type is not a `Sentence` (§2.2), so `sentence()` refuses it at
-   compile time, and a source rule (§7.4) keeps every `Composed` type off the list of `Sentence`s.
+   rendering its parts: `Text` as `Prose`, `Name` as `Name`, `Path` as `DisplayPath`, `Foreign` as
+   one `Name` for each of its lines, so its line breaks stay and the rest of each line takes the
+   strict set, and `Command` as a `Command` of selfie's `Literal` words and the part's shell word,
+   with the program's words from an exhaustive match. A command that shows any character escaped is
+   followed by a note under the line that holds it, which ends at the first line break after the
+   command or at the end of the sentence: §5.5's note for a character the strict set escapes, and
+   the command as shown for a control character such as a line feed or a tab, which the command
+   already shows escaped and so does not run as shown. A value whose parts can hold a command
+   therefore ends the line it is shown on. A sentence that ends in a `Text` leaves out the line
+   breaks at its end, as `message` does, before escaping. The match has no catch-all, so a new part
+   fails to compile until the CLI says how to show it. A `Composed` type is not a `Sentence` (§2.2),
+   so `sentence()` refuses it at compile time, and a source rule (§7.4) keeps every `Composed` type
+   off the list of `Sentence`s.
 5. A `Command` part is a `SuggestedCommand`, built only by its three constructors.
    `SuggestedCommand::apply` quotes a name as one shell word through `selfie::fs::shell_operand`;
    `make_directory` quotes a path through `selfie::fs::shell_quote`, which keeps a leading `~/`
@@ -388,14 +402,15 @@ writer escapes every escape sequence (§1.8).
    `RefusedSpecFile`, `UnreadableSpecFile` and `SymlinkReason` that kind carries; the `Message` a
    not-found failure appends to name a spec file declaring the name; the `CollectionRefusal` a
    collection gives; the `UnplacedWrite` a spec write refused as unplaced carries; the `SyncError` a
-   sync gives, with the `NotARepository` it refuses a directory outside any git repository with; the
-   `Message` that words an unknown key, naming it as a `Name`; and a validation issue's message,
-   `IssueMessage`, which is its own text, a `Message` naming values as parts, the deploy state's
-   notice or a `DirectoryIssue`, and which the issue's event payload carries; the `Message` a
-   refused spec's reason is: a refused row, a `PackagesRefused` event, `spec info`'s refusals and
-   the reason of the failure for a spec selfie will not use; the `Message` the warning that a run
-   skips a spec file is; and the sentence of a not-found failure, which names its hint's `name:`
-   value as a `Name`.
+   sync gives, with the `NotARepository` it refuses a directory outside any git repository with; a
+   git sync's `GitSyncError`, a git status's `GitStatusError`, and the `GitFailure` a sync step
+   fails with; the `Message` that words an unknown key, naming it as a `Name`; and a validation
+   issue's message, `IssueMessage`, which is its own text, a `Message` naming values as parts, the
+   deploy state's notice or a `DirectoryIssue`, and which the issue's event payload carries; the
+   `Message` a refused spec's reason is: a refused row, a `PackagesRefused` event, `spec info`'s
+   refusals and the reason of the failure for a spec selfie will not use; the `Message` the warning
+   that a run skips a spec file is; and the sentence of a not-found failure, which names its hint's
+   `name:` value as a `Name`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as

@@ -597,7 +597,7 @@ mod tests {
             assert!(result.is_err());
             match result.unwrap_err() {
                 ConfigLoadError::FileSystemError(FileSystemError::IoError(e)) => {
-                    assert_eq!(e.error.kind(), std::io::ErrorKind::PermissionDenied);
+                    assert_eq!(e.error().kind(), std::io::ErrorKind::PermissionDenied);
                 }
                 other => panic!("Expected FileSystemError::IoError, got: {other:?}"),
             }

@@ -12,7 +12,7 @@ pub enum SyncError {
     NotARepo(NotARepository),
 
     /// A git operation failed during preparation.
-    GitError(String),
+    GitError(crate::git::GitSyncError),
 
     /// One or more changed package files failed validation.
     ValidationFailed {
@@ -36,10 +36,9 @@ impl crate::parts::Composed for SyncError {
     fn parts(&self) -> crate::parts::Parts<'_> {
         use crate::parts::Parts;
 
-        // A git failure's text names what git names, as text (selfie-thy5).
         match self {
             Self::NotARepo(outside) => outside.parts(),
-            Self::GitError(message) => Parts::new().text(message.as_str()),
+            Self::GitError(error) => error.parts(),
             Self::ValidationFailed { failures } => {
                 let noun = if failures.len() == 1 {
                     "package"
@@ -55,6 +54,83 @@ impl crate::parts::Composed for SyncError {
     }
 }
 
+/// The git step of a sync command that failed, and git's error.
+///
+/// Its sentence frames the error with the step, such as "Fetch failed: ",
+/// and names the error's paths and git's text as parts.
+#[derive(Debug, Clone)]
+pub struct GitFailure {
+    step: GitStep,
+    error: crate::git::GitSyncError,
+}
+
+/// A git step a sync command runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitStep {
+    /// Finding the repository that holds the package directory.
+    Discover,
+    /// Reading the working tree's status, for `sync status`.
+    Status,
+    /// Reading the working tree's status, before a pull.
+    CheckStatus,
+    /// Staging a commit's files.
+    Stage,
+    /// Creating a commit.
+    Commit,
+    /// Pushing the commits.
+    Push,
+    /// Fetching from the remote.
+    Fetch,
+    /// Fast-forwarding to the remote branch.
+    FastForward,
+}
+
+impl GitFailure {
+    /// `error`, which `step` failed with.
+    #[must_use]
+    pub fn at(step: GitStep, error: crate::git::GitSyncError) -> Self {
+        Self { step, error }
+    }
+
+    /// The step that failed.
+    #[must_use]
+    pub fn step(&self) -> GitStep {
+        self.step
+    }
+
+    /// Git's error.
+    #[must_use]
+    pub fn error(&self) -> &crate::git::GitSyncError {
+        &self.error
+    }
+}
+
+crate::parts::display_from_parts!(GitFailure);
+
+impl crate::parts::Composed for GitFailure {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        use crate::parts::Parts;
+
+        let frame = match self.step {
+            // A failed push keeps the commits made before it, and says so.
+            GitStep::Push => {
+                return Parts::new()
+                    .text("Push failed: ")
+                    .append(self.error.parts())
+                    .text(". Your commits are preserved locally.");
+            }
+            GitStep::Discover => "Failed to discover repository: ",
+            GitStep::Status => "Failed to get repo status: ",
+            GitStep::CheckStatus => "Failed to check repo status: ",
+            GitStep::Stage => "Failed to stage files: ",
+            GitStep::Commit => "Failed to commit: ",
+            GitStep::Fetch => "Fetch failed: ",
+            GitStep::FastForward => "Fast-forward failed: ",
+        };
+        Parts::new().text(frame).append(self.error.parts())
+    }
+}
+
 /// A directory that is not inside a git repository.
 #[derive(Debug, Clone)]
 pub struct NotARepository {
@@ -66,9 +142,7 @@ crate::parts::display_from_parts!(NotARepository);
 
 impl crate::parts::Composed for NotARepository {
     fn parts(&self) -> crate::parts::Parts<'_> {
-        crate::parts::Parts::new()
-            .text("not a git repository: ")
-            .path(&self.path)
+        crate::git::sync_provider::not_a_repository(&self.path)
     }
 }
 

@@ -128,7 +128,7 @@ where
             Ok(status) => Some(status),
             Err(e) => {
                 sender
-                    .send_warning(format!("Git status unavailable: {e}"))
+                    .send_composed_warning(super::info::git_status_unavailable(&e))
                     .await;
                 None
             }

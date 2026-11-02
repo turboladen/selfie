@@ -77,9 +77,10 @@ pub(crate) fn composed(value: &impl Composed) -> Shown {
 }
 
 /// `parts` as the CLI shows them: a name as a [`Name`], a path as a
-/// [`DisplayPath`], and the words around them as [`Prose`]. Line breaks at
-/// the end of a sentence that ends in words are left out, as [`message`]
-/// leaves them out; a name or a path shows its own line breaks escaped. A
+/// [`DisplayPath`], another program's text one [`Name`] per line, and the words
+/// around them as [`Prose`]. Line breaks at the end of a sentence that ends in
+/// words are left out, as [`message`] leaves them out; a name or a path shows
+/// its own line breaks escaped. A
 /// command that shows any character escaped is followed by a line saying so,
 /// as [`noted_suggestion`] notes it, under the line that holds the command.
 /// Show a value whose parts can hold a command at the end of its line, or the
@@ -112,6 +113,14 @@ pub(crate) fn rendered(parts: &Parts) -> Shown {
                 }
             }
             Part::Name(name) => line.push(Name::new(name).into()),
+            // Each line a name, so every character that reads as another shows
+            // escaped, while the foreign text's own line breaks stay line
+            // breaks. The line breaks at its end go, so blank lines it ended
+            // with do not push the rest of the sentence onto a line of its own.
+            Part::Foreign(text) => {
+                let text = text.trim_end_matches(['\r', '\n']);
+                line.push(Shown::join(text.lines().map(Name::new), lit!("\n")));
+            }
             Part::Path(path) => line.push(DisplayPath::of(path).into()),
             Part::Command(command) => {
                 let shown = suggested(command);

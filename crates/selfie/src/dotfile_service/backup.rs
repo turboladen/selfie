@@ -225,8 +225,8 @@ fn remedy<F: FileSystem>(
             // A remedy about the file system holding a path names one that is
             // there: the write names a directory it could not create or a copy it
             // could not make.
-            let held = || existing(filesystem, failure.path.as_deref().unwrap_or(root));
-            match failure.error.kind() {
+            let held = || existing(filesystem, failure.path().unwrap_or(root));
+            match failure.error().kind() {
                 ErrorKind::StorageFull | ErrorKind::QuotaExceeded => return Remedy::Full(held()),
                 ErrorKind::ReadOnlyFilesystem => return Remedy::ReadOnly(held()),
                 _ => {}
