@@ -500,7 +500,7 @@ impl EventProcessor {
                 self.display.print_warning(shown!(
                     "{} failed: {}",
                     Name::new(&recommend_name),
-                    received::message(error)
+                    received::failure(&error)
                 ));
             }
 
@@ -1199,7 +1199,9 @@ mod tests {
                 PackageEvent::RecommendFailed {
                     operation_info: info(),
                     recommend_name: "rec".to_string(),
-                    error: "no such formula".to_string(),
+                    error: Box::new(selfie::package::event::OperationFailure::Generic(
+                        "no such formula".to_string(),
+                    )),
                 },
                 Channel::Stderr,
                 "rec failed: no such formula",
@@ -1269,7 +1271,9 @@ mod tests {
             PackageEvent::RecommendFailed {
                 operation_info: make_operation_info("root"),
                 recommend_name: "r\u{200B}a\nb".to_string(),
-                error: "no such formula".to_string(),
+                error: Box::new(selfie::package::event::OperationFailure::Generic(
+                    "no such formula".to_string(),
+                )),
             },
             PackageEvent::SettledEarlier {
                 operation_info: make_operation_info("root"),

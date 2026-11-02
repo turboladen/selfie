@@ -852,13 +852,13 @@ impl EventSender {
     pub(crate) async fn send_recommend_failed(
         &self,
         recommend_name: impl fmt::Display,
-        error: impl fmt::Display,
+        error: Box<OperationFailure>,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::RecommendFailed {
             operation_info,
             recommend_name: recommend_name.to_string(),
-            error: error.to_string(),
+            error,
         })
         .await;
     }
@@ -3632,7 +3632,9 @@ pub enum PackageEvent {
     RecommendFailed {
         operation_info: OperationInfo,
         recommend_name: String,
-        error: String,
+        /// Why it failed, as the failure itself, so a consumer renders it as it
+        /// renders any other.
+        error: Box<OperationFailure>,
     },
 
     /// A package a recommend needs settled earlier in the same install run, so

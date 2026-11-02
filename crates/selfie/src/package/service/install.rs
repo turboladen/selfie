@@ -835,7 +835,7 @@ where
         // the cancel stopped just before it spawned, which the runner reports
         // the same way as an interrupted one.
         Err(RecommendError::Failed(error)) => {
-            sender.send_recommend_failed(recommend_name, &error).await;
+            sender.send_recommend_failed(recommend_name, error).await;
         }
     }
     true
@@ -846,7 +846,9 @@ enum RecommendError {
     /// A cancel came before it installed the next of its packages.
     Interrupted,
     /// Resolving or installing one of its packages failed.
-    Failed(String),
+    // Boxed because a failure is large for an error every `?` here returns, and
+    // resolution hands it back boxed already.
+    Failed(Box<OperationFailure>),
 }
 
 /// Try to install a single recommended package (with its hard dependencies).
@@ -869,7 +871,7 @@ where
     let mut dep_graph =
         deps::resolve_dependencies(recommend_name, repo, config.environment(), sender)
             .await
-            .map_err(|f| RecommendError::Failed(f.to_string()))?;
+            .map_err(RecommendError::Failed)?;
     // A package that settled earlier in the run is neither refused, checked,
     // counted nor installed again here. Its outcome, gap included, was
     // reported under the graph that settled it.
@@ -882,7 +884,7 @@ where
     let mut confirmed =
         confirm_installable(&dep_graph, config, command_runner, sender, progress, token)
             .await
-            .map_err(|f| RecommendError::Failed(f.to_string()))?;
+            .map_err(RecommendError::Failed)?;
     // Only now, since a refused recommend reused nothing.
     for (name, how) in reused {
         sender.send_settled_earlier(name, recommend_name, how).await;
@@ -906,7 +908,7 @@ where
             dep_graph.required_by.get(pkg_name).map(String::as_str),
         )
         .await
-        .map_err(|failure| RecommendError::Failed(failure.to_string()))?;
+        .map_err(|failure| RecommendError::Failed(Box::new(failure)))?;
         settled.insert(pkg_name.clone(), Settled::from(&installed));
 
         // A recommend leaves the run clean whatever happens to it, so a check

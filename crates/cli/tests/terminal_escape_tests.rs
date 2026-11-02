@@ -1484,3 +1484,29 @@ fn a_refused_spec_save_names_the_spec_and_its_key_escaped() {
     );
     assert!(!refusal.contains('\u{200B}'), "{refusal:?}");
 }
+
+// A failed recommend names the failure's file escaped, as the failure would on
+// a line of its own.
+#[test]
+fn a_failed_recommend_names_its_failures_file_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(
+        &temp,
+        &[
+            (
+                "r.yml",
+                &format!(
+                    "name: r\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \
+                     recommends: [b]\n"
+                ),
+            ),
+            ("b.yml", "name: b\nenvironments: [\n"),
+        ],
+    );
+
+    let printed = printed(&temp, &["package", "install", "r"]);
+
+    let failed = line_with(&printed, "b failed: Parse error in package");
+    assert!(failed.contains(r"p\u{200b}k/b.yml"), "{failed}");
+    assert!(!failed.contains('\u{200B}'), "{failed:?}");
+}
