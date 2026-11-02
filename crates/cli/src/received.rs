@@ -19,7 +19,7 @@ use selfie::package::event::{
 use selfie::package::event::{
     OperationFailure, OperationSuccess, RefusalKind, UncheckedSource, UnknownStatus,
 };
-use selfie::package::port::{PackageError, PackageParseError, PackageParseKind, PackageRepoError};
+use selfie::package::port::{PackageParseError, PackageParseKind, PackageRepoError};
 use selfie::sync_service::port::PackageValidationIssue;
 use selfie::validation::{ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
@@ -317,71 +317,11 @@ pub(crate) fn refusal_reason(row: &RefusedSpec) -> Shown {
     }
 }
 
-/// A package error, with the spec it names as a Name and its file as a path.
-pub(crate) fn package_error(error: &PackageError) -> Shown {
-    match error {
-        PackageError::ParseError {
-            name,
-            failed_file,
-            cause,
-            ..
-        } => shown!(
-            "Parse error in package `{}` from {}: {}",
-            Name::new(name),
-            DisplayPath::of(failed_file),
-            composed(cause)
-        ),
-        PackageError::UnreadableFile {
-            name,
-            failed_file,
-            cause,
-            ..
-        } => shown!(
-            "Cannot read package `{}` from {}: {}",
-            Name::new(name),
-            DisplayPath::of(failed_file),
-            composed(cause)
-        ),
-        PackageError::UnusableName {
-            name,
-            failed_file,
-            cause,
-            ..
-        } => shown!(
-            "Cannot use package `{}` from {}: {}",
-            Name::new(name),
-            DisplayPath::of(failed_file),
-            composed(cause)
-        ),
-        PackageError::MultiplePackagesFound {
-            name,
-            packages_path,
-            conflicting_paths,
-            ..
-        } => ambiguous_name(name, packages_path, conflicting_paths),
-        PackageError::PackageNotFound {
-            name,
-            packages_path,
-            declared_by,
-            ..
-        } => {
-            let hint = selfie::package::port::name_field_hint(declared_by);
-            shown!(
-                "Package `{}` not found in path {}{}",
-                Name::new(name),
-                DisplayPath::of(packages_path),
-                composed(&hint)
-            )
-        }
-        other => sentence(other).into(),
-    }
-}
-
-/// A repository's error: a package error composed as [`package_error`]
-/// composes it, and a listing error from its parts.
+/// A repository's error: a package error and a listing error from their
+/// parts.
 pub(crate) fn repo_error(error: &PackageRepoError) -> Shown {
     match error {
-        PackageRepoError::PackageError(error) => package_error(error),
+        PackageRepoError::PackageError(error) => composed(&**error),
         PackageRepoError::PackageListError(error) => composed(error),
         other => sentence(other).into(),
     }
@@ -405,7 +345,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
             package_name,
             reason,
         } => uncreatable(package_name, reason),
-        OperationFailure::Package(error) => package_error(error),
+        OperationFailure::Package(error) => composed(error),
         OperationFailure::DeployState(failure) => composed(failure),
         OperationFailure::PackageList(error) => composed(error),
         OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
@@ -659,6 +599,7 @@ impl From<&SpecListItem> for SpecItem {
 mod tests {
     use super::*;
     use selfie::package::event::UnknownStatus;
+    use selfie::package::port::PackageError;
 
     // A name that shows as written is pre-filled; one the prompt can only show
     // escaped is unkeepable, so it is noted but never returned; a plain name
@@ -850,7 +791,7 @@ mod tests {
             }]),
         ];
         for error in &errors {
-            assert_eq!(package_error(error).as_str(), error.to_string());
+            assert_eq!(composed(error).as_str(), error.to_string());
         }
 
         let ambiguous = RefusedSpec {
@@ -1728,5 +1669,28 @@ mod tests {
             named += library.matches(value).count();
         }
         assert!(named > 0, "no message names the value");
+    }
+
+    // Two package errors that no command renders itself are shown with their
+    // environment and file escaped, one through `failure` and one through
+    // `repo_error`.
+    #[test]
+    fn a_package_error_is_shown_with_its_values_escaped() {
+        let environment = PackageError::EnvironmentNotFound {
+            package_name: "a".to_string(),
+            environment: "w\u{200B}k".to_string(),
+            available_environments: Vec::new(),
+            package_file: "/p/a.yml".into(),
+            required_by: None,
+        };
+        let exists = PackageError::PackageAlreadyExists {
+            name: "a".to_string(),
+            file_path: "/p\u{200B}k/a.yml".into(),
+        };
+
+        let shown = failure(&OperationFailure::Package(environment)).into_string();
+        assert_eq!(shown, r"Environment `w\u{200b}k` not found in package `a`");
+        let shown = repo_error(&PackageRepoError::from(exists)).into_string();
+        assert_eq!(shown, r"Package `a` already exists at /p\u{200b}k/a.yml");
     }
 }

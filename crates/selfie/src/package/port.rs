@@ -697,16 +697,12 @@ impl Composed for PackageListError {
     }
 }
 
-/// Why several spec files claiming one name are refused, and what to do about it.
+/// Why several spec files claiming one name are refused, and what to do about
+/// it, as parts in which the name and each file's name are names and the
+/// directory is a path.
 ///
 /// The one wording, for install and for apply and drift alike. `directory` is
 /// where the files are, and `paths` the files.
-pub(crate) fn ambiguous_name_sentence(name: &str, directory: &Path, paths: &[PathBuf]) -> String {
-    ambiguous_name_parts(name, directory, paths).to_string()
-}
-
-/// [`ambiguous_name_sentence`] as parts: the name and each file's name as names,
-/// the directory as a path.
 pub(crate) fn ambiguous_name_parts<'a>(
     name: &'a str,
     directory: &'a Path,
@@ -793,8 +789,13 @@ pub(crate) fn with_name_hint<R: PackageRepository + ?Sized>(
 /// and the name to use instead, or nothing when `declared` is empty.
 #[must_use]
 pub fn name_field_hint(declared: &[NameDeclaration]) -> Message {
+    name_field_hint_parts(declared).into()
+}
+
+// This builds `name_field_hint`'s parts, borrowing each value from `declared`.
+fn name_field_hint_parts(declared: &[NameDeclaration]) -> Parts<'_> {
     if declared.is_empty() {
-        return Parts::new().into();
+        return Parts::new();
     }
     // The file by its directory and name, as `packages/nvim.yml`, so a reader
     // with both directories can tell which one holds it.
@@ -826,7 +827,6 @@ pub fn name_field_hint(declared: &[NameDeclaration]) -> Message {
         .append(claims)
         .text("; a package is named by its file, so use ")
         .append(names)
-        .into()
 }
 
 /// One reason a package file cannot be rewritten, as
@@ -965,7 +965,7 @@ fn untrusted_keys_sentence(path: &Path, levels: &[UntrustedLevel]) -> String {
     )
 }
 
-/// [`ambiguous_name_sentence`] for files that all sit in one directory, named
+/// The ambiguity sentence for files that all sit in one directory, named
 /// by the first file's.
 pub(crate) fn ambiguous_files_sentence(name: &str, paths: &[PathBuf]) -> String {
     ambiguous_files_parts(name, paths).to_string()
@@ -984,14 +984,9 @@ pub(crate) fn ambiguous_files_parts<'a>(name: &'a str, paths: &'a [PathBuf]) -> 
 ///
 /// Represents detailed failures when working with individual packages,
 /// providing rich context for debugging and user-friendly error messages.
-#[derive(Error, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum PackageError {
     /// No package with the specified name could be found
-    #[error(
-        "Package `{name}` not found in path {}{}",
-        packages_path.display(),
-        name_field_hint(declared_by)
-    )]
     #[allow(clippy::doc_link_with_quotes)]
     PackageNotFound {
         name: String,
@@ -1006,7 +1001,6 @@ pub enum PackageError {
     },
 
     /// Multiple package files found with the same name, creating ambiguity
-    #[error("{}", ambiguous_name_sentence(name, packages_path, conflicting_paths))]
     MultiplePackagesFound {
         name: String,
         packages_path: PathBuf,
@@ -1021,7 +1015,6 @@ pub enum PackageError {
     // message tells the reader to go open it, and a directory is not something
     // you can open -- the two `spec` commands that say so were both naming a
     // path the user still had to search.
-    #[error("Parse error in package `{name}` from {}: {cause}", failed_file.display())]
     ParseError {
         name: String,
         packages_path: PathBuf,
@@ -1036,7 +1029,6 @@ pub enum PackageError {
     /// selfie either declined to open the file or the read itself failed. Saying
     /// "parse error" for a fifo sends the reader to inspect YAML syntax in a file
     /// that has none.
-    #[error("Cannot read package `{name}` from {}: {cause}", failed_file.display())]
     UnreadableFile {
         name: String,
         packages_path: PathBuf,
@@ -1049,7 +1041,6 @@ pub enum PackageError {
     ///
     /// The file is never read, so neither "parse error" nor "cannot read" is
     /// true of it: the remedy is renaming the file.
-    #[error("Cannot use package `{name}` from {}: {cause}", failed_file.display())]
     UnusableName {
         name: String,
         packages_path: PathBuf,
@@ -1059,10 +1050,6 @@ pub enum PackageError {
     },
 
     /// The requested environment is not configured for this package
-    #[error(
-        "Environment `{environment}` not found in package `{package_name}`{}",
-        required_by_clause(required_by.as_deref())
-    )]
     EnvironmentNotFound {
         package_name: String,
         environment: String,
@@ -1075,7 +1062,6 @@ pub enum PackageError {
     },
 
     /// Package environment exists but has no check command configured
-    #[error("No check command defined for package `{package_name}` in environment `{environment}`")]
     NoCheckCommand {
         package_name: String,
         environment: String,
@@ -1085,23 +1071,12 @@ pub enum PackageError {
     },
 
     /// A package with the specified name already exists
-    #[error("Package `{name}` already exists at {}", file_path.display())]
     PackageAlreadyExists { name: String, file_path: PathBuf },
 
     /// The write path for a new package is occupied, though the name is free
-    #[error(
-        "Cannot create `{name}`: {} is already taken by something selfie did not find under \
-         that name; selfie will not write over it.",
-        file_path.display()
-    )]
     PackagePathOccupied { name: String, file_path: PathBuf },
 
     /// Package environment exists but has no install command configured
-    #[error(
-        "No install command defined for package `{package_name}` in environment \
-         `{environment}`{}",
-        required_by_clause(required_by.as_deref())
-    )]
     NoInstallCommand {
         package_name: String,
         environment: String,
@@ -1112,6 +1087,130 @@ pub enum PackageError {
         /// recommend of the package being installed.
         required_by: Option<String>,
     },
+}
+
+crate::parts::display_from_parts!(error PackageError);
+
+impl Composed for PackageError {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::PackageNotFound {
+                name,
+                packages_path,
+                declared_by,
+                ..
+            } => Parts::new()
+                .text("Package `")
+                .name(name)
+                .text("` not found in path ")
+                .path(packages_path)
+                .append(name_field_hint_parts(declared_by)),
+            Self::MultiplePackagesFound {
+                name,
+                packages_path,
+                conflicting_paths,
+                ..
+            } => ambiguous_name_parts(name, packages_path, conflicting_paths),
+            Self::ParseError {
+                name,
+                failed_file,
+                cause,
+                ..
+            } => unloadable_parts("Parse error in ", name, failed_file, cause),
+            Self::UnreadableFile {
+                name,
+                failed_file,
+                cause,
+                ..
+            } => unloadable_parts("Cannot read ", name, failed_file, cause),
+            Self::UnusableName {
+                name,
+                failed_file,
+                cause,
+                ..
+            } => unloadable_parts("Cannot use ", name, failed_file, cause),
+            Self::EnvironmentNotFound {
+                package_name,
+                environment,
+                required_by,
+                ..
+            } => Parts::new()
+                .text("Environment `")
+                .name(environment)
+                .text("` not found in ")
+                .append(package_named(package_name))
+                .append(required_by_parts(required_by.as_deref())),
+            Self::NoCheckCommand {
+                package_name,
+                environment,
+                ..
+            } => Parts::new()
+                .text("No check command defined for ")
+                .append(package_named(package_name))
+                .text(" in environment `")
+                .name(environment)
+                .text("`"),
+            Self::PackageAlreadyExists { name, file_path } => Parts::new()
+                .text("Package `")
+                .name(name)
+                .text("` already exists at ")
+                .path(file_path),
+            Self::PackagePathOccupied { name, file_path } => Parts::new()
+                .text("Cannot create `")
+                .name(name)
+                .text("`: ")
+                .path(file_path)
+                .text(
+                    " is already taken by something selfie did not find under that name; selfie \
+                     will not write over it.",
+                ),
+            Self::NoInstallCommand {
+                package_name,
+                environment,
+                required_by,
+                ..
+            } => Parts::new()
+                .text("No install command defined for ")
+                .append(package_named(package_name))
+                .text(" in environment `")
+                .name(environment)
+                .text("`")
+                .append(required_by_parts(required_by.as_deref())),
+        }
+    }
+}
+
+// These word the pieces a package error's sentence shares. `unloadable_parts`
+// words a spec that could not be loaded; `PackageError::unloadable`, below,
+// chooses which variant that is.
+
+// This words the spec a sentence is about as `package `<name>``.
+fn package_named(name: &str) -> Parts<'_> {
+    Parts::new().text("package `").name(name).text("`")
+}
+
+// This words a spec file that answers to `name` and could not be loaded, as
+// `<prefix>package `<name>` from <file>: <cause>`.
+fn unloadable_parts<'a>(
+    prefix: &'a str,
+    name: &'a str,
+    failed_file: &'a Path,
+    cause: &'a PackageParseError,
+) -> Parts<'a> {
+    Parts::new()
+        .text(prefix)
+        .append(package_named(name))
+        .text(" from ")
+        .path(failed_file)
+        .text(": ")
+        .append(cause.parts())
+}
+
+// This words the package that needs this one, when one does, with it as a name.
+fn required_by_parts(required_by: Option<&str>) -> Parts<'_> {
+    required_by.map_or_else(Parts::new, |by| {
+        Parts::new().text(", which `").name(by).text("` requires")
+    })
 }
 
 impl PackageError {
@@ -1162,7 +1261,7 @@ impl PackageError {
 }
 
 pub(crate) fn required_by_clause(required_by: Option<&str>) -> String {
-    required_by.map_or_else(String::new, |by| format!(", which `{by}` requires"))
+    required_by_parts(required_by).to_string()
 }
 
 /// Output from listing packages in the repository
@@ -2148,5 +2247,229 @@ mod conflicting_path_tests {
             "{parts:?}"
         );
         assert!(parts.contains(&&Part::Name("bar".into())), "{parts:?}");
+    }
+
+    // Each package error, with values holding U+200B, and its sentence.
+    fn package_errors() -> Vec<(PackageError, String)> {
+        let (name, environment, required_by) = ("n\u{200B}m", "w\u{200B}k", "r\u{200B}q");
+        let file = || PathBuf::from("/p\u{200B}k/a.yml");
+        let cause = || {
+            PackageParseError::new(
+                file(),
+                PackageParseKind::InvalidName {
+                    name: "a\u{200B}".to_string(),
+                },
+            )
+        };
+        let unloadable = |prefix: &str| {
+            format!(
+                "{prefix} package `{name}` from /p\u{200B}k/a.yml: its name 'a\u{200B}' is not a \
+                 valid spec name. Rename the file: {}.",
+                crate::package::SPEC_NAME_RULE
+            )
+        };
+        vec![
+            (
+                PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    files_examined: 0,
+                    search_patterns: Vec::new(),
+                    declared_by: Vec::new(),
+                },
+                format!("Package `{name}` not found in path /p\u{200B}k"),
+            ),
+            (
+                PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    files_examined: 1,
+                    search_patterns: Vec::new(),
+                    declared_by: vec![NameDeclaration {
+                        path: "/p\u{200B}k/bar.yml".into(),
+                        name: "foo".to_string(),
+                    }],
+                },
+                format!(
+                    "Package `{name}` not found in path /p\u{200B}k. p\u{200B}k/bar.yml declares \
+                     `name: foo`; a package is named by its file, so use 'bar'"
+                ),
+            ),
+            (
+                PackageError::MultiplePackagesFound {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    conflicting_paths: vec![
+                        "/p\u{200B}k/m.yml".into(),
+                        "/p\u{200B}k/m.yaml".into(),
+                    ],
+                    files_examined: 2,
+                    search_patterns: Vec::new(),
+                },
+                format!(
+                    "Multiple packages found with name `{name}` in path /p\u{200B}k: m.yml, m.yaml. \
+                     Names are compared ignoring case, and `.yml` and `.yaml` name the same \
+                     package, so these files all claim one name. Rename or remove all but one."
+                ),
+            ),
+            (
+                PackageError::ParseError {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    failed_file: file(),
+                    cause: cause(),
+                },
+                unloadable("Parse error in"),
+            ),
+            (
+                PackageError::UnreadableFile {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    failed_file: file(),
+                    cause: cause(),
+                },
+                unloadable("Cannot read"),
+            ),
+            (
+                PackageError::UnusableName {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    failed_file: file(),
+                    cause: cause(),
+                },
+                unloadable("Cannot use"),
+            ),
+            (
+                PackageError::EnvironmentNotFound {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    available_environments: Vec::new(),
+                    package_file: file(),
+                    required_by: None,
+                },
+                format!("Environment `{environment}` not found in package `{name}`"),
+            ),
+            (
+                PackageError::EnvironmentNotFound {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    available_environments: Vec::new(),
+                    package_file: file(),
+                    required_by: Some(required_by.to_string()),
+                },
+                format!(
+                    "Environment `{environment}` not found in package `{name}`, which \
+                     `{required_by}` requires"
+                ),
+            ),
+            (
+                PackageError::NoCheckCommand {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    package_file: file(),
+                    other_envs_with_check: Vec::new(),
+                },
+                format!(
+                    "No check command defined for package `{name}` in environment `{environment}`"
+                ),
+            ),
+            (
+                PackageError::PackageAlreadyExists {
+                    name: name.to_string(),
+                    file_path: file(),
+                },
+                format!("Package `{name}` already exists at /p\u{200B}k/a.yml"),
+            ),
+            (
+                PackageError::PackagePathOccupied {
+                    name: name.to_string(),
+                    file_path: file(),
+                },
+                format!(
+                    "Cannot create `{name}`: /p\u{200B}k/a.yml is already taken by something selfie \
+                     did not find under that name; selfie will not write over it."
+                ),
+            ),
+            (
+                PackageError::NoInstallCommand {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    package_file: file(),
+                    other_envs_with_install: Vec::new(),
+                    required_by: None,
+                },
+                format!(
+                    "No install command defined for package `{name}` in environment `{environment}`"
+                ),
+            ),
+            (
+                PackageError::NoInstallCommand {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    package_file: file(),
+                    other_envs_with_install: Vec::new(),
+                    required_by: Some(required_by.to_string()),
+                },
+                format!(
+                    "No install command defined for package `{name}` in environment \
+                     `{environment}`, which `{required_by}` requires"
+                ),
+            ),
+        ]
+    }
+
+    // Every package error's sentence, whole, so a change to how they are built
+    // cannot change their words. Each value in it is a part of the kind the CLI
+    // escapes it as: a spec, an environment or a requiring package as a name, and
+    // a file or a directory as a path. `values_of` panics on a value written as
+    // text, and the kinds tell a name from a path, which `values_of` cannot.
+    #[test]
+    fn a_package_errors_sentences_are_worded_whole() {
+        use crate::parts::{Part, values_of};
+
+        let (name, path) = (
+            |value: &str| ("name", value.to_string()),
+            |value: &str| ("path", value.to_string()),
+        );
+        let (n, e, r) = ("n\u{200B}m", "w\u{200B}k", "r\u{200B}q");
+        let (file, directory) = ("/p\u{200B}k/a.yml", "/p\u{200B}k");
+        let unloadable = vec![name(n), path(file), name("a\u{200B}")];
+        let kinds = [
+            vec![name(n), path(directory)],
+            vec![
+                name(n),
+                path(directory),
+                path("p\u{200B}k/bar.yml"),
+                name("bar"),
+            ],
+            vec![name(n), path(directory), name("m.yml"), name("m.yaml")],
+            unloadable.clone(),
+            unloadable.clone(),
+            unloadable,
+            vec![name(e), name(n)],
+            vec![name(e), name(n), name(r)],
+            vec![name(n), name(e)],
+            vec![name(n), path(file)],
+            vec![name(n), path(file)],
+            vec![name(n), name(e)],
+            vec![name(n), name(e), name(r)],
+        ];
+        let errors = package_errors();
+        assert_eq!(errors.len(), kinds.len());
+        for ((error, sentence), kinds) in errors.into_iter().zip(kinds) {
+            assert_eq!(error.to_string(), sentence);
+            let values: Vec<String> = kinds.iter().map(|(_, value)| value.clone()).collect();
+            assert_eq!(values_of(&error.parts().into()), values, "{error}");
+            let shown: Vec<(&str, String)> = error
+                .parts()
+                .into_iter()
+                .filter_map(|part| match part {
+                    Part::Name(value) => Some(("name", value.to_string())),
+                    Part::Path(value) => Some(("path", value.display().to_string())),
+                    Part::Text(_) | Part::Command(_) => None,
+                })
+                .collect();
+            assert_eq!(shown, kinds, "{error}");
+        }
     }
 }
