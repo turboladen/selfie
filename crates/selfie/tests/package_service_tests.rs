@@ -1107,6 +1107,65 @@ mod a_spec_selfie_cannot_read {
         assert!(!info.environments.is_empty());
     }
 
+    // A refused spec's reason, whole, as each command hands it on: a check's
+    // failure, spec info's refusal, and a listing's refused row and its gap. Each
+    // is read through `to_string`, so the pins hold whatever type carries it.
+    #[tokio::test]
+    async fn a_refused_specs_reason_keeps_its_words() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("hostile.yml"),
+            "name: hostile\nenvironments:\n  test:\n    install: \"true\"\n    \
+             check: \"true\"\n    \"w\\u200Bk\": 1\n",
+        )
+        .unwrap();
+        let service = create_service_test_service(&temp_dir);
+        let reason = "in environment 'test': unknown field 'w\u{200B}k'; expected one of: \
+                      install, check, audit, dependencies, recommends, dotfiles";
+
+        let events = collect_events(service.check("hostile").await).await;
+        let Some(OperationResult::Failure(failure)) = get_operation_result(&events) else {
+            panic!("the check must fail: {events:?}");
+        };
+        assert_eq!(
+            failure.to_string(),
+            format!("Cannot use package `hostile`: {reason}")
+        );
+
+        let events = collect_events(service.spec_info("hostile").await).await;
+        let info = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+                _ => None,
+            })
+            .expect("the info must be sent");
+        assert_eq!(
+            info.refusal.as_ref().map(ToString::to_string).as_deref(),
+            Some(reason)
+        );
+
+        let events = collect_events(PackageService::list(&service, false).await).await;
+        let data = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageListLoaded { package_list, .. } => Some(package_list),
+                _ => None,
+            })
+            .expect("the listing must be sent");
+        let [refused] = data.refused.as_slice() else {
+            panic!("exactly the hostile spec is refused: {:?}", data.refused);
+        };
+        assert_eq!(refused.reason.to_string(), reason);
+        let Some(OperationResult::Success(success)) = get_operation_result(&events) else {
+            panic!("the listing must succeed: {events:?}");
+        };
+        let Some([gap]) = success.gaps() else {
+            panic!("exactly one gap: {:?}", success.gaps());
+        };
+        assert_eq!(gap.reason().to_string(), format!("is refused: {reason}"));
+    }
+
     #[tokio::test]
     async fn the_same_spec_without_the_key_still_audits() {
         let temp_dir = TempDir::new().unwrap();

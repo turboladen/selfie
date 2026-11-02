@@ -2236,6 +2236,35 @@ mod conflicting_path_tests {
         assert_eq!(name_field_hint(&[]).to_string(), "");
     }
 
+    // The `name:` value as the hint's words carry it, one row per class of
+    // character an escape could treat differently: an invisible one, the three
+    // ASCII characters a Rust escape backslashes, and a blank that is not a
+    // space.
+    #[test]
+    fn a_name_field_hints_value_keeps_its_spelling() {
+        let rows = [
+            ("ze\u{200B}o", "ze\\u{200b}o"),
+            ("ze\"o", "ze\\\"o"),
+            ("ze'o", "ze\\'o"),
+            ("ze\\o", "ze\\\\o"),
+            ("ze\u{A0}o", "ze\\u{a0}o"),
+        ];
+        for (name, written) in rows {
+            let declared = [NameDeclaration {
+                path: PathBuf::from("/home/me/pkgs/bar.yml"),
+                name: name.to_string(),
+            }];
+            assert_eq!(
+                name_field_hint(&declared).to_string(),
+                format!(
+                    ". pkgs/bar.yml declares `name: {written}`; a package is named by its file, \
+                     so use 'bar'"
+                ),
+                "{name:?}"
+            );
+        }
+    }
+
     // Every path and name a spec file's read failure gives is a part of its own,
     // so a value holding U+200B never sits inside selfie's words.
     #[test]
