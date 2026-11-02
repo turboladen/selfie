@@ -259,11 +259,13 @@ where
         Ok(across) => across,
         // Unplaced, the spec was compared with nothing, so it is not written.
         Err(_) => {
-            return OperationResult::Failure(OperationFailure::UnplacedSpec {
-                action: SpecWrite::Update,
-                package_name: package_name.to_string(),
-                path: file_path,
-            });
+            return OperationResult::Failure(OperationFailure::UnplacedSpec(
+                crate::package::event::UnplacedWrite {
+                    action: SpecWrite::Update,
+                    package_name: package_name.to_string(),
+                    path: file_path,
+                },
+            ));
         }
     };
     let refused_on_save: Vec<String> = package
@@ -1392,11 +1394,13 @@ mod tests {
         )
         .await;
 
-        let OperationResult::Failure(OperationFailure::UnplacedSpec {
-            action: crate::package::event::SpecWrite::Update,
-            package_name,
-            path,
-        }) = result
+        let OperationResult::Failure(OperationFailure::UnplacedSpec(
+            crate::package::event::UnplacedWrite {
+                action: crate::package::event::SpecWrite::Update,
+                package_name,
+                path,
+            },
+        )) = result
         else {
             panic!("expected the update to be refused as unplaced, got: {result:?}");
         };

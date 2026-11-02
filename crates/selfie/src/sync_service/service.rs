@@ -21,11 +21,13 @@ use crate::{
         OperationSuccess, Outcome, PackageEvent, StepCount, StepEnding, StepKind,
         metadata::OperationType,
     },
+    parts::{Composed, Message, Parts},
     privilege::{Privilege, SudoPolicy, WriteScope},
 };
 
 use super::port::{
-    ConfirmedCommit, PendingCommit, PrepareResult, PushOptions, SyncError, SyncService,
+    ConfirmedCommit, NotARepository, PendingCommit, PrepareResult, PushOptions, SyncError,
+    SyncService,
 };
 
 /// Concrete implementation of [`SyncService`].
@@ -234,9 +236,13 @@ where
             // Counted with the relayed warnings, which it is one of: a summary
             // under a failed check must not read as a clean run.
             let mut warned = summary.warned;
-            if let Some(error_msg) = summary.error {
+            if let Some(error) = summary.error {
                 sender
-                    .send_warning(format!("Drift check failed: {error_msg}"))
+                    .send_composed_warning(Message::from(
+                        Parts::new()
+                            .text("Drift check failed: ")
+                            .append(error.parts()),
+                    ))
                     .await;
                 warned += 1;
             }
@@ -280,7 +286,7 @@ where
         })
         .await
         .map_err(|e| match e {
-            GitSyncError::NotARepo { path } => SyncError::NotARepo { path },
+            GitSyncError::NotARepo { path } => SyncError::NotARepo(NotARepository { path }),
             other => SyncError::GitError(other.to_string()),
         })?;
 
@@ -1435,7 +1441,7 @@ struct DriftSummary {
     /// How the check scored, when it reported a result.
     outcome: Option<Outcome>,
     /// The failure message, when the check failed.
-    error: Option<String>,
+    error: Option<Message>,
     /// Why the check was canceled, when it was.
     ///
     /// Distinct from `error`: a canceled check did not fail, it did not finish, and
@@ -1531,7 +1537,7 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                 result: OperationResult::Failure(failure),
                 ..
             } => {
-                summary.error = Some(failure.to_string());
+                summary.error = Some(failure.message());
                 summary.outcome = Some(Outcome::Failed);
             }
             // Recorded rather than swallowed. Under the catch-all below, an
@@ -1553,7 +1559,11 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
     // A stream that ends without saying how the check went, as it does when the
     // task running the check panics, is a check that failed, never a clean one.
     if !finished {
-        summary.error = Some("the drift check ended without reporting a result".to_string());
+        summary.error = Some(
+            Parts::new()
+                .text("the drift check ended without reporting a result")
+                .into(),
+        );
     }
 
     summary
@@ -2246,7 +2256,10 @@ mod tests {
 
         assert!(summary.drifted_targets.is_empty());
         assert_eq!(summary.total_deployed, 0);
-        assert_eq!(summary.error.as_deref(), Some("permission denied"));
+        assert_eq!(
+            summary.error.map(|error| error.to_string()).as_deref(),
+            Some("permission denied")
+        );
     }
 
     // A stream that ends with no completion is a check that never finished, as
@@ -3094,10 +3107,20 @@ mod tests {
         }
     }
 
-    // A DotfileService whose `check_drift` fails outright, a state no run of the
-    // binary reaches today: discovery or the git status step fails first.
+    // A DotfileService whose `check_drift` fails outright, with the failure it
+    // holds: a state no run of the binary reaches today, since discovery or the
+    // git status step fails first.
     #[derive(Clone)]
-    struct DriftCheckFailing;
+    struct DriftCheckFailing(OperationFailure);
+
+    fn unlisted_package_directory() -> crate::package::port::PackageListError {
+        crate::package::port::PackageListError::new(
+            PathBuf::from("/p\u{200B}k"),
+            crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                kind: "regular file",
+            }),
+        )
+    }
 
     impl DotfileService for DriftCheckFailing {
         async fn list(&self) -> EventStream {
@@ -3119,9 +3142,7 @@ mod tests {
         async fn check_drift(&self) -> EventStream {
             let events = vec![PackageEvent::Completed {
                 operation_info: test_operation_info(),
-                result: OperationResult::Failure(OperationFailure::Generic(
-                    "could not collect packages".to_string(),
-                )),
+                result: OperationResult::Failure(self.0.clone()),
             }];
             Box::pin(futures::stream::iter(events))
         }
@@ -3136,14 +3157,46 @@ mod tests {
     }
 
     // The failed check's warning counts in `warned`, so the summary under it
-    // cannot read as a clean run.
+    // cannot read as a clean run. Its words are pinned whole, so a change to how
+    // it is built cannot change them.
     #[tokio::test]
     async fn status_counts_a_failed_drift_check_as_warned() {
+        let events = status_under_a_failed_drift_check(OperationFailure::PackageList(
+            unlisted_package_directory(),
+        ))
+        .await;
+
+        let warned = events.iter().find_map(|e| match e {
+            PackageEvent::SyncDriftSummary { warned, .. } => Some(*warned),
+            _ => None,
+        });
+        assert_eq!(warned, Some(1), "{events:?}");
+        let warnings: Vec<String> = events
+            .iter()
+            .filter_map(crate::package::event::warning_text)
+            .collect();
+        assert_eq!(
+            warnings,
+            [format!(
+                "Drift check failed: {}",
+                unlisted_package_directory()
+            )]
+        );
+        // The directory is a part, so the CLI escapes it.
+        let values: Vec<Vec<String>> = events
+            .iter()
+            .filter_map(crate::package::event::warning_values)
+            .collect();
+        assert_eq!(values, [["/p\u{200B}k"]]);
+    }
+
+    // What `sync status` sends when its drift check ends on `failure`.
+    async fn status_under_a_failed_drift_check(failure: OperationFailure) -> Vec<PackageEvent> {
         use futures::StreamExt;
 
         let service = SyncServiceImpl::new(
             GitReachingDrift,
-            DriftCheckFailing,
+            DriftCheckFailing(failure),
             crate::config::SelfieConfigBuilder::default()
                 .environment("test-env")
                 .package_directory("/tmp/selfie-packages")
@@ -3154,14 +3207,38 @@ mod tests {
                 ),
             ),
         );
+        service.status().await.collect().await
+    }
 
-        let events: Vec<PackageEvent> = service.status().await.collect().await;
+    // A drift check that ends on a repository's failure names its path as a part,
+    // as every failure of a Composed kind does.
+    #[tokio::test]
+    async fn status_names_a_failed_drift_checks_repository_path_as_a_part() {
+        let refused = crate::package::port::PackageRepoError::Occupied {
+            path: PathBuf::from("/p\u{200B}k/a.yml"),
+        };
+        let events = status_under_a_failed_drift_check(refused.clone().into()).await;
 
-        let warned = events.iter().find_map(|e| match e {
-            PackageEvent::SyncDriftSummary { warned, .. } => Some(*warned),
-            _ => None,
+        let warnings: Vec<String> = events
+            .iter()
+            .filter_map(crate::package::event::warning_text)
+            .collect();
+        assert_eq!(warnings, [format!("Drift check failed: {refused}")]);
+        let values: Vec<Vec<String>> = events
+            .iter()
+            .filter_map(crate::package::event::warning_values)
+            .collect();
+        assert_eq!(values, [["/p\u{200B}k/a.yml"]]);
+    }
+
+    // A directory outside any git repository, whole, so a change to how it is
+    // built cannot change its words.
+    #[test]
+    fn a_directory_outside_a_repository_is_worded_whole() {
+        let error = SyncError::NotARepo(NotARepository {
+            path: PathBuf::from("/p\u{200B}k"),
         });
-        assert_eq!(warned, Some(1), "{events:?}");
+        assert_eq!(error.to_string(), "not a git repository: /p\u{200B}k");
     }
 
     // A relayed warning must raise `warned`, on an event stream that carries no

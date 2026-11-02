@@ -8,7 +8,7 @@ use crate::{
         Package, SpecOrigin,
         event::{
             EventSender, OperationFailure, OperationResult, OperationSuccess, SpecWrite,
-            Uncreatable,
+            Uncreatable, UnplacedWrite,
         },
         port::{PackageRepoError, PackageRepository},
         service::{
@@ -16,6 +16,7 @@ use crate::{
             validate::{OnWrite, all_issues, collisions_with_other_specs, refuse_or_report},
         },
     },
+    parts::{Composed, Message, Parts},
 };
 
 /// `identity` is [`creatable_identity`]'s answer for `package`.
@@ -59,9 +60,12 @@ where
                 name: package_name,
                 file_path: existing.file_path().to_path_buf(),
             };
-            let error_msg = error.to_string();
             sender
-                .send_warning(format!("Package already exists: {error_msg}"))
+                .send_composed_warning(Message::from(
+                    Parts::new()
+                        .text("Package already exists: ")
+                        .append(error.parts()),
+                ))
                 .await;
             return OperationResult::Failure(error.into());
         }
@@ -71,15 +75,21 @@ where
         // names the directory and what is there.
         Err(e @ PackageRepoError::PackageListError(_)) => {
             sender
-                .send_warning(format!("Refusing to create '{package_name}': {e}"))
+                .send_composed_warning(Message::from(
+                    refusing_to_create(&package_name).append(e.parts()),
+                ))
                 .await;
             return OperationResult::Failure(e.into());
         }
         Err(e) => {
             sender
-                .send_warning(format!(
-                    "Refusing to create '{package_name}': selfie could not use what already \
-                     answers to that name, and creates no new spec beside it. {e}"
+                .send_composed_warning(Message::from(
+                    refusing_to_create(&package_name)
+                        .text(
+                            "selfie could not use what already answers to that name, and \
+                             creates no new spec beside it. ",
+                        )
+                        .append(e.parts()),
                 ))
                 .await;
             return OperationResult::Failure(e.into());
@@ -97,10 +107,11 @@ where
     if repo.path_is_occupied(package.path()) {
         let path = package.path().to_path_buf();
         sender
-            .send_warning(format!(
-                "Refusing to create '{package_name}': {} is already taken by something selfie \
-                 did not find under that name; selfie will not write over it.",
-                path.display()
+            .send_composed_warning(Message::from(
+                refusing_to_create(&package_name).path(&path).text(
+                    " is already taken by something selfie did not find under that name; selfie \
+                     will not write over it.",
+                ),
             ))
             .await;
         // A distinct variant from `PackageAlreadyExists`: the name really is
@@ -141,11 +152,11 @@ where
         Ok(across) => across,
         // Unplaced, the spec was compared with nothing, so it is not written.
         Err(_) => {
-            return OperationResult::Failure(OperationFailure::UnplacedSpec {
+            return OperationResult::Failure(OperationFailure::UnplacedSpec(UnplacedWrite {
                 action: SpecWrite::Create,
                 package_name,
                 path: package.path().clone(),
-            });
+            }));
         }
     };
     // Every error refuses a create.
@@ -199,6 +210,14 @@ where
         config.environment().to_string(),
         (progress.current_step(), progress.total_steps()).into(),
     ))
+}
+
+// The opening of each warning a create sends before it refuses.
+fn refusing_to_create(package_name: &str) -> Parts<'_> {
+    Parts::new()
+        .text("Refusing to create '")
+        .name(package_name)
+        .text("': ")
 }
 
 /// The name selfie will resolve the created spec by, which is its file stem.
@@ -639,9 +658,7 @@ mod tests {
         // name lookup folds case and would have found the file.
         let mut warnings = Vec::new();
         while let Ok(event) = rx.try_recv() {
-            if let PackageEvent::Warning { message, .. } = event {
-                warnings.push(message);
-            }
+            warnings.extend(crate::package::event::warning_text(&event));
         }
         assert_eq!(warnings.len(), 1, "got: {warnings:?}");
         // The warning and the error the adapters print both say the same thing, and
@@ -980,5 +997,153 @@ mod tests {
             rendered.contains("/packages is not a directory, it is a regular file"),
             "the refusal must name the directory and what is there, got: {rendered}"
         );
+    }
+
+    // Runs a create of `myapp` against `repo`, and returns the spec's path and
+    // every event the create sent.
+    async fn create_events(repo: MockPackageRepository) -> (PathBuf, Vec<PackageEvent>) {
+        let (_temp, config, package) = fixture();
+        let path = package.path().clone();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        create(package, &repo, &config, &sender, &mut progress).await;
+        drop(sender);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        (path, events)
+    }
+
+    // Runs a create of `myapp` against `repo`, and returns the spec's path and the
+    // words of each warning the create sent.
+    async fn create_warnings(repo: MockPackageRepository) -> (PathBuf, Vec<String>) {
+        let (path, events) = create_events(repo).await;
+        let warnings = events
+            .iter()
+            .filter_map(crate::package::event::warning_text)
+            .collect();
+        (path, warnings)
+    }
+
+    // The values each warning a create sent names as parts, failing on a warning
+    // sent as finished text.
+    async fn create_warning_values(repo: MockPackageRepository) -> (PathBuf, Vec<Vec<String>>) {
+        let (path, events) = create_events(repo).await;
+        let values = events
+            .iter()
+            .filter_map(crate::package::event::warning_values)
+            .collect();
+        (path, values)
+    }
+
+    // A repository answering every lookup with a spec of that name at
+    // `/p<U+200B>k/myapp.yml`.
+    fn existing() -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().returning(|_| {
+            Ok(crate::package::GetPackage::from_existing(
+                PackageBuilder::default()
+                    .name("myapp")
+                    .environment("test", |b| b.install("true"))
+                    .path("/p\u{200B}k/myapp.yml")
+                    .build(),
+                PathBuf::from("/p\u{200B}k/myapp.yml"),
+            ))
+        });
+        repo
+    }
+
+    // A repository whose package directory, `/p<U+200B>k`, a regular file holds.
+    fn unlisted() -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().returning(|_| {
+            Err(PackageRepoError::PackageListError(PackageListError::new(
+                PathBuf::from("/p\u{200B}k"),
+                crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                    kind: "regular file",
+                }),
+            )))
+        });
+        repo
+    }
+
+    // A repository holding a file under the name that does not parse.
+    fn unparsable() -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package()
+            .returning(|_| Err(a_real_parse_error().into()));
+        repo
+    }
+
+    // A repository with no spec of the name, whose path is still occupied.
+    fn occupied() -> MockPackageRepository {
+        let mut repo = MockPackageRepository::new();
+        repo.expect_get_package().returning(|name| {
+            Err(PackageError::PackageNotFound {
+                name: name.to_string(),
+                packages_path: PathBuf::from("/packages"),
+                files_examined: 0,
+                search_patterns: vec![],
+                declared_by: Vec::new(),
+            }
+            .into())
+        });
+        repo.expect_path_is_occupied().returning(|_| true);
+        repo
+    }
+
+    // Each warning a create sends before it refuses, whole, so a change to how
+    // they are built cannot change their words.
+    #[tokio::test]
+    async fn the_create_warnings_are_worded_whole() {
+        assert_eq!(
+            create_warnings(existing()).await.1,
+            ["Package already exists: Package `myapp` already exists at /p\u{200B}k/myapp.yml"]
+        );
+        assert_eq!(
+            create_warnings(unlisted()).await.1,
+            ["Refusing to create 'myapp': /p\u{200B}k is not a directory, it is a regular file"]
+        );
+        let cause = PackageRepoError::from(a_real_parse_error()).to_string();
+        assert_eq!(
+            create_warnings(unparsable()).await.1,
+            [format!(
+                "Refusing to create 'myapp': selfie could not use what already answers to that \
+                 name, and creates no new spec beside it. {cause}"
+            )]
+        );
+        let (path, warnings) = create_warnings(occupied()).await;
+        assert_eq!(
+            warnings,
+            [format!(
+                "Refusing to create 'myapp': {} is already taken by something selfie did not \
+                 find under that name; selfie will not write over it.",
+                path.display()
+            )]
+        );
+    }
+
+    // Each warning a create sends before it refuses names the spec and every path
+    // as parts, so the CLI escapes them.
+    #[tokio::test]
+    async fn the_create_warnings_name_their_values_as_parts() {
+        assert_eq!(
+            create_warning_values(existing()).await.1,
+            [["myapp", "/p\u{200B}k/myapp.yml"]]
+        );
+        assert_eq!(
+            create_warning_values(unlisted()).await.1,
+            [["myapp", "/p\u{200B}k"]]
+        );
+        let (_, values) = create_warning_values(unparsable()).await;
+        assert_eq!(values.len(), 1, "{values:?}");
+        assert_eq!(values[0][0], "myapp", "{values:?}");
+        assert!(
+            values[0].contains(&"/packages/myapp.yml".to_string()),
+            "{values:?}"
+        );
+        let (path, values) = create_warning_values(occupied()).await;
+        assert_eq!(values, [["myapp".to_string(), path.display().to_string()]]);
     }
 }

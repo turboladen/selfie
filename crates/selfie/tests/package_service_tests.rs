@@ -2008,12 +2008,8 @@ mod validate_all_covers_standalone_specs {
     fn unchecked(events: &[PackageEvent]) -> Vec<String> {
         events
             .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } if message.starts_with("Could not check") => {
-                    Some(message.clone())
-                }
-                _ => None,
-            })
+            .filter_map(test_common::warning_text)
+            .filter(|words| words.starts_with("Could not check"))
             .collect()
     }
 
@@ -2260,12 +2256,8 @@ mod validate_all_covers_standalone_specs {
         assert_eq!(results(&events), [("alpha".to_string(), Outcome::Clean)]);
         let about_the_directory: Vec<_> = events
             .iter()
-            .filter_map(|event| match event {
-                PackageEvent::Warning { message, .. } if message.contains("dotfiles") => {
-                    Some(message.clone())
-                }
-                _ => None,
-            })
+            .filter_map(test_common::warning_text)
+            .filter(|words| words.contains("dotfiles"))
             .collect();
         assert_eq!(about_the_directory.len(), 1, "{about_the_directory:?}");
         assert!(

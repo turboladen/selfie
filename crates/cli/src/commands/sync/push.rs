@@ -80,7 +80,7 @@ pub(crate) async fn handle_push(
             return Exit::Failed;
         }
         Err(e) => {
-            display.print_error(received::sentence(e));
+            display.print_error(received::composed(&e));
             return Exit::Failed;
         }
     };

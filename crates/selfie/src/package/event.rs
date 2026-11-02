@@ -1526,12 +1526,7 @@ pub enum OperationFailure {
     /// A spec write refused because selfie could not tell which spec directory
     /// the spec belongs in, so it could not compare the spec with the others.
     /// Nothing was written.
-    UnplacedSpec {
-        /// Whether the spec was being created or updated.
-        action: SpecWrite,
-        package_name: String,
-        path: std::path::PathBuf,
-    },
+    UnplacedSpec(UnplacedWrite),
     /// A spec `spec create` refuses to write for its name or its path, before
     /// anything is looked up or written.
     Uncreatable {
@@ -1765,23 +1760,7 @@ impl std::fmt::Display for OperationFailure {
                     ),
                 }
             }
-            OperationFailure::UnplacedSpec {
-                action,
-                package_name,
-                path,
-            } => {
-                let verb = match action {
-                    SpecWrite::Create => "create",
-                    SpecWrite::Update => "update",
-                };
-                write!(
-                    f,
-                    "Refusing to {verb} '{package_name}': selfie could not tell which spec \
-                     directory {} belongs in, so it could not compare it with the other specs, \
-                     and nothing was written",
-                    path.display()
-                )
-            }
+            OperationFailure::UnplacedSpec(write) => write!(f, "{write}"),
             OperationFailure::Uncreatable {
                 package_name,
                 reason,
@@ -3121,6 +3100,35 @@ impl OperationSuccess {
 }
 
 impl OperationFailure {
+    /// This failure's sentence, with the same words as its `Display`, naming as
+    /// parts every value its kind names as parts.
+    #[must_use]
+    pub fn message(&self) -> Message {
+        // The arms not named here word their values as text until each kind is
+        // Composed (selfie-2kwj).
+        match self {
+            Self::Package(error) => Message::of(error),
+            Self::DependencyError(failure) => Message::of(failure),
+            Self::PackageList(error) => Message::of(error),
+            Self::Repository(error) => Message::of(error),
+            Self::UnplacedSpec(write) => Message::of(write),
+            Self::DeployState(failure) => Message::of(failure),
+            Self::UnusableDotfilesDirectory(refusal) => Message::of(refusal),
+            Self::Stopped(stop) => Message::of(stop),
+            Self::Track(message) => message.clone(),
+            Self::UnreadableSpec {
+                package_name,
+                reason,
+            } => Parts::new()
+                .text("Cannot use package `")
+                .name(package_name)
+                .text("`: ")
+                .text(reason.as_str())
+                .into(),
+            other => Parts::new().text(other.to_string()).into(),
+        }
+    }
+
     /// The label for this failure, such as `"not_installed_after_install"`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
@@ -3300,6 +3308,38 @@ impl OperationFailure {
             required_by,
             reason,
         })
+    }
+}
+
+/// A spec write selfie refused because it could not tell which spec directory
+/// the spec belongs in.
+#[derive(Debug, Clone)]
+pub struct UnplacedWrite {
+    /// Whether the spec was being created or updated.
+    pub action: SpecWrite,
+    /// The spec's name.
+    pub package_name: String,
+    /// The file the spec would have been written to.
+    pub path: std::path::PathBuf,
+}
+
+crate::parts::display_from_parts!(UnplacedWrite);
+
+impl Composed for UnplacedWrite {
+    fn parts(&self) -> Parts<'_> {
+        let verb = match self.action {
+            SpecWrite::Create => "create",
+            SpecWrite::Update => "update",
+        };
+        Parts::new()
+            .text(format!("Refusing to {verb} '"))
+            .name(&self.package_name)
+            .text("': selfie could not tell which spec directory ")
+            .path(&self.path)
+            .text(
+                " belongs in, so it could not compare it with the other specs, and nothing was \
+                 written",
+            )
     }
 }
 
@@ -4934,6 +4974,36 @@ pub struct AddEnvironment {
     pub recommends: Vec<String>,
 }
 
+// The words of a warning event, whichever of the two warning events `event` is,
+// or `None` for any other event. Test-common links its own copy of selfie, so its
+// `PackageEvent` is a different type inside this crate, and the crate's own tests
+// need this copy. Keep it in step with `test_common::warning_text`, in
+// test-common/src/events.rs.
+#[cfg(test)]
+pub(crate) fn warning_text(event: &PackageEvent) -> Option<String> {
+    match event {
+        PackageEvent::Warning { message, .. } => Some(message.clone()),
+        PackageEvent::ComposedWarning { warning, .. } => Some(warning.to_string()),
+        _ => None,
+    }
+}
+
+// The values a warning event names as parts, or `None` for any other event.
+// Panics on a warning sent as finished text. Its twin for integration tests is
+// `warning_values` in tests/unanswered_check_tests.rs, which skips text warnings
+// instead; keep the two in step.
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn warning_values(event: &PackageEvent) -> Option<Vec<String>> {
+    match event {
+        PackageEvent::Warning { message, .. } => panic!("sent as text: {message}"),
+        PackageEvent::ComposedWarning { warning, .. } => Some(crate::parts::values_of(
+            &crate::parts::Message::from(warning.parts()),
+        )),
+        _ => None,
+    }
+}
+
 // One of each way a check can give no answer, in declaration order, for the
 // tests that table them.
 #[cfg(test)]
@@ -6236,6 +6306,126 @@ mod tests {
         assert!(!none.contains("failed"), "{none}");
         assert!(none.ends_with("1 refused"), "{none}");
         assert!(one.contains("0 refused, 1 failed"), "{one}");
+    }
+
+    // A failure's message has its `Display`'s words, and names as parts what
+    // each Composed kind names.
+    #[test]
+    fn a_failures_message_keeps_its_words() {
+        // Each holds U+200B, so a kind worded as text makes `values_of` panic.
+        let named: Vec<(OperationFailure, &[&str])> = vec![
+            (
+                OperationFailure::Package(
+                    crate::package::port::PackageError::PackageAlreadyExists {
+                        name: "a\u{200B}b".to_string(),
+                        file_path: "/p\u{200B}k/a.yml".into(),
+                    },
+                ),
+                &["a\u{200B}b", "/p\u{200B}k/a.yml"],
+            ),
+            (
+                OperationFailure::missing_dependency(
+                    "a\u{200B}b".to_string(),
+                    "d\u{200B}p".to_string(),
+                ),
+                &["a\u{200B}b", "d\u{200B}p"],
+            ),
+            (
+                OperationFailure::PackageList(crate::package::port::PackageListError::new(
+                    "/p\u{200B}k".into(),
+                    crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                        kind: "regular file",
+                    }),
+                )),
+                &["/p\u{200B}k"],
+            ),
+            (
+                OperationFailure::from(crate::package::port::PackageRepoError::Occupied {
+                    path: "/p\u{200B}k/a.yml".into(),
+                }),
+                &["/p\u{200B}k/a.yml"],
+            ),
+            (
+                OperationFailure::UnplacedSpec(UnplacedWrite {
+                    action: SpecWrite::Update,
+                    package_name: "a\u{200B}b".to_string(),
+                    path: "/p\u{200B}k/a.yml".into(),
+                }),
+                &["a\u{200B}b", "/p\u{200B}k/a.yml"],
+            ),
+            (
+                OperationFailure::DeployState(
+                    crate::dotfile_service::DeployStateFailure::StoppedAfterRecording {
+                        target: "/t\u{200B}x".into(),
+                    },
+                ),
+                &["/t\u{200B}x"],
+            ),
+            (
+                OperationFailure::UnusableDotfilesDirectory(
+                    crate::package::collect::directory::TrackDirectoryRefusal::SharedWithPackages(
+                        "/p\u{200B}k".into(),
+                    ),
+                ),
+                &["/p\u{200B}k"],
+            ),
+            (
+                OperationFailure::Stopped(crate::dotfile_service::ApplyStop::Package {
+                    name: "a\u{200B}b".to_string(),
+                }),
+                &["a\u{200B}b"],
+            ),
+            (
+                OperationFailure::Track(Message::from(
+                    Parts::new()
+                        .text("Cannot track ")
+                        .path(std::path::Path::new("/t\u{200B}x")),
+                )),
+                &["/t\u{200B}x"],
+            ),
+            (
+                OperationFailure::UnreadableSpec {
+                    package_name: "a\u{200B}b".to_string(),
+                    reason: "unknown field 'bogus'".to_string(),
+                },
+                &["a\u{200B}b"],
+            ),
+            (
+                OperationFailure::Generic("could not collect packages".to_string()),
+                &[],
+            ),
+        ];
+        for (failure, named) in &named {
+            let message = failure.message();
+            assert_eq!(message.to_string(), failure.to_string());
+            assert_eq!(crate::parts::values_of(&message), *named, "{failure}");
+        }
+    }
+
+    // A spec write refused as unplaced, whole for each action, so a change to how
+    // it is built cannot change its words.
+    #[test]
+    fn an_unplaced_spec_write_is_worded_whole() {
+        let refused = |action| {
+            OperationFailure::UnplacedSpec(UnplacedWrite {
+                action,
+                package_name: "myapp".to_string(),
+                path: "/p\u{200B}k/myapp.yml".into(),
+            })
+            .to_string()
+        };
+        assert_eq!(
+            refused(SpecWrite::Create),
+            "Refusing to create 'myapp': selfie could not tell which spec directory \
+             /p\u{200B}k/myapp.yml belongs in, so it could not compare it with the other specs, \
+             and nothing was written"
+        );
+        assert_eq!(
+            refused(SpecWrite::Update),
+            "Refusing to update 'myapp': selfie could not tell which spec directory \
+             /p\u{200B}k/myapp.yml belongs in, so it could not compare it with the other specs, \
+             and nothing was written"
+        );
     }
 }
 

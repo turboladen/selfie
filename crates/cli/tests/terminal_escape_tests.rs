@@ -774,6 +774,117 @@ fn a_package_with_nothing_to_apply_names_the_environment_as_a_name() {
     assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
 }
 
+// A package with no configuration for the environment in use names the
+// environment as a name, so a U+200B and a right-to-left override in it show
+// escaped.
+#[test]
+fn package_status_names_an_unconfigured_environment_escaped() {
+    let temp = setup_default_test_config();
+    fs::write(
+        temp.path().join("packages").join("pk.yml"),
+        format!("name: pk\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"),
+    )
+    .unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args([
+            "--no-color",
+            "--environment",
+            "w\u{200B}o\u{202E}k",
+            "package",
+            "status",
+            "pk",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.lines().any(|line| line
+            .contains(r"Package 'pk' has no configuration for environment 'w\u{200b}o\u{202e}k'")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
+// A spec file a validation could not compare with is named by its label, such
+// as `packages/<file>`, as a name, so a U+200B in its file name shows escaped.
+#[test]
+fn spec_validate_names_a_spec_it_could_not_check_escaped() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    fs::write(
+        packages.join("a.yml"),
+        format!(
+            "name: a\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    dotfiles:\n\
+             \x20     - source: rc\n        target: ~/.rc\n"
+        ),
+    )
+    .unwrap();
+    fs::write(packages.join("x\u{200B}.yml"), "name: [unclosed\n").unwrap();
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "spec", "validate", "a"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains(r"Could not check packages/x\u{200b}.yml for an entry")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
+// A package directory outside any git repository is named as a path, so a
+// U+200B and a line feed in it show escaped on the error's one line.
+#[test]
+fn sync_push_names_a_directory_outside_a_repository_escaped() {
+    let temp = tempfile::tempdir().unwrap();
+    let packages = temp.path().join("p\u{200B}k\nx");
+    fs::create_dir_all(&packages).unwrap();
+    let config = temp.path().join(".config").join("selfie");
+    fs::create_dir_all(&config).unwrap();
+    fs::write(
+        config.join("config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: \"{}\"\n",
+            packages.display().to_string().replace('\n', "\\n")
+        ),
+    )
+    .unwrap();
+    // Discovery walks up from the directory, and selfie's does not read
+    // GIT_CEILING_DIRECTORIES, so a TMPDIR inside a work tree finds that one.
+    let inside = common::isolated_git()
+        .arg("-C")
+        .arg(&packages)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .unwrap();
+    assert!(
+        !inside.status.success(),
+        "the sandbox {} is inside a git work tree, so this test cannot run here",
+        temp.path().display()
+    );
+
+    let output = sandboxed_std_command(&temp)
+        .args(["--no-color", "sync", "push", "--yes"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(output.status.code(), Some(FAILED), "{stderr}");
+    assert!(
+        stderr.lines().any(
+            |line| line.contains("not a git repository: ") && line.ends_with(r"/p\u{200b}k\nx")
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains('\u{200B}'), "{stderr:?}");
+}
+
 // A conflict's diff shows each line of content with its escape sequences as
 // escapes and its tabs as tabs, and a content line starting `-- ` or `++ ` as
 // content, not as a header.

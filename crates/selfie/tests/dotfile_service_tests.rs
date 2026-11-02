@@ -21865,7 +21865,10 @@ mod collisions_with_unreadable_specs {
         );
         let warned_at = events
             .iter()
-            .position(|e| matches!(e, PackageEvent::Warning { message, .. } if message.starts_with("Could not check")))
+            .position(|e| {
+                test_common::warning_text(e)
+                    .is_some_and(|words| words.starts_with("Could not check"))
+            })
             .unwrap();
         let deployed_at = events
             .iter()

@@ -439,16 +439,37 @@ async fn install_pkg_with_a_slow_check(slow: &str) -> Vec<PackageEvent> {
     install_pkg_with_a_failing_check(slow, timed_out(&check)).await
 }
 
-// Counts the warnings whose message starts with `prefix`.
+// Counts the warnings whose words start with `prefix`.
 fn warnings_starting(events: &[PackageEvent], prefix: &str) -> usize {
     events
         .iter()
         .filter(|event| {
-            matches!(
-                event,
-                PackageEvent::Warning { message, .. } if message.starts_with(prefix)
-            )
+            test_common::warning_text(event).is_some_and(|words| words.starts_with(prefix))
         })
+        .count()
+}
+
+// The values each warning sent composed names as parts. A warning sent as
+// finished text is not one of them. Its twin for the crate's unit tests is
+// `warning_values` in src/package/event.rs, which panics on a text warning
+// instead; keep the two in step.
+fn warning_values(events: &[PackageEvent]) -> Vec<Vec<String>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            PackageEvent::ComposedWarning { warning, .. } => Some(selfie::parts::values_of(
+                &selfie::parts::Message::from(selfie::parts::Composed::parts(warning)),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+// Counts the warnings worded `words`, whole.
+fn warnings_worded(events: &[PackageEvent], words: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| test_common::warning_text(event).as_deref() == Some(words))
         .count()
 }
 
@@ -522,13 +543,17 @@ async fn a_recommend_whose_post_install_check_times_out_leaves_the_run_clean() {
     assert!(gaps(success).is_empty(), "{success:?}");
     assert_eq!(success.outcome(), Outcome::Clean);
     assert_eq!(
-        warnings_starting(
+        warnings_worded(
             &events,
-            "Recommended package 'rec' installed, but its check gave no answer"
+            "Recommended package 'rec' installed, but its check gave no answer: `check-rec` \
+             timed out after 1 second, the limit `command_timeout` sets"
         ),
         1,
         "{events:?}"
     );
+    // The check's failure stays text until selfie-2kwj makes it Composed, so
+    // only the recommend is a part here.
+    assert_eq!(warning_values(&events), [["rec"]]);
 }
 
 // A recommend's own dependency is named as installed for the recommend, not
@@ -547,13 +572,36 @@ async fn a_recommends_dependency_is_named_for_the_recommend() {
 
     assert_eq!(completed(&events).outcome(), Outcome::Clean);
     assert_eq!(
-        warnings_starting(
+        warnings_worded(
             &events,
-            "'lib', a dependency of recommended package 'rec', installed, but its check gave no answer"
+            "'lib', a dependency of recommended package 'rec', installed, but its check gave no \
+             answer: `check-lib` timed out after 1 second, the limit `command_timeout` sets"
         ),
         1,
         "{events:?}"
     );
+    // The check's failure stays text until selfie-2kwj makes it Composed, so
+    // only the two packages are parts here.
+    assert_eq!(warning_values(&events), [["lib", "rec"]]);
+}
+
+// An install command that fails is a warning naming the package, whole, so a
+// change to how it is built cannot change its words.
+#[tokio::test]
+async fn a_failed_install_command_is_worded_whole() {
+    let temp = TempDir::new().unwrap();
+    write_spec(temp.path(), "pkg", "");
+    let runner = FakeCommandRunner::new().failing("true", b"");
+
+    let events = install(&temp, runner).await;
+
+    assert!(failed(&events).to_string().contains("true"), "{events:?}");
+    assert_eq!(
+        warnings_worded(&events, "Package 'pkg' installation command failed"),
+        1,
+        "{events:?}"
+    );
+    assert_eq!(warning_values(&events), [["pkg"]]);
 }
 
 // Each `SettledEarlier` event as (package, recommend, how), in order.

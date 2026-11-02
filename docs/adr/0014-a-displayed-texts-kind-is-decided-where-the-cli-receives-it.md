@@ -142,15 +142,21 @@ Options considered:
    - `OperationFailure::NotInstalledAfterInstall`'s sentence, which names the package requiring this
      one in a string;
    - `Uncreatable`'s refusal;
-   - `OperationFailure::UnreadableSpec`;
    - `ConfigLoadError`;
    - the warning that a run skips a spec file;
    - the warning that a run did not check collisions with sources it could not use;
    - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
    - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
-     or `OperationFailure` holding one, into a `String`, such as a warning that `spec create` or
-     `spec remove` sends, `sync status`'s drift error, and the warning that a run did not check
-     collisions with a directory it could not list;
+     or `OperationFailure` holding one, into a `String`;
+   - the "Git status unavailable" warning that `spec info`, `spec list` and `spec search` send,
+     which holds git's error text, and with it any path git names, as text;
+   - `OperationFailure::UnreadableSpec`'s reason, a `SpecRefusal` flattened into a `String` before
+     the failure holds it, which `OperationFailure::message()` appends as text;
+   - the check failure that a recommend's "installed, but its check gave no answer" warning appends,
+     which names the check command and its working directory as text;
+   - the `OperationFailure` kinds `message()` words as text: `InvalidSpec`'s package name,
+     `CommandError`'s command and working directory, and `Generic`'s free text, which can hold a
+     path;
    - an `io::Error` that `tempfile` built, whose message names its temporary file and enters a
      sentence as `Text`.
 
@@ -384,10 +390,11 @@ writer escapes every escape sequence (§1.8).
    spec file's read failure, `PackageParseError`, and the `PackageParseKind` it holds, with the
    `RefusedSpecFile`, `UnreadableSpecFile` and `SymlinkReason` that kind carries; the `Message` a
    not-found failure appends to name a spec file declaring the name; the `CollectionRefusal` a
-   collection gives; the `Message` that words an unknown key, naming it as a `Name`; and a
-   validation issue's message, `IssueMessage`, which is its own text, a `Message` naming values as
-   parts, the deploy state's notice or a `DirectoryIssue`, and which the issue's event payload
-   carries.
+   collection gives; the `UnplacedWrite` a spec write refused as unplaced carries; the `SyncError` a
+   sync gives, with the `NotARepository` it refuses a directory outside any git repository with; the
+   `Message` that words an unknown key, naming it as a `Name`; and a validation issue's message,
+   `IssueMessage`, which is its own text, a `Message` naming values as parts, the deploy state's
+   notice or a `DirectoryIssue`, and which the issue's event payload carries.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as

@@ -14,6 +14,7 @@ use crate::{
         port::PackageRepository,
         service::{InstallOptions, ProgressTracker},
     },
+    parts::{Message, Parts},
 };
 
 use tokio_util::sync::CancellationToken;
@@ -536,9 +537,11 @@ where
 
     if !install_output.is_success() {
         sender
-            .send_warning(format!(
-                "Package '{}' installation command failed",
-                context.package_name
+            .send_composed_warning(Message::from(
+                Parts::new()
+                    .text("Package '")
+                    .name(context.package_name)
+                    .text("' installation command failed"),
             ))
             .await;
         // The install command's stdout has already been streamed to the caller
@@ -916,17 +919,26 @@ where
         // warning, never one of the run's gaps.
         if let Some(gap) = installed.gap {
             let whose = if gap.package_name() == recommend_name {
-                format!("Recommended package '{recommend_name}'")
+                Parts::new()
+                    .text("Recommended package '")
+                    .name(recommend_name)
+                    .text("'")
             } else {
-                format!(
-                    "'{}', a dependency of recommended package '{recommend_name}',",
-                    gap.package_name()
-                )
+                Parts::new()
+                    .text("'")
+                    .name(gap.package_name())
+                    .text("', a dependency of recommended package '")
+                    .name(recommend_name)
+                    .text("',")
             };
+            // Only a check that ran after the install leaves a gap here. Its
+            // failure names the check command and its directory as text until
+            // the check failure is Composed (selfie-2kwj).
             sender
-                .send_warning(format!(
-                    "{whose} installed, but its check gave no answer: {}",
-                    gap.reason()
+                .send_composed_warning(Message::from(
+                    whose
+                        .text(" installed, but its check gave no answer: ")
+                        .text(gap.reason().to_string()),
                 ))
                 .await;
         }
