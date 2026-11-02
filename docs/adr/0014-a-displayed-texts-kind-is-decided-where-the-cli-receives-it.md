@@ -147,7 +147,6 @@ Options considered:
    - the warning that a run skips a spec file;
    - the warning that a run did not check collisions with sources it could not use;
    - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
-   - `PackageRepoError::FileSystemError`'s sentence, which holds a `FileSystemError` as prose;
    - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
      or `OperationFailure` holding one, into a `String`, such as a warning that `spec create` or
      `spec remove` sends, a failed recommend's reason, `sync status`'s drift error, and the warning
@@ -380,13 +379,14 @@ writer escapes every escape sequence (§1.8).
    `ApplyStop` an apply with `stop_on_error` gives for a stop other than the deploy state's; the
    `Message` a dotfile entry's `Refusal` carries as its sentence and its `Failure` as its sentence
    and its error, and the `Message` a track's `OperationFailure::Track` carries; the
-   `ComposedWarning` a `PackageEvent::ComposedWarning` carries; a package's `PackageError`; a spec
-   file's read failure, `PackageParseError`, and the `PackageParseKind` it holds, with the
-   `RefusedSpecFile`, `UnreadableSpecFile` and `SymlinkReason` that kind carries; the `Message` a
-   not-found failure appends to name a spec file declaring the name; the `CollectionRefusal` a
-   collection gives; the `Message` that words an unknown key, naming it as a `Name`; and a
-   validation issue's message, `IssueMessage`, which is its own text, the deploy state's notice or a
-   `DirectoryIssue`.
+   `ComposedWarning` a `PackageEvent::ComposedWarning` carries; a package's `PackageError`; a
+   repository's `PackageRepoError`, with the `UnwritableReason` it carries, and the `LookupFailure`
+   that holds one; a spec file's read failure, `PackageParseError`, and the `PackageParseKind` it
+   holds, with the `RefusedSpecFile`, `UnreadableSpecFile` and `SymlinkReason` that kind carries;
+   the `Message` a not-found failure appends to name a spec file declaring the name; the
+   `CollectionRefusal` a collection gives; the `Message` that words an unknown key, naming it as a
+   `Name`; and a validation issue's message, `IssueMessage`, which is its own text, the deploy
+   state's notice or a `DirectoryIssue`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as

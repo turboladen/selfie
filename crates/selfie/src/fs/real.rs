@@ -11,7 +11,7 @@ use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
 use super::filesystem::{
     AbsentReason, DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent, IoFailure,
-    OpenRefusal, Placed, Removal, RepositoryRead, TargetRead, parent_dir,
+    IrregularKind, OpenRefusal, Placed, Removal, RepositoryRead, TargetRead, parent_dir,
 };
 use super::target::TargetPath;
 
@@ -46,24 +46,29 @@ fn symlink_refusal(path: &Path) -> Option<FileSystemError> {
 /// it safe to ask this question about the very targets that would hang.
 // Every read of a path that selfie does not control asks this first: opening a fifo to
 // read blocks, and nothing else on a read path checks.
-fn irregular_kind(path: &Path) -> Option<&'static str> {
+fn irregular_kind(path: &Path) -> Option<IrregularKind> {
+    irregular_of(&fs::metadata(path).ok()?)
+}
+
+/// What irregular file `metadata` describes, or `None` for a regular file, a
+/// directory or a symlink.
+fn irregular_of(metadata: &fs::Metadata) -> Option<IrregularKind> {
     use std::os::unix::fs::FileTypeExt as _;
 
-    let metadata = fs::metadata(path).ok()?;
     let file_type = metadata.file_type();
 
     if file_type.is_fifo() {
         // The blocking one: `open` waits for the other end.
-        return Some("named pipe (fifo)");
+        return Some(IrregularKind::Fifo);
     }
     if file_type.is_socket() {
-        return Some("socket");
+        return Some(IrregularKind::Socket);
     }
     if file_type.is_char_device() {
-        return Some("character device");
+        return Some(IrregularKind::CharacterDevice);
     }
     if file_type.is_block_device() {
-        return Some("block device");
+        return Some(IrregularKind::BlockDevice);
     }
 
     // A **directory** is deliberately not one of these: opening one never blocks,
@@ -623,21 +628,10 @@ fn not_a_directory_state(ancestor: Option<PathBuf>, error: io::Error) -> Directo
 /// `lstat` that has already been tested for one, or a followed stat, which cannot be
 /// one.
 fn file_kind(metadata: &fs::Metadata) -> &'static str {
-    use std::os::unix::fs::FileTypeExt as _;
-
-    let file_type = metadata.file_type();
-    if file_type.is_file() {
+    if metadata.file_type().is_file() {
         "regular file"
-    } else if file_type.is_fifo() {
-        "named pipe (fifo)"
-    } else if file_type.is_socket() {
-        "socket"
-    } else if file_type.is_char_device() {
-        "character device"
-    } else if file_type.is_block_device() {
-        "block device"
     } else {
-        "not a directory"
+        irregular_of(metadata).map_or("not a directory", IrregularKind::label)
     }
 }
 
@@ -647,8 +641,6 @@ fn file_kind(metadata: &fs::Metadata) -> &'static str {
 /// Takes a non-following stat's metadata or a descriptor's, and answers for the
 /// name either way: a link is reported as a link, never as what it points at.
 fn not_regular(path: &Path, metadata: &fs::Metadata) -> Option<TargetRead> {
-    use std::os::unix::fs::FileTypeExt as _;
-
     let file_type = metadata.file_type();
     if file_type.is_symlink() {
         return Some(TargetRead::Link {
@@ -658,16 +650,7 @@ fn not_regular(path: &Path, metadata: &fs::Metadata) -> Option<TargetRead> {
     if file_type.is_dir() {
         return Some(TargetRead::Directory);
     }
-    if file_type.is_fifo()
-        || file_type.is_socket()
-        || file_type.is_char_device()
-        || file_type.is_block_device()
-    {
-        return Some(TargetRead::Irregular {
-            kind: file_kind(metadata),
-        });
-    }
-    None
+    irregular_of(metadata).map(|kind| TargetRead::Irregular { kind })
 }
 
 /// What a failure to open or read a regular file that is there says: unreadable
@@ -1693,7 +1676,7 @@ mod private_write_tests {
 
             match err {
                 FileSystemError::IrregularTarget { kind, .. } => {
-                    assert_eq!(kind, "named pipe (fifo)");
+                    assert_eq!(kind, IrregularKind::Fifo);
                 }
                 other => panic!("expected an irregular-target refusal, got {other:?}"),
             }
@@ -2277,7 +2260,7 @@ mod irregular_targets {
 
         match irregular_refusal(&fifo) {
             Some(FileSystemError::IrregularTarget { kind, path }) => {
-                assert_eq!(kind, "named pipe (fifo)");
+                assert_eq!(kind, IrregularKind::Fifo);
                 assert_eq!(path, fifo);
             }
             other => panic!("expected an irregular-target refusal, got {other:?}"),
@@ -2291,7 +2274,9 @@ mod irregular_targets {
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
 
         match irregular_refusal(&path) {
-            Some(FileSystemError::IrregularTarget { kind, .. }) => assert_eq!(kind, "socket"),
+            Some(FileSystemError::IrregularTarget { kind, .. }) => {
+                assert_eq!(kind, IrregularKind::Socket)
+            }
             other => panic!("expected an irregular-target refusal, got {other:?}"),
         }
     }
@@ -2300,7 +2285,7 @@ mod irregular_targets {
     fn a_character_device_is_named_as_one() {
         match irregular_refusal(Path::new("/dev/null")) {
             Some(FileSystemError::IrregularTarget { kind, .. }) => {
-                assert_eq!(kind, "character device");
+                assert_eq!(kind, IrregularKind::CharacterDevice);
             }
             other => panic!("expected an irregular-target refusal, got {other:?}"),
         }
@@ -2334,7 +2319,7 @@ mod irregular_targets {
 
         match irregular_refusal(&link) {
             Some(FileSystemError::IrregularTarget { kind, .. }) => {
-                assert_eq!(kind, "named pipe (fifo)");
+                assert_eq!(kind, IrregularKind::Fifo);
             }
             other => panic!("a link to a fifo must be refused, got {other:?}"),
         }
@@ -2381,7 +2366,7 @@ mod irregular_targets {
 
         match result {
             Err(FileSystemError::IrregularTarget { kind, .. }) => {
-                assert_eq!(kind, "named pipe (fifo)");
+                assert_eq!(kind, IrregularKind::Fifo);
             }
             other => panic!("expected an irregular-target refusal, got {other:?}"),
         }
@@ -2412,7 +2397,7 @@ mod irregular_targets {
 
         match result {
             Err(FileSystemError::IrregularTarget { kind, .. }) => {
-                assert_eq!(kind, "named pipe (fifo)");
+                assert_eq!(kind, IrregularKind::Fifo);
             }
             other => panic!("expected an irregular-target refusal, got {other:?}"),
         }
@@ -2435,7 +2420,7 @@ mod irregular_targets {
 
         match err {
             FileSystemError::IrregularTarget { kind, .. } => {
-                assert_eq!(kind, "character device");
+                assert_eq!(kind, IrregularKind::CharacterDevice);
             }
             other => panic!("expected an irregular-target refusal, got {other:?}"),
         }
@@ -2478,7 +2463,9 @@ mod no_follow_read_tests {
         assert!(
             matches!(
                 read_target(&to_socket, Links::Followed),
-                Ok(TargetRead::Irregular { kind: "socket" })
+                Ok(TargetRead::Irregular {
+                    kind: crate::fs::IrregularKind::Socket
+                })
             ),
             "{:?}",
             read_target(&to_socket, Links::Followed)
@@ -2573,7 +2560,7 @@ mod no_follow_read_tests {
         assert!(matches!(
             result.unwrap(),
             TargetRead::Irregular {
-                kind: "named pipe (fifo)"
+                kind: crate::fs::IrregularKind::Fifo
             }
         ));
     }
@@ -2604,7 +2591,7 @@ mod no_follow_read_tests {
         assert!(matches!(
             read(&fifo).unwrap(),
             TargetRead::Irregular {
-                kind: "named pipe (fifo)"
+                kind: crate::fs::IrregularKind::Fifo
             }
         ));
     }

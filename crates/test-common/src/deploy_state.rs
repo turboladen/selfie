@@ -180,7 +180,7 @@ pub fn every_cause(at: &dyn Fn(&str) -> PathBuf) -> Vec<FileSystemError> {
         },
         FileSystemError::IrregularTarget {
             path: at("deploy-state.yml"),
-            kind: "fifo",
+            kind: selfie::fs::IrregularKind::Fifo,
         },
         FileSystemError::BelowNonDirectory {
             path: at("deploy-state.yml"),
@@ -282,7 +282,7 @@ pub fn every_state_value(root: &str) -> Vec<StateValue> {
     values.extend([
         StateLoadFailure::Irregular {
             path: at("deploy-state.yml"),
-            kind: "fifo",
+            kind: selfie::fs::IrregularKind::Fifo,
         },
         StateLoadFailure::Read {
             path: at("deploy-state.yml"),

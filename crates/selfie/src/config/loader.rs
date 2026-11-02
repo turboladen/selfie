@@ -82,10 +82,14 @@ pub enum ConfigLoadError {
     // is rendered alone -- every command loads the configuration before doing
     // anything, so there is no surrounding context to borrow a path from.
     #[error(
-        "{}: the configuration file is a {kind}, not a regular file. Replace it with a regular file or remove it.",
-        .path.display()
+        "{}: the configuration file is a {}, not a regular file. Replace it with a regular file or remove it.",
+        .path.display(),
+        .kind.label()
     )]
-    IrregularFile { path: PathBuf, kind: &'static str },
+    IrregularFile {
+        path: PathBuf,
+        kind: crate::fs::IrregularKind,
+    },
 
     /// The configuration file is a symbolic link whose target does not exist
     ///

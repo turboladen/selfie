@@ -33,7 +33,7 @@ pub(crate) enum RefusalReason {
     /// asked about.
     UnknownEnvironmentKeys(Vec<(String, Vec<UnknownKey>)>),
     /// The top level could not be read back, carrying the parse failure.
-    UncheckedTopLevel(String),
+    UncheckedTopLevel(crate::yaml::ParseFailure),
     /// No environment is declared, carrying the issue `spec validate` raises for
     /// it so a caller reporting structured diagnostics states one category and
     /// one field rather than inventing its own.
@@ -129,11 +129,13 @@ impl Composed for RefusalReason {
             }
             // The parse failure ends the sentence: it is the parser's own words and
             // where it stopped, and anything after it would read as part of it.
-            Self::UncheckedTopLevel(error) => Parts::new().text(format!(
-                "its top-level keys could not be checked, so an unrecognized one -- a \
-                 misspelling, or an anchor named after a real field -- cannot be ruled out. The \
-                 re-read failed with: {error}"
-            )),
+            Self::UncheckedTopLevel(error) => Parts::new()
+                .text(
+                    "its top-level keys could not be checked, so an unrecognized one -- a \
+                     misspelling, or an anchor named after a real field -- cannot be ruled out. \
+                     The re-read failed with: ",
+                )
+                .cause(error),
             // The remedy travels with the message. Every other reason here ends
             // with what to do about it, and a bare "At least one environment must
             // be defined" leaves a reader to work out where the section goes.

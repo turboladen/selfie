@@ -635,7 +635,7 @@ mod tests {
                 config_dir,
                 FileSystemError::IrregularTarget {
                     path: config_dir.join("config.yaml"),
-                    kind: "named pipe (fifo)",
+                    kind: crate::fs::IrregularKind::Fifo,
                 },
             );
 
@@ -644,7 +644,7 @@ mod tests {
             match result.unwrap_err() {
                 ConfigLoadError::IrregularFile { path, kind } => {
                     assert_eq!(path, config_dir.join("config.yaml"));
-                    assert_eq!(kind, "named pipe (fifo)");
+                    assert_eq!(kind, crate::fs::IrregularKind::Fifo);
                 }
                 other => panic!("Expected IrregularFile, got: {other:?}"),
             }
@@ -659,7 +659,7 @@ mod tests {
                 config_dir,
                 FileSystemError::IrregularTarget {
                     path: config_dir.join("config.yaml"),
-                    kind: "socket",
+                    kind: crate::fs::IrregularKind::Socket,
                 },
             );
 
@@ -667,7 +667,10 @@ mod tests {
 
             assert!(matches!(
                 result.unwrap_err(),
-                ConfigLoadError::IrregularFile { kind: "socket", .. }
+                ConfigLoadError::IrregularFile {
+                    kind: crate::fs::IrregularKind::Socket,
+                    ..
+                }
             ));
         }
 
@@ -684,7 +687,7 @@ mod tests {
                 config_dir,
                 FileSystemError::IrregularTarget {
                     path: config_dir.join("config.yaml"),
-                    kind: "named pipe (fifo)",
+                    kind: crate::fs::IrregularKind::Fifo,
                 },
             );
 

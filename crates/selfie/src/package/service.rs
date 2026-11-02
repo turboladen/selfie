@@ -811,7 +811,7 @@ mod tests {
             (
                 "IrregularFile",
                 PackageParseKind::IrregularFile {
-                    kind: "named pipe (fifo)",
+                    kind: crate::fs::IrregularKind::Fifo,
                 },
             ),
             (

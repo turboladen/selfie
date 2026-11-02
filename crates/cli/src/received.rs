@@ -19,7 +19,7 @@ use selfie::package::event::{
 use selfie::package::event::{
     OperationFailure, OperationSuccess, RefusalKind, UncheckedSource, UnknownStatus,
 };
-use selfie::package::port::{PackageParseError, PackageParseKind, PackageRepoError};
+use selfie::package::port::{PackageParseError, PackageParseKind};
 use selfie::sync_service::port::PackageValidationIssue;
 use selfie::validation::{ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
@@ -317,22 +317,11 @@ pub(crate) fn refusal_reason(row: &RefusedSpec) -> Shown {
     }
 }
 
-/// A repository's error: a package error and a listing error from their
-/// parts.
-pub(crate) fn repo_error(error: &PackageRepoError) -> Shown {
-    match error {
-        PackageRepoError::PackageError(error) => composed(&**error),
-        PackageRepoError::PackageListError(error) => composed(error),
-        other => sentence(other).into(),
-    }
-}
-
-/// Why a dependency's status is unknown, with a lookup's error composed as
-/// [`repo_error`] composes it.
+/// Why a dependency's status is unknown, with a lookup's error from its parts.
 pub(crate) fn unknown_status(status: &UnknownStatus) -> Shown {
     match status {
-        UnknownStatus::LookupFailed(failure) => repo_error(&failure.clone().into_error()),
-        UnknownStatus::Error(error) => repo_error(error),
+        UnknownStatus::LookupFailed(failure) => composed(failure),
+        UnknownStatus::Error(error) => composed(error),
         other => sentence(other).into(),
     }
 }
@@ -348,6 +337,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         OperationFailure::Package(error) => composed(error),
         OperationFailure::DeployState(failure) => composed(failure),
         OperationFailure::PackageList(error) => composed(error),
+        OperationFailure::Repository(error) => composed(error),
         OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
         OperationFailure::Stopped(stop) => composed(stop),
         OperationFailure::Track(message) => composed(message),
@@ -461,7 +451,7 @@ pub(crate) fn config_load_error(error: &ConfigLoadError) -> Shown {
             "{}: the configuration file is a {}, not a regular file. Replace it with a regular \
              file or remove it.",
             DisplayPath::of(path),
-            Prose::new(kind)
+            Prose::new(kind.label())
         ),
         ConfigLoadError::UnresolvableFile { path } => shown!(
             "{}: the configuration file is a symbolic link that does not resolve. Restore or \
@@ -599,7 +589,7 @@ impl From<&SpecListItem> for SpecItem {
 mod tests {
     use super::*;
     use selfie::package::event::UnknownStatus;
-    use selfie::package::port::PackageError;
+    use selfie::package::port::{PackageError, PackageRepoError};
 
     // A name that shows as written is pre-filled; one the prompt can only show
     // escaped is unkeepable, so it is noted but never returned; a plain name
@@ -706,7 +696,7 @@ mod tests {
             },
             ConfigLoadError::IrregularFile {
                 path: "/c/config.yaml".into(),
-                kind: "fifo",
+                kind: selfie::fs::IrregularKind::Fifo,
             },
             ConfigLoadError::UnresolvableFile {
                 path: "/c/config.yaml".into(),
@@ -1556,7 +1546,7 @@ mod tests {
             let routes = [
                 composed(&error),
                 failure(&OperationFailure::PackageList(error.clone())),
-                repo_error(&PackageRepoError::PackageListError(error.clone())),
+                composed(&PackageRepoError::PackageListError(error.clone())),
                 composed(&Invalid::DotfilesDirectoryUnreadable(error.clone())),
             ];
             for shown in routes {
@@ -1672,8 +1662,8 @@ mod tests {
     }
 
     // Two package errors that no command renders itself are shown with their
-    // environment and file escaped, one through `failure` and one through
-    // `repo_error`.
+    // environment and file escaped, one through `failure` and one as a
+    // repository error.
     #[test]
     fn a_package_error_is_shown_with_its_values_escaped() {
         let environment = PackageError::EnvironmentNotFound {
@@ -1690,7 +1680,26 @@ mod tests {
 
         let shown = failure(&OperationFailure::Package(environment)).into_string();
         assert_eq!(shown, r"Environment `w\u{200b}k` not found in package `a`");
-        let shown = repo_error(&PackageRepoError::from(exists)).into_string();
+        let shown = composed(&PackageRepoError::from(exists)).into_string();
         assert_eq!(shown, r"Package `a` already exists at /p\u{200b}k/a.yml");
+    }
+
+    // A repository failure shows its file and a symlink's destination escaped.
+    #[test]
+    fn a_repository_failure_is_shown_with_its_values_escaped() {
+        use selfie::package::port::{SymlinkReason, UnwritableReason};
+
+        let error = PackageRepoError::UnwritablePath {
+            path: "/p\u{200B}k/a.yml".into(),
+            reason: UnwritableReason::Symlink(SymlinkReason {
+                to: Some("/else\u{200B}where".into()),
+            }),
+        };
+
+        let shown = failure(&OperationFailure::from(error)).into_string();
+        assert_eq!(
+            shown,
+            r"refusing to write /p\u{200b}k/a.yml: it is a symlink to '/else\u{200b}where'. Remove what is at that path, or choose another name."
+        );
     }
 }

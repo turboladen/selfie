@@ -34,7 +34,7 @@ pub(crate) async fn handle_remove(
         // own sentence; one with nothing to suggest keeps the short line.
         Err(e) if e.means_no_such_package() => {
             if names_a_declaring_spec(&e) {
-                display.print_error(crate::received::repo_error(&e));
+                display.print_error(crate::received::composed(&e));
             } else {
                 display.print_error(shown!("Package '{}' not found.", shown_name));
             }
@@ -46,7 +46,7 @@ pub(crate) async fn handle_remove(
             display.print_error(shown!(
                 "Cannot remove '{}': {}",
                 shown_name,
-                crate::received::repo_error(&e)
+                crate::received::composed(&e)
             ));
             return Exit::Failed;
         }
@@ -60,7 +60,7 @@ pub(crate) async fn handle_remove(
                 "Cannot remove '{}': selfie could not load that spec, so it cannot \
                  tell what depends on it. Resolve what is reported below, then try again. {}",
                 shown_name,
-                crate::received::repo_error(&e)
+                crate::received::composed(&e)
             ));
             return Exit::Failed;
         }
@@ -77,7 +77,7 @@ pub(crate) async fn handle_remove(
         Some(e) => {
             display.print_warning(shown!(
                 "Could not check for dependent packages: {}",
-                crate::received::repo_error(e)
+                crate::received::composed(e)
             ));
             false
         }

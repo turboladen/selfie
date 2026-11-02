@@ -293,7 +293,7 @@ mod tests {
                 vec![crate::package::port::PackageParseError::new(
                     "/test/packages/ghost.yml",
                     crate::package::port::PackageParseKind::IrregularFile {
-                        kind: "named pipe (fifo)",
+                        kind: crate::fs::IrregularKind::Fifo,
                     },
                 )],
             ))

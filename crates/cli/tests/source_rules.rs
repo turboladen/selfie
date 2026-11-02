@@ -1694,7 +1694,6 @@ fn composed_types() -> Vec<String> {
     impls.0
 }
 
-// Each type `sentence.rs` lists in `sentences!`, by name.
 // Every type `sentence.rs` lists in `sentences!`, as written there.
 fn sentence_list() -> Vec<syn::Type> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sentence.rs");
@@ -1713,6 +1712,8 @@ fn sentence_list() -> Vec<syn::Type> {
         .collect()
 }
 
+// Each type `sentence.rs` lists in `sentences!`, by its name alone, as
+// `composed_types` names a Composed impl, so the two lists can be compared.
 fn sentence_types() -> Vec<String> {
     sentence_list().iter().map(last_segment).collect()
 }

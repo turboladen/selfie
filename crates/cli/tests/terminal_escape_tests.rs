@@ -1449,3 +1449,38 @@ fn spec_validate_all_names_an_ambiguous_names_directory_escaped() {
     assert!(row.contains(r"p\u{200b}k: m.yaml, m.yml"), "{row}");
     assert!(!row.contains('\u{200B}'), "{row:?}");
 }
+
+// A track into a spec carrying a key selfie does not model refuses to rewrite
+// it, and names the spec and the key escaped.
+#[test]
+fn a_refused_spec_save_names_the_spec_and_its_key_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(
+        &temp,
+        &[(
+            "c.yml",
+            &format!(
+                "name: c\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \
+                 \"a\\u200Budt\": 1\n"
+            ),
+        )],
+    );
+    let tracked = temp.path().join(".rc");
+    fs::write(&tracked, "x\n").unwrap();
+
+    let printed = printed(
+        &temp,
+        &["package", "track-dotfile", "c", tracked.to_str().unwrap()],
+    );
+
+    let refusal = line_with(&printed, "Cannot save the spec: refusing to rewrite");
+    assert!(
+        refusal.contains(r"p\u{200b}k/c.yml: unrecognized"),
+        "{refusal}"
+    );
+    assert!(
+        refusal.contains(&format!(r"environments.{SELFIE_ENV}.a\u{{200b}}udt")),
+        "{refusal}"
+    );
+    assert!(!refusal.contains('\u{200B}'), "{refusal:?}");
+}

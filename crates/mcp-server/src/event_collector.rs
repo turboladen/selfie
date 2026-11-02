@@ -3192,7 +3192,7 @@ mod tests {
         let error = selfie::package::port::PackageParseError::new(
             "/packages/ghost.yml",
             selfie::package::port::PackageParseKind::IrregularFile {
-                kind: "named pipe (fifo)",
+                kind: selfie::fs::IrregularKind::Fifo,
             },
         );
 

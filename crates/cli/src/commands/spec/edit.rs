@@ -38,7 +38,7 @@ pub(crate) async fn handle_edit(
             display.print_error(shown!(
                 "Cannot edit '{}': {}",
                 Name::new(package_name),
-                crate::received::repo_error(&e)
+                crate::received::composed(&e)
             ));
             return Exit::Failed;
         }
@@ -48,7 +48,7 @@ pub(crate) async fn handle_edit(
                  that name, and opens no new package beside it. Edit the existing file directly. \
                  {}",
                 Name::new(package_name),
-                crate::received::repo_error(&e)
+                crate::received::composed(&e)
             ));
             return Exit::Failed;
         }

@@ -258,7 +258,10 @@ pub enum StateLoadFailure {
     /// The state file could not be written, though the permissions allow it.
     StateNotWritable(StateSaveError),
     /// Something that is not a regular file sits at the path.
-    Irregular { path: PathBuf, kind: &'static str },
+    Irregular {
+        path: PathBuf,
+        kind: crate::fs::IrregularKind,
+    },
     /// The file exists and could not be read.
     Read {
         path: PathBuf,
@@ -308,7 +311,8 @@ impl Composed for StateLoadFailure {
                 .text("Cannot read the deploy state: '")
                 .path(path)
                 .text(format!(
-                    "' is a {kind}. Remove it, or point state_directory elsewhere"
+                    "' is a {}. Remove it, or point state_directory elsewhere",
+                    kind.label()
                 )),
             Self::Read { path, cause } => parts
                 .text("Cannot read deploy state '")
@@ -1318,7 +1322,7 @@ mod tests {
         fs.expect_irregular_target_refusal().returning(|path| {
             Some(FileSystemError::IrregularTarget {
                 path: path.path().to_path_buf(),
-                kind: "named pipe (fifo)",
+                kind: crate::fs::IrregularKind::Fifo,
             })
         });
 

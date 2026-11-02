@@ -1029,7 +1029,7 @@ mod tests {
                 Err(selfie::package::port::PackageParseError::new(
                     "/test/packages/broken.yml",
                     selfie::package::port::PackageParseKind::IrregularFile {
-                        kind: "named pipe (fifo)",
+                        kind: selfie::fs::IrregularKind::Fifo,
                     },
                 )),
             ]))
