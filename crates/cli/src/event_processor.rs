@@ -267,10 +267,7 @@ impl EventProcessor {
                 self.display.print_warning(received::message(message));
                 // Warnings don't set failure exit code by default
             }
-            PackageEvent::DeployStateWarning { warning, .. } => {
-                self.display.print_warning(received::composed(&warning));
-            }
-            PackageEvent::DotfilesDirectoryWarning { warning, .. } => {
+            PackageEvent::ComposedWarning { warning, .. } => {
                 self.display.print_warning(received::composed(&warning));
             }
 

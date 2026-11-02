@@ -738,7 +738,7 @@ where
         match load_deploy_state(filesystem, config.state_directory().map(PathBuf::as_path)) {
             StateLoad::Usable(loaded) => {
                 if let Some(warning) = loaded.directory_warning() {
-                    sender.send_deploy_state_warning(warning.clone()).await;
+                    sender.send_composed_warning(warning.clone()).await;
                 }
                 Recorder::new(loaded)
             }

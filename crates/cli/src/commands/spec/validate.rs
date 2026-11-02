@@ -3,8 +3,8 @@ use crate::received;
 use crate::terminal_text::{DisplayPath, Literal, Name, Shown, lit, shown};
 use selfie::package::{
     event::{
-        CollectionRefusal, DotfilesDirectoryWarning, OperationResult, OperationSuccess, Outcome,
-        PackageEvent, RefusedPackage, SpecStatus, ValidationResultData,
+        CollectionRefusal, ComposedWarning, DotfilesDirectoryWarning, OperationResult,
+        OperationSuccess, Outcome, PackageEvent, RefusedPackage, SpecStatus, ValidationResultData,
     },
     port::PackageParseError,
     service::SpecService,
@@ -112,10 +112,15 @@ fn handle_validate_all_event(
             held.results.push(validation_result.clone());
             true
         }
+        // A deploy-state warning is not held: it prints in stream order, through
+        // the shared handler.
         PackageEvent::SpecSkipped { .. }
         | PackageEvent::PackagesRefused { .. }
         | PackageEvent::Warning { .. }
-        | PackageEvent::DotfilesDirectoryWarning { .. } => {
+        | PackageEvent::ComposedWarning {
+            warning: ComposedWarning::DotfilesDirectory(_) | ComposedWarning::Message(_),
+            ..
+        } => {
             held.warnings.push(event.clone());
             true
         }
@@ -165,8 +170,13 @@ fn print_unlisted_warnings(
                     display.print_warning(line);
                 }
             }
-            PackageEvent::DotfilesDirectoryWarning { warning, .. }
-                if !listed(&|r| names_directory(r, warning)) =>
+            // Every kind prints, except a directory warning the table already lists.
+            PackageEvent::ComposedWarning { warning, .. }
+                if !matches!(
+                    warning,
+                    ComposedWarning::DotfilesDirectory(directory)
+                        if listed(&|r| names_directory(r, directory))
+                ) =>
             {
                 display.print_warning(received::composed(warning));
             }
@@ -550,25 +560,30 @@ mod tests {
 
     // A dotfiles directory the run lists as unvalidated is said once, in its
     // entry, and its warning is not printed beside it. A warning about another
-    // directory is still printed, so the warning is held and matched rather
-    // than dropped.
+    // directory, and a warning of another kind, are each still printed once, so
+    // every held warning is matched rather than dropped.
     #[tokio::test]
     async fn a_listed_directory_is_said_once() {
-        use selfie::package::event::{DotfilesDirectoryWarning, StepCount};
+        use selfie::package::event::StepCount;
 
         let denied = test_common::permission_denied;
         let listed = directory("/listed", selfie::fs::DirectoryState::Unlistable(denied()));
         let other = directory("/other", selfie::fs::DirectoryState::Unlistable(denied()));
         let events = vec![
-            PackageEvent::DotfilesDirectoryWarning {
+            PackageEvent::ComposedWarning {
                 operation_info: info(),
                 warning: DotfilesDirectoryWarning::Unreadable(Unreadable::Unlistable(
                     listed.clone(),
-                )),
+                ))
+                .into(),
             },
-            PackageEvent::DotfilesDirectoryWarning {
+            PackageEvent::ComposedWarning {
                 operation_info: info(),
-                warning: DotfilesDirectoryWarning::Unreadable(Unreadable::Unlistable(other)),
+                warning: DotfilesDirectoryWarning::Unreadable(Unreadable::Unlistable(other)).into(),
+            },
+            PackageEvent::ComposedWarning {
+                operation_info: info(),
+                warning: test_common::message("another kind of warning").into(),
             },
             PackageEvent::Completed {
                 operation_info: info(),
@@ -600,6 +615,49 @@ mod tests {
             1,
             "{out}"
         );
+        assert_eq!(out.matches("another kind of warning").count(), 1, "{out}");
+    }
+
+    // A deploy-state warning is not held for the flush: it goes to the shared
+    // handler in stream order. A dotfiles-directory warning and any other
+    // composed warning are held.
+    #[test]
+    fn only_a_deploy_state_warning_is_not_held() {
+        use selfie::dotfile_service::{DeployStateWarning, StateLoadFailure};
+
+        let display = DisplayManager::new(false);
+        let mut held = Held::default();
+        let event = |warning: ComposedWarning| PackageEvent::ComposedWarning {
+            operation_info: info(),
+            warning,
+        };
+        let deploy_state = DeployStateWarning::ReadingPast(StateLoadFailure::Empty {
+            path: "/state/deploy-state.yml".into(),
+        });
+        let directory = DotfilesDirectoryWarning::Unreadable(Unreadable::Unlistable(directory(
+            "/d",
+            selfie::fs::DirectoryState::Unlistable(test_common::permission_denied()),
+        )));
+
+        assert!(!handle_validate_all_event(
+            &event(deploy_state.into()),
+            &mut held,
+            false,
+            &display
+        ));
+        assert!(handle_validate_all_event(
+            &event(directory.into()),
+            &mut held,
+            false,
+            &display
+        ));
+        assert!(handle_validate_all_event(
+            &event(test_common::message("another warning").into()),
+            &mut held,
+            false,
+            &display
+        ));
+        assert_eq!(held.warnings.len(), 2);
     }
 
     // `validate --all` over a stream holding a skipped spec, a validated spec,

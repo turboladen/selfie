@@ -58,13 +58,13 @@ where
     ) {
         StateLoad::Usable(loaded) => {
             if let Some(warning) = loaded.directory_warning() {
-                sender.send_deploy_state_warning(warning.clone()).await;
+                sender.send_composed_warning(warning.clone()).await;
             }
             loaded.into_state()
         }
         StateLoad::Unusable(failure) => {
             sender
-                .send_deploy_state_warning(DeployStateWarning::ReadingPast(failure))
+                .send_composed_warning(DeployStateWarning::ReadingPast(failure))
                 .await;
             DeployState::empty()
         }

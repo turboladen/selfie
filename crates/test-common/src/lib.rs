@@ -30,7 +30,7 @@ pub use deadline::{ReleaseFifo, within_deadline};
 pub use deploy_state::{StateValue, every_cause, every_state_value, permission_denied};
 pub use events::{
     assert_failed_answer, assert_failed_operation, assert_successful_operation, collect_events,
-    create_test_operation_info, get_operation_result,
+    create_test_operation_info, get_operation_result, warning_text,
 };
 pub use fixtures::{
     TestPackageBehavior, create_circular_dependency, create_dependency_chain,

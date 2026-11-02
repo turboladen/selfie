@@ -420,7 +420,7 @@ async fn install_stops_at_a_check_that_cannot_enter_the_package_directory() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, PackageEvent::Warning { .. })),
+            .any(|e| test_common::warning_text(e).is_some()),
         "no warning precedes the failure: {events:?}"
     );
 }
@@ -499,7 +499,7 @@ async fn install_stops_at_a_pre_install_check_that_was_canceled() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, PackageEvent::Warning { .. })),
+            .any(|e| test_common::warning_text(e).is_some()),
         "no warning precedes the failure: {events:?}"
     );
 }
@@ -589,7 +589,7 @@ async fn a_post_install_check_that_says_not_installed_fails_the_install() {
     assert_eq!(completions, 1, "{events:?}");
     let warnings = events
         .iter()
-        .filter(|e| matches!(e, PackageEvent::Warning { .. }))
+        .filter(|e| test_common::warning_text(e).is_some())
         .count();
     assert_eq!(warnings, 0, "{events:?}");
 }
@@ -807,7 +807,7 @@ async fn a_cancel_before_the_post_install_check_ends_the_install_canceled() {
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, PackageEvent::Warning { .. })),
+            .any(|e| test_common::warning_text(e).is_some()),
         "no warning about a check that never ran: {events:?}"
     );
     let commands: Vec<String> = runner.inner.calls().into_iter().map(|(c, _)| c).collect();

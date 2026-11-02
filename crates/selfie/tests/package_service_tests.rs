@@ -1879,8 +1879,10 @@ mod validate_all_covers_standalone_specs {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                PackageEvent::DotfilesDirectoryWarning { warning, .. }
-                    if warning.to_string().contains("standalone dotfiles")
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::DotfilesDirectory(warning),
+                    ..
+                } if warning.to_string().contains("standalone dotfiles")
             )),
             "the warning must say which directory could not be read"
         );
@@ -2364,8 +2366,10 @@ mod validate_all_covers_standalone_specs {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                PackageEvent::DotfilesDirectoryWarning { warning, .. }
-                    if warning.to_string().contains("is not a directory")
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::DotfilesDirectory(warning),
+                    ..
+                } if warning.to_string().contains("is not a directory")
             )),
             "{events:?}"
         );
@@ -2386,7 +2390,7 @@ mod validate_all_covers_standalone_specs {
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, PackageEvent::Warning { .. })),
+                .any(|event| test_common::warning_text(event).is_some()),
             "{events:?}"
         );
     }

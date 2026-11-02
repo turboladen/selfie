@@ -142,9 +142,9 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
     events
         .iter()
         .flat_map(|event| match event {
-            PackageEvent::Warning { message, .. } => vec![message.clone()],
-            PackageEvent::DeployStateWarning { warning, .. } => vec![warning.to_string()],
-            PackageEvent::DotfilesDirectoryWarning { warning, .. } => vec![warning.to_string()],
+            PackageEvent::Warning { .. } | PackageEvent::ComposedWarning { .. } => {
+                test_common::warning_text(event).into_iter().collect()
+            }
             PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.to_string()],
             PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.to_string()],
             PackageEvent::PackagesRefused {
@@ -7723,6 +7723,7 @@ mod secret_bearing {
                     PackageEvent::DotfileFailed { .. }
                         | PackageEvent::DotfileRefused { .. }
                         | PackageEvent::Warning { .. }
+                        | PackageEvent::ComposedWarning { .. }
                 )),
                 "the canceled entry must not be reported: {events:?}"
             );
@@ -19016,8 +19017,10 @@ mod orphans {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                PackageEvent::DeployStateWarning { warning, .. }
-                    if warning.to_string().contains("Could not tidy")
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::DeployState(warning),
+                    ..
+                } if warning.to_string().contains("Could not tidy")
             )),
             "{events:#?}"
         );
@@ -19120,9 +19123,13 @@ mod orphans {
         let events = apply_refusing_state_writes(dirs).await;
         assert_eq!(entries_skipped_count(&events), 1, "{events:#?}");
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, PackageEvent::DeployStateWarning { .. })),
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::DeployState(_),
+                    ..
+                }
+            )),
             "{events:#?}"
         );
     }
@@ -19209,9 +19216,13 @@ mod orphans {
 
         let events = apply_refusing_state_writes(&dirs).await;
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, PackageEvent::DeployStateWarning { .. })),
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::ComposedWarning {
+                    warning: selfie::package::event::ComposedWarning::DeployState(_),
+                    ..
+                }
+            )),
             "{events:#?}"
         );
         assert_eq!(base_of(&dirs, &key), Some(BaseKind::DotfilesDirectory));

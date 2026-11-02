@@ -94,12 +94,10 @@ impl ApplyWarning {
             Self::SkippedSpec(error) => sender.send_spec_skipped(error.clone()).await,
             Self::AbsentDotfilesDirectory { path, reason } => {
                 sender
-                    .send_dotfiles_directory_warning(
-                        super::directory::DotfilesDirectoryWarning::Absent {
-                            path: path.clone(),
-                            reason: reason.clone(),
-                        },
-                    )
+                    .send_composed_warning(super::directory::DotfilesDirectoryWarning::Absent {
+                        path: path.clone(),
+                        reason: reason.clone(),
+                    })
                     .await;
             }
             Self::Named { message, .. } => sender.send_warning(message.clone()).await,
@@ -195,9 +193,9 @@ impl CollectionRefusal {
         match self {
             Self::UnreadableDotfilesDirectory(unreadable) => {
                 sender
-                    .send_dotfiles_directory_warning(
-                        super::directory::DotfilesDirectoryWarning::Unreadable(unreadable.clone()),
-                    )
+                    .send_composed_warning(super::directory::DotfilesDirectoryWarning::Unreadable(
+                        unreadable.clone(),
+                    ))
                     .await;
             }
             Self::AmbiguousName { name, paths, .. } => {

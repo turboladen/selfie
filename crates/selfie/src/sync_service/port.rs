@@ -164,6 +164,7 @@ pub trait SyncService: Send + Sync {
     /// Emits [`SyncRepoStatus`](crate::package::event::PackageEvent::SyncRepoStatus),
     /// then the drift check's own
     /// [`Warning`](crate::package::event::PackageEvent::Warning),
+    /// [`ComposedWarning`](crate::package::event::PackageEvent::ComposedWarning),
     /// [`PackagesRefused`](crate::package::event::PackageEvent::PackagesRefused),
     /// [`DotfileRefused`](crate::package::event::PackageEvent::DotfileRefused)
     /// and [`SpecSkipped`](crate::package::event::PackageEvent::SpecSkipped)

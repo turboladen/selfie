@@ -157,3 +157,14 @@ pub fn create_test_operation_info(
         timestamp: Instant::now(),
     }
 }
+
+/// The words of a warning event, whichever of the two warning events `event`
+/// is, or `None` for any other event.
+#[must_use]
+pub fn warning_text(event: &PackageEvent) -> Option<String> {
+    match event {
+        PackageEvent::Warning { message, .. } => Some(message.clone()),
+        PackageEvent::ComposedWarning { warning, .. } => Some(warning.to_string()),
+        _ => None,
+    }
+}

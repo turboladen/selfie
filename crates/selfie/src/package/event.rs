@@ -647,8 +647,10 @@ impl EventSender {
         self.send_log(LogLevel::Debug, message).await;
     }
 
-    pub(crate) async fn send_warning(&self, message: impl fmt::Display) {
-        self.send_log(LogLevel::Warning, message).await;
+    // A String, never an `impl Display`: a value worded from parts has a Display
+    // too, and must go through `send_composed_warning` instead.
+    pub(crate) async fn send_warning(&self, message: impl Into<String>) {
+        self.send_log(LogLevel::Warning, message.into()).await;
     }
 
     /// Report what the run could not use, and so could not check for a shared
@@ -662,27 +664,13 @@ impl EventSender {
         .await;
     }
 
-    /// Report something about the deploy state the command goes on past, as a
+    /// Report something the command goes on past, worded from parts, as a
     /// warning-level log record and the event.
-    pub(crate) async fn send_deploy_state_warning(
-        &self,
-        warning: crate::dotfile_service::DeployStateWarning,
-    ) {
+    pub(crate) async fn send_composed_warning(&self, warning: impl Into<ComposedWarning>) {
+        let warning = warning.into();
         let operation_info = self.touch_operation_info();
         log_warning(&operation_info, &warning.to_string());
-        self.send(PackageEvent::DeployStateWarning {
-            operation_info,
-            warning,
-        })
-        .await;
-    }
-
-    /// Report a standalone dotfiles directory the command could not use, as a
-    /// warning-level log record and the event.
-    pub(crate) async fn send_dotfiles_directory_warning(&self, warning: DotfilesDirectoryWarning) {
-        let operation_info = self.touch_operation_info();
-        log_warning(&operation_info, &warning.to_string());
-        self.send(PackageEvent::DotfilesDirectoryWarning {
+        self.send(PackageEvent::ComposedWarning {
             operation_info,
             warning,
         })
@@ -3358,6 +3346,55 @@ pub enum Settled {
     Unconfirmed,
 }
 
+/// A warning whose sentence is built from parts.
+// A kind has a variant of its own only when an adapter tells it apart from the
+// others; every other warning is its `Message`.
+#[derive(Debug, Clone)]
+pub enum ComposedWarning {
+    /// About the deploy state.
+    DeployState(crate::dotfile_service::DeployStateWarning),
+    /// About a standalone dotfiles directory the command could not use.
+    DotfilesDirectory(DotfilesDirectoryWarning),
+    /// Any other warning, as its sentence.
+    Message(crate::parts::Message),
+}
+
+crate::parts::display_from_parts!(ComposedWarning);
+
+impl Composed for ComposedWarning {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::DeployState(warning) => warning.parts(),
+            Self::DotfilesDirectory(warning) => warning.parts(),
+            Self::Message(message) => message.parts(),
+        }
+    }
+}
+
+impl From<crate::dotfile_service::DeployStateWarning> for ComposedWarning {
+    fn from(warning: crate::dotfile_service::DeployStateWarning) -> Self {
+        Self::DeployState(warning)
+    }
+}
+
+impl From<DotfilesDirectoryWarning> for ComposedWarning {
+    fn from(warning: DotfilesDirectoryWarning) -> Self {
+        Self::DotfilesDirectory(warning)
+    }
+}
+
+impl From<crate::parts::Message> for ComposedWarning {
+    fn from(message: crate::parts::Message) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<Parts<'_>> for ComposedWarning {
+    fn from(parts: Parts<'_>) -> Self {
+        Self::Message(parts.into())
+    }
+}
+
 /// Events that can be emitted during package operations
 #[derive(Debug, Clone)]
 pub enum PackageEvent {
@@ -3420,17 +3457,10 @@ pub enum PackageEvent {
         message: String,
     },
 
-    /// A warning about the deploy state, whose `Display` is its sentence.
-    DeployStateWarning {
+    /// A warning worded from parts, whose `Display` is its sentence.
+    ComposedWarning {
         operation_info: OperationInfo,
-        warning: crate::dotfile_service::DeployStateWarning,
-    },
-
-    /// A warning about a standalone dotfiles directory the command could not
-    /// use, whose `Display` is its sentence.
-    DotfilesDirectoryWarning {
-        operation_info: OperationInfo,
-        warning: DotfilesDirectoryWarning,
+        warning: ComposedWarning,
     },
 
     /// Package information loaded

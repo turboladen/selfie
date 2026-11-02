@@ -652,11 +652,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "type": "warning",
             "message": message,
         })),
-        PackageEvent::DeployStateWarning { warning, .. } => Some(serde_json::json!({
-            "type": "warning",
-            "message": warning.to_string(),
-        })),
-        PackageEvent::DotfilesDirectoryWarning { warning, .. } => Some(serde_json::json!({
+        PackageEvent::ComposedWarning { warning, .. } => Some(serde_json::json!({
             "type": "warning",
             "message": warning.to_string(),
         })),
@@ -3301,9 +3297,9 @@ mod tests {
         let warning = DeployStateWarning::ReadingPast(failure());
         let stopped = DeployStateFailure::StoppedBeforeWriting(failure());
         let typed = vec![
-            PackageEvent::DeployStateWarning {
+            PackageEvent::ComposedWarning {
                 operation_info: test_op_info(),
-                warning: warning.clone(),
+                warning: warning.clone().into(),
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
@@ -3355,9 +3351,9 @@ mod tests {
             DirectoryState::Absent(AbsentReason::Empty),
         ));
         let typed = vec![
-            PackageEvent::DotfilesDirectoryWarning {
+            PackageEvent::ComposedWarning {
                 operation_info: test_op_info(),
-                warning: warning.clone(),
+                warning: warning.clone().into(),
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
