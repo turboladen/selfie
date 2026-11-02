@@ -352,3 +352,64 @@ fn is_gone<F: FileSystem>(filesystem: &F, target: &Path) -> bool {
         DirectoryState::Absent(AbsentReason::Empty)
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::event::BaseKind;
+
+    // Each reason an orphan check is skipped, in the warning it is sent in, whole.
+    #[test]
+    fn a_skipped_orphan_check_is_worded_whole() {
+        let warning = |shortfall: Shortfall| shortfall_warning(&shortfall, 2);
+        let skipped = |why: &str| {
+            format!(
+                "Not checking 2 deployed target(s) for orphans: {why}, so selfie cannot tell \
+                 whether an entry still deploys to them"
+            )
+        };
+
+        assert_eq!(
+            warning(Shortfall::Refused(CollectionRefusal::UnloadableSpec {
+                error: crate::package::port::PackageParseError::new(
+                    "/p/my broken.yml",
+                    crate::package::port::PackageParseKind::Unreadable {
+                        reason: "a fifo".to_string(),
+                    },
+                ),
+                base: BaseKind::PackageDirectory,
+            })),
+            skipped("spec '/p/my broken.yml' could not be loaded")
+        );
+        assert_eq!(
+            warning(Shortfall::Refused(CollectionRefusal::AmbiguousName {
+                name: "nv".to_string(),
+                paths: vec!["/p/nv.yaml".into(), "/p/nv.yml".into()],
+                base: BaseKind::PackageDirectory,
+            })),
+            skipped("several spec files claim the name 'nv'")
+        );
+        assert_eq!(
+            warning(Shortfall::SetAside("bat".to_string())),
+            skipped("dotfiles/ spec 'bat' is unused because packages/ claims its name")
+        );
+        assert_eq!(
+            warning(Shortfall::AbsentDotfilesDirectory),
+            skipped("the dotfiles directory is not there")
+        );
+        assert_eq!(
+            warning(Shortfall::RefusedPackage("my tool".to_string())),
+            skipped("package 'my tool' was refused")
+        );
+        assert_eq!(
+            warning(Shortfall::NoHome),
+            skipped("the home directory could not be determined")
+        );
+        assert_eq!(
+            warning(Shortfall::NothingProduced),
+            "Not checking 2 deployed target(s) for orphans: no package deploys a dotfile in this \
+             environment. If package_directory points at the wrong directory, correct it; \
+             otherwise remove the files you no longer need yourself"
+        );
+    }
+}

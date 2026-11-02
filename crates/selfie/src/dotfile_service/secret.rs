@@ -1033,4 +1033,37 @@ mod tests {
             "the link itself is still named: {without}"
         );
     }
+
+    // The replaced-link warning, with and without the link's destination, whole.
+    #[test]
+    fn a_replacement_warning_is_worded_whole() {
+        let entry = DotfileEntry::new("creds.tpl", "~/my creds");
+        let target = SecretEntry {
+            entry: &entry,
+            source: crate::package::event::DotfileSource::Command("op read x".to_string()),
+            path: crate::fs::target::repository_path(std::path::Path::new("/home/u/my creds")),
+            link: None,
+        };
+        let link_to = |points_to: Option<&str>| {
+            classify_link(Some(crate::fs::FileSystemError::SymlinkedTarget {
+                path: std::path::PathBuf::from("/home/u/my creds"),
+                points_to: points_to.map(std::path::PathBuf::from),
+            }))
+            .expect("a symlink refusal")
+            .expect("is a link")
+        };
+
+        assert_eq!(
+            replaced_link_warning(&target, &link_to(Some("/home/u/my vault"))).to_string(),
+            "Replaced '/home/u/my creds', which was a symlink to '/home/u/my vault', with a \
+             regular file readable only by you. The credential was not written through the \
+             link. Remove the link or point the entry somewhere else if you meant it to survive."
+        );
+        assert_eq!(
+            replaced_link_warning(&target, &link_to(None)).to_string(),
+            "Replaced '/home/u/my creds', which was a symlink, with a regular file readable only \
+             by you. The credential was not written through the link. Remove the link or point \
+             the entry somewhere else if you meant it to survive."
+        );
+    }
 }

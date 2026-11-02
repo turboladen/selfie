@@ -788,4 +788,48 @@ mod tests {
             [target, written, blocked].map(|path| path.display().to_string())
         );
     }
+
+    // A prune that could not list the directory, and one that could not remove two
+    // earlier copies, report it in these words, whole.
+    #[test]
+    fn a_failed_prune_is_worded_whole() {
+        let kept = Kept {
+            path: PathBuf::from("/s/backups/my dir/new"),
+            directory: PathBuf::from("/s/backups/my dir"),
+        };
+        let denied = || FileSystemError::IoError(std::io::Error::other("denied").into());
+        let mut unlistable = MockFileSystem::default();
+        unlistable
+            .expect_list_directory()
+            .returning(move |_| Err(denied()));
+        let mut stuck = MockFileSystem::default();
+        stuck.expect_list_directory().returning(|dir| {
+            Ok(vec![
+                dir.join("new"),
+                dir.join("old one"),
+                dir.join("old two"),
+            ])
+        });
+        stuck.expect_remove_file().returning(move |_| Err(denied()));
+
+        assert_eq!(
+            kept.prune_earlier(&unlistable)
+                .map(|warning| warning.to_string()),
+            Some(
+                "Kept a copy of the previous content, but cannot list '/s/backups/my dir' to \
+                 remove earlier copies: IO error: denied"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            kept.prune_earlier(&stuck)
+                .map(|warning| warning.to_string()),
+            Some(
+                "Kept a copy of the previous content, but cannot remove an earlier copy beside \
+                 it: '/s/backups/my dir/old one': IO error: denied; '/s/backups/my dir/old two': \
+                 IO error: denied"
+                    .to_string()
+            )
+        );
+    }
 }

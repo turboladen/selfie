@@ -1522,4 +1522,44 @@ mod tests {
             save("/d/gone.")
         );
     }
+
+    // An already-tracked target that is a symlink or a fifo is reported in these
+    // words, whole.
+    #[test]
+    fn an_already_tracked_refusal_is_worded_whole() {
+        let target = repository_path(Path::new("/home/u/my rc"));
+        let warning = |link: bool| {
+            let mut fs = MockFileSystem::default();
+            fs.expect_symlink_refusal().returning(move |path| {
+                link.then(|| FileSystemError::SymlinkedTarget {
+                    path: path.path().to_path_buf(),
+                    points_to: Some(PathBuf::from("/home/u/my vault")),
+                })
+            });
+            fs.expect_irregular_target_refusal().returning(|path| {
+                Some(FileSystemError::IrregularTarget {
+                    path: path.path().to_path_buf(),
+                    kind: "named pipe (fifo)",
+                })
+            });
+            already_tracked_refusal(&fs, &target).map(|warning| warning.to_string())
+        };
+
+        assert_eq!(
+            warning(true),
+            Some(
+                "/home/u/my rc: target is a symlink to '/home/u/my vault' and selfie will not \
+                 write through it. The entry stays as it is, and this command wrote nothing."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            warning(false),
+            Some(
+                "/home/u/my rc: target resolves to a named pipe (fifo) and selfie will not write \
+                 to it. The entry stays as it is, and this command wrote nothing."
+                    .to_string()
+            )
+        );
+    }
 }

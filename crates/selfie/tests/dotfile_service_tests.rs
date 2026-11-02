@@ -23312,3 +23312,87 @@ mod track_sentences {
         );
     }
 }
+
+// The whole sentence of each warning an entry or a collection sends that no other
+// test pins whole, so a change to how one is built cannot change a word of it
+// unnoticed.
+mod warning_sentences {
+    use super::*;
+
+    const ALL: &str = "environments:\n  test:\n    install: \"echo i\"\n";
+
+    async fn applied(dirs: &TestDirs, runner: FakeCommandRunner) -> Vec<PackageEvent> {
+        collect_events(
+            dirs.service_with_runner(runner)
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await
+    }
+
+    // A name both directories claim, once with both specs loaded and once with the
+    // packages/ spec unloadable.
+    #[tokio::test]
+    async fn a_name_both_directories_claim_is_worded_whole() {
+        let loaded = TestDirs::new();
+        write_package_yaml(&loaded.package_dir, "bat", &format!("name: bat\n{ALL}"));
+        write_package_yaml(&loaded.dotfiles_dir, "bat", "name: bat\n");
+        let broken = TestDirs::new();
+        write_package_yaml(&broken.package_dir, "bat", "name: [unterminated\n");
+        write_package_yaml(&broken.dotfiles_dir, "bat", "name: bat\n");
+
+        let loaded = warning_messages(&applied(&loaded, FakeCommandRunner::new()).await);
+        let broken = warning_messages(&applied(&broken, FakeCommandRunner::new()).await);
+
+        assert!(
+            loaded.contains(
+                &"Duplicate name 'bat' found in both packages/ and dotfiles/ — using the \
+                  packages/ version"
+                    .to_string()
+            ),
+            "{loaded:?}"
+        );
+        assert!(
+            broken.contains(
+                &"Not using 'bat' from dotfiles/: packages/ has a spec by that name that could \
+                  not be loaded"
+                    .to_string()
+            ),
+            "{broken:?}"
+        );
+    }
+
+    // A secret entry whose target is a symlink replaces the link and says so,
+    // naming the link and where it pointed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_replaced_link_is_worded_whole() {
+        let dirs = TestDirs::new();
+        let vault = dirs.target_dir.join("my vault");
+        std::fs::write(&vault, "old").unwrap();
+        let link = dirs.target_dir.join("my creds");
+        std::os::unix::fs::symlink(&vault, &link).unwrap();
+        write_package_yaml(
+            &dirs.package_dir,
+            "creds",
+            &format!(
+                "name: creds\n{ALL}dotfiles:\n  - command: \"op read x\"\n    target: \"{}\"\n",
+                link.display()
+            ),
+        );
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"secret-value");
+
+        let warnings = warning_messages(&applied(&dirs, runner).await);
+
+        assert!(
+            warnings.contains(&format!(
+                "Replaced '{}', which was a symlink to '{}', with a regular file readable only \
+                 by you. The credential was not written through the link. Remove the link or \
+                 point the entry somewhere else if you meant it to survive.",
+                link.display(),
+                vault.display()
+            )),
+            "{warnings:?}"
+        );
+    }
+}

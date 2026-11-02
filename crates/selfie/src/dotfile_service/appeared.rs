@@ -143,4 +143,21 @@ mod tests {
              was written"
         );
     }
+
+    // What appeared during either window is reported in these words, whole.
+    #[test]
+    fn a_target_that_appeared_is_worded_whole() {
+        let target = repository_path(Path::new("/home/u/my rc"));
+
+        assert_eq!(
+            warning(&target, During::Write).to_string(),
+            "Something appeared at '/home/u/my rc' while selfie was writing it, and was left in \
+             place. Run apply again to settle it."
+        );
+        assert_eq!(
+            warning(&target, During::Prompt).to_string(),
+            "'/home/u/my rc' changed while selfie was asking about it, and was left in place. Run \
+             apply again to settle it."
+        );
+    }
 }
