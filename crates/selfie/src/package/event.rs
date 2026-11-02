@@ -5421,6 +5421,131 @@ mod tests {
         );
     }
 
+    // Each operation failure that words its own fields, whole, so a change to
+    // how it is built cannot change its words. Its message says the same.
+    #[test]
+    fn an_operation_failures_own_words_are_pinned() {
+        use crate::package::port::NameDeclaration;
+        use std::path::PathBuf;
+
+        let installed =
+            |required_by: Option<&str>, exit_code| OperationFailure::NotInstalledAfterInstall {
+                package_name: "p".to_string(),
+                check_command: "c".to_string(),
+                exit_code,
+                required_by: required_by.map(str::to_string),
+            };
+        let missing = |reason| OperationFailure::NoSuchPackage {
+            name: "p".to_string(),
+            reason,
+            declared_by: Vec::new(),
+        };
+        let uncreatable = |reason| OperationFailure::Uncreatable {
+            package_name: "p".to_string(),
+            reason,
+        };
+        let invalid = |action| OperationFailure::InvalidSpec {
+            action,
+            package_name: "p".to_string(),
+            issues: Vec::new(),
+        };
+        let invalid_name = format!(
+            "Refusing to create 'p': it is not a valid spec name. Rename it: {}.",
+            crate::package::SPEC_NAME_RULE
+        );
+        let cases: Vec<(OperationFailure, &str)> = vec![
+            (
+                OperationFailure::UnreadableSpec {
+                    package_name: "p".to_string(),
+                    reason: Parts::new().text("r").into(),
+                },
+                "Cannot use package `p`: r",
+            ),
+            (
+                invalid(SpecWrite::Create),
+                "Refusing to create 'p': it would not pass spec validate (0 errors), so nothing \
+                 was written",
+            ),
+            (
+                invalid(SpecWrite::Update),
+                "Refusing to update 'p': the updated spec would not pass validation (0 errors), \
+                 so nothing was written",
+            ),
+            (uncreatable(Uncreatable::InvalidName), &invalid_name),
+            (
+                uncreatable(Uncreatable::OutsidePackageDirectory {
+                    path: PathBuf::from("/a/p.yml"),
+                    directory: PathBuf::from("/b"),
+                }),
+                "Refusing to create 'p': /a/p.yml is not directly in the package directory /b, \
+                 where every spec has to be.",
+            ),
+            (
+                uncreatable(Uncreatable::UnloadableFileName {
+                    path: PathBuf::from("/b/p.txt"),
+                }),
+                "Refusing to create 'p': selfie would not load /b/p.txt as a spec. Its name \
+                 before the .yml or .yaml extension has to follow the rule for a package name.",
+            ),
+            (
+                installed(None, None),
+                "The install command for 'p' succeeded, but its check command `c` still says it \
+                 is not installed",
+            ),
+            (
+                installed(Some("q"), Some(1)),
+                "The install command for 'p', which `q` requires, succeeded, but its check \
+                 command `c` still says it is not installed (exit 1)",
+            ),
+            (
+                missing(NoSuchPackageReason::NotFound),
+                "No package named 'p' was found",
+            ),
+            (
+                missing(NoSuchPackageReason::MaybeInUnlistableDirectory),
+                "No package named 'p' was found. A dotfiles directory could not be listed, so it \
+                 may be there.",
+            ),
+            (
+                missing(NoSuchPackageReason::MaybeInUncheckableDirectory),
+                "No package named 'p' was found. A dotfiles directory could not be checked, so \
+                 whether it is there is unknown.",
+            ),
+            (
+                missing(NoSuchPackageReason::NotLoaded),
+                "Package 'p' could not be loaded, so nothing was applied",
+            ),
+            (
+                OperationFailure::PushDisabled,
+                "sync push is disabled: its commit can record every tracked file as deleted. \
+                 Commit and push the repository with git until this is fixed",
+            ),
+            (OperationFailure::Generic("g".to_string()), "g"),
+        ];
+        for (failure, words) in &cases {
+            assert_eq!(failure.to_string(), *words, "{failure:?}");
+            assert_eq!(failure.message().to_string(), *words, "{failure:?}");
+        }
+
+        // The hint and an ambiguity name values of their own; their words are
+        // pinned where they are built, and their message matches.
+        for failure in [
+            OperationFailure::NoSuchPackage {
+                name: "p".to_string(),
+                reason: NoSuchPackageReason::NotFound,
+                declared_by: vec![NameDeclaration {
+                    path: PathBuf::from("/d/bar.yml"),
+                    name: "p".to_string(),
+                }],
+            },
+            missing(NoSuchPackageReason::Ambiguous {
+                conflicting_paths: vec![PathBuf::from("/d/p.yml"), PathBuf::from("/d/p.yaml")],
+            }),
+        ] {
+            assert_eq!(failure.message().to_string(), failure.to_string());
+        }
+    }
+
     // Each status selfie could not answer for, whole, in the words a status
     // cell and a gap's summary build on.
     #[test]
