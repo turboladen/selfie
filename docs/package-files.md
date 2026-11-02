@@ -1007,8 +1007,10 @@ life the directory holds one copy per target _ever_ deployed, not per target cur
 
 If selfie cannot write the copy it **does not overwrite** the target rather than proceeding without
 it. The target is left exactly as it was, the entry counts as failed ("Failed to keep a copy of …"),
-and the run exits `1`. Free up space under the state directory, or point `--state-directory`
-somewhere writable, and run apply again.
+and the run exits `1`. The message names the path to fix and says how: give your user write and
+search access to a directory, remount a read-only file system, move something out of the way, or
+free space. To keep copies elsewhere instead, point `state_directory` (or `--state-directory`) at a
+writable directory. Then run apply again.
 
 Recovering is a `cp` — nothing reads these files and no command manages them:
 

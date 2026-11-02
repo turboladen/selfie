@@ -3,6 +3,8 @@
 //! One copy per target, under `backups/` in the state directory, replacing any
 //! earlier copy of the same target.
 
+use std::fmt;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::dotfile_service::deploy::compute_checksum;
@@ -74,7 +76,7 @@ impl Kept {
     }
 }
 
-/// Copy `current` aside before `target_key`'s target is overwritten.
+/// Copy `current` aside before `target`, keyed as `target_key`, is overwritten.
 ///
 /// `root` is the `backups` directory; it and the per-target directory beneath it
 /// are created as needed. Earlier copies of the same target survive until the
@@ -82,16 +84,25 @@ impl Kept {
 ///
 /// # Errors
 ///
-/// [`FileSystemError`] naming a path under `root` if the copy cannot be written.
-/// The caller must then leave the target alone: there would be nothing to
-/// recover it from.
+/// The entry's [`Failure`] if the copy cannot be written, naming `target`, the
+/// path that failed, and the directory to fix. The caller must then leave the
+/// target alone: there would be nothing to recover it from.
 pub(super) fn keep<F: FileSystem>(
     filesystem: &F,
     root: &Path,
     target_key: &str,
+    target: &Path,
     current: &[u8],
-) -> Result<Kept, FileSystemError> {
-    keep_at(filesystem, root, target_key, current, &stamp())
+) -> Result<Kept, Failure> {
+    keep_at(filesystem, root, target_key, current, &stamp()).map_err(|error| {
+        failure(
+            filesystem,
+            root,
+            &directory(root, target_key),
+            target,
+            &error,
+        )
+    })
 }
 
 // `keep` with the timestamp supplied, so a test can hand two calls the same one.
@@ -103,12 +114,12 @@ fn keep_at<F: FileSystem>(
     current: &[u8],
     stamp: &str,
 ) -> Result<Kept, FileSystemError> {
-    let directory = root.join(component(target_key));
+    let per_target = directory(root, target_key);
     // The timestamp alone is not a name. Two applies inside one millisecond would
     // produce the same one, and the second `write_file_private` would replace the
     // first's copy -- before the second's target write had landed, so a failure
     // there would leave neither the older content nor a copy of it.
-    let path = directory.join(format!("{stamp}-{}", suffix()));
+    let path = per_target.join(format!("{stamp}-{}", suffix()));
 
     // `write_file_private`, so the copy is owner-only and lands atomically. It
     // holds whatever was at the target, which may be a credential even for a
@@ -123,14 +134,24 @@ fn keep_at<F: FileSystem>(
     // content that is nowhere else, while this one holds what is still at the
     // target -- so pruning before the overwrite lands trades the irreplaceable
     // for a duplicate whenever the write then fails.
-    Ok(Kept { path, directory })
+    Ok(Kept {
+        path,
+        directory: per_target,
+    })
 }
 
-/// The failure of an entry whose target could not be copied before it was
-/// overwritten. The sentence names the target; `error` names the path under the
-/// state directory that failed, which is the backups directory when it could not
-/// be created and the copy itself otherwise.
-pub(super) fn failure(target: &Path, error: &FileSystemError) -> Failure {
+// The failure of an entry whose target could not be copied before it was
+// overwritten. The sentence names the target, `error` names the path under the
+// state directory that failed, and the remedy names the directory to fix and
+// how, as far as the filesystem can tell. `directory` is the one the copy went in.
+fn failure<F: FileSystem>(
+    filesystem: &F,
+    root: &Path,
+    directory: &Path,
+    target: &Path,
+    error: &FileSystemError,
+) -> Failure {
+    let remedy = remedy(filesystem, root, directory, error);
     Failure::new(
         EntryOperation::Backup,
         format_args!(
@@ -139,10 +160,105 @@ pub(super) fn failure(target: &Path, error: &FileSystemError) -> Failure {
         ),
         error,
     )
-    .with_remedy(
-        "The target is unchanged. Free space under the state directory, or point \
-         --state-directory somewhere writable, then run apply again.",
-    )
+    .with_remedy(&format!(
+        "The target is unchanged. {remedy} To keep copies elsewhere instead, point \
+         state_directory at a writable directory. Then run apply again."
+    ))
+}
+
+/// What to do about a copy that could not be made. Its `Display` is one complete
+/// sentence, an instruction naming the path to act on.
+enum Remedy {
+    /// A directory that refuses a new entry, or that may not be searched.
+    Denied(PathBuf),
+    /// A path on a read-only file system.
+    ReadOnly(PathBuf),
+    /// Something where selfie has to create a directory or its copy.
+    InTheWay(PathBuf),
+    /// A path on a file system that is full, or over quota.
+    Full(PathBuf),
+    /// A directory selfie could not write to, for no reason it could find.
+    Other(PathBuf),
+}
+
+impl fmt::Display for Remedy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Denied(path) => write!(
+                f,
+                "Give your user write and search access to '{}'.",
+                path.display()
+            ),
+            Self::ReadOnly(path) => write!(
+                f,
+                "Remount the file system holding '{}' read-write.",
+                path.display()
+            ),
+            Self::InTheWay(path) => write!(f, "Move '{}' out of the way.", path.display()),
+            Self::Full(path) => write!(
+                f,
+                "Free space on the file system holding '{}'.",
+                path.display()
+            ),
+            Self::Other(path) => write!(f, "Check that selfie can write to '{}'.", path.display()),
+        }
+    }
+}
+
+// The write's own error decides wherever it names its cause and its path. The
+// rest, a permission refusal above all, names the directory selfie tried to
+// create or the copy, never the directory that refused, so the permissions are
+// asked which one that is. Asked only for the wording: the copy was not made and
+// the target is not written, whatever this answers.
+fn remedy<F: FileSystem>(
+    filesystem: &F,
+    root: &Path,
+    directory: &Path,
+    error: &FileSystemError,
+) -> Remedy {
+    match error {
+        FileSystemError::BelowNonDirectory {
+            parent: Some(parent),
+            ..
+        } => return Remedy::InTheWay(parent.clone()),
+        FileSystemError::DirectoryTarget { path, .. } => return Remedy::InTheWay(path.clone()),
+        FileSystemError::IoError(failure) => {
+            // A remedy about the file system holding a path names one that is
+            // there: the write names a directory it could not create or a copy it
+            // could not make.
+            let held = || existing(filesystem, failure.path.as_deref().unwrap_or(root));
+            match failure.error.kind() {
+                ErrorKind::StorageFull | ErrorKind::QuotaExceeded => return Remedy::Full(held()),
+                ErrorKind::ReadOnlyFilesystem => return Remedy::ReadOnly(held()),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    // The remedy names the path selfie composed, never a link's destination.
+    match filesystem.file_creation_refusal(directory) {
+        Some(FileSystemError::CannotCreateIn { path, cause }) => match cause.kind() {
+            ErrorKind::PermissionDenied => Remedy::Denied(path),
+            ErrorKind::ReadOnlyFilesystem => Remedy::ReadOnly(path),
+            ErrorKind::NotADirectory | ErrorKind::AlreadyExists => Remedy::InTheWay(path),
+            _ => Remedy::Other(path),
+        },
+        Some(_) | None => Remedy::Other(directory.to_path_buf()),
+    }
+}
+
+// The nearest of `path` and its ancestors that exists, or `path` when none does.
+fn existing<F: FileSystem>(filesystem: &F, path: &Path) -> PathBuf {
+    path.ancestors()
+        .find(|ancestor| filesystem.path_exists(ancestor))
+        .unwrap_or(path)
+        .to_path_buf()
+}
+
+// The directory one target's copies go in. `keep_at` writes there and `remedy`
+// asks about it, so the two cannot disagree.
+fn directory(root: &Path, target_key: &str) -> PathBuf {
+    root.join(component(target_key))
 }
 
 // The directory holding one target's copy.
@@ -306,7 +422,14 @@ mod tests {
         // No `list_directory` and no `remove_file` expectation, so reaching either
         // panics rather than passing quietly.
 
-        let kept = keep(&fs, Path::new("/state/backups"), "/home/u/.npmrc", b"old").expect("kept");
+        let kept = keep(
+            &fs,
+            Path::new("/state/backups"),
+            "/home/u/.npmrc",
+            Path::new("/home/u/.npmrc"),
+            b"old",
+        )
+        .expect("kept");
 
         assert_eq!(
             kept.path().parent().expect("a per-target directory"),
@@ -332,7 +455,14 @@ mod tests {
             ))
         });
 
-        let kept = keep(&fs, Path::new("/state/backups"), "/home/u/.npmrc", b"old").expect("kept");
+        let kept = keep(
+            &fs,
+            Path::new("/state/backups"),
+            "/home/u/.npmrc",
+            Path::new("/home/u/.npmrc"),
+            b"old",
+        )
+        .expect("kept");
         let stale = kept
             .prune_earlier(&fs)
             .expect("the failure must be reported");
@@ -358,7 +488,14 @@ mod tests {
             Ok(())
         });
 
-        let kept = keep(&fs, Path::new("/state/backups"), "/home/u/.npmrc", b"old").expect("kept");
+        let kept = keep(
+            &fs,
+            Path::new("/state/backups"),
+            "/home/u/.npmrc",
+            Path::new("/home/u/.npmrc"),
+            b"old",
+        )
+        .expect("kept");
         let mine = kept.path().to_path_buf();
         let earlier = mine.parent().expect("a directory").join("earlier");
         let listing = vec![mine.clone(), earlier.clone()];
@@ -470,26 +607,163 @@ mod tests {
         );
     }
 
-    // The failure has to send the user somewhere they can act, and must not read
-    // as the target write having failed -- the target is untouched.
+    const ROOT: &str = "/state/backups";
+    const KEY: &str = "/home/u/.config/app.toml";
+
+    // The directory the copy of `KEY` goes in.
+    fn copy_directory() -> PathBuf {
+        directory(Path::new(ROOT), KEY)
+    }
+
+    // A probe answer: `path` refuses a new file with `kind`.
+    fn refused(path: &Path, kind: ErrorKind) -> Option<FileSystemError> {
+        Some(FileSystemError::CannotCreateIn {
+            path: path.to_path_buf(),
+            cause: std::sync::Arc::new(std::io::Error::from(kind)),
+        })
+    }
+
+    // The write's own error, of `kind`, naming the copy's directory as the
+    // writer names a directory it could not create.
+    fn write_error(kind: ErrorKind) -> FileSystemError {
+        FileSystemError::IoError(crate::fs::IoFailure::at(
+            &copy_directory(),
+            std::io::Error::from(kind),
+        ))
+    }
+
+    // `failure`'s message when the probe answers `refusal` and the write failed
+    // with `error`. Only `/state` and the paths above it exist.
+    fn message_for(refusal: Option<FileSystemError>, error: &FileSystemError) -> String {
+        let mut fs = MockFileSystem::default();
+        fs.expect_file_creation_refusal()
+            .return_once(move |_| refusal);
+        fs.expect_path_exists()
+            .returning(|path| Path::new("/state").starts_with(path));
+        failure(
+            &fs,
+            Path::new(ROOT),
+            &copy_directory(),
+            Path::new(KEY),
+            error,
+        )
+        .message
+    }
+
+    // Each cause names its own path and fix. A blocked `/state` is neither the
+    // backups root nor the copy's directory, so naming either in its place fails,
+    // and every path is matched with its closing quote. Where the write's own
+    // error decides, the probe answers `/elsewhere`, so asking it fails too, and
+    // a remedy about a file system names `/state`, the nearest path that exists.
     #[test]
-    fn the_failure_names_the_target_and_an_escape() {
-        let error = FileSystemError::IoError(
-            std::io::Error::other("/state/backups: No space left on device").into(),
-        );
-        let failure = failure(Path::new("/home/u/.config/app.toml"), &error);
-        let message = &failure.message;
+    fn each_cause_names_the_path_to_fix_and_the_fix() {
+        let copy = copy_directory();
+        let elsewhere = || refused(Path::new("/elsewhere"), ErrorKind::PermissionDenied);
+        let cases = [
+            (
+                refused(Path::new("/state"), ErrorKind::PermissionDenied),
+                write_error(ErrorKind::PermissionDenied),
+                "Give your user write and search access to '/state'.".to_string(),
+            ),
+            (
+                refused(Path::new("/state"), ErrorKind::ReadOnlyFilesystem),
+                write_error(ErrorKind::Other),
+                "Remount the file system holding '/state' read-write.".to_string(),
+            ),
+            (
+                refused(Path::new(ROOT), ErrorKind::NotADirectory),
+                write_error(ErrorKind::Other),
+                "Move '/state/backups' out of the way.".to_string(),
+            ),
+            (
+                refused(Path::new(ROOT), ErrorKind::AlreadyExists),
+                write_error(ErrorKind::Other),
+                "Move '/state/backups' out of the way.".to_string(),
+            ),
+            (
+                refused(Path::new("/state"), ErrorKind::Other),
+                write_error(ErrorKind::Other),
+                "Check that selfie can write to '/state'.".to_string(),
+            ),
+            (
+                None,
+                write_error(ErrorKind::Other),
+                format!("Check that selfie can write to '{}'.", copy.display()),
+            ),
+            (
+                elsewhere(),
+                write_error(ErrorKind::StorageFull),
+                "Free space on the file system holding '/state'.".to_string(),
+            ),
+            (
+                elsewhere(),
+                write_error(ErrorKind::QuotaExceeded),
+                "Free space on the file system holding '/state'.".to_string(),
+            ),
+            (
+                elsewhere(),
+                write_error(ErrorKind::ReadOnlyFilesystem),
+                "Remount the file system holding '/state' read-write.".to_string(),
+            ),
+            (
+                elsewhere(),
+                FileSystemError::BelowNonDirectory {
+                    path: copy.join("copy"),
+                    parent: Some(PathBuf::from("/state/file")),
+                    cause: std::sync::Arc::new(std::io::Error::from(ErrorKind::NotADirectory)),
+                },
+                "Move '/state/file' out of the way.".to_string(),
+            ),
+            (
+                elsewhere(),
+                FileSystemError::DirectoryTarget {
+                    path: copy.join("copy"),
+                    cause: std::sync::Arc::new(std::io::Error::from(ErrorKind::IsADirectory)),
+                },
+                format!("Move '{}' out of the way.", copy.join("copy").display()),
+            ),
+        ];
+
+        for (refusal, error, remedy) in cases {
+            let message = message_for(refusal, &error);
+
+            // Whatever the cause, the target is named and untouched, another state
+            // directory is offered, and nothing reads as a failed target write.
+            assert_eq!(
+                message,
+                format!(
+                    "Failed to keep a copy of '{KEY}' before overwriting it: {error}. The \
+                     target is unchanged. {remedy} To keep copies elsewhere instead, point \
+                     state_directory at a writable directory. Then run apply again."
+                ),
+            );
+        }
+    }
+
+    // The question is about the directory the write used, asked once, and its
+    // answer is the path the remedy names.
+    #[test]
+    fn the_probe_asks_about_the_directory_the_copy_went_to() {
+        let mut fs = MockFileSystem::default();
+        let expected = copy_directory();
+        fs.expect_file_creation_refusal()
+            .withf(move |path| path == expected)
+            .times(1)
+            .returning(|_| refused(Path::new("/elsewhere"), ErrorKind::PermissionDenied));
+        fs.expect_write_file_private()
+            .returning(|_, _, _| Err(write_error(ErrorKind::PermissionDenied)));
+
+        let failure = keep(&fs, Path::new(ROOT), KEY, Path::new(KEY), b"old")
+            .err()
+            .expect("the copy failed");
 
         assert_eq!(failure.operation, EntryOperation::Backup);
         assert!(
-            message.contains("/home/u/.config/app.toml")
-                && message.contains("--state-directory")
-                && message.contains("The target is unchanged"),
-            "{message}"
-        );
-        assert!(
-            !message.contains("Failed to write"),
-            "a copy that could not be made is not a failed target write: {message}"
+            failure
+                .message
+                .contains("Give your user write and search access to '/elsewhere'."),
+            "{}",
+            failure.message
         );
     }
 }

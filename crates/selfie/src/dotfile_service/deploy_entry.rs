@@ -421,9 +421,14 @@ fn keep_current<F: FileSystem>(
         return Ok(None);
     }
 
-    backup::keep(filesystem, root, unit.target_key, current)
-        .map(Some)
-        .map_err(|e| backup::failure(unit.target_path.path(), &e))
+    backup::keep(
+        filesystem,
+        root,
+        unit.target_key,
+        unit.target_path.path(),
+        current,
+    )
+    .map(Some)
 }
 
 /// What the target holds as its write is about to happen: `None` for nothing
