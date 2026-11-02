@@ -5199,6 +5199,145 @@ mod tests {
         }
     }
 
+    // Each check failure whole, built as a check builds it from the runner's
+    // error, and as an operation failure words it, with its message in the same
+    // words. Each command holds U+200B.
+    #[test]
+    fn a_check_failures_words_are_pinned() {
+        use crate::commands::runner::{CommandError, OutputStream, UnusableDirectory};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let command = || "c #\u{200B}".to_string();
+        let wd = || std::path::PathBuf::from("/w\u{200B}d");
+        let cause = || Arc::new(std::io::Error::other("the cause"));
+        let timed_out = "`c #\u{200B}` timed out after 1 second, the limit `command_timeout` sets";
+        let unusable = "Cannot run 'c #\u{200B}' in /w\u{200B}d: the cause";
+        let cases: Vec<(CommandError, String, String)> = vec![
+            (
+                CommandError::Canceled {
+                    command: command(),
+                    working_directory: wd(),
+                },
+                "Command canceled: c #\u{200B}".to_string(),
+                "Command canceled: c #\u{200B}".to_string(),
+            ),
+            (
+                CommandError::SpawnFailed {
+                    command: command(),
+                    program: "/bin/s\u{200B}h".to_string(),
+                    working_directory: wd(),
+                    cause: cause(),
+                },
+                "Could not start '/bin/s\u{200B}h' to run 'c #\u{200B}': the cause".to_string(),
+                "Could not start '/bin/s\u{200B}h' to run 'c #\u{200B}': the cause".to_string(),
+            ),
+            (
+                CommandError::StdoutSpawn(command()),
+                "Failed spawning stdout during command: c #\u{200B}".to_string(),
+                "Failed spawning stdout during command: c #\u{200B}".to_string(),
+            ),
+            (
+                CommandError::StderrSpawn(command()),
+                "Failed spawning stderr during command: c #\u{200B}".to_string(),
+                "Failed spawning stderr during command: c #\u{200B}".to_string(),
+            ),
+            (
+                CommandError::OutputReadFailed {
+                    command: command(),
+                    working_directory: wd(),
+                    stream: OutputStream::Stdout,
+                    cause: cause(),
+                },
+                "Failed reading stdout of command 'c #\u{200B}': the cause".to_string(),
+                "Failed reading stdout of command 'c #\u{200B}': the cause".to_string(),
+            ),
+            (
+                CommandError::ContentMarkersAbsent {
+                    command: command(),
+                    working_directory: wd(),
+                },
+                "Could not separate the output of command 'c #\u{200B}' from the shell's"
+                    .to_string(),
+                "Could not separate the output of command 'c #\u{200B}' from the shell's"
+                    .to_string(),
+            ),
+            (
+                CommandError::IoError {
+                    command: command(),
+                    working_directory: wd(),
+                    cause: cause(),
+                },
+                "IO Error executing command 'c #\u{200B}': the cause".to_string(),
+                "IO Error executing command 'c #\u{200B}': the cause".to_string(),
+            ),
+            (
+                CommandError::Timeout {
+                    command: command(),
+                    timeout: Duration::from_secs(1),
+                    working_directory: wd(),
+                },
+                timed_out.to_string(),
+                format!("Command error: {timed_out}"),
+            ),
+            (
+                CommandError::WorkingDirectoryUnusable(UnusableDirectory::new(
+                    command(),
+                    wd(),
+                    cause(),
+                )),
+                unusable.to_string(),
+                unusable.to_string(),
+            ),
+        ];
+        for (error, check_words, failure_words) in cases {
+            let check = CheckFailure::from(&error);
+            assert_eq!(check.to_string(), check_words, "{error:?}");
+            assert_eq!(
+                UnknownStatus::CheckFailed(check.clone()).to_string(),
+                check_words
+            );
+            let failure = OperationFailure::from(&check);
+            assert_eq!(failure.to_string(), failure_words, "{error:?}");
+            assert_eq!(failure.message().to_string(), failure_words, "{error:?}");
+        }
+
+        let internal = CheckFailure::Internal {
+            message: crate::commands::BoundedText::bound(b"Task failed: boom"),
+        };
+        assert_eq!(
+            internal.to_string(),
+            "selfie failed while running the check, which is a bug in selfie and not in the \
+             check command: Task failed: boom"
+        );
+    }
+
+    // Each status selfie could not answer for, whole, in the words a status
+    // cell and a gap's summary build on.
+    #[test]
+    fn an_unknown_status_is_worded_whole() {
+        let refused = UnknownStatus::Refused {
+            kind: RefusalKind::UnknownTopLevelKeys,
+            reason: Parts::new()
+                .text("unknown field '")
+                .name("k\u{200B}y")
+                .text("'")
+                .into(),
+        };
+        assert_eq!(
+            refused.to_string(),
+            "is refused: unknown field 'k\u{200B}y'"
+        );
+        assert_eq!(
+            UnknownStatus::NotInEnvironment.to_string(),
+            "not in current environment"
+        );
+        assert_eq!(
+            UnknownStatus::NoCheckCommand.to_string(),
+            "no check command"
+        );
+    }
+
     // Each command failure whole, through every type that carries it, and the
     // failure's message in the same words as its Display.
     #[test]
