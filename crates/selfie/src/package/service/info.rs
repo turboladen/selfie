@@ -1238,4 +1238,47 @@ environments:
         }
         assert!(found, "Expected EnvironmentStatusChecked event");
     }
+
+    // The warning for a package with no configuration for the environment in use,
+    // whole, so a change to how it is built cannot change its words.
+    #[tokio::test]
+    async fn an_unconfigured_environment_is_worded_whole() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let config = SelfieConfigBuilder::default()
+            .environment("w\u{200B}k")
+            .package_directory(temp_dir.path())
+            .build();
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("test", |b| b.install("echo install"))
+            .path(&pkg_path)
+            .build();
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_get_package()
+            .returning(move |_| Ok(GetPackage::from_existing(package.clone(), pkg_path.clone())));
+        let (sender, mut rx) = status_test_sender();
+
+        handle_status(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &MockCommandRunner::new(),
+            &sender,
+            &mut ProgressTracker::new(2),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        drop(sender);
+        let mut warnings = Vec::new();
+        while let Some(event) = rx.recv().await {
+            warnings.extend(crate::package::event::warning_text(&event));
+        }
+        assert_eq!(
+            warnings,
+            ["Package 'test-pkg' has no configuration for environment 'w\u{200B}k'"]
+        );
+    }
 }

@@ -294,7 +294,7 @@ mod tests {
         fs::DirectoryState,
         package::{
             PackageBuilder,
-            event::{OperationContext, PackageEvent, metadata::OperationType},
+            event::{OperationContext, metadata::OperationType},
             port::MockPackageRepository,
         },
     };
@@ -351,9 +351,7 @@ mod tests {
         drop(sender);
         let mut warnings = Vec::new();
         while let Some(event) = rx.recv().await {
-            if let PackageEvent::Warning { message, .. } = event {
-                warnings.push(message);
-            }
+            warnings.extend(crate::package::event::warning_text(&event));
         }
         warnings
     }
@@ -408,5 +406,77 @@ mod tests {
         let warnings = warnings_sent_for(std::slice::from_ref(&place), &package).await;
 
         assert_eq!(warnings.len(), 1, "{warnings:?}");
+    }
+
+    // Each place's warning, whole, so a change to how it is built cannot change
+    // its words.
+    #[test]
+    fn the_unchecked_warnings_are_worded_whole() {
+        let unlisted = || {
+            PackageListError::new(
+                PathBuf::from("/p\u{200B}k"),
+                DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                    kind: "regular file",
+                }),
+            )
+        };
+        let worded = [
+            (
+                Unchecked::Unloadable {
+                    path: PathBuf::from("/p\u{200B}k/x\u{200B}.yml"),
+                    base: BaseKind::PackageDirectory,
+                },
+                Checking::Validate,
+                "Could not check packages/x\u{200B}.yml for an entry deploying to a target this \
+                 spec deploys: it could not be loaded"
+                    .to_string(),
+            ),
+            (
+                Unchecked::Unloadable {
+                    path: PathBuf::from("/p\u{200B}k/x\u{200B}.yml"),
+                    base: BaseKind::PackageDirectory,
+                },
+                Checking::Track,
+                "Could not check /p\u{200B}k/x\u{200B}.yml for an entry deploying this file: it \
+                 could not be loaded"
+                    .to_string(),
+            ),
+            (
+                Unchecked::Ambiguous {
+                    name: "n\u{200B}m".to_string(),
+                    paths: vec![
+                        PathBuf::from("/d\u{200B}f/n.yml"),
+                        PathBuf::from("/d\u{200B}f/n.yaml"),
+                    ],
+                    base: BaseKind::DotfilesDirectory,
+                },
+                Checking::Apply,
+                "Could not check dotfiles/n.yml and dotfiles/n.yaml for an entry deploying to a \
+                 target this apply deploys: they all claim the name 'n\u{200B}m', so none of \
+                 them is used"
+                    .to_string(),
+            ),
+            (
+                Unchecked::PackageDirectory(unlisted()),
+                Checking::Validate,
+                format!(
+                    "Could not check the package specs for an entry deploying to a target this \
+                     spec deploys: {}",
+                    unlisted()
+                ),
+            ),
+            (
+                Unchecked::DotfilesDirectory(unlisted()),
+                Checking::Validate,
+                format!(
+                    "Could not check the standalone dotfiles for an entry deploying to a target \
+                     this spec deploys: {}",
+                    unlisted()
+                ),
+            ),
+        ];
+        for (place, checking, words) in worded {
+            assert_eq!(place.sentence(checking).to_string(), words);
+        }
     }
 }

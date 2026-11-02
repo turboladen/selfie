@@ -4934,6 +4934,20 @@ pub struct AddEnvironment {
     pub recommends: Vec<String>,
 }
 
+// The words of a warning event, whichever of the two warning events `event` is,
+// or `None` for any other event. Test-common links its own copy of selfie, so its
+// `PackageEvent` is a different type inside this crate, and the crate's own tests
+// need this copy. Keep it in step with `test_common::warning_text`, in
+// test-common/src/events.rs.
+#[cfg(test)]
+pub(crate) fn warning_text(event: &PackageEvent) -> Option<String> {
+    match event {
+        PackageEvent::Warning { message, .. } => Some(message.clone()),
+        PackageEvent::ComposedWarning { warning, .. } => Some(warning.to_string()),
+        _ => None,
+    }
+}
+
 // One of each way a check can give no answer, in declaration order, for the
 // tests that table them.
 #[cfg(test)]
@@ -6236,6 +6250,32 @@ mod tests {
         assert!(!none.contains("failed"), "{none}");
         assert!(none.ends_with("1 refused"), "{none}");
         assert!(one.contains("0 refused, 1 failed"), "{one}");
+    }
+
+    // A spec write refused as unplaced, whole for each action, so a change to how
+    // it is built cannot change its words.
+    #[test]
+    fn an_unplaced_spec_write_is_worded_whole() {
+        let refused = |action| {
+            OperationFailure::UnplacedSpec {
+                action,
+                package_name: "myapp".to_string(),
+                path: "/p\u{200B}k/myapp.yml".into(),
+            }
+            .to_string()
+        };
+        assert_eq!(
+            refused(SpecWrite::Create),
+            "Refusing to create 'myapp': selfie could not tell which spec directory \
+             /p\u{200B}k/myapp.yml belongs in, so it could not compare it with the other specs, \
+             and nothing was written"
+        );
+        assert_eq!(
+            refused(SpecWrite::Update),
+            "Refusing to update 'myapp': selfie could not tell which spec directory \
+             /p\u{200B}k/myapp.yml belongs in, so it could not compare it with the other specs, \
+             and nothing was written"
+        );
     }
 }
 

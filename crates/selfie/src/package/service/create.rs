@@ -981,4 +981,90 @@ mod tests {
             "the refusal must name the directory and what is there, got: {rendered}"
         );
     }
+
+    // Runs a create of `myapp` against `repo`, and returns the spec's path and the
+    // words of each warning the create sent.
+    async fn create_warnings(repo: MockPackageRepository) -> (PathBuf, Vec<String>) {
+        let (_temp, config, package) = fixture();
+        let path = package.path().clone();
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        create(package, &repo, &config, &sender, &mut progress).await;
+        drop(sender);
+        let mut warnings = Vec::new();
+        while let Some(event) = rx.recv().await {
+            warnings.extend(crate::package::event::warning_text(&event));
+        }
+        (path, warnings)
+    }
+
+    // Each warning a create sends before it refuses, whole, so a change to how
+    // they are built cannot change their words.
+    #[tokio::test]
+    async fn the_create_warnings_are_worded_whole() {
+        let mut exists = MockPackageRepository::new();
+        exists.expect_get_package().returning(|_| {
+            Ok(crate::package::GetPackage::from_existing(
+                PackageBuilder::default()
+                    .name("myapp")
+                    .environment("test", |b| b.install("true"))
+                    .path("/p\u{200B}k/myapp.yml")
+                    .build(),
+                PathBuf::from("/p\u{200B}k/myapp.yml"),
+            ))
+        });
+        assert_eq!(
+            create_warnings(exists).await.1,
+            ["Package already exists: Package `myapp` already exists at /p\u{200B}k/myapp.yml"]
+        );
+
+        let mut unlisted = MockPackageRepository::new();
+        unlisted.expect_get_package().returning(|_| {
+            Err(PackageRepoError::PackageListError(PackageListError::new(
+                PathBuf::from("/p\u{200B}k"),
+                crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                    kind: "regular file",
+                }),
+            )))
+        });
+        assert_eq!(
+            create_warnings(unlisted).await.1,
+            ["Refusing to create 'myapp': /p\u{200B}k is not a directory, it is a regular file"]
+        );
+
+        let mut unparsable = MockPackageRepository::new();
+        unparsable
+            .expect_get_package()
+            .returning(|_| Err(a_real_parse_error().into()));
+        let cause = PackageRepoError::from(a_real_parse_error()).to_string();
+        assert_eq!(
+            create_warnings(unparsable).await.1,
+            [format!(
+                "Refusing to create 'myapp': selfie could not use what already answers to that \
+                 name, and creates no new spec beside it. {cause}"
+            )]
+        );
+
+        let mut occupied = MockPackageRepository::new();
+        occupied.expect_get_package().returning(|name| {
+            Err(PackageError::PackageNotFound {
+                name: name.to_string(),
+                packages_path: PathBuf::from("/packages"),
+                files_examined: 0,
+                search_patterns: vec![],
+                declared_by: Vec::new(),
+            }
+            .into())
+        });
+        occupied.expect_path_is_occupied().returning(|_| true);
+        let (path, warnings) = create_warnings(occupied).await;
+        assert_eq!(
+            warnings,
+            [format!(
+                "Refusing to create 'myapp': {} is already taken by something selfie did not \
+                 find under that name; selfie will not write over it.",
+                path.display()
+            )]
+        );
+    }
 }

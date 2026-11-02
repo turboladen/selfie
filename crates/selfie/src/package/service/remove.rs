@@ -512,4 +512,58 @@ mod tests {
         }
         assert!(found, "Expected DotfileCleanupInfo event");
     }
+
+    // The warning for a dependency scan that failed, whole, so a change to how it
+    // is built cannot change its words.
+    #[tokio::test]
+    async fn a_failed_dependency_scan_is_worded_whole() {
+        let mut mock_repo = MockPackageRepository::new();
+        let (sender, mut rx) = test_sender();
+        let package = PackageBuilder::default()
+            .name("target-pkg")
+            .environment("test-env", |b| b.install("brew install target"))
+            .path("/test/packages/target-pkg.yml")
+            .build();
+        let get_package =
+            GetPackage::from_existing(package, PathBuf::from("/test/packages/target-pkg.yml"));
+        mock_repo
+            .expect_get_package()
+            .return_once(move |_| Ok(get_package));
+        let scan_failure = || {
+            crate::package::port::PackageRepoError::PackageListError(
+                crate::package::port::PackageListError::new(
+                    PathBuf::from("/p\u{200B}k"),
+                    crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                        kind: "regular file",
+                    }),
+                ),
+            )
+        };
+        mock_repo
+            .expect_find_dependent_packages()
+            .return_once(move |_| Err(scan_failure()));
+        mock_repo.expect_remove_package().returning(|_| Ok(()));
+
+        handle_remove(
+            "target-pkg",
+            &mock_repo,
+            &test_config(),
+            &sender,
+            &mut ProgressTracker::new(3),
+        )
+        .await;
+
+        drop(sender);
+        let mut warnings = Vec::new();
+        while let Some(event) = rx.recv().await {
+            warnings.extend(crate::package::event::warning_text(&event));
+        }
+        assert_eq!(
+            warnings,
+            [format!(
+                "Failed to check for dependent packages: {}",
+                scan_failure()
+            )]
+        );
+    }
 }

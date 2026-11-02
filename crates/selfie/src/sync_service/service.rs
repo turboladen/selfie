@@ -3095,9 +3095,19 @@ mod tests {
     }
 
     // A DotfileService whose `check_drift` fails outright, a state no run of the
-    // binary reaches today: discovery or the git status step fails first.
+    // binary reaches today: discovery or the git status step fails first. It fails
+    // on a package directory that a file holds.
     #[derive(Clone)]
     struct DriftCheckFailing;
+
+    fn unlisted_package_directory() -> crate::package::port::PackageListError {
+        crate::package::port::PackageListError::new(
+            PathBuf::from("/p\u{200B}k"),
+            crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                kind: "regular file",
+            }),
+        )
+    }
 
     impl DotfileService for DriftCheckFailing {
         async fn list(&self) -> EventStream {
@@ -3119,8 +3129,8 @@ mod tests {
         async fn check_drift(&self) -> EventStream {
             let events = vec![PackageEvent::Completed {
                 operation_info: test_operation_info(),
-                result: OperationResult::Failure(OperationFailure::Generic(
-                    "could not collect packages".to_string(),
+                result: OperationResult::Failure(OperationFailure::PackageList(
+                    unlisted_package_directory(),
                 )),
             }];
             Box::pin(futures::stream::iter(events))
@@ -3136,7 +3146,8 @@ mod tests {
     }
 
     // The failed check's warning counts in `warned`, so the summary under it
-    // cannot read as a clean run.
+    // cannot read as a clean run. Its words are pinned whole, so a change to how
+    // it is built cannot change them.
     #[tokio::test]
     async fn status_counts_a_failed_drift_check_as_warned() {
         use futures::StreamExt;
@@ -3162,6 +3173,27 @@ mod tests {
             _ => None,
         });
         assert_eq!(warned, Some(1), "{events:?}");
+        let warnings: Vec<String> = events
+            .iter()
+            .filter_map(crate::package::event::warning_text)
+            .collect();
+        assert_eq!(
+            warnings,
+            [format!(
+                "Drift check failed: {}",
+                unlisted_package_directory()
+            )]
+        );
+    }
+
+    // A directory outside any git repository, whole, so a change to how it is
+    // built cannot change its words.
+    #[test]
+    fn a_directory_outside_a_repository_is_worded_whole() {
+        let error = SyncError::NotARepo {
+            path: PathBuf::from("/p\u{200B}k"),
+        };
+        assert_eq!(error.to_string(), "not a git repository: /p\u{200B}k");
     }
 
     // A relayed warning must raise `warned`, on an event stream that carries no
