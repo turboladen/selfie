@@ -597,8 +597,7 @@ where
                 Ok(status) if !status.staged.is_empty() => {
                     sender
                         .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            "Staged changes detected. Commit or unstage them before pulling."
-                                .to_string(),
+                            "Staged changes detected. Commit or unstage them before pulling.",
                         )))
                         .await;
                     return;
@@ -712,7 +711,7 @@ where
                 Ok(crate::git::FastForwardResult::Diverged) => {
                     sender
                         .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            "Remote has diverged. Resolve manually with git.".to_string(),
+                            "Remote has diverged. Resolve manually with git.",
                         )))
                         .await;
                 }
@@ -1693,7 +1692,7 @@ mod tests {
     async fn the_drift_summary_carries_the_checks_outcome() {
         let failed = PackageEvent::Completed {
             operation_info: op_info(),
-            result: OperationResult::Failure(OperationFailure::Generic("boom".to_string())),
+            result: OperationResult::Failure(OperationFailure::Generic("boom")),
         };
         let cases = [
             (
@@ -2256,9 +2255,7 @@ mod tests {
     async fn collect_drift_summary_surfaces_failure() {
         let events = vec![PackageEvent::Completed {
             operation_info: test_operation_info(),
-            result: OperationResult::Failure(OperationFailure::Generic(
-                "permission denied".to_string(),
-            )),
+            result: OperationResult::Failure(OperationFailure::Generic("permission denied")),
         }];
 
         let summary = collect_drift_summary(events_to_stream(events)).await;

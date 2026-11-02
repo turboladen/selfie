@@ -1574,8 +1574,51 @@ pub enum OperationFailure {
     /// failure: it was canceled, could not start, or its result could not be
     /// read, or selfie failed running it.
     Check(CheckFailure),
-    /// Generic failure with a freeform message
-    Generic(String),
+    /// A spec update named an environment the spec does not have, or added
+    /// one it already has. Nothing was written.
+    SpecUpdate(SpecUpdateRefusal),
+    /// A failure selfie words without naming any value.
+    // `&'static str`, so a sentence built from a value cannot reach it: a value
+    // needs an arm of its own, whose sentence names it as a part.
+    Generic(&'static str),
+}
+
+/// Why a spec update refuses the environment it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecUpdateRefusal {
+    /// The update edits or removes an environment the spec does not have.
+    EnvironmentNotFound {
+        environment: String,
+        package: String,
+    },
+    /// The update adds an environment the spec already has.
+    EnvironmentExists {
+        environment: String,
+        package: String,
+    },
+}
+
+crate::parts::display_from_parts!(SpecUpdateRefusal);
+
+impl Composed for SpecUpdateRefusal {
+    fn parts(&self) -> Parts<'_> {
+        let (environment, package, verdict) = match self {
+            Self::EnvironmentNotFound {
+                environment,
+                package,
+            } => (environment, package, "' not found in package '"),
+            Self::EnvironmentExists {
+                environment,
+                package,
+            } => (environment, package, "' already exists in package '"),
+        };
+        Parts::new()
+            .text("Environment '")
+            .name(environment)
+            .text(verdict)
+            .name(package)
+            .text("'")
+    }
 }
 
 /// Why `spec create` refuses a spec by its name or its path.
@@ -1807,7 +1850,8 @@ impl std::fmt::Display for OperationFailure {
             OperationFailure::PushDisabled => {
                 write!(f, "{}", crate::git::sync_provider::commit_disabled())
             }
-            OperationFailure::Generic(msg) => write!(f, "{msg}"),
+            OperationFailure::SpecUpdate(refusal) => write!(f, "{refusal}"),
+            OperationFailure::Generic(msg) => f.write_str(msg),
         }
     }
 }
@@ -1922,16 +1966,10 @@ fn no_such_package_parts<'a>(
     }
 }
 
-// Convenience: allow creating OperationFailure from strings
-impl From<String> for OperationFailure {
-    fn from(msg: String) -> Self {
+// A literal is a generic failure; a sentence naming a value is not one.
+impl From<&'static str> for OperationFailure {
+    fn from(msg: &'static str) -> Self {
         OperationFailure::Generic(msg)
-    }
-}
-
-impl From<&str> for OperationFailure {
-    fn from(msg: &str) -> Self {
-        OperationFailure::Generic(msg.to_string())
     }
 }
 
@@ -3151,6 +3189,7 @@ impl OperationFailure {
             Self::Git(failure) => Message::of(failure),
             Self::PushDisabled => crate::git::sync_provider::commit_disabled().into(),
             Self::Check(failure) => Message::of(failure),
+            Self::SpecUpdate(refusal) => Message::of(refusal),
             Self::UnreadableSpec {
                 package_name,
                 reason,
@@ -5520,7 +5559,7 @@ mod tests {
                 "sync push is disabled: its commit can record every tracked file as deleted. \
                  Commit and push the repository with git until this is fixed",
             ),
-            (OperationFailure::Generic("g".to_string()), "g"),
+            (OperationFailure::Generic("g"), "g"),
         ];
         for (failure, words) in &cases {
             assert_eq!(failure.to_string(), *words, "{failure:?}");
@@ -6873,7 +6912,7 @@ mod tests {
 
     #[test]
     fn every_failure_is_failed() {
-        let failure = OperationResult::Failure(OperationFailure::Generic("no".to_string()));
+        let failure = OperationResult::Failure(OperationFailure::Generic("no"));
         assert_eq!(failure.outcome(), Outcome::Failed);
     }
 
@@ -7090,10 +7129,7 @@ mod tests {
                 },
                 &["a\u{200B}b"],
             ),
-            (
-                OperationFailure::Generic("could not collect packages".to_string()),
-                &[],
-            ),
+            (OperationFailure::Generic("could not collect packages"), &[]),
         ];
         // A not-found failure, for each reason, with a hint naming a declaring
         // file and its `name:` value.

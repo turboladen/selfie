@@ -443,8 +443,7 @@ where
                             .send_completed(OperationResult::Failure(
                                 crate::package::event::OperationFailure::Generic(
                                     "Could not list every dotfile directory, so this listing \
-                                     would be missing entries"
-                                        .to_string(),
+                                     would be missing entries",
                                 ),
                             ))
                             .await;

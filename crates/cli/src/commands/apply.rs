@@ -773,7 +773,7 @@ mod tests {
     // Control: failures were always handed on, and still are.
     #[test]
     fn a_failure_falls_through_to_the_default_handler() {
-        let failure = OperationResult::Failure(OperationFailure::Generic("boom".to_string()));
+        let failure = OperationResult::Failure(OperationFailure::Generic("boom"));
         assert!(summary_to_render(&failure).is_none());
     }
 
