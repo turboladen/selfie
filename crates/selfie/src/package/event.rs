@@ -1526,12 +1526,7 @@ pub enum OperationFailure {
     /// A spec write refused because selfie could not tell which spec directory
     /// the spec belongs in, so it could not compare the spec with the others.
     /// Nothing was written.
-    UnplacedSpec {
-        /// Whether the spec was being created or updated.
-        action: SpecWrite,
-        package_name: String,
-        path: std::path::PathBuf,
-    },
+    UnplacedSpec(UnplacedWrite),
     /// A spec `spec create` refuses to write for its name or its path, before
     /// anything is looked up or written.
     Uncreatable {
@@ -1765,23 +1760,7 @@ impl std::fmt::Display for OperationFailure {
                     ),
                 }
             }
-            OperationFailure::UnplacedSpec {
-                action,
-                package_name,
-                path,
-            } => {
-                let verb = match action {
-                    SpecWrite::Create => "create",
-                    SpecWrite::Update => "update",
-                };
-                write!(
-                    f,
-                    "Refusing to {verb} '{package_name}': selfie could not tell which spec \
-                     directory {} belongs in, so it could not compare it with the other specs, \
-                     and nothing was written",
-                    path.display()
-                )
-            }
+            OperationFailure::UnplacedSpec(write) => write!(f, "{write}"),
             OperationFailure::Uncreatable {
                 package_name,
                 reason,
@@ -3300,6 +3279,38 @@ impl OperationFailure {
             required_by,
             reason,
         })
+    }
+}
+
+/// A spec write selfie refused because it could not tell which spec directory
+/// the spec belongs in.
+#[derive(Debug, Clone)]
+pub struct UnplacedWrite {
+    /// Whether the spec was being created or updated.
+    pub action: SpecWrite,
+    /// The spec's name.
+    pub package_name: String,
+    /// The file the spec would have been written to.
+    pub path: std::path::PathBuf,
+}
+
+crate::parts::display_from_parts!(UnplacedWrite);
+
+impl Composed for UnplacedWrite {
+    fn parts(&self) -> Parts<'_> {
+        let verb = match self.action {
+            SpecWrite::Create => "create",
+            SpecWrite::Update => "update",
+        };
+        Parts::new()
+            .text(format!("Refusing to {verb} '"))
+            .name(&self.package_name)
+            .text("': selfie could not tell which spec directory ")
+            .path(&self.path)
+            .text(
+                " belongs in, so it could not compare it with the other specs, and nothing was \
+                 written",
+            )
     }
 }
 
@@ -4948,6 +4959,22 @@ pub(crate) fn warning_text(event: &PackageEvent) -> Option<String> {
     }
 }
 
+// The values a warning event names as parts, or `None` for any other event.
+// Panics on a warning sent as finished text. Its twin for integration tests is
+// `warning_values` in tests/unanswered_check_tests.rs, which skips text warnings
+// instead; keep the two in step.
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn warning_values(event: &PackageEvent) -> Option<Vec<String>> {
+    match event {
+        PackageEvent::Warning { message, .. } => panic!("sent as text: {message}"),
+        PackageEvent::ComposedWarning { warning, .. } => Some(crate::parts::values_of(
+            &crate::parts::Message::from(warning.parts()),
+        )),
+        _ => None,
+    }
+}
+
 // One of each way a check can give no answer, in declaration order, for the
 // tests that table them.
 #[cfg(test)]
@@ -6257,11 +6284,11 @@ mod tests {
     #[test]
     fn an_unplaced_spec_write_is_worded_whole() {
         let refused = |action| {
-            OperationFailure::UnplacedSpec {
+            OperationFailure::UnplacedSpec(UnplacedWrite {
                 action,
                 package_name: "myapp".to_string(),
                 path: "/p\u{200B}k/myapp.yml".into(),
-            }
+            })
             .to_string()
         };
         assert_eq!(

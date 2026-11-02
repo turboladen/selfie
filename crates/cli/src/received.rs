@@ -339,6 +339,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         OperationFailure::PackageList(error) => composed(error),
         OperationFailure::Repository(error) => composed(error),
         OperationFailure::DependencyError(failure) => composed(failure),
+        OperationFailure::UnplacedSpec(write) => composed(write),
         OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
         OperationFailure::Stopped(stop) => composed(stop),
         OperationFailure::Track(message) => composed(message),
@@ -909,6 +910,21 @@ mod tests {
         assert_eq!(
             unknown_status(&status).as_str(),
             r"Package `dep\u{200b}x` not found in path /p"
+        );
+    }
+
+    // A spec write refused as unplaced names the spec and its path, each escaped.
+    #[test]
+    fn an_unplaced_spec_write_names_its_spec_and_path_escaped() {
+        let refused = OperationFailure::UnplacedSpec(selfie::package::event::UnplacedWrite {
+            action: selfie::package::event::SpecWrite::Create,
+            package_name: "my\u{200B}app".to_string(),
+            path: "/p\u{200B}k/my\u{200B}app.yml".into(),
+        });
+
+        assert_eq!(
+            failure(&refused).as_str(),
+            r"Refusing to create 'my\u{200b}app': selfie could not tell which spec directory /p\u{200b}k/my\u{200b}app.yml belongs in, so it could not compare it with the other specs, and nothing was written"
         );
     }
 

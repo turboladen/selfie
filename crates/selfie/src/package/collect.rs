@@ -117,13 +117,9 @@ fn unparsable_paths(invalid: &[crate::package::port::PackageParseError]) -> Vec<
 }
 
 /// Reports that [`Listed::place`] could not place a spec.
-#[derive(Debug, Clone, thiserror::Error)]
-#[error(
-    "selfie could not tell which spec directory {} belongs in, so it could not compare it with \
-     the other specs",
-    .0.display()
-)]
-pub(crate) struct UnplacedSpec(PathBuf);
+// A marker with no words: each caller words the refusal for the write it stops.
+#[derive(Debug, Clone)]
+pub(crate) struct UnplacedSpec;
 
 impl Listed {
     /// Lists both directories.
@@ -178,14 +174,13 @@ impl Listed {
     /// - `spec`'s origin names the dotfiles directory, and that directory could not
     ///   be listed.
     pub(crate) fn place(&mut self, spec: &Package) -> Result<(), UnplacedSpec> {
-        let unplaced = || UnplacedSpec(spec.path().clone());
         let (specs, invalid) = match spec.origin() {
             SpecOrigin::PackageDirectory => (&mut self.packages, &mut self.invalid_in_packages),
             SpecOrigin::DotfilesDirectory => match &mut self.dotfiles {
                 Ok((specs, invalid)) => (specs, invalid),
-                Err(_) => return Err(unplaced()),
+                Err(_) => return Err(UnplacedSpec),
             },
-            SpecOrigin::Memory => return Err(unplaced()),
+            SpecOrigin::Memory => return Err(UnplacedSpec),
         };
         // The file holds `spec` now, whatever failed to parse there before.
         invalid.retain(|error| error.package_path() != spec.path().as_path());
