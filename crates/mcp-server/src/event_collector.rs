@@ -3808,8 +3808,9 @@ mod tests {
         assert!(env_data["dependency_statuses"][1]["reason"].is_null());
     }
 
-    // A failed recommend's row carries the failure's own sentence, so the MCP
-    // server says what the CLI says, without the CLI's escapes.
+    // A failed recommend's row carries the failure's `Display`, its words with
+    // each value written raw. The CLI escapes those values, so the two differ
+    // wherever a value holds a character it escapes.
     #[test]
     fn a_failed_recommend_carries_its_failures_sentence() {
         let failure =
@@ -3829,8 +3830,8 @@ mod tests {
         assert_eq!(rows[0]["error"], sentence.as_str());
     }
 
-    // A recommend refused for a spec selfie will not read carries the words the
-    // row carried when it held the failure's sentence as a string.
+    // A recommend refused for a spec selfie will not read carries the refusal's
+    // words, naming the spec and the reason it was refused.
     #[test]
     fn a_failed_recommends_unreadable_spec_keeps_its_words() {
         let rows = event_to_json(&PackageEvent::RecommendFailed {
