@@ -327,9 +327,9 @@ fn not_posix_sh(field_name: &str, why: &str) -> ValidationIssue {
     ValidationIssue::warning(
         ValidationErrorCategory::CommandSyntax,
         field_name,
-        &format!(
+        crate::validation::IssueMessage::Text(format!(
             "The command does not parse as POSIX sh: {why}. This is fine if your shell accepts it"
-        ),
+        )),
         None,
     )
 }
@@ -608,7 +608,9 @@ impl Package {
                     issues.push(ValidationIssue::info(
                         ValidationErrorCategory::InvalidValue,
                         &environment_field(env_name, field),
-                        &format!("The {field} command is blank, so selfie treats it as absent"),
+                        crate::validation::IssueMessage::Text(format!(
+                            "The {field} command is blank, so selfie treats it as absent"
+                        )),
                         Some(&format!("Remove the `{field}` key, or give it a command.")),
                     ));
                 }
@@ -645,10 +647,10 @@ impl Package {
                         issues.push(ValidationIssue::warning_at(
                             ValidationErrorCategory::UrlFormat,
                             "homepage",
-                            &format!(
+                            crate::validation::IssueMessage::Text(format!(
                                 "URL should use http or https scheme, found: {}",
                                 url.scheme()
-                            ),
+                            )),
                             Some("Use https:// prefix for the URL."),
                             hp_loc,
                         ));
@@ -658,7 +660,7 @@ impl Package {
                     issues.push(ValidationIssue::error_at(
                         ValidationErrorCategory::UrlFormat,
                         "homepage",
-                        &format!("Invalid URL format: {err}"),
+                        crate::validation::IssueMessage::Text(format!("Invalid URL format: {err}")),
                         Some("Provide a valid URL with http:// or https:// prefix."),
                         hp_loc,
                     ));
@@ -748,7 +750,9 @@ impl Package {
                 issues.push(ValidationIssue::warning(
                     ValidationErrorCategory::CommandSyntax,
                     field_name,
-                    &format!("Potential invalid redirection with {redirect}"),
+                    crate::validation::IssueMessage::Text(format!(
+                        "Potential invalid redirection with {redirect}"
+                    )),
                     Some("Ensure the redirection path is valid and absolute."),
                 ));
             }
@@ -940,9 +944,9 @@ impl Package {
         vec![ValidationIssue::info(
             ValidationErrorCategory::Advisory,
             "dotfiles",
-            &format!(
+            crate::validation::IssueMessage::Text(format!(
                 "'selfie apply' executes {command_count} command(s) for this package's dotfiles"
-            ),
+            )),
             Some(
                 "Review the 'command' and 'vars' entries before applying a package you did not write.",
             ),
@@ -1127,7 +1131,7 @@ impl Package {
             issues.push(ValidationIssue::error_at(
                 ValidationErrorCategory::InvalidValue,
                 &format!("{field}.target"),
-                &format!("Dotfile {}", rejection.message()),
+                crate::validation::IssueMessage::Text(format!("Dotfile {}", rejection.message())),
                 Some(rejection.suggestion()),
                 target_loc,
             ));

@@ -1703,7 +1703,7 @@ mod tests {
         let issue = |level, field: &str| ValidationIssueData {
             category: selfie::validation::ValidationErrorCategory::CommandSyntax,
             field: field.to_string(),
-            message: "Unmatched double quote in command".to_string(),
+            message: "Unmatched double quote in command".into(),
             level,
             suggestion: Some("Add a closing double quote.".to_string()),
             location: None,

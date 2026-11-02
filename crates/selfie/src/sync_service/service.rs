@@ -825,7 +825,7 @@ fn validate_changes_against(
                 level: crate::validation::ValidationLevel::Error,
                 category: PushIssueCategory::NameCollision,
                 field: "-".to_string(),
-                message: name_collision_message(&names),
+                message: crate::validation::IssueMessage::Text(name_collision_message(&names)),
                 location: None,
                 suggestion: None,
             }],
@@ -934,7 +934,9 @@ fn apply_refusal_issue(
         level: crate::validation::ValidationLevel::Error,
         category: super::port::PushIssueCategory::ApplyRefusal,
         field: "-".to_string(),
-        message: format!("'selfie apply' would refuse this package: {unreported}"),
+        message: crate::validation::IssueMessage::Text(format!(
+            "'selfie apply' would refuse this package: {unreported}"
+        )),
         location: None,
         // A refusal carries its remedy in its message.
         suggestion: None,
@@ -1193,7 +1195,7 @@ fn load_spec(
         level: crate::validation::ValidationLevel::Error,
         category,
         field: "-".to_string(),
-        message,
+        message: crate::validation::IssueMessage::Text(message),
         location,
         suggestion: None,
     };
@@ -1231,7 +1233,7 @@ fn push_issue(
         level: issue.level(),
         category: super::port::PushIssueCategory::Validation(issue.category()),
         field: issue.field().to_string(),
-        message: issue.message().to_string(),
+        message: issue.wording().clone(),
         location: issue.location(),
         suggestion: issue.suggestion().cloned(),
     })
@@ -3403,7 +3405,7 @@ mod push_validation_tests {
             issue.category,
             crate::sync_service::PushIssueCategory::ParseError
         );
-        assert_eq!(issue.message, "unclosed bracket '{'");
+        assert_eq!(issue.message.to_string(), "unclosed bracket '{'");
         assert_eq!(
             issue.location.map(|at| at.to_string()).as_deref(),
             Some("line 5, column 15")
@@ -4192,7 +4194,7 @@ environments:
                 crate::validation::ValidationErrorCategory::InvalidValue,
             ),
             field: "configs".to_string(),
-            message: "m".to_string(),
+            message: "m".into(),
             location: None,
             suggestion: None,
         };
@@ -4200,11 +4202,15 @@ environments:
         let issue = super::apply_refusal_issue(&refusal, &[reported])
             .expect("the environment's key was not reported");
         assert!(
-            issue.message.contains("unknown field 'audt'"),
+            issue.message.to_string().contains("unknown field 'audt'"),
             "{}",
             issue.message
         );
-        assert!(!issue.message.contains("configs"), "{}", issue.message);
+        assert!(
+            !issue.message.to_string().contains("configs"),
+            "{}",
+            issue.message
+        );
     }
 
     // With nothing reported, every reason of a refusal is appended, the last one
@@ -4225,12 +4231,15 @@ environments:
 
         let issue = super::apply_refusal_issue(&refusal, &[]).expect("nothing reported either");
         assert!(
-            issue.message.contains("unknown field 'configs'"),
+            issue
+                .message
+                .to_string()
+                .contains("unknown field 'configs'"),
             "{}",
             issue.message
         );
         assert!(
-            issue.message.contains("unknown field 'audt'"),
+            issue.message.to_string().contains("unknown field 'audt'"),
             "{}",
             issue.message
         );
@@ -4257,7 +4266,7 @@ environments:
                 crate::validation::ValidationErrorCategory::InvalidValue,
             ),
             field: refusal.reasons()[0].fields()[0].clone(),
-            message: "m".to_string(),
+            message: "m".into(),
             location: None,
             suggestion: None,
         };
@@ -4328,7 +4337,10 @@ environments:
             "one problem must be reported once, got: {issues:?}"
         );
         assert!(
-            issues[0].message.contains("could not be checked"),
+            issues[0]
+                .message
+                .to_string()
+                .contains("could not be checked"),
             "the entry must name the unread top level: {issues:?}"
         );
     }

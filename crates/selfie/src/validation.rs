@@ -145,8 +145,9 @@ pub struct ValidationIssue {
     pub(crate) location: Option<crate::yaml::SourceLocation>,
 }
 
-/// What a validation issue says: its own words, or the deploy state's verdict
-/// in the words a run gives it.
+/// What a validation issue says: its own words, as text or as parts naming
+/// its values, the deploy state's verdict in the words a run gives it, or what
+/// is wrong with a spec directory.
 #[derive(Debug, Clone)]
 pub enum IssueMessage {
     /// The issue's own sentence.
@@ -158,6 +159,28 @@ pub enum IssueMessage {
     // Boxed so a validation issue stays small enough to return in a `Result`
     // without boxing it there.
     Directory(Box<DirectoryIssue>),
+    /// The issue's own sentence, naming the values it names as parts.
+    Message(crate::parts::Message),
+}
+
+// Only a literal converts implicitly. A sentence formatted at runtime may name a
+// value, so it is built as a `Message`, or as `Text` explicitly.
+impl From<&'static str> for IssueMessage {
+    fn from(text: &'static str) -> Self {
+        Self::Text(text.to_string())
+    }
+}
+
+impl From<&String> for IssueMessage {
+    fn from(text: &String) -> Self {
+        Self::Text(text.clone())
+    }
+}
+
+impl From<crate::parts::Message> for IssueMessage {
+    fn from(message: crate::parts::Message) -> Self {
+        Self::Message(message)
+    }
 }
 
 crate::parts::display_from_parts!(IssueMessage);
@@ -168,6 +191,7 @@ impl crate::parts::Composed for IssueMessage {
             Self::Text(text) => crate::parts::Parts::new().text(text.as_str()),
             Self::DeployState(notice) => notice.parts(),
             Self::Directory(issue) => issue.parts(),
+            Self::Message(message) => message.parts(),
         }
     }
 }
@@ -243,13 +267,13 @@ impl ValidationIssue {
     pub(super) fn error(
         category: ValidationErrorCategory,
         field: &str,
-        message: &str,
+        message: impl Into<IssueMessage>,
         suggestion: Option<&str>,
     ) -> Self {
         Self {
             category,
             field: field.to_string(),
-            message: IssueMessage::Text(message.to_string()),
+            message: message.into(),
             level: ValidationLevel::Error,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
@@ -265,13 +289,13 @@ impl ValidationIssue {
     pub(super) fn info(
         category: ValidationErrorCategory,
         field: &str,
-        message: &str,
+        message: impl Into<IssueMessage>,
         suggestion: Option<&str>,
     ) -> Self {
         Self {
             category,
             field: field.to_string(),
-            message: IssueMessage::Text(message.to_string()),
+            message: message.into(),
             level: ValidationLevel::Info,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
@@ -282,14 +306,14 @@ impl ValidationIssue {
     pub(super) fn error_at(
         category: ValidationErrorCategory,
         field: &str,
-        message: &str,
+        message: impl Into<IssueMessage>,
         suggestion: Option<&str>,
         location: Option<crate::yaml::SourceLocation>,
     ) -> Self {
         Self {
             category,
             field: field.to_string(),
-            message: IssueMessage::Text(message.to_string()),
+            message: message.into(),
             level: ValidationLevel::Error,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location,
@@ -300,13 +324,13 @@ impl ValidationIssue {
     pub(super) fn warning(
         category: ValidationErrorCategory,
         field: &str,
-        message: &str,
+        message: impl Into<IssueMessage>,
         suggestion: Option<&str>,
     ) -> Self {
         Self {
             category,
             field: field.to_string(),
-            message: IssueMessage::Text(message.to_string()),
+            message: message.into(),
             level: ValidationLevel::Warning,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
@@ -317,14 +341,14 @@ impl ValidationIssue {
     pub(super) fn warning_at(
         category: ValidationErrorCategory,
         field: &str,
-        message: &str,
+        message: impl Into<IssueMessage>,
         suggestion: Option<&str>,
         location: Option<crate::yaml::SourceLocation>,
     ) -> Self {
         Self {
             category,
             field: field.to_string(),
-            message: IssueMessage::Text(message.to_string()),
+            message: message.into(),
             level: ValidationLevel::Warning,
             suggestion: suggestion.map(std::string::ToString::to_string),
             location,
@@ -346,8 +370,7 @@ impl ValidationIssue {
     pub fn message(&self) -> std::borrow::Cow<'_, str> {
         match &self.message {
             IssueMessage::Text(text) => text.as_str().into(),
-            IssueMessage::DeployState(notice) => notice.to_string().into(),
-            IssueMessage::Directory(issue) => issue.to_string().into(),
+            other => other.to_string().into(),
         }
     }
 

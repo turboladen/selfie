@@ -505,7 +505,7 @@ mod tests {
         ValidationIssueData {
             category: ValidationErrorCategory::CommandSyntax,
             field: "environments.test.install".to_string(),
-            message: "m".to_string(),
+            message: "m".into(),
             level,
             suggestion: None,
             location: None,

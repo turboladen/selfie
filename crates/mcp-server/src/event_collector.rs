@@ -884,7 +884,7 @@ fn issue_json(issue: &selfie::package::event::ValidationIssueData) -> Value {
         level: issue.level,
         category: validation_category_label(issue.category),
         field: &issue.field,
-        message: &issue.message,
+        message: &issue.message.to_string(),
         suggestion: issue.suggestion.as_deref(),
         location: issue.location,
     })
@@ -935,7 +935,7 @@ pub(crate) fn push_failures_json(
                         level: issue.level,
                         category: push_category_label(issue.category),
                         field: &issue.field,
-                        message: &issue.message,
+                        message: &issue.message.to_string(),
                         suggestion: issue.suggestion.as_deref(),
                         location: issue.location,
                     })
@@ -1869,7 +1869,7 @@ mod tests {
         let issue = |location| selfie::package::event::ValidationIssueData {
             category: ValidationErrorCategory::RequiredField,
             field: "name".to_string(),
-            message: "m".to_string(),
+            message: "m".into(),
             level: selfie::validation::ValidationLevel::Error,
             suggestion: None,
             location,
@@ -1941,7 +1941,7 @@ mod tests {
                 level: selfie::validation::ValidationLevel::Error,
                 category: PushIssueCategory::ParseError,
                 field: "-".to_string(),
-                message: "unclosed bracket".to_string(),
+                message: "unclosed bracket".into(),
                 location: selfie::yaml::SourceLocation::new(2, 1),
                 suggestion: None,
             }],
@@ -2799,7 +2799,7 @@ mod tests {
                 issues: vec![selfie::package::event::ValidationIssueData {
                     category: ValidationErrorCategory::Advisory,
                     field: "f".to_string(),
-                    message: "m".to_string(),
+                    message: "m".into(),
                     level,
                     suggestion: None,
                     location: None,

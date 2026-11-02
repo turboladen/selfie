@@ -1302,7 +1302,7 @@ mod tests {
                     level: selfie::validation::ValidationLevel::Error,
                     category: PushIssueCategory::ParseError,
                     field: "-".to_string(),
-                    message: "unclosed bracket".to_string(),
+                    message: "unclosed bracket".into(),
                     location: None,
                     suggestion: None,
                 }],

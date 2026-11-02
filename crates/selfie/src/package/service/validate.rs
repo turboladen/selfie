@@ -74,7 +74,7 @@ pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueDat
         .map(|issue| ValidationIssueData {
             category: issue.category(),
             field: issue.field().to_string(),
-            message: issue.message().to_string(),
+            message: issue.wording().clone(),
             level: issue.level(),
             suggestion: issue.suggestion().map(std::string::ToString::to_string),
             location: issue.location(),
@@ -415,7 +415,8 @@ pub(super) mod tests {
     // issues of one level arrived in.
     #[test]
     fn issues_go_out_by_level_keeping_their_order() {
-        type Make = fn(ValidationErrorCategory, &str, &str, Option<&str>) -> ValidationIssue;
+        type Make =
+            fn(ValidationErrorCategory, &str, &'static str, Option<&str>) -> ValidationIssue;
         let issue =
             |make: Make, field| make(ValidationErrorCategory::InvalidValue, field, "m", None);
         let issues: ValidationIssues = vec![
@@ -559,7 +560,7 @@ pub(super) mod tests {
                     validation_result
                         .issues
                         .into_iter()
-                        .filter(|issue| issue.message.contains("so apply deploys none"))
+                        .filter(|issue| issue.message.to_string().contains("so apply deploys none"))
                         .map(|issue| issue.field),
                 );
             }

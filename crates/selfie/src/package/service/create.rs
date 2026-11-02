@@ -421,7 +421,7 @@ mod tests {
                 .iter()
                 .any(|issue| matches!(issue.level, ValidationLevel::Error)
                     && issue.field == "homepage"
-                    && issue.message.contains("Invalid URL format")),
+                    && issue.message.to_string().contains("Invalid URL format")),
             "got: {issues:?}"
         );
     }
@@ -508,6 +508,7 @@ mod tests {
                         ValidationLevel::Warning
                     ) && issue
                         .message
+                        .to_string()
                         .contains("does not parse as POSIX sh"))),
                 "{command}: got: {results:?}"
             );
@@ -544,6 +545,7 @@ mod tests {
                 .any(|issue| matches!(issue.level, ValidationLevel::Warning)
                     && issue
                         .message
+                        .to_string()
                         .contains("Current environment 'test' is not configured")),
             "got: {results:?}"
         );
@@ -582,7 +584,7 @@ mod tests {
                 .issues
                 .iter()
                 .any(|issue| matches!(issue.level, ValidationLevel::Info)
-                    && issue.message.contains("executes 1 command(s)")),
+                    && issue.message.to_string().contains("executes 1 command(s)")),
             "got: {results:?}"
         );
         assert!(

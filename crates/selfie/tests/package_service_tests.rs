@@ -1573,7 +1573,7 @@ mod validate_all_covers_standalone_specs {
             .flat_map(|issues| {
                 issues
                     .iter()
-                    .map(|issue| (issue.field.clone(), issue.message.clone()))
+                    .map(|issue| (issue.field.clone(), issue.message.to_string()))
             })
             .collect()
     }
@@ -2451,8 +2451,8 @@ mod validate_all_covers_standalone_specs {
         fn collisions(issues: &[ValidationIssueData]) -> Vec<(String, String)> {
             issues
                 .iter()
-                .filter(|issue| issue.message.contains(COLLISION))
-                .map(|issue| (issue.field.clone(), issue.message.clone()))
+                .filter(|issue| issue.message.to_string().contains(COLLISION))
+                .map(|issue| (issue.field.clone(), issue.message.to_string()))
                 .collect()
         }
 

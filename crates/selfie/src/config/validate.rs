@@ -124,7 +124,7 @@ impl super::diagnostics::LoadedConfig {
             ValidationIssue::warning(
                 ValidationErrorCategory::Advisory,
                 ignored.key(),
-                &ignored.message(),
+                crate::validation::IssueMessage::Text(ignored.message()),
                 Some(&ignored.suggestion()),
             )
         }));
@@ -172,7 +172,7 @@ fn missing_setting_issue(field_name: &str, example: &str) -> ValidationIssue {
     ValidationIssue::error(
         ValidationErrorCategory::RequiredField,
         field_name,
-        &format!("The `{field_name}` setting is missing"),
+        crate::validation::IssueMessage::Text(format!("The `{field_name}` setting is missing")),
         Some(&format!("Add `{field_name}` to the file. Ex. {example}")),
     )
 }
@@ -243,14 +243,14 @@ fn validate_directory_path(
                 ValidationIssue::warning(
                     ValidationErrorCategory::Advisory,
                     field_name,
-                    &message,
+                    crate::validation::IssueMessage::Text(message),
                     None,
                 )
             } else {
                 ValidationIssue::error(
                     ValidationErrorCategory::PathFormat,
                     field_name,
-                    &message,
+                    crate::validation::IssueMessage::Text(message),
                     None,
                 )
             });
@@ -261,7 +261,9 @@ fn validate_directory_path(
         return Err(ValidationIssue::error(
             ValidationErrorCategory::PathFormat,
             field_name,
-            &format!("The `{field_name}` path is relative and cannot be resolved"),
+            crate::validation::IssueMessage::Text(format!(
+                "The `{field_name}` path is relative and cannot be resolved"
+            )),
             Some("Provide an absolute path or use ~ for the home directory"),
         ));
     }
@@ -405,10 +407,10 @@ fn validate_command_timeout(timeout: Option<NonZeroU64>) -> Option<ValidationIss
         ValidationIssue::warning(
             ValidationErrorCategory::InvalidValue,
             "command_timeout",
-            &format!(
+            crate::validation::IssueMessage::Text(format!(
                 "Command timeout is {} seconds, which exceeds the recommended maximum of {MAX_RECOMMENDED_TIMEOUT_SECS} seconds",
                 timeout.get()
-            ),
+            )),
             Some(&format!(
                 "Consider lowering `command_timeout` to {MAX_RECOMMENDED_TIMEOUT_SECS} or less"
             )),
