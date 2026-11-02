@@ -1755,3 +1755,86 @@ fn spec_validate_names_a_mismatched_name_escaped() {
     assert!(row.contains(r"Package name 'n\u{200b}m'"), "{row}");
     assert!(!row.contains('\u{200B}'), "{row:?}");
 }
+
+// Every command that names a refused spec's reason shows its unknown key, and
+// the environment the key sits in, escaped: a listing's row, a run's skipping
+// line, a single-package command's failure, and spec info's refusal here and
+// in another environment. A spec that does not parse is skipped with its file
+// named escaped, and each listing names an ambiguity's directory escaped.
+#[test]
+fn a_refused_specs_reason_names_its_key_and_environment_escaped() {
+    let temp = setup_default_test_config();
+    let keyed = format!(
+        "name: g\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \"w\\u200Bk\": 1\n"
+    );
+    let elsewhere = "name: e\nenvironments:\n  \"w\\u200Bv\":\n    install: \"true\"\n    \
+                     \"x\\u200By\": 1\n";
+    hostile_package_directory(
+        &temp,
+        &[
+            ("g.yml", &keyed),
+            ("e.yml", elsewhere),
+            ("b.yml", "name: b\n  bad: [\n"),
+            ("m.yml", &plain_spec("m")),
+            ("m.yaml", &plain_spec("m")),
+        ],
+    );
+    let ambiguity = r"p\u{200b}k: m.yaml, m.yml";
+    let key = r"unknown field 'w\u{200b}k'";
+    let cases: [(&[&str], &str, &str); 12] = [
+        (&["package", "list"], "refused (g.yml)", key),
+        (&["spec", "list"], "Refused: g", key),
+        (&["apply"], "Skipping package 'g'", key),
+        (&["dotfiles", "drift"], "Skipping package 'g'", key),
+        (&["package", "check", "g"], "Cannot use package `g`", key),
+        (&["spec", "info", "g"], "would refuse this spec here", key),
+        (
+            &["dotfiles", "list"],
+            "Cannot read the dotfiles in 'e'",
+            r"in environment 'w\u{200b}v': unknown field 'x\u{200b}y'",
+        ),
+        (&["apply"], "Skipping package file", r"p\u{200b}k/b.yml"),
+        (
+            &["spec", "info", "e"],
+            "would refuse this spec in another environment",
+            r"in environment 'w\u{200b}v': unknown field 'x\u{200b}y'",
+        ),
+        (&["package", "list"], "refused (m.yaml)", ambiguity),
+        (&["spec", "list"], "m.yaml) — Multiple packages", ambiguity),
+        (
+            &["dotfiles", "list"],
+            "m.yaml): Multiple packages",
+            ambiguity,
+        ),
+    ];
+
+    for (args, marker, escaped) in cases {
+        let printed = printed(&temp, args);
+        let line = line_with(&printed, marker);
+        assert!(line.contains(escaped), "{args:?}: {line}");
+        assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
+    }
+}
+
+// A not-found failure's hint shows the declared `name:` value as a name: an
+// invisible character escaped once, and a quote as it is written.
+#[test]
+fn a_name_field_hint_shows_the_declared_name_as_a_name() {
+    for (declared, asked, shown) in [
+        ("ze\\u200Bo", "ze\u{200B}o", r"name: ze\u{200b}o`"),
+        ("ze\\\"o", "ze\"o", "name: ze\"o`"),
+    ] {
+        let temp = setup_default_test_config();
+        let spec = format!(
+            "name: \"{declared}\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+        );
+        hostile_package_directory(&temp, &[("bar.yml", &spec)]);
+
+        let printed = printed(&temp, &["apply", asked]);
+
+        let hint = line_with(&printed, "bar.yml declares");
+        assert!(hint.contains(shown), "{asked:?}: {hint}");
+        assert!(!hint.contains('\u{200B}'), "{asked:?}: {hint:?}");
+        assert!(hint.contains(r"p\u{200b}k/bar.yml"), "{asked:?}: {hint}");
+    }
+}

@@ -90,7 +90,7 @@ pub(crate) fn every_labeled_reason() -> Vec<UnknownStatus> {
         directory_unreadable(),
         UnknownStatus::Refused {
             kind: RefusalKind::NoEnvironments,
-            reason: "r".to_string(),
+            reason: test_common::message("r"),
         },
         UnknownStatus::NotInEnvironment,
         UnknownStatus::NoCheckCommand,

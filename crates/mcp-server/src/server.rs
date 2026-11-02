@@ -972,7 +972,7 @@ mod tests {
         let own: Vec<&str> = [
             UnknownStatus::Refused {
                 kind: RefusalKind::NoEnvironments,
-                reason: String::new(),
+                reason: test_common::message(""),
             },
             UnknownStatus::NotInEnvironment,
             UnknownStatus::NoCheckCommand,

@@ -110,7 +110,7 @@ impl ApplyWarning {
 /// while collecting the packages, before any of them is looked at.
 ///
 /// Each variant names what was refused and carries what a renderer needs to
-/// say why; [`sentence`](Self::sentence) says it as prose.
+/// say why. A refusal's parts word it as a sentence.
 #[derive(Debug, Clone)]
 pub enum CollectionRefusal {
     /// A dotfiles directory selfie could not read through, so it may hold
@@ -189,15 +189,9 @@ impl CollectionRefusal {
         matches!(self, Self::UnreadableDotfilesDirectory(_))
     }
 
-    /// This refusal as a sentence for a person, as its parts write it.
-    #[must_use]
-    pub fn sentence(&self) -> String {
-        self.to_string()
-    }
-
     // Each refusal leaves as the event its kind calls for: a directory as its
-    // warning, a name as a refused package carrying `sentence`, an unloadable
-    // spec typed, so each adapter renders it.
+    // warning, a name as a refused package whose reason is this refusal's own
+    // parts, an unloadable spec typed, so each adapter renders it.
     async fn send(&self, sender: &crate::package::event::EventSender) {
         match self {
             Self::UnreadableDotfilesDirectory(unreadable) => {
@@ -211,7 +205,7 @@ impl CollectionRefusal {
                 sender
                     .send_packages_refused([crate::package::event::PackageRefusal {
                         kind: crate::package::event::RefusalKind::AmbiguousName,
-                        reason: self.sentence(),
+                        reason: crate::parts::Message::of(self),
                         package: crate::package::event::RefusedPackage {
                             name: name.clone(),
                             paths: paths.clone(),

@@ -13209,7 +13209,7 @@ async fn list_refuses_a_package_spec_declaring_no_environment() {
         [("noenv", selfie::package::event::RefusalKind::NoEnvironments)]
     );
     assert!(
-        listed.refused[0].reason.contains("environment"),
+        listed.refused[0].reason.to_string().contains("environment"),
         "the reason must name what is missing, got: {}",
         listed.refused[0].reason
     );
@@ -13750,7 +13750,7 @@ environments:
     );
     assert_eq!(listed.refused[0].package_name, "shadowed");
     assert!(
-        listed.refused[0].reason.contains("_dotfiles"),
+        listed.refused[0].reason.to_string().contains("_dotfiles"),
         "the reason must name the key, got: {}",
         listed.refused[0].reason
     );
@@ -13940,7 +13940,7 @@ environments:
     );
     assert_eq!(listed.refused[0].package_name, "envshadow");
     assert!(
-        listed.refused[0].reason.contains("_dotfiles"),
+        listed.refused[0].reason.to_string().contains("_dotfiles"),
         "the reason must name the key, got: {}",
         listed.refused[0].reason
     );
@@ -13999,7 +13999,7 @@ async fn list_refuses_every_file_of_an_ambiguous_name() {
     assert_eq!(listed.refused.len(), 2, "{listed:?}");
     assert!(listed.refused.iter().all(|row| row.kind
         == selfie::package::event::RefusalKind::AmbiguousName
-        && row.reason.contains("bat.yaml, bat.yml")));
+        && row.reason.to_string().contains("bat.yaml, bat.yml")));
 }
 
 // Copies of what a target held before an apply overwrote it.
@@ -19815,7 +19815,7 @@ mod refusals_grouped_by_reason {
                     ..
                 } => Some((
                     *kind,
-                    reason.clone(),
+                    reason.to_string(),
                     packages.iter().map(|p| p.name.clone()).collect(),
                 )),
                 _ => None,

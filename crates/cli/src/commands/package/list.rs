@@ -193,7 +193,7 @@ fn handle_list_event(
                     failed(shown!(
                         "refused ({}): {}",
                         DisplayPath::of(shown),
-                        crate::received::refusal_reason(refused)
+                        crate::received::composed(&refused.reason)
                     )),
                     None,
                 );

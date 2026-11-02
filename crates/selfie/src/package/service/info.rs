@@ -111,7 +111,7 @@ where
                 .sum(),
             package
                 .untrusted_keys_refusal()
-                .map(|reason| reason.to_string()),
+                .map(|reason| crate::parts::Message::of(&reason)),
         )
     };
 
@@ -128,7 +128,7 @@ where
         environments,
         current_environment: config.environment().to_string(),
         git_status: file_git_status,
-        refusal: refusal.map(|reason| reason.to_string()),
+        refusal: refusal.map(|reason| crate::parts::Message::of(&reason)),
         refusal_elsewhere,
         dotfiles,
         apply_commands,
@@ -368,7 +368,7 @@ fn look_up_dependency<PR: PackageRepository>(
     if let Some(reason) = dep_package.package.spec_refusal(current_env) {
         return DependencyLookup::Known(EnvironmentStatus::Unknown(UnknownStatus::Refused {
             kind: reason.kind(),
-            reason: reason.to_string(),
+            reason: crate::parts::Message::of(&reason),
         }));
     }
 

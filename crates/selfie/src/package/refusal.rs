@@ -457,6 +457,105 @@ mod tests {
         package
     }
 
+    // A refused spec's reason names its environment and its key as names, and
+    // an ambiguity's names its directory as a path, so a value holding U+200B
+    // never sits inside selfie's words. The kinds are checked as well as the
+    // values, since `values_of` cannot tell a name from a path.
+    #[test]
+    fn a_refused_specs_reason_names_its_values_as_parts() {
+        use crate::package::event::{OperationFailure, RefusedSpec};
+        use crate::parts::{Composed, Part, values_of};
+
+        let package = package_from(
+            "name: myapp\nenvironments:\n  \"w\\u200Bk\":\n    install: \"true\"\n    \
+             \"x\\u200By\": 1\n",
+        );
+        let refusal = package
+            .spec_refusal("w\u{200B}k")
+            .expect("the key refuses it");
+        let row = RefusedSpec::new(&package, &refusal);
+        assert_eq!(values_of(&row.reason), ["w\u{200B}k", "x\u{200B}y"]);
+        let parts = row.reason.parts();
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+        assert!(
+            parts.contains(&&Part::Name("w\u{200B}k".into())),
+            "{parts:?}"
+        );
+        assert!(
+            parts.contains(&&Part::Name("x\u{200B}y".into())),
+            "{parts:?}"
+        );
+
+        let failure = OperationFailure::UnreadableSpec {
+            package_name: "myapp".to_string(),
+            reason: row.reason.clone(),
+        };
+        assert_eq!(
+            values_of(&failure.message()),
+            ["myapp", "w\u{200B}k", "x\u{200B}y"]
+        );
+
+        let directory = std::path::Path::new("/p\u{200B}k");
+        let files = [directory.join("m.yml"), directory.join("m.yaml")];
+        let ambiguous = RefusedSpec::ambiguous_file("m", &files[0], &files);
+        let parts = ambiguous.reason.parts();
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+        assert!(parts.contains(&&Part::Path(directory.into())), "{parts:?}");
+        assert!(parts.contains(&&Part::Name("m".into())), "{parts:?}");
+    }
+
+    // Two specs refused for the same reason are reported as one group, named by
+    // that reason in its words, and a third refused for another reason as a
+    // group of its own.
+    #[tokio::test]
+    async fn specs_refused_for_one_reason_are_reported_once() {
+        use crate::package::event::{
+            EventSender, OperationContext, PackageEvent, metadata::OperationType,
+        };
+
+        let env = "    install: \"true\"\n    \"w\\u200Bk\": 1\n";
+        let first = package_from(&format!("name: a\nenvironments:\n  work:\n{env}"));
+        let second = package_from(&format!("name: b\nenvironments:\n  work:\n{env}"));
+        let other = package_from(
+            "name: c\nenvironments:\n  work:\n    install: \"true\"\n    \"z\\u200Bz\": 1\n",
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<PackageEvent>(10);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageList,
+            "a".to_string(),
+            "work".to_string(),
+            OperationContext::default(),
+        );
+
+        super::refuse_up_front([&first, &second, &other], "work", &sender).await;
+        drop(sender);
+
+        let mut groups = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let PackageEvent::PackagesRefused {
+                reason, packages, ..
+            } = event
+            {
+                let names: Vec<String> = packages.into_iter().map(|p| p.name).collect();
+                groups.push((reason.to_string(), names));
+            }
+        }
+        let clause = |key: &str| {
+            format!(
+                "in environment 'work': unknown field '{key}'; expected one of: install, check, \
+                 audit, dependencies, recommends, dotfiles"
+            )
+        };
+        assert_eq!(
+            groups,
+            [
+                (clause("w\u{200B}k"), vec!["a".to_string(), "b".to_string()]),
+                (clause("z\u{200B}z"), vec!["c".to_string()]),
+            ]
+        );
+    }
+
     // `is_refused` answers what `spec_refusal` does, rule by rule, for every
     // reason it gives and for a file it accepts.
     #[test]

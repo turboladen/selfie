@@ -147,10 +147,11 @@ where
                 .map(
                     |(name, loaded_paths, _)| crate::package::event::PackageRefusal {
                         kind: crate::package::event::RefusalKind::AmbiguousName,
-                        reason: crate::package::port::ambiguous_files_sentence(
+                        reason: crate::package::port::ambiguous_files_parts(
                             name,
                             &names.ambiguous[*name],
-                        ),
+                        )
+                        .into(),
                         package: crate::package::event::RefusedPackage {
                             name: (*name).clone(),
                             paths: loaded_paths.clone(),
@@ -1312,7 +1313,8 @@ mod tests {
                 // The typed event, not a `Warning`: the service reports the
                 // failure and the adapter decides how to say it.
                 crate::package::event::PackageEvent::SpecSkipped { error, .. } => {
-                    warnings.push(crate::package::service::skipped_spec_warning(&error));
+                    warnings
+                        .push(crate::package::service::skipped_spec_warning(&error).to_string());
                 }
                 crate::package::event::PackageEvent::AuditResultCompleted { .. } => {
                     audit_results += 1;

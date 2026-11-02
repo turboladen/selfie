@@ -659,7 +659,7 @@ mod a_spec_selfie_cannot_read {
     fn assert_refused_over_the_shadowing_key(events: &[PackageEvent]) {
         let reason = match get_operation_result(events).expect("the operation must complete") {
             OperationResult::Failure(OperationFailure::UnreadableSpec { reason, .. }) => {
-                reason.clone()
+                reason.to_string()
             }
             OperationResult::Failure(OperationFailure::DependencyError(
                 DependencyFailure::UnreadableSpec { reason, .. },
@@ -745,7 +745,7 @@ mod a_spec_selfie_cannot_read {
 
     // The one refused entry a listing reported, after asserting there is exactly
     // one: a listing that refused the clean spec as well would still hold this.
-    fn only_refusal(refused: &[selfie::package::event::RefusedSpec]) -> &str {
+    fn only_refusal(refused: &[selfie::package::event::RefusedSpec]) -> String {
         assert_eq!(
             refused.len(),
             1,
@@ -753,11 +753,11 @@ mod a_spec_selfie_cannot_read {
         );
         assert_eq!(refused[0].package_name, "shadowed");
         assert!(
-            refused[0].reason.contains("_environments"),
+            refused[0].reason.to_string().contains("_environments"),
             "the refusal must name the key it refused over, got: {}",
             refused[0].reason
         );
-        &refused[0].reason
+        refused[0].reason.to_string()
     }
 
     // A listing is not refused for one spec in it. The shadowed spec leaves the
@@ -997,7 +997,8 @@ mod a_spec_selfie_cannot_read {
             .expect("the info must be sent");
         let reason = info
             .refusal
-            .as_deref()
+            .as_ref()
+            .map(ToString::to_string)
             .expect("the refusal must be carried");
         assert!(reason.contains("_environments"), "got: {reason}");
         assert!(info.environments.is_empty(), "{:?}", info.environments);
@@ -1036,7 +1037,8 @@ mod a_spec_selfie_cannot_read {
         assert_eq!(environments, ["test", "work"]);
         let elsewhere = info
             .refusal_elsewhere
-            .as_deref()
+            .as_ref()
+            .map(ToString::to_string)
             .expect("the other environment's refusal must be carried");
         assert!(
             elsewhere.contains("work") && elsewhere.contains("audt"),
@@ -1105,6 +1107,65 @@ mod a_spec_selfie_cannot_read {
             .expect("the info must be sent");
         assert!(info.refusal.is_none());
         assert!(!info.environments.is_empty());
+    }
+
+    // A refused spec's reason, whole, as each command hands it on: a check's
+    // failure, spec info's refusal, and a listing's refused row and its gap. Each
+    // is read through `to_string`, so the pins hold whatever type carries it.
+    #[tokio::test]
+    async fn a_refused_specs_reason_keeps_its_words() {
+        let temp_dir = TempDir::new().unwrap();
+        std::fs::write(
+            temp_dir.path().join("hostile.yml"),
+            "name: hostile\nenvironments:\n  test:\n    install: \"true\"\n    \
+             check: \"true\"\n    \"w\\u200Bk\": 1\n",
+        )
+        .unwrap();
+        let service = create_service_test_service(&temp_dir);
+        let reason = "in environment 'test': unknown field 'w\u{200B}k'; expected one of: \
+                      install, check, audit, dependencies, recommends, dotfiles";
+
+        let events = collect_events(service.check("hostile").await).await;
+        let Some(OperationResult::Failure(failure)) = get_operation_result(&events) else {
+            panic!("the check must fail: {events:?}");
+        };
+        assert_eq!(
+            failure.to_string(),
+            format!("Cannot use package `hostile`: {reason}")
+        );
+
+        let events = collect_events(service.spec_info("hostile").await).await;
+        let info = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageInfoLoaded { package_info, .. } => Some(package_info),
+                _ => None,
+            })
+            .expect("the info must be sent");
+        assert_eq!(
+            info.refusal.as_ref().map(ToString::to_string).as_deref(),
+            Some(reason)
+        );
+
+        let events = collect_events(PackageService::list(&service, false).await).await;
+        let data = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::PackageListLoaded { package_list, .. } => Some(package_list),
+                _ => None,
+            })
+            .expect("the listing must be sent");
+        let [refused] = data.refused.as_slice() else {
+            panic!("exactly the hostile spec is refused: {:?}", data.refused);
+        };
+        assert_eq!(refused.reason.to_string(), reason);
+        let Some(OperationResult::Success(success)) = get_operation_result(&events) else {
+            panic!("the listing must succeed: {events:?}");
+        };
+        let Some([gap]) = success.gaps() else {
+            panic!("exactly one gap: {:?}", success.gaps());
+        };
+        assert_eq!(gap.reason().to_string(), format!("is refused: {reason}"));
     }
 
     #[tokio::test]
@@ -1468,7 +1529,8 @@ async fn spec_info_counts_no_commands_for_a_spec_apply_refuses() {
         .expect("the info must be sent");
     assert!(
         info.refusal
-            .as_deref()
+            .as_ref()
+            .map(ToString::to_string)
             .is_some_and(|reason| reason.contains("environment")),
         "{:?}",
         info.refusal
@@ -1825,8 +1887,8 @@ mod validate_all_covers_standalone_specs {
             events.iter().any(|event| matches!(
                 event,
                 PackageEvent::PackagesRefused { kind: RefusalKind::AmbiguousName, reason, packages, .. }
-                    if reason.contains("dup.yaml")
-                        && reason.contains("dup.yml")
+                    if reason.to_string().contains("dup.yaml")
+                        && reason.to_string().contains("dup.yml")
                         && packages.len() == 1
                         && packages[0].name == "dup"
                         && packages[0].paths.len() == 2
@@ -2804,7 +2866,7 @@ async fn an_audit_of_every_package_groups_the_packages_it_refuses() {
             PackageEvent::PackagesRefused {
                 reason, packages, ..
             } => Some((
-                reason.clone(),
+                reason.to_string(),
                 packages.iter().map(|p| p.name.clone()).collect(),
             )),
             _ => None,

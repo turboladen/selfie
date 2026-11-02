@@ -706,7 +706,7 @@ impl EventSender {
     pub(crate) async fn send_refused_group(
         &self,
         kind: RefusalKind,
-        reason: String,
+        reason: Message,
         packages: Vec<RefusedPackage>,
     ) {
         let operation_info = self.touch_operation_info();
@@ -716,7 +716,7 @@ impl EventSender {
             environment = &operation_info.environment,
             kind = ?kind,
             packages = ?names,
-            reason = &reason,
+            reason = %reason,
             "packages refused",
         );
         self.send(PackageEvent::PackagesRefused {
@@ -1509,7 +1509,7 @@ pub enum OperationFailure {
     /// rather than prose has the package and the reason as separate fields.
     UnreadableSpec {
         package_name: String,
-        reason: String,
+        reason: Message,
     },
     /// A spec write that validation refused, so nothing was written.
     ///
@@ -1769,32 +1769,7 @@ impl std::fmt::Display for OperationFailure {
                 name,
                 reason,
                 declared_by,
-            } => match reason {
-                NoSuchPackageReason::NotFound => write!(
-                    f,
-                    "No package named '{name}' was found{}",
-                    crate::package::port::name_field_hint(declared_by)
-                ),
-                NoSuchPackageReason::MaybeInUnlistableDirectory => write!(
-                    f,
-                    "No package named '{name}' was found{}. A dotfiles directory could not be \
-                     listed, so it may be there.",
-                    crate::package::port::name_field_hint(declared_by)
-                ),
-                NoSuchPackageReason::MaybeInUncheckableDirectory => write!(
-                    f,
-                    "No package named '{name}' was found{}. A dotfiles directory could not be \
-                     checked, so whether it is there is unknown.",
-                    crate::package::port::name_field_hint(declared_by)
-                ),
-                NoSuchPackageReason::NotLoaded => write!(
-                    f,
-                    "Package '{name}' could not be loaded, so nothing was applied"
-                ),
-                NoSuchPackageReason::Ambiguous { conflicting_paths } => f.write_str(
-                    &crate::package::port::ambiguous_files_sentence(name, conflicting_paths),
-                ),
-            },
+            } => write!(f, "{}", no_such_package_parts(name, reason, declared_by)),
             OperationFailure::NotInstalledAfterInstall {
                 package_name,
                 check_command,
@@ -1896,6 +1871,39 @@ impl Composed for DependencyFailure {
                 .name(package_name)
                 .text("` carries a spec selfie will not read, so its dependencies are unknown: ")
                 .append(reason.parts()),
+        }
+    }
+}
+
+// The sentence saying `name` names no package selfie can use, for `reason`,
+// with the hint naming each of `declared_by`. `Display` and `message` both
+// write it, so the two cannot word it differently.
+fn no_such_package_parts<'a>(
+    name: &'a str,
+    reason: &'a NoSuchPackageReason,
+    declared_by: &'a [crate::package::port::NameDeclaration],
+) -> Parts<'a> {
+    let hint = || crate::package::port::name_field_hint_parts(declared_by);
+    let not_found = || {
+        Parts::new()
+            .text("No package named '")
+            .name(name)
+            .text("' was found")
+    };
+    match reason {
+        NoSuchPackageReason::NotFound => not_found().append(hint()),
+        NoSuchPackageReason::MaybeInUnlistableDirectory => not_found()
+            .append(hint())
+            .text(". A dotfiles directory could not be listed, so it may be there."),
+        NoSuchPackageReason::MaybeInUncheckableDirectory => not_found().append(hint()).text(
+            ". A dotfiles directory could not be checked, so whether it is there is unknown.",
+        ),
+        NoSuchPackageReason::NotLoaded => Parts::new()
+            .text("Package '")
+            .name(name)
+            .text("' could not be loaded, so nothing was applied"),
+        NoSuchPackageReason::Ambiguous { conflicting_paths } => {
+            crate::package::port::ambiguous_files_parts(name, conflicting_paths)
         }
     }
 }
@@ -3123,8 +3131,13 @@ impl OperationFailure {
                 .text("Cannot use package `")
                 .name(package_name)
                 .text("`: ")
-                .text(reason.as_str())
+                .append(reason.parts())
                 .into(),
+            Self::NoSuchPackage {
+                name,
+                reason,
+                declared_by,
+            } => no_such_package_parts(name, reason, declared_by).into(),
             other => Parts::new().text(other.to_string()).into(),
         }
     }
@@ -3664,7 +3677,7 @@ pub enum PackageEvent {
         kind: RefusalKind,
         /// The objection as a clause, which a consumer puts after the package
         /// names and a colon.
-        reason: String,
+        reason: Message,
         /// Every package refused for this reason, in the order they were met.
         packages: Vec<RefusedPackage>,
     },
@@ -3885,10 +3898,10 @@ pub struct PackageInfoData {
     /// Why `selfie apply` would refuse this spec in the current environment,
     /// when it would. `environments` and `dotfiles` are then empty, because
     /// neither can be trusted, and `apply_commands` is zero.
-    pub refusal: Option<String>,
+    pub refusal: Option<Message>,
     /// Why apply would refuse this spec in another environment it declares, when
     /// it would there and not here.
-    pub refusal_elsewhere: Option<String>,
+    pub refusal_elsewhere: Option<Message>,
     /// Every dotfile entry the spec declares, shared and per environment.
     pub dotfiles: Vec<ScopedDotfile>,
     /// How many commands `selfie apply` would run in the current environment to
@@ -4075,7 +4088,7 @@ pub enum UnknownStatus {
         /// Which refusal it is.
         kind: RefusalKind,
         /// The objection as a clause.
-        reason: String,
+        reason: Message,
     },
     /// The spec declares nothing for the current environment.
     NotInEnvironment,
@@ -4274,7 +4287,7 @@ pub struct RefusedSpec {
     /// What selfie objected to, for a consumer that branches on it.
     pub kind: RefusalKind,
     /// What selfie objected to, as a clause for display.
-    pub reason: String,
+    pub reason: Message,
     /// Every file that claims the package's name, when `kind` is
     /// [`RefusalKind::AmbiguousName`]; empty otherwise.
     pub claimants: Vec<std::path::PathBuf>,
@@ -4292,7 +4305,7 @@ impl RefusedSpec {
             package_name: name.to_string(),
             path: path.to_path_buf(),
             kind: RefusalKind::AmbiguousName,
-            reason: crate::package::port::ambiguous_files_sentence(name, files),
+            reason: crate::package::port::ambiguous_files_parts(name, files).into(),
             claimants: files.to_vec(),
         }
     }
@@ -4316,7 +4329,7 @@ impl RefusedSpec {
             package_name: package.name().to_string(),
             path: package.path().to_path_buf(),
             kind: refusal.kind(),
-            reason: refusal.to_string(),
+            reason: Message::of(refusal),
             claimants: Vec::new(),
         }
     }
@@ -4651,7 +4664,7 @@ impl fmt::Display for SkipReason {
 /// Carries one package refused whole, before refusals are grouped by reason.
 pub(crate) struct PackageRefusal {
     pub(crate) kind: RefusalKind,
-    pub(crate) reason: String,
+    pub(crate) reason: Message,
     pub(crate) package: RefusedPackage,
 }
 
@@ -4669,21 +4682,31 @@ impl From<&RefusedSpec> for PackageRefusal {
 }
 
 /// `refusals` grouped by kind and reason, in the order each pair first appears,
-/// with each group's packages in the order they came.
+/// with each group's packages in the order they came. Two reasons with the same
+/// words are one reason, and the group keeps the first one's parts.
+// Compared by words, not by `Message`'s equality, which also compares each
+// part's kind: two producers wording one reason with different parts would
+// otherwise split a group, and apply would say the same reason twice.
 fn group_refusals(
     refusals: impl IntoIterator<Item = PackageRefusal>,
-) -> Vec<(RefusalKind, String, Vec<RefusedPackage>)> {
-    let mut groups: Vec<(RefusalKind, String, Vec<RefusedPackage>)> = Vec::new();
+) -> Vec<(RefusalKind, Message, Vec<RefusedPackage>)> {
+    // Each group keeps its reason's words beside the reason, so each refusal's
+    // words are rendered once.
+    let mut groups: Vec<(RefusalKind, String, Message, Vec<RefusedPackage>)> = Vec::new();
     for refusal in refusals {
+        let words = refusal.reason.to_string();
         match groups
             .iter_mut()
-            .find(|(kind, reason, _)| *kind == refusal.kind && *reason == refusal.reason)
+            .find(|(kind, key, _, _)| *kind == refusal.kind && *key == words)
         {
-            Some((_, _, packages)) => packages.push(refusal.package),
-            None => groups.push((refusal.kind, refusal.reason, vec![refusal.package])),
+            Some((_, _, _, packages)) => packages.push(refusal.package),
+            None => groups.push((refusal.kind, words, refusal.reason, vec![refusal.package])),
         }
     }
     groups
+        .into_iter()
+        .map(|(kind, _, reason, packages)| (kind, reason, packages))
+        .collect()
 }
 
 /// Structured data for check results
@@ -5113,7 +5136,7 @@ mod tests {
             (
                 UnknownStatus::Refused {
                     kind: RefusalKind::UnknownTopLevelKeys,
-                    reason: "r".to_string(),
+                    reason: Parts::new().text("r").into(),
                 },
                 Coverage::Unanswered,
             ),
@@ -6207,7 +6230,7 @@ mod tests {
     fn refusal(kind: RefusalKind, reason: &str, name: &str) -> PackageRefusal {
         PackageRefusal {
             kind,
-            reason: reason.to_string(),
+            reason: Parts::new().text(reason.to_string()).into(),
             package: RefusedPackage {
                 name: name.to_string(),
                 paths: vec![std::path::PathBuf::from(format!("/p/{name}.yml"))],
@@ -6254,9 +6277,9 @@ mod tests {
         ]);
 
         assert_eq!(groups.len(), 2, "{groups:?}");
-        assert_eq!(groups[0].1, "unknown field `audt`");
+        assert_eq!(groups[0].1.to_string(), "unknown field `audt`");
         assert_eq!(names(&groups[0].2), ["a", "d"]);
-        assert_eq!(groups[1].1, "unknown field `version`");
+        assert_eq!(groups[1].1.to_string(), "unknown field `version`");
         assert_eq!(names(&groups[1].2), ["b", "c", "e"]);
     }
 
@@ -6272,6 +6295,33 @@ mod tests {
         assert_eq!(groups.len(), 2, "{groups:?}");
         assert_eq!(groups[0].0, RefusalKind::UnknownTopLevelKeys);
         assert_eq!(groups[1].0, RefusalKind::NoEnvironments);
+    }
+
+    // Two reasons with the same words are one group, whichever parts each was
+    // built from, and the group keeps the first reason's parts.
+    #[test]
+    fn one_reason_built_two_ways_is_one_group() {
+        let named = PackageRefusal {
+            reason: Parts::new()
+                .text("unknown field '")
+                .name("k\u{200B}y")
+                .text("'")
+                .into(),
+            ..refusal(RefusalKind::UnknownTopLevelKeys, "", "a")
+        };
+        let first = named.reason.clone();
+        let groups = group_refusals([
+            named,
+            refusal(
+                RefusalKind::UnknownTopLevelKeys,
+                "unknown field 'k\u{200B}y'",
+                "b",
+            ),
+        ]);
+
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(names(&groups[0].2), ["a", "b"]);
+        assert_eq!(groups[0].1, first);
     }
 
     fn applied_with(refused_count: usize, failed_count: usize) -> OperationSuccess {
@@ -6386,7 +6436,7 @@ mod tests {
             (
                 OperationFailure::UnreadableSpec {
                     package_name: "a\u{200B}b".to_string(),
-                    reason: "unknown field 'bogus'".to_string(),
+                    reason: Parts::new().text("unknown field 'bogus'").into(),
                 },
                 &["a\u{200B}b"],
             ),
@@ -6395,10 +6445,46 @@ mod tests {
                 &[],
             ),
         ];
-        for (failure, named) in &named {
+        // A not-found failure, for each reason, with a hint naming a declaring
+        // file and its `name:` value.
+        let declared = vec![crate::package::port::NameDeclaration {
+            path: "/h/p\u{200B}k/bar.yml".into(),
+            name: "ze\u{200B}o".to_string(),
+        }];
+        let hinted: &[&str] = &["ze\u{200B}o", "p\u{200B}k/bar.yml", "ze\u{200B}o", "bar"];
+        let not_found = [
+            (NoSuchPackageReason::NotFound, hinted),
+            (NoSuchPackageReason::MaybeInUnlistableDirectory, hinted),
+            (NoSuchPackageReason::MaybeInUncheckableDirectory, hinted),
+            (NoSuchPackageReason::NotLoaded, &["ze\u{200B}o"][..]),
+            (
+                NoSuchPackageReason::Ambiguous {
+                    conflicting_paths: vec![
+                        "/p\u{200B}k/ze.yml".into(),
+                        "/p\u{200B}k/Ze.yaml".into(),
+                    ],
+                },
+                &["ze\u{200B}o", "/p\u{200B}k", "ze.yml", "Ze.yaml"][..],
+            ),
+        ]
+        .map(|(reason, values)| {
+            (
+                OperationFailure::NoSuchPackage {
+                    name: "ze\u{200B}o".to_string(),
+                    reason,
+                    declared_by: declared.clone(),
+                },
+                values,
+            )
+        });
+        for (failure, named) in named
+            .iter()
+            .map(|(f, n)| (f, *n))
+            .chain(not_found.iter().map(|(f, n)| (f, *n)))
+        {
             let message = failure.message();
             assert_eq!(message.to_string(), failure.to_string());
-            assert_eq!(crate::parts::values_of(&message), *named, "{failure}");
+            assert_eq!(crate::parts::values_of(&message), named, "{failure}");
         }
     }
 

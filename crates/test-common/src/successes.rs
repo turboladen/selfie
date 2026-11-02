@@ -27,7 +27,7 @@ pub fn every_success(environment: &str, package: &str, path: &str) -> Vec<Operat
         [
             UnknownStatus::Refused {
                 kind: RefusalKind::AmbiguousName,
-                reason: "two files claim it".to_string(),
+                reason: crate::messages::message("two files claim it"),
             },
             UnknownStatus::Error(PackageRepoError::IoError(std::sync::Arc::new(
                 std::io::Error::other("disk"),

@@ -63,18 +63,29 @@ use crate::{commands::runner::CommandRunner, config::SelfieConfig};
 /// what most callers iterate. Say what was skipped and why, or the run reports
 /// on the files it could read and looks like a clean result.
 #[must_use]
-pub fn skipped_spec_warning(invalid: &super::port::PackageParseError) -> String {
-    // `pub` for an adapter that wants the sentence as text; one that shows the
-    // path and the reason apart composes its own from the error. A
-    // `PackageParseKind` has no field for a path, so nothing here checks
+pub fn skipped_spec_warning(invalid: &super::port::PackageParseError) -> crate::parts::Message {
+    // A `PackageParseKind` has no field for a path, so nothing here checks
     // whether the message already names one.
     //
     // The wording avoids both "invalid" and "unparsable". A fifo is neither: it
     // was never opened, let alone parsed.
-    format!(
-        "Skipping package file {}: {invalid}",
-        invalid.package_path().display()
+    skipping(
+        invalid.package_path(),
+        crate::parts::Composed::parts(invalid),
     )
+}
+
+// The warning that a run leaves out the spec file at `path`, for `reason`.
+fn skipping<'a>(
+    path: &'a std::path::Path,
+    reason: crate::parts::Parts<'a>,
+) -> crate::parts::Message {
+    crate::parts::Parts::new()
+        .text("Skipping package file ")
+        .path(path)
+        .text(": ")
+        .append(reason)
+        .into()
 }
 
 /// The warning for a run that could not compare its entries' targets with
@@ -91,12 +102,8 @@ pub fn collisions_unchecked_warning(sources: &[super::event::UncheckedSource]) -
 /// The warning for a spec file a listing leaves out because several files claim
 /// its name, as [`skipped_spec_warning`] words one that did not parse.
 #[must_use]
-pub fn ambiguous_spec_warning(row: &crate::package::event::RefusedSpec) -> String {
-    format!(
-        "Skipping package file {}: {}",
-        row.path.display(),
-        row.reason
-    )
+pub fn ambiguous_spec_warning(row: &crate::package::event::RefusedSpec) -> crate::parts::Message {
+    skipping(&row.path, crate::parts::Composed::parts(&row.reason))
 }
 
 /// Helper for tracking progress through operation steps
@@ -830,7 +837,7 @@ mod tests {
 
         for (kind, parse_kind) in cases {
             let error = PackageParseError::new(path.clone(), parse_kind);
-            let message = skipped_spec_warning(&error);
+            let message = skipped_spec_warning(&error).to_string();
             let count = message.matches("/test/packages/ghost.yml").count();
             assert_eq!(count, 1, "{kind}: named {count} times in: {message}");
         }
@@ -879,7 +886,7 @@ mod tests {
 
         for (kind, parse_kind) in retagged {
             let error = PackageParseError::new(path.clone(), parse_kind);
-            let message = skipped_spec_warning(&error);
+            let message = skipped_spec_warning(&error).to_string();
             let count = message.matches("/test/packages/ghost.yml").count();
             assert_eq!(
                 count, 2,
