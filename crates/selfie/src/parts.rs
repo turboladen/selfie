@@ -26,7 +26,79 @@ pub enum Part<'a> {
     Command(SuggestedCommand),
     /// Text another program or library wrote, such as git's error, which can
     /// quote a path or a name selfie cannot pull out as a part of its own.
-    Foreign(Cow<'a, str>),
+    Foreign(ForeignText<'a>),
+    /// A command a spec's author wrote, such as an install or check command.
+    SpecCommand(SpecCommandText),
+}
+
+/// A command a spec's author wrote, as a sentence carries it: shell text of any
+/// shape, bounded to the length a diagnostic keeps of it.
+///
+/// Built only by this module's builders, so every one is bounded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecCommandText(String);
+
+impl SpecCommandText {
+    // `command`, keeping both its ends and eliding its middle when it is longer
+    // than `BoundedText` keeps.
+    fn of(command: &str) -> Self {
+        Self(crate::commands::BoundedText::bound(command.as_bytes()).into_string())
+    }
+
+    // `command`, bounded to its `share` of a sentence's bound.
+    fn within(command: &str, share: usize) -> Self {
+        Self(crate::commands::BoundedText::bound_within(command.as_bytes(), share).into_string())
+    }
+
+    /// `command`, bounded as selfie bounds a spec's command, for building
+    /// messages in tests.
+    #[cfg(any(test, feature = "with_mocks"))]
+    #[must_use]
+    pub fn for_tests(command: &str) -> Self {
+        Self::of(command)
+    }
+
+    /// The command, as bounded.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Text another program or library wrote, as a sentence carries it.
+///
+/// Built only by this module's builders, each from the one source that has
+/// already guarded its text, such as a redacted git message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignText<'a>(Cow<'a, str>);
+
+impl<'a> ForeignText<'a> {
+    /// `text`, as another program's text, for building messages in tests.
+    #[cfg(any(test, feature = "with_mocks"))]
+    #[must_use]
+    pub fn for_tests(text: impl Into<Cow<'a, str>>) -> Self {
+        Self(text.into())
+    }
+
+    /// The text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn into_owned(self) -> ForeignText<'static> {
+        ForeignText(Cow::Owned(self.0.into_owned()))
+    }
+
+    fn borrowed(&self) -> ForeignText<'_> {
+        ForeignText(Cow::Borrowed(&self.0))
+    }
+}
+
+impl fmt::Display for ForeignText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// A `selfie` subcommand a sentence offers.
@@ -137,6 +209,32 @@ impl fmt::Display for SuggestedCommand {
     }
 }
 
+// A cause's own text, without the line breaks at its end, for a sentence that
+// goes on after it.
+pub(crate) fn cause_words(cause: &impl fmt::Display) -> String {
+    let text = cause.to_string();
+    let trimmed = text.trim_end_matches(['\r', '\n']).len();
+    let mut text = text;
+    text.truncate(trimmed);
+    text
+}
+
+// Splits `budget` bytes among values of these lengths, for a sentence that
+// names several unbounded values and is bounded as a whole. A value within an
+// equal share of what the shorter ones left keeps its whole length, and the
+// longer ones split the rest equally.
+pub(crate) fn shares<const N: usize>(lengths: [usize; N], budget: usize) -> [usize; N] {
+    let mut order: [usize; N] = std::array::from_fn(|index| index);
+    order.sort_by_key(|&index| lengths[index]);
+    let mut shares = lengths;
+    let mut left = budget;
+    for (done, &index) in order.iter().enumerate() {
+        shares[index] = lengths[index].min(left / (N - done));
+        left -= shares[index];
+    }
+    shares
+}
+
 /// A sentence, as its parts in order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Parts<'a>(Vec<Part<'a>>);
@@ -159,8 +257,7 @@ impl<'a> Parts<'a> {
     // A cause's own text, embedded in a sentence, without the line breaks at
     // its end: the sentence goes on after it.
     pub(crate) fn cause(self, cause: impl fmt::Display) -> Self {
-        let text = cause.to_string();
-        self.text(text.trim_end_matches(['\r', '\n']).to_string())
+        self.text(cause_words(&cause))
     }
 
     pub(crate) fn name(mut self, name: impl Into<Cow<'a, str>>) -> Self {
@@ -173,11 +270,46 @@ impl<'a> Parts<'a> {
         self
     }
 
+    // A command a spec's author wrote. It is bounded here, so a sentence that
+    // names one stays a diagnostic's length however long the command is.
+    pub(crate) fn spec_command(mut self, command: &str) -> Self {
+        self.0.push(Part::SpecCommand(SpecCommandText::of(command)));
+        self
+    }
+
+    // `spec_command`, `path` and `cause` for a sentence that names several
+    // unbounded values, each bounded to the share of the sentence's bound
+    // that `shares` gave it.
+    pub(crate) fn spec_command_within(mut self, command: &str, share: usize) -> Self {
+        self.0
+            .push(Part::SpecCommand(SpecCommandText::within(command, share)));
+        self
+    }
+
+    // A path that fits its share and is valid UTF-8 stays a path. One cut to
+    // its share, or decoded lossily, names no file any more, so it enters as a
+    // name, which claims nothing about the file system.
+    pub(crate) fn path_within(self, path: &'a Path, share: usize) -> Self {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        if bytes.len() <= share && path.to_str().is_some() {
+            return self.path(path);
+        }
+        let bounded = crate::commands::BoundedText::bound_within(bytes, share);
+        self.name(bounded.into_string())
+    }
+
+    // `cause` is `cause_words`' text, measured for its share as it is.
+    pub(crate) fn cause_within(self, cause: &str, share: usize) -> Self {
+        let bounded = crate::commands::BoundedText::bound_within(cause.as_bytes(), share);
+        self.text(bounded.into_string())
+    }
+
     // An error the tempfile crate built, whose message ends with the temporary
     // file's path. It is the one source of a foreign part outside git, which
     // `TempfileText`'s constructor, private to the file system module, holds.
     pub(crate) fn tempfile(mut self, error: crate::fs::filesystem::TempfileText<'_>) -> Self {
-        self.0.push(Part::Foreign(Cow::Owned(error.text())));
+        self.0
+            .push(Part::Foreign(ForeignText(Cow::Owned(error.text()))));
         self
     }
 
@@ -185,7 +317,8 @@ impl<'a> Parts<'a> {
     // the one source of a foreign part from the git side, so a credential in
     // git's stderr cannot reach a part without passing through the redaction.
     pub(crate) fn git(mut self, text: &'a crate::git::GitMessage) -> Self {
-        self.0.push(Part::Foreign(Cow::Borrowed(text.as_str())));
+        self.0
+            .push(Part::Foreign(ForeignText(Cow::Borrowed(text.as_str()))));
         self
     }
 
@@ -259,7 +392,8 @@ impl<'a> Parts<'a> {
                     Part::Name(name) => Part::Name(Cow::Owned(name.into_owned())),
                     Part::Path(path) => Part::Path(Cow::Owned(path.into_owned())),
                     Part::Command(command) => Part::Command(command),
-                    Part::Foreign(text) => Part::Foreign(Cow::Owned(text.into_owned())),
+                    Part::Foreign(text) => Part::Foreign(text.into_owned()),
+                    Part::SpecCommand(command) => Part::SpecCommand(command),
                 }),
             }
         }
@@ -276,7 +410,8 @@ impl<'a> Parts<'a> {
                     Part::Name(name) => Part::Name(Cow::Borrowed(name)),
                     Part::Path(path) => Part::Path(Cow::Borrowed(path)),
                     Part::Command(command) => Part::Command(command.clone()),
-                    Part::Foreign(text) => Part::Foreign(Cow::Borrowed(text)),
+                    Part::Foreign(text) => Part::Foreign(text.borrowed()),
+                    Part::SpecCommand(command) => Part::SpecCommand(command.clone()),
                 })
                 .collect(),
         )
@@ -335,7 +470,8 @@ impl<'p, 'a> IntoIterator for &'p Parts<'a> {
 
 impl fmt::Display for Parts<'_> {
     /// Writes each part as it is, a path through [`Path::display`], a
-    /// command as [`SuggestedCommand`] writes it, and foreign text raw.
+    /// command as [`SuggestedCommand`] writes it, and foreign text and a spec's
+    /// command raw.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for part in self {
             match part {
@@ -343,7 +479,8 @@ impl fmt::Display for Parts<'_> {
                 Part::Name(name) => f.write_str(name)?,
                 Part::Path(path) => write!(f, "{}", path.display())?,
                 Part::Command(command) => write!(f, "{command}")?,
-                Part::Foreign(text) => f.write_str(text)?,
+                Part::Foreign(text) => f.write_str(text.as_str())?,
+                Part::SpecCommand(command) => f.write_str(command.as_str())?,
             }
         }
         Ok(())
@@ -382,8 +519,8 @@ macro_rules! display_from_parts {
 }
 pub(crate) use display_from_parts;
 
-/// The names, paths and foreign texts `message` names, in order, each as its
-/// value's text.
+/// The names, paths, foreign texts and spec commands `message` names, in
+/// order, each as its value's text.
 ///
 /// # Panics
 ///
@@ -406,6 +543,7 @@ pub fn values_of(message: &Message) -> Vec<String> {
             Part::Name(name) => Some(name.to_string()),
             Part::Path(path) => Some(path.display().to_string()),
             Part::Foreign(text) => Some(text.to_string()),
+            Part::SpecCommand(command) => Some(command.as_str().to_string()),
             Part::Command(_) => None,
         })
         .collect()
@@ -418,6 +556,15 @@ mod tests {
     // The parts of `parts`, in order, for comparing.
     fn listed<'a>(parts: &Parts<'a>) -> Vec<Part<'a>> {
         parts.into_iter().cloned().collect()
+    }
+
+    // Values within an equal share keep their length, and what they leave goes
+    // to the longer ones, so the shares never pass the budget.
+    #[test]
+    fn short_values_leave_their_share_to_long_ones() {
+        assert_eq!(shares([10, 5000, 20], 2000), [10, 1970, 20]);
+        assert_eq!(shares([5000, 10, 5000], 2000), [995, 10, 995]);
+        assert_eq!(shares([10, 20, 30], 2000), [10, 20, 30]);
     }
 
     // Each part is written as it is, with nothing escaped and nothing between

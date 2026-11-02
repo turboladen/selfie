@@ -1605,6 +1605,19 @@ mod tests {
                 );
                 continue;
             }
+            // A spec's command shows on one line, its line break escaped and
+            // its U+200B kept so it still pastes, with a note spelling it out.
+            if message
+                .parts()
+                .into_iter()
+                .any(|part| matches!(part, Part::SpecCommand(_)))
+            {
+                assert_eq!(
+                    shown, "Run /d/t\u{200B}x\\ny\nEscaped: /d/t\\u{200b}x\\ny",
+                    "{shown:?}"
+                );
+                continue;
+            }
             // Another program's text keeps its own line breaks, and escapes the
             // rest of each line as a name.
             if message
@@ -1631,11 +1644,11 @@ mod tests {
     // blank line inside it.
     #[test]
     fn foreign_text_keeps_crlf_and_interior_blank_lines() {
-        use selfie::parts::{Message, Part, Parts};
+        use selfie::parts::{ForeignText, Message, Part, Parts};
 
         let message: Message = [
             Part::Text("git: ".into()),
-            Part::Foreign("a\r\nb\n\nc".into()),
+            Part::Foreign(ForeignText::for_tests("a\r\nb\n\nc")),
         ]
         .into_iter()
         .collect::<Parts>()
@@ -1649,11 +1662,11 @@ mod tests {
     // blank lines at its end, so the words after it stay on its last line.
     #[test]
     fn foreign_text_shows_each_line_escaped() {
-        use selfie::parts::{Message, Part, Parts};
+        use selfie::parts::{ForeignText, Message, Part, Parts};
 
         let message: Message = [
             Part::Text("git: ".into()),
-            Part::Foreign("a\u{200B}b\u{202E}\tc\nd\n\n".into()),
+            Part::Foreign(ForeignText::for_tests("a\u{200B}b\u{202E}\tc\nd\n\n")),
             Part::Text(". Then more.".into()),
         ]
         .into_iter()

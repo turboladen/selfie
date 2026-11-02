@@ -54,6 +54,9 @@ impl Kinds {
                 Part::Foreign(text) => {
                     panic!("a success names no foreign text: {text:?} in {value:?}")
                 }
+                Part::SpecCommand(command) => {
+                    panic!("a success names no spec command: {command:?} in {value:?}")
+                }
                 Part::Text(text) => assert!(
                     !names
                         .iter()

@@ -3694,7 +3694,7 @@ mod credential_egress_tests {
         )
     }
 
-    // The event-stream exit: `OperationFailure::Generic` reaches
+    // The event-stream exit: an `OperationFailure::Git` reaches
     // `PackageEvent::Completed`, which the CLI prints and which
     // `event_collector` serializes into the MCP tool result as
     // `{"status":"failure","error": <this>}`.
@@ -5663,6 +5663,7 @@ mod git_failure_words {
                 Part::Name(value) => Some(("name", value.to_string())),
                 Part::Path(value) => Some(("path", value.display().to_string())),
                 Part::Foreign(value) => Some(("foreign", value.to_string())),
+                Part::SpecCommand(value) => Some(("spec command", value.as_str().to_string())),
                 Part::Text(_) | Part::Command(_) => None,
             })
             .collect()
