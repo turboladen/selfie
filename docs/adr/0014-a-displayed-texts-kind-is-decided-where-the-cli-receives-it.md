@@ -151,7 +151,7 @@ Options considered:
      that a run did not check collisions with a directory it could not list;
    - an `io::Error` that `tempfile` built, whose message names its temporary file and enters a
      sentence as `Text`;
-   - a dotfile entry's unknown key, which its refusal names as `Text`.
+   - an unknown key a validation issue names, whose message is still a `String`.
 
    Each of these moves to §9 when it is next changed.
 3. A name inside a sentence the CLI composes is a `Name`, whatever the sentence around it is.
@@ -377,7 +377,11 @@ writer escapes every escape sequence (§1.8).
    `ApplyStop` an apply with `stop_on_error` gives for a stop other than the deploy state's; the
    `Message` a dotfile entry's `Refusal` carries as its sentence and its `Failure` as its sentence
    and its error, and the `Message` a track's `OperationFailure::Track` carries; the
-   `ComposedWarning` a `PackageEvent::ComposedWarning` carries; and a validation issue's message,
+   `ComposedWarning` a `PackageEvent::ComposedWarning` carries; a spec file's read failure,
+   `PackageParseError`, and the `PackageParseKind` it holds, with the `RefusedSpecFile`,
+   `UnreadableSpecFile` and `SymlinkReason` that kind carries; the `Message` a not-found failure
+   appends to name a spec file declaring the name; the `CollectionRefusal` a collection gives; the
+   `Message` that words an unknown key, naming it as a `Name`; and a validation issue's message,
    `IssueMessage`, which is its own text, the deploy state's notice or a `DirectoryIssue`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
