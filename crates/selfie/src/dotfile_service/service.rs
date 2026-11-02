@@ -16,7 +16,7 @@ use crate::{
         event::metadata::OperationType,
         event::{
             EventSender, EventStream, OperationContext, OperationFailure, OperationResult,
-            OperationSuccess, PackageEvent, RefusedSpec,
+            OperationSuccess, PackageEvent, RefusedSpec, Settle, create_settling_event_stream,
         },
         port::PackageRepository,
     },
@@ -139,6 +139,17 @@ where
     {
         crate::package::event::create_event_stream(f)
     }
+
+    /// Create an event stream whose operation can wait for its consumer.
+    ///
+    /// Delegates to [`create_settling_event_stream`].
+    fn create_settling_event_stream<Func, Fut>(f: Func) -> EventStream
+    where
+        Func: FnOnce(mpsc::Sender<PackageEvent>, Settle) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        create_settling_event_stream(f)
+    }
 }
 
 impl<R, F, CR, P> DotfileServiceImpl<R, F, CR, P>
@@ -167,7 +178,7 @@ where
         let config = self.config.clone();
         let token = self.cancellation_token.clone();
 
-        Self::create_event_stream(move |tx| async move {
+        Self::create_settling_event_stream(move |tx, settle| async move {
             let sender = EventSender::new_with_context(
                 tx,
                 OperationType::DotfileApply,
@@ -238,6 +249,7 @@ where
                         config: &config,
                         sender: &sender,
                         options: &options,
+                        settle: &settle,
                         token: &token,
                     };
                     // Applying everything carries on with what it could collect

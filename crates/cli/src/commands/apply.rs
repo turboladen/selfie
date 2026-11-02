@@ -242,9 +242,11 @@ impl InteractiveConflictResolver {
 impl InteractiveConflictResolver {
     /// Print the conflict's row in the entry table, with its base directory
     /// named inside the block.
-    // Inside the block, not through the event processor's headings: this runs on
-    // the service's thread while the processor may still be printing lines queued
-    // before it, each under its own heading.
+    // The heading is forced: the blank line and the diff set this block apart
+    // from the rows above it, so the block names its own base directory.
+    // `force_heading` records it as the stream's last heading, so the next row
+    // under the same base prints none. The library calls the resolver only after
+    // the processor has printed every earlier row.
     fn print_conflict_row(&self, source: &DotfileSource, target: &str) {
         let _block = self.display.hold_block();
         // A blank line first, so the block's diff and prompt do not read as part
@@ -467,6 +469,49 @@ mod tests {
                 "Packages: /r/packages".to_string(),
                 "conflict    bat/config → ~/.config/bat/config".to_string()
             ]
+        );
+    }
+
+    // The row after the prompt is headed against the prompt's heading: under
+    // the same base it prints none, and under another base it prints that one.
+    #[test]
+    fn the_row_after_the_prompt_is_headed_against_the_prompts_heading() {
+        use selfie::package::event::{BaseKind, RepoPath, SourceBase};
+
+        let under = |kind, directory: &str, path: &str| {
+            DotfileSource::File(RepoPath {
+                base: Some(SourceBase {
+                    kind,
+                    directory: directory.into(),
+                }),
+                path: path.into(),
+            })
+        };
+        let display = DisplayManager::new(false);
+        resolver(&display).print_conflict_row(
+            &under(BaseKind::PackageDirectory, "/r/packages", "bat/config"),
+            "~/.config/bat/config",
+        );
+        let printed = || display.printed().len();
+        let after_prompt = printed();
+
+        crate::source_paths::label(
+            &display,
+            Channel::Stdout,
+            &under(BaseKind::PackageDirectory, "/r/packages", "fd/ignore"),
+        );
+        assert_eq!(printed(), after_prompt, "{:?}", display.printed());
+
+        crate::source_paths::label(
+            &display,
+            Channel::Stdout,
+            &under(BaseKind::DotfilesDirectory, "/r/dotfiles", "zshrc"),
+        );
+        assert_eq!(
+            display.printed().last().map(|(_, line)| line.as_str()),
+            Some("Dotfiles: /r/dotfiles"),
+            "{:?}",
+            display.printed()
         );
     }
 

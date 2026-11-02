@@ -12,7 +12,7 @@ use crate::{
     commands::CommandRunner,
     config::SelfieConfig,
     dotfile_service::{
-        port::{ConflictDetail, ConflictResolution, put_to_resolver},
+        port::{Asked, ConflictDetail, ConflictResolution, put_to_resolver},
         resolve::{ResolvedContent, resolve_content},
     },
     fs::{
@@ -22,7 +22,7 @@ use crate::{
     package::{
         DotfileEntry,
         event::{
-            ConflictReport, EntryOperation, EventSender, Failure, LinkAtTarget, Refusal,
+            ConflictReport, EntryOperation, EventSender, Failure, LinkAtTarget, Refusal, Settle,
             SkipReason, StepEnding,
         },
     },
@@ -172,6 +172,8 @@ pub(super) struct SecretApply<'a, F, CR> {
     pub(super) config: &'a SelfieConfig,
     pub(super) sender: &'a EventSender,
     pub(super) options: &'a ApplyOptions,
+    /// Waited on before a conflict is put to the resolver.
+    pub(super) settle: &'a Settle,
     /// The caller's live cancellation token, so Ctrl+C reaches a provider command
     /// that is blocked on a biometric or password prompt. Never a fresh token:
     /// `command_timeout` would then be the only way out of an interactive prompt.
@@ -612,14 +614,17 @@ where
         let report = secret_conflict_report(&resolved.bytes, &current);
 
         let declined = match self.ask_resolver(target, resolved, &current, &report).await {
-            Some(ConflictResolution::Accept) => {
+            Asked::Answered(ConflictResolution::Accept) => {
                 return self
                     .after_prompt(target, resolved, &current, before_write)
                     .await
                     .map(|if_present| (if_present, Overwrite::Accepted));
             }
-            Some(ConflictResolution::Skip) => true,
-            None => false,
+            Asked::Answered(ConflictResolution::Skip) => true,
+            Asked::Unanswered => false,
+            // A run canceled before the prompt ends here, as a canceled run ends
+            // at any other entry.
+            Asked::Canceled => return Err(SecretOutcome::Canceled),
         };
 
         // Only the summary reaches the event. The values went to the resolver
@@ -674,9 +679,8 @@ where
         Err(appeared::settle_present(&mut entry, &now, appeared::During::Prompt).await)
     }
 
-    /// Put the conflict to the injected resolver, if there is one, and return
-    /// its answer: `None` when there is no resolver, or when the resolver did
-    /// not return one, as when it panicked.
+    /// Put the conflict to the injected resolver, if there is one, and say what
+    /// came of it: [`Asked::Unanswered`] when there is no resolver.
     ///
     /// The resolver is blocking and needs `'static`, so the values are moved in
     /// as owned buffers and the borrowed `ConflictDetail` is built inside the
@@ -694,9 +698,9 @@ where
         resolved: &ResolvedContent,
         current: &[u8],
         report: &ConflictReport,
-    ) -> Option<ConflictResolution> {
+    ) -> Asked {
         let Some(resolver) = &self.options.conflict_resolver else {
-            return None;
+            return Asked::Unanswered;
         };
         // Rendered only once a resolver will read it.
         let summary = report.to_string();
@@ -706,7 +710,7 @@ where
         let incoming = resolved.bytes.clone();
         let current = current.to_vec();
 
-        put_to_resolver(resolver, move |r| {
+        put_to_resolver(resolver, self.settle, self.token, move |r| {
             r.resolve(
                 &path,
                 ConflictDetail::Secret {
