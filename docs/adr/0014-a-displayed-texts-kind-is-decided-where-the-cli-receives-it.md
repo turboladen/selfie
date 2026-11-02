@@ -152,8 +152,7 @@ Options considered:
      `spec remove` sends, `sync status`'s drift error, and the warning that a run did not check
      collisions with a directory it could not list;
    - an `io::Error` that `tempfile` built, whose message names its temporary file and enters a
-     sentence as `Text`;
-   - an unknown key a validation issue names, whose message is still a `String`.
+     sentence as `Text`.
 
    Each of these moves to §9 when it is next changed.
 3. A name inside a sentence the CLI composes is a `Name`, whatever the sentence around it is.
@@ -386,8 +385,9 @@ writer escapes every escape sequence (§1.8).
    `RefusedSpecFile`, `UnreadableSpecFile` and `SymlinkReason` that kind carries; the `Message` a
    not-found failure appends to name a spec file declaring the name; the `CollectionRefusal` a
    collection gives; the `Message` that words an unknown key, naming it as a `Name`; and a
-   validation issue's message, `IssueMessage`, which is its own text, the deploy state's notice or a
-   `DirectoryIssue`.
+   validation issue's message, `IssueMessage`, which is its own text, a `Message` naming values as
+   parts, the deploy state's notice or a `DirectoryIssue`, and which the issue's event payload
+   carries.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as
