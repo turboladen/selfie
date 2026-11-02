@@ -121,7 +121,7 @@ pub(crate) fn rendered(parts: &Parts) -> Shown {
             // breaks. The line breaks at its end go, so blank lines it ended
             // with do not push the rest of the sentence onto a line of its own.
             Part::Foreign(text) => {
-                let text = text.trim_end_matches(['\r', '\n']);
+                let text = text.as_str().trim_end_matches(['\r', '\n']);
                 line.push(Shown::join(text.lines().map(Name::new), lit!("\n")));
             }
             Part::Path(path) => line.push(DisplayPath::of(path).into()),

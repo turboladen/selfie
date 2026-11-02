@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use selfie::parts::{Message, Part, Parts, SpecCommandText, SuggestedCommand};
+use selfie::parts::{ForeignText, Message, Part, Parts, SpecCommandText, SuggestedCommand};
 
 /// A message whose sentence is `text` alone.
 #[must_use]
@@ -41,7 +41,7 @@ pub fn every_message(value: &str) -> Vec<Message> {
         ]),
         built(vec![
             Part::Text("git says: ".into()),
-            Part::Foreign(value.into()),
+            Part::Foreign(ForeignText::for_tests(value)),
         ]),
         built(vec![
             Part::Text("Run ".into()),

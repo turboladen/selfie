@@ -324,21 +324,23 @@ writer escapes every escape sequence (§1.8).
 1. `selfie::parts` defines `Part`, `Parts`, `Message` and the trait `Composed`. A `Parts` is an
    ordered list of `Part`s, and a `Part` is one of:
 
-   | Part                | What it holds                                                                |
-   | ------------------- | ---------------------------------------------------------------------------- |
-   | `Text(Cow<str>)`    | selfie's words, a count it formats, or text from outside it that carries no  |
-   |                     | value, such as an operating system's error or a gated parse failure          |
-   | `Name(Cow<str>)`    | an environment, package or spec name                                         |
-   | `Path(Cow<Path>)`   | a path, including one spelled as the spec spells it, such as `~/.bashrc`     |
-   | `Command(..)`       | a command for the user to run: a program from a closed enum, `selfie` with a |
-   |                     | subcommand or `mkdir -p --`, and one or two operands                         |
-   | `Foreign(Cow<str>)` | text another program or library wrote that can quote a value selfie cannot   |
-   |                     | pull out as a part of its own, such as git's error                           |
-   | `SpecCommand(..)`   | a command a spec's author wrote, bounded to the length a diagnostic keeps,   |
-   |                     | both ends kept                                                               |
+   | Part              | What it holds                                                                |
+   | ----------------- | ---------------------------------------------------------------------------- |
+   | `Text(Cow<str>)`  | selfie's words, a count it formats, or text from outside it that carries no  |
+   |                   | value, such as an operating system's error or a gated parse failure          |
+   | `Name(Cow<str>)`  | an environment, package or spec name                                         |
+   | `Path(Cow<Path>)` | a path, including one spelled as the spec spells it, such as `~/.bashrc`     |
+   | `Command(..)`     | a command for the user to run: a program from a closed enum, `selfie` with a |
+   |                   | subcommand or `mkdir -p --`, and one or two operands                         |
+   | `Foreign(..)`     | text another program or library wrote that can quote a value selfie cannot   |
+   |                   | pull out as a part of its own, such as git's error                           |
+   | `SpecCommand(..)` | a command a spec's author wrote, bounded to the length a diagnostic keeps,   |
+   |                   | both ends kept                                                               |
 
-   A part says what a value is, never how to escape it. Text from outside selfie is one of three, by
-   whether it can quote a value:
+   A foreign part's `ForeignText` and a spec command's `SpecCommandText` are built only in
+   `selfie::parts`, by the builders that take what feeds each, so the compiler keeps any other code
+   from making one. A part says what a value is, never how to escape it. Text from outside selfie is
+   one of three, by whether it can quote a value:
    - `Text` is outside text that carries no value. An operating system's error, through std, is a
      description and an error number and names no path; selfie names the path itself, as a `Path`. A
      `ParseFailure` is gated to selfie's own vocabulary and carries no file content.
