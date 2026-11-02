@@ -1230,4 +1230,90 @@ mod tests {
         );
         assert!(message.contains("Permission denied"), "got: {message}");
     }
+
+    // Each sentence a track builds outside its handlers, whole.
+    #[test]
+    fn the_track_builders_are_worded_whole() {
+        let spec = Path::new("/repo/my packages/x.yml");
+        let copy = Path::new("/d/g c/cfg");
+        let fs_error =
+            || FileSystemError::IoError(std::io::Error::other("/d/g.yml: denied").into());
+        let save = |removal: &CopyRemoval| {
+            spec_save_failure(
+                &PackageRepoError::FileSystemError(fs_error()),
+                copy,
+                removal,
+            )
+        };
+
+        assert_eq!(
+            unusable_copy_directory(spec, "..").map(|f| f.to_string()),
+            Some(
+                "Cannot track into '..': the copy would be written outside '/repo/my packages'"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            unusable_copy_directory(spec, ".").map(|f| f.to_string()),
+            Some(
+                "Cannot track into '.': the copy would be written straight into '/repo/my \
+                 packages' rather than a directory of its own"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            unusable_copy_directory(Path::new("x.yml"), "n").map(|f| f.to_string()),
+            Some("Cannot track into 'n': its spec has no directory to write beside".to_string())
+        );
+        assert_eq!(
+            repository_write_refusal(
+                copy,
+                &FileSystemError::SymlinkedTarget {
+                    path: copy.to_path_buf(),
+                    points_to: Some(PathBuf::from("/tmp/my planted")),
+                }
+            ),
+            "Cannot write the tracked copy at '/d/g c/cfg': it is a symlink to '/tmp/my \
+             planted'. Remove it, or track under a different name."
+        );
+        assert_eq!(
+            repository_write_refusal(
+                copy,
+                &FileSystemError::IrregularTarget {
+                    path: copy.to_path_buf(),
+                    kind: "socket",
+                }
+            ),
+            "Cannot write the tracked copy at '/d/g c/cfg': it is a socket. Remove it, or track \
+             under a different name."
+        );
+        assert_eq!(
+            repository_write_refusal(copy, &fs_error()),
+            "Cannot write source file: IO error: /d/g.yml: denied"
+        );
+        assert_eq!(
+            save(&CopyRemoval::Removed),
+            "Cannot save the spec: File system error: IO error: /d/g.yml: denied. The copy at '/d/g c/cfg' was \
+             removed."
+        );
+        assert_eq!(
+            save(&CopyRemoval::Unconfirmed),
+            "Cannot save the spec: File system error: IO error: /d/g.yml: denied. The copy at '/d/g c/cfg' was left \
+             alone: it no longer holds what selfie wrote, so removing it could have deleted \
+             another file. Check it, and remove it yourself if it is not wanted."
+        );
+        assert_eq!(
+            save(&CopyRemoval::Failed(fs_error())),
+            "Cannot save the spec: File system error: IO error: /d/g.yml: denied. The copy at '/d/g c/cfg' could \
+             not be checked or removed: IO error: /d/g.yml: denied. Check it, and remove it \
+             yourself before retrying if it is the copy selfie wrote."
+        );
+        assert_eq!(
+            unsafe_name_failure("../x").map(|f| f.to_string()),
+            Some(format!(
+                "Invalid name '../x': {}",
+                crate::package::SPEC_NAME_RULE
+            ))
+        );
+    }
 }

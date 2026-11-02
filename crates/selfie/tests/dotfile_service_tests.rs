@@ -23122,3 +23122,193 @@ mod entry_sentences {
         );
     }
 }
+
+// The whole sentence of every track failure a track can reach, so a change to how
+// one is built cannot change a word of it unnoticed.
+mod track_sentences {
+    use super::*;
+
+    const ALL: &str = "environments:\n  test:\n    install: \"echo i\"\n";
+
+    async fn standalone(dirs: &TestDirs, name: &str, target: &std::path::Path) -> String {
+        failure_message(
+            &collect_events(
+                dirs.service_with_dotfiles()
+                    .track_standalone(name, target.to_str().unwrap())
+                    .await,
+            )
+            .await,
+        )
+    }
+
+    // A target spelled relative is refused, with the rule's remedy, by either
+    // entry point.
+    #[tokio::test]
+    async fn a_relative_target_is_worded_whole() {
+        let dirs = TestDirs::new();
+        write_package_yaml(&dirs.package_dir, "bat", &format!("name: bat\n{ALL}"));
+        let sentence = "Cannot track 'my rc': target path is not absolute; it must be absolute or \
+                        start with '~/'. Use '~/.config/file' for a path under your home \
+                        directory, or an absolute path like '/etc/config'.";
+
+        let package = failure_message(
+            &collect_events(
+                dirs.service_with_dotfiles()
+                    .track_for_package("bat", "my rc")
+                    .await,
+            )
+            .await,
+        );
+
+        assert_eq!(
+            standalone(&dirs, "n", std::path::Path::new("my rc")).await,
+            sentence
+        );
+        assert_eq!(package, sentence);
+    }
+
+    // A target one package already deploys is refused with the command that
+    // tracks it there, and one two specs deploy with the remedy for both.
+    #[tokio::test]
+    async fn a_target_tracked_elsewhere_is_worded_whole() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("my rc");
+        std::fs::write(&target, "x").unwrap();
+        let entry = format!(
+            "dotfiles:\n  - source: rc\n    target: \"{}\"\n",
+            target.display()
+        );
+        write_package_yaml(
+            &dirs.package_dir,
+            "bat",
+            &format!("name: bat\n{ALL}{entry}"),
+        );
+        let bat = dirs.package_dir.join("bat.yml");
+        let t = target.display();
+
+        let once = standalone(&dirs, "n", &target).await;
+        write_package_yaml(&dirs.dotfiles_dir, "gem", &format!("name: gem\n{entry}"));
+        let twice = standalone(&dirs, "n", &target).await;
+
+        assert_eq!(
+            once,
+            format!(
+                "Cannot track '{t}': package 'bat' ({}) already deploys it, and two specs \
+                 deploying one file are both refused by apply. Track it there with `selfie \
+                 package track-dotfile bat '{t}'`, or remove that entry first.",
+                bat.display()
+            )
+        );
+        assert_eq!(
+            twice,
+            format!(
+                "Cannot track '{t}': package 'bat' ({}) and standalone dotfile 'gem' ({}) \
+                 already deploys it, and two specs deploying one file are both refused by \
+                 apply. Remove the entry from the spec that should not deploy it first.",
+                bat.display(),
+                dirs.dotfiles_dir.join("gem.yml").display()
+            )
+        );
+    }
+
+    // What is at the target, when it is not a readable regular file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_target_track_cannot_copy_is_worded_whole() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dirs = TestDirs::new();
+        let t = |name: &str| dirs.target_dir.join(name);
+        std::fs::write(t("elsewhere"), "x").unwrap();
+        std::os::unix::fs::symlink(t("elsewhere"), t("my link")).unwrap();
+        nix::unistd::mkfifo(&t("my pipe"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+        std::fs::write(t("my binary"), [0xff, 0xfe]).unwrap();
+        std::fs::create_dir_all(t("my dir")).unwrap();
+        std::fs::write(t("my shut"), "x").unwrap();
+        std::fs::set_permissions(t("my shut"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = std::fs::read(t("my shut")).is_ok();
+
+        let mut sentences = Vec::new();
+        for name in [
+            "my link",
+            "my pipe",
+            "my binary",
+            "my absent",
+            "my dir",
+            "my shut",
+        ] {
+            sentences.push(standalone(&dirs, "n", &t(name)).await);
+        }
+        std::fs::set_permissions(t("my shut"), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // The UTF-8 error's own words are std's, so only selfie's frame around
+        // them is pinned whole.
+        let binary = sentences.remove(2);
+        assert!(
+            binary.starts_with("Cannot read target file: it is not UTF-8 text (")
+                && binary.ends_with(')'),
+            "{binary}"
+        );
+        assert!(binary.contains("utf-8"), "{binary}");
+
+        let p = |name: &str| t(name).display().to_string();
+        let mut expected = vec![
+            format!(
+                "{}: target is a symlink to '{}' and selfie will not write through it. Replace \
+                 the symlink with a regular file, or track the path it points to.",
+                p("my link"),
+                p("elsewhere")
+            ),
+            format!(
+                "{}: target resolves to a named pipe (fifo) and selfie will not write to it. \
+                 Point the entry at a regular file instead.",
+                p("my pipe")
+            ),
+            format!("Target file does not exist: {}", p("my absent")),
+            format!(
+                "Cannot track the target: a directory is at the target '{}', and a file cannot \
+                 replace a directory. Remove it or point the entry somewhere else.",
+                p("my dir")
+            ),
+            "Cannot read target file: IO error: Permission denied (os error 13)".to_string(),
+        ];
+        // Root reads the file whatever its mode, so the last refusal is not there.
+        if readable {
+            sentences.pop();
+            expected.pop();
+        }
+        assert_eq!(sentences, expected);
+    }
+
+    // A spec path or a copy path something already holds, and a name that cannot
+    // be a spec's.
+    #[tokio::test]
+    async fn an_occupied_path_or_an_invalid_name_is_worded_whole() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("cfg");
+        std::fs::write(&target, "x").unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("taken.yml"), "x").unwrap();
+        std::fs::create_dir_all(dirs.dotfiles_dir.join("occ")).unwrap();
+        std::fs::write(dirs.dotfiles_dir.join("occ").join("cfg"), "x").unwrap();
+
+        assert_eq!(
+            standalone(&dirs, "taken", &target).await,
+            format!(
+                "Something is already at {}, where the spec for 'taken' would be written. Remove \
+                 it first or choose a different name.",
+                dirs.dotfiles_dir.join("taken.yml").display()
+            )
+        );
+        assert_eq!(
+            standalone(&dirs, "occ", &target).await,
+            format!(
+                "Source file already exists at {}. Remove it first, or track a different file.",
+                dirs.dotfiles_dir.join("occ").join("cfg").display()
+            )
+        );
+        assert_eq!(
+            standalone(&dirs, "../x", &target).await,
+            format!("Invalid name '../x': {}", selfie::package::SPEC_NAME_RULE)
+        );
+    }
+}
