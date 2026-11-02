@@ -1874,7 +1874,8 @@ fn a_sync_outside_a_repository_names_the_directory_escaped() {
 }
 
 // git's own text, naming a directory in the repository it could not read, shows
-// that directory escaped, in sync status's failure and in sync push's.
+// that directory escaped: in sync status's failure, sync push's, and the
+// warning spec info and spec list give when git status is unavailable.
 #[test]
 #[cfg(unix)]
 fn gits_own_text_names_a_directory_escaped() {
@@ -1898,20 +1899,41 @@ fn gits_own_text_names_a_directory_escaped() {
     fs::create_dir_all(&unreadable).unwrap();
     fs::write(unreadable.join("f"), "x").unwrap();
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
-    // Root reads it anyway, and then git does not fail.
+    // Root, or a file system that ignores modes, reads it anyway, and then git
+    // does not fail.
     if fs::read_dir(&unreadable).is_ok() {
         fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).unwrap();
-        eprintln!("SKIP: running as root, so the directory is readable");
+        eprintln!("SKIP: mode 0o000 is not honored here, so the directory stays readable");
         return;
     }
 
-    let cases: [(&[&str], &str); 2] = [
-        (&["sync", "status"], "Failed to get repo status: status: "),
-        (&["sync", "push", "--yes"], "status: Failed to read the directory"),
+    // Each line is found by selfie's own words where it has any, and by the
+    // escaped directory where git's text is all there is, never by git's or
+    // gix's wording, which changes with a release or a locale.
+    let cases: [(&[&str], &str); 4] = [
+        (&["sync", "status"], "Failed to get repo status: "),
+        (&["sync", "push", "--yes"], r"/q\u{200b}r"),
+        (&["spec", "info", "a"], "Git status unavailable: "),
+        (&["spec", "list"], "Git status unavailable: "),
     ];
+    // git's own messages in the C locale, so a translated one cannot change
+    // which line holds the directory.
+    let printed = |args: &[&str]| {
+        let output = sandboxed_std_command(&temp)
+            .env("LC_ALL", "C")
+            .arg("--no-color")
+            .args(args)
+            .output()
+            .unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
     let shown: Vec<String> = cases
         .iter()
-        .map(|(args, marker)| line_with(&printed(&temp, args), marker).to_string())
+        .map(|(args, marker)| line_with(&printed(args), marker).to_string())
         .collect();
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o755)).unwrap();
 

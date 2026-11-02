@@ -75,7 +75,7 @@ where
         Ok(dir_status) => Some(dir_status.status_for_file(package_blob.package.path())),
         Err(e) => {
             sender
-                .send_warning(format!("Git status unavailable: {e}"))
+                .send_composed_warning(git_status_unavailable(&e))
                 .await;
             None
         }
@@ -448,6 +448,16 @@ async fn get_installation_status(
     EnvironmentStatus::from(&result.result)
 }
 
+/// The warning that git's status of the package directory is unknown, for
+/// `error`, with git's text a part of its own.
+pub(super) fn git_status_unavailable(error: &crate::git::GitStatusError) -> Parts<'_> {
+    use crate::parts::Composed as _;
+
+    Parts::new()
+        .text("Git status unavailable: ")
+        .append(error.parts())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,8 +693,11 @@ environments:
                     assert_eq!(package_info.git_status, None);
                     found_info = true;
                 }
-                PackageEvent::Warning { message, .. } => {
-                    assert!(message.contains("Git status unavailable"));
+                PackageEvent::ComposedWarning { warning, .. } => {
+                    assert_eq!(
+                        warning.to_string(),
+                        "Git status unavailable: failed to query git status: simulated failure"
+                    );
                     found_warning = true;
                 }
                 _ => {}

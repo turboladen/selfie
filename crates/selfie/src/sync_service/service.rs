@@ -671,11 +671,11 @@ where
                         Ok(files) => files,
                         Err(e) => {
                             sender
-                                .send_log(
-                                    crate::package::event::LogLevel::Warning,
-                                    format!(
-                                        "Failed to compute diff: {e}. Change summary may be incomplete."
-                                    ),
+                                .send_composed_warning(
+                                    Parts::new()
+                                        .text("Failed to compute diff: ")
+                                        .append(e.parts())
+                                        .text(". Change summary may be incomplete."),
                                 )
                                 .await;
                             Vec::new()
@@ -5703,6 +5703,22 @@ mod git_failure_words {
             branch: "m\u{200B}n".to_string(),
         };
         assert_eq!(kinds(&branch.parts()), [("name", "m\u{200B}n".to_string())]);
+    }
+
+    // A failed diff after a pull warns as a composed warning, so git's text in
+    // it is a part of its own.
+    #[tokio::test]
+    async fn a_failed_diff_warns_with_gits_text_as_a_part() {
+        let events: Vec<PackageEvent> = service(Step::Diff).pull().await.collect().await;
+
+        let warning = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::ComposedWarning { warning, .. } => Some(warning),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no composed warning: {events:?}"));
+        assert_eq!(kinds(&warning.parts()), [("foreign", GIT_TEXT.to_string())]);
     }
 
     // Prepare's own git failures, with no frame of their own.
