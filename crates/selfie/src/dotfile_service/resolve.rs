@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use super::refusal::{guarded, located, repository_condition};
@@ -23,6 +22,7 @@ use crate::package::{
     ContentSource, DotfileEntry, InvalidEntry,
     event::{Condition, Location, Refusal},
 };
+use crate::parts::{Composed, Message, Parts};
 
 // The limit in the unit docs/package-files.md states it in, which the error names.
 const MAX_CONTENT_MIB: usize = 8;
@@ -63,28 +63,69 @@ impl std::fmt::Debug for ResolvedContent {
 /// and otherwise the runner's error message when no completed exit is
 /// available, for example a timeout or a failure to start. None includes
 /// resolved content.
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub(crate) enum ResolveError {
-    #[error("dotfile command '{command}' failed: {stderr}")]
     CommandFailed { command: String, stderr: String },
-    #[error("dotfile var '{name}' command failed: {stderr}")]
     BindingFailed { name: String, stderr: String },
-    #[error("dotfile command '{command}' produced no output")]
     EmptyOutput { command: String },
-    #[error("dotfile var '{name}' produced no output")]
     EmptyBinding { name: String },
-    #[error("dotfile command '{command}' produced output selfie could not tell from the shell's")]
     UnseparableOutput { command: String },
-    #[error("dotfile var '{name}' produced output selfie could not tell from the shell's")]
     UnseparableBinding { name: String },
-    #[error("dotfile content exceeds {MAX_CONTENT_MIB} MiB")]
     TooLarge,
-    #[error(transparent)]
-    TemplateUnreadable(#[from] UnreadableTemplate),
-    #[error("dotfile for '{target}' has no content to resolve")]
-    NotSecretBearing { target: String },
-    #[error("dotfile template '{template}' escapes the package directory")]
-    TemplateEscapesPackage { template: String },
+    TemplateUnreadable(UnreadableTemplate),
+    NotSecretBearing { target: PathBuf },
+    TemplateEscapesPackage { template: PathBuf },
+}
+
+crate::parts::display_from_parts!(error ResolveError);
+
+// A command and stderr are text the package file or the command wrote, so each
+// enters as text; a var name is a name, and a target or a template is a path.
+impl Composed for ResolveError {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new();
+        match self {
+            Self::CommandFailed { command, stderr } => {
+                parts.text(format!("dotfile command '{command}' failed: {stderr}"))
+            }
+            Self::BindingFailed { name, stderr } => parts
+                .text("dotfile var '")
+                .name(name.as_str())
+                .text("' command failed: ")
+                .text(stderr.as_str()),
+            Self::EmptyOutput { command } => {
+                parts.text(format!("dotfile command '{command}' produced no output"))
+            }
+            Self::EmptyBinding { name } => parts
+                .text("dotfile var '")
+                .name(name.as_str())
+                .text("' produced no output"),
+            Self::UnseparableOutput { command } => parts.text(format!(
+                "dotfile command '{command}' produced output selfie could not tell from the \
+                 shell's"
+            )),
+            Self::UnseparableBinding { name } => parts
+                .text("dotfile var '")
+                .name(name.as_str())
+                .text("' produced output selfie could not tell from the shell's"),
+            Self::TooLarge => parts.text(format!("dotfile content exceeds {MAX_CONTENT_MIB} MiB")),
+            Self::TemplateUnreadable(unreadable) => unreadable.parts(),
+            Self::NotSecretBearing { target } => parts
+                .text("dotfile for '")
+                .path(target)
+                .text("' has no content to resolve"),
+            Self::TemplateEscapesPackage { template } => parts
+                .text("dotfile template '")
+                .path(template)
+                .text("' escapes the package directory"),
+        }
+    }
+}
+
+impl From<UnreadableTemplate> for ResolveError {
+    fn from(unreadable: UnreadableTemplate) -> Self {
+        Self::TemplateUnreadable(unreadable)
+    }
 }
 
 impl ResolveError {
@@ -137,13 +178,12 @@ impl ResolveError {
 }
 
 /// A template [`read_template`] would not or could not read.
-#[derive(Debug, Error)]
-#[error("dotfile template '{template}' cannot be read: {message}")]
+#[derive(Debug)]
 pub(crate) struct UnreadableTemplate {
-    // `template` rather than `source`, because thiserror treats a field of that
-    // name as the error's `source()`.
-    template: String,
-    message: String,
+    // The template as the package file spells it.
+    template: PathBuf,
+    // Why it could not be read.
+    message: Message,
     /// What is at the template, and where, as the classifier names them.
     condition: Condition,
     at: Location,
@@ -157,6 +197,18 @@ impl UnreadableTemplate {
             (self.condition, self.at),
             format!("Skipping '{entry_target}': {self}"),
         )
+    }
+}
+
+crate::parts::display_from_parts!(error UnreadableTemplate);
+
+impl Composed for UnreadableTemplate {
+    fn parts(&self) -> Parts<'_> {
+        Parts::new()
+            .text("dotfile template '")
+            .path(&self.template)
+            .text("' cannot be read: ")
+            .append(self.message.parts())
     }
 }
 
@@ -177,7 +229,7 @@ impl UnreadableTemplate {
 fn template_path(source: &str, base_dir: &Path) -> Result<PathBuf, ResolveError> {
     super::classify::within_package(base_dir, source).ok_or_else(|| {
         ResolveError::TemplateEscapesPackage {
-            template: source.to_string(),
+            template: PathBuf::from(source),
         }
     })
 }
@@ -199,11 +251,10 @@ pub(crate) fn read_template<F: FileSystem>(
     if let Some(refusal) = filesystem.irregular_target_refusal(&repository_path(path)) {
         let (condition, at) = located(guarded(&refusal), Location::Template);
         return Err(UnreadableTemplate {
-            template: source.to_string(),
-            message: format!(
-                "{}. Replace it with a regular file.",
-                repository_read_refusal(&refusal)
-            ),
+            template: PathBuf::from(source),
+            message: repository_read_refusal(&refusal)
+                .text(". Replace it with a regular file.")
+                .into(),
             condition,
             at,
         });
@@ -211,8 +262,9 @@ pub(crate) fn read_template<F: FileSystem>(
     filesystem
         .read_repository_file(path)
         .map_err(|e| UnreadableTemplate {
-            template: source.to_string(),
-            message: e.to_string(),
+            template: PathBuf::from(source),
+            // The read's error names no path, so its own words enter as one text.
+            message: Parts::new().text(e.to_string()).into(),
             condition: repository_condition(&e),
             at: Location::Template,
         })
@@ -242,7 +294,7 @@ where
         Ok(ContentSource::RepoFile(_))
         | Err(InvalidEntry::Shape | InvalidEntry::UnknownKeys(_) | InvalidEntry::VarName(_)) => {
             Err(ResolveError::NotSecretBearing {
-                target: entry.target().to_string(),
+                target: PathBuf::from(entry.target()),
             })
         }
 
@@ -1098,7 +1150,7 @@ mod tests {
     #[test]
     fn a_refused_template_is_worded_whole() {
         let escapes = ResolveError::TemplateEscapesPackage {
-            template: "../my.tpl".to_string(),
+            template: PathBuf::from("../my.tpl"),
         };
         let mut fs = MockFileSystem::default();
         fs.expect_irregular_target_refusal().returning(|path| {
