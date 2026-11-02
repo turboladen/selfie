@@ -230,7 +230,7 @@ impl From<&ValidationIssueData> for Issue {
             data.level,
             data.category,
             &data.field,
-            message(&data.message).into(),
+            composed(&data.message),
             data.suggestion
                 .as_deref()
                 .map(|suggestion| message(suggestion).into()),
@@ -245,7 +245,7 @@ impl From<&PackageValidationIssue> for Issue {
             data.level,
             data.category,
             &data.field,
-            message(&data.message).into(),
+            composed(&data.message),
             data.suggestion
                 .as_deref()
                 .map(|suggestion| message(suggestion).into()),

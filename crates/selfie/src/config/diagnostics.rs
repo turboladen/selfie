@@ -21,8 +21,8 @@ pub(crate) const FRONTEND_SECTIONS: &[&str] = &["cli"];
 /// Naming the replacement turns a warning someone has to investigate into one
 /// they can act on.
 // Matched case-insensitively, so `Configs_Directory` gets the same hint. The
-// user's own spelling is echoed back rather than the canonical form, so they can
-// find the line in their file.
+// message echoes the user's own spelling rather than the canonical form, so they
+// can find the line in their file; the suggestion names only the replacement.
 const RENAMED_KEYS: &[(&str, &str)] = &[("configs_directory", "dotfiles_directory")];
 
 /// A key in the configuration file that selfie read and did not use.
@@ -56,30 +56,30 @@ impl IgnoredKey {
         &self.key
     }
 
-    /// What was ignored, and what replaced it when that is known.
+    /// What was ignored, and what replaced it when that is known, naming the
+    /// key as a part.
     #[must_use]
-    pub fn message(&self) -> String {
+    pub fn message(&self) -> crate::parts::Message {
+        let key = crate::parts::Parts::new()
+            .text("`")
+            .name(self.key.as_str())
+            .text("`");
         match self.renamed_to {
-            Some(to) => format!(
-                "`{}` was renamed to `{to}` and is no longer read. Selfie ignored it.",
-                self.key
-            ),
-            None => format!(
-                "`{}` is not a recognized setting. Selfie ignored it.",
-                self.key
-            ),
+            Some(to) => key.text(format!(
+                " was renamed to `{to}` and is no longer read. Selfie ignored it."
+            )),
+            None => key.text(" is not a recognized setting. Selfie ignored it."),
         }
+        .into()
     }
 
     /// What to do about it.
     #[must_use]
     pub fn suggestion(&self) -> String {
         match self.renamed_to {
-            Some(to) => format!("Rename `{}` to `{to}`.", self.key),
-            None => format!(
-                "Remove `{}`, or check it against the settings in the configuration guide.",
-                self.key
-            ),
+            Some(to) => format!("Rename it to `{to}`."),
+            None => "Remove it, or check it against the settings in the configuration guide."
+                .to_string(),
         }
     }
 }
@@ -277,11 +277,47 @@ mod tests {
         let keys = library_ignored_keys(top_level(&["totally_bogus"]));
 
         assert_eq!(keys.len(), 1);
-        assert!(keys[0].message().contains("totally_bogus"));
-        assert!(keys[0].message().contains("not a recognized setting"));
+        assert!(keys[0].message().to_string().contains("totally_bogus"));
+        assert!(
+            keys[0]
+                .message()
+                .to_string()
+                .contains("not a recognized setting")
+        );
         // It must not invent a rename for a key that has none.
-        assert!(!keys[0].message().contains("renamed"));
+        assert!(!keys[0].message().to_string().contains("renamed"));
         assert!(!keys[0].suggestion().contains("Rename"));
+    }
+
+    // An ignored key is named as a part, whole, so the CLI escapes it.
+    #[test]
+    fn an_ignored_key_is_named_as_a_part() {
+        let keys = library_ignored_keys(top_level(&["ver\u{200B}bose"]));
+
+        assert_eq!(keys.len(), 1);
+        let message = keys[0].message();
+        assert_eq!(
+            message.to_string(),
+            "`ver\u{200B}bose` is not a recognized setting. Selfie ignored it."
+        );
+        assert_eq!(crate::parts::values_of(&message), ["ver\u{200B}bose"]);
+    }
+
+    // An ignored key's suggestion names no key, since the message beside it
+    // already names the one the user wrote.
+    #[test]
+    fn an_ignored_keys_suggestion_names_no_key() {
+        let unknown = library_ignored_keys(top_level(&["ver\u{200B}bose"]));
+        let renamed = library_ignored_keys(top_level(&["Configs_Directory"]));
+
+        assert_eq!(
+            unknown[0].suggestion(),
+            "Remove it, or check it against the settings in the configuration guide."
+        );
+        assert_eq!(
+            renamed[0].suggestion(),
+            "Rename it to `dotfiles_directory`."
+        );
     }
 
     #[test]
@@ -289,12 +325,17 @@ mod tests {
         let keys = library_ignored_keys(top_level(&["configs_directory"]));
 
         assert_eq!(keys.len(), 1);
-        assert!(keys[0].message().contains("configs_directory"));
-        assert!(keys[0].message().contains("dotfiles_directory"));
+        assert!(keys[0].message().to_string().contains("configs_directory"));
+        assert!(keys[0].message().to_string().contains("dotfiles_directory"));
         assert!(keys[0].suggestion().contains("Rename"));
         // The whole point of the rename table is that this is *not* the generic
         // message, so assert it is absent rather than only that the hint is there.
-        assert!(!keys[0].message().contains("not a recognized setting"));
+        assert!(
+            !keys[0]
+                .message()
+                .to_string()
+                .contains("not a recognized setting")
+        );
     }
 
     #[test]
@@ -303,7 +344,7 @@ mod tests {
 
         assert_eq!(keys.len(), 1);
         assert!(
-            keys[0].message().contains("dotfiles_directory"),
+            keys[0].message().to_string().contains("dotfiles_directory"),
             "got: {}",
             keys[0].message()
         );
@@ -316,8 +357,7 @@ mod tests {
         let keys = library_ignored_keys(top_level(&["Configs_Directory"]));
 
         assert_eq!(keys[0].key(), "Configs_Directory");
-        assert!(keys[0].message().contains("Configs_Directory"));
-        assert!(keys[0].suggestion().contains("Configs_Directory"));
+        assert!(keys[0].message().to_string().contains("Configs_Directory"));
     }
 
     // Validation must not stop at the first problem.
@@ -353,7 +393,12 @@ mod tests {
 
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].key(), "cli.verbose");
-        assert!(keys[0].message().contains("not a recognized setting"));
+        assert!(
+            keys[0]
+                .message()
+                .to_string()
+                .contains("not a recognized setting")
+        );
     }
 
     // A misspelled *section* is nobody's, so it is reported — otherwise `clu:`

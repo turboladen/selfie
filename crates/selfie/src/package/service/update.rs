@@ -928,6 +928,7 @@ mod tests {
                 matches!(issue.level, ValidationLevel::Warning)
                     && issue
                         .message
+                        .to_string()
                         .contains("Current environment 'test-env' is not configured")
             }),
             "got: {results:?}"
@@ -969,7 +970,7 @@ mod tests {
         assert!(
             results[0].issues.iter().any(|issue| {
                 matches!(issue.level, ValidationLevel::Info)
-                    && issue.message.contains("check command is blank")
+                    && issue.message.to_string().contains("check command is blank")
             }),
             "got: {results:?}"
         );
@@ -996,7 +997,7 @@ mod tests {
                 .iter()
                 .any(|result| result.issues.iter().any(|issue| {
                     matches!(issue.level, ValidationLevel::Info)
-                        && issue.message.contains("executes 1 command(s)")
+                        && issue.message.to_string().contains("executes 1 command(s)")
                 })),
             "got: {results:?}"
         );

@@ -216,7 +216,7 @@ fn spec_validate_shows_a_suggestion_in_its_table() {
     assert!(header.contains("Suggestion"), "{}", out.stdout);
     assert!(
         out.stdout
-            .contains("Add an environment section for 'test-env'"),
+            .contains("Add an environment section for this machine's environment if it needs one."),
         "{}",
         out.stdout
     );
@@ -264,7 +264,7 @@ fn sync_push_shows_a_suggestion_in_its_table() {
     assert_eq!(out.stdout, "");
     assert!(
         out.stderr
-            .contains("Add an environment section for 'test-env'"),
+            .contains("Add an environment section for this machine's environment if it needs one."),
         "{}",
         out.stderr
     );

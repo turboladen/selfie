@@ -659,7 +659,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
                 .iter()
                 .map(|ignored| serde_json::json!({
                     "key": ignored.key(),
-                    "message": ignored.message(),
+                    "message": ignored.message().to_string(),
                     "suggestion": ignored.suggestion(),
                 }))
                 .collect::<Vec<_>>(),
@@ -1302,7 +1302,7 @@ mod tests {
                     level: selfie::validation::ValidationLevel::Error,
                     category: PushIssueCategory::ParseError,
                     field: "-".to_string(),
-                    message: "unclosed bracket".to_string(),
+                    message: "unclosed bracket".into(),
                     location: None,
                     suggestion: None,
                 }],

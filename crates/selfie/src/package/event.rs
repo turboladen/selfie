@@ -4873,7 +4873,8 @@ pub struct ValidationResultData {
 pub struct ValidationIssueData {
     pub category: crate::validation::ValidationErrorCategory,
     pub field: String,
-    pub message: String,
+    /// What the issue says, as parts a consumer can show by kind.
+    pub message: crate::validation::IssueMessage,
     pub level: crate::validation::ValidationLevel,
     pub suggestion: Option<String>,
     /// Where in the file the issue is, when the file says.

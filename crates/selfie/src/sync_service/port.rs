@@ -54,8 +54,8 @@ pub struct PackageValidationIssue {
     pub category: PushIssueCategory,
     /// The YAML field path affected (e.g., `"environments.test-env.install"`).
     pub field: String,
-    /// Human-readable description.
-    pub message: String,
+    /// What the issue says, as parts a consumer can show by kind.
+    pub message: crate::validation::IssueMessage,
     /// Where in the file the issue is, or `None` for one that does not map to a
     /// position.
     pub location: Option<crate::yaml::SourceLocation>,

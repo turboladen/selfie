@@ -240,7 +240,7 @@ mod tests {
         ValidationIssueData {
             category: selfie::validation::ValidationErrorCategory::CommandSyntax,
             field: "environments.work.install".to_string(),
-            message: "Unmatched double quote in command".to_string(),
+            message: "Unmatched double quote in command".into(),
             level,
             suggestion: suggestion.map(str::to_string),
             location: None,
@@ -274,7 +274,7 @@ mod tests {
     fn an_issue_ending_in_a_line_break_ends_at_its_text() {
         let display = DisplayManager::new(false);
         let mut ending = issue(ValidationLevel::Error, Some("fix it\r\n"));
-        ending.message = "broken\r\n".to_string();
+        ending.message = "broken\r\n".into();
 
         print_issues(&display, &[ending]);
 
