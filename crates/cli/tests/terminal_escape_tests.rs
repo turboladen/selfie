@@ -1942,3 +1942,49 @@ fn gits_own_text_names_a_directory_escaped() {
         assert!(!line.contains('\u{200B}'), "{args:?}: {line:?}");
     }
 }
+
+// A write tempfile fails names the temporary file in tempfile's own text, and
+// that path shows its blank escaped too, not only the target's. U+2800 is the
+// blank tempfile's own `{:?}` leaves as it is, so only the CLI escapes it.
+#[test]
+#[cfg(unix)]
+fn a_failed_temporary_files_path_shows_escaped() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("pk");
+    fs::create_dir_all(&packages).unwrap();
+    fs::write(packages.join("rc"), "hi\n").unwrap();
+    fs::write(
+        packages.join("a.yml"),
+        format!(
+            "name: a\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\ndotfiles:\n  - \
+             source: rc\n    target: \"~/r\\u2800o/f\"\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: \"{}\"\n",
+            packages.display()
+        ),
+    )
+    .unwrap();
+    let locked = temp.path().join("r\u{2800}o");
+    fs::create_dir_all(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    // Root writes into it anyway, and then nothing fails.
+    if fs::write(locked.join("probe"), "x").is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("SKIP: running as root, so the directory is writable");
+        return;
+    }
+
+    let printed = printed(&temp, &["apply"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let line = line_with(&printed, " at path ");
+    assert!(line.contains(r#"r\u{2800}o/.selfie-"#), "{line}");
+    assert!(!line.contains('\u{2800}'), "{line:?}");
+}

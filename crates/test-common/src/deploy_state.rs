@@ -116,8 +116,8 @@ impl StateValue {
 // error names a path or a symlink refusal names its destination.
 fn cause_shape(cause: &FileSystemError) -> usize {
     match cause {
-        FileSystemError::IoError(IoFailure { path: None, .. }) => 0,
-        FileSystemError::IoError(IoFailure { path: Some(_), .. }) => 1,
+        FileSystemError::IoError(failure) if failure.path().is_none() => 0,
+        FileSystemError::IoError(_) => 1,
         FileSystemError::HomeDirNotFound => 2,
         FileSystemError::SymlinkedTarget {
             points_to: Some(_), ..

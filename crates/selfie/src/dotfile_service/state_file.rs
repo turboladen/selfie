@@ -703,7 +703,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         // A file that is not there is the ordinary first run. Only that one
         // condition is absence; a permission failure on the file or any parent
         // is a file selfie cannot read.
-        Err(FileSystemError::IoError(e)) if e.error.kind() == std::io::ErrorKind::NotFound => {
+        Err(FileSystemError::IoError(e)) if e.error().kind() == std::io::ErrorKind::NotFound => {
             return StateLoad::Usable(located.holding(DeployState::empty()));
         }
         Err(source) => {

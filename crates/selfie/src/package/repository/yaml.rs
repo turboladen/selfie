@@ -52,7 +52,7 @@ pub struct YamlPackageRepository<F: FileSystem> {
 /// directory, so every listing failure in this file converts through here.
 fn preserving_kind(error: FileSystemError) -> std::io::Error {
     match &error {
-        FileSystemError::IoError(io) => std::io::Error::new(io.error.kind(), error.to_string()),
+        FileSystemError::IoError(io) => std::io::Error::new(io.error().kind(), error.to_string()),
         _ => std::io::Error::other(error.to_string()),
     }
 }
@@ -1892,7 +1892,7 @@ mod tests {
             let PackageParseKind::Io { cause } = failure.kind() else {
                 panic!("expected an IO error, got {failure:?}");
             };
-            assert_eq!(cause.error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(cause.error().kind(), std::io::ErrorKind::PermissionDenied);
         }
     }
 

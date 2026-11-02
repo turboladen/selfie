@@ -173,6 +173,14 @@ impl<'a> Parts<'a> {
         self
     }
 
+    // An error the tempfile crate built, whose message ends with the temporary
+    // file's path. It is the one source of a foreign part outside git, which
+    // `TempfileText`'s constructor, private to the file system module, holds.
+    pub(crate) fn tempfile(mut self, error: crate::fs::filesystem::TempfileText<'_>) -> Self {
+        self.0.push(Part::Foreign(Cow::Owned(error.text())));
+        self
+    }
+
     // Git's own text, which `GitMessage` has already redacted and bounded. It is
     // the one source of a foreign part from the git side, so a credential in
     // git's stderr cannot reach a part without passing through the redaction.
