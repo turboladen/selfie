@@ -180,9 +180,10 @@ sandbox-run *ARGS:
             TERM="${TERM:-dumb}" "$bin" "$@"
     }
 
-    # The gate. `package list` prints the package directory it actually read, so
-    # this fails whenever the binary reached anything but the sandbox. Matched on
-    # the unique mktemp component because the printed path is canonicalized.
+    # The gate. `package list` prints the package directory it read. The gate
+    # passes only when that line names the sandbox's own directory, as
+    # `~/packages` against the sandbox `HOME`, as `$home/packages`, or as its
+    # canonical path, and the listing after it names `sandbox-sentinel`.
     #
     # Captured inside the `if` rather than by a plain assignment because `set -e`
     # aborts on the assignment form, and a missing or unreadable config is exactly
@@ -194,11 +195,14 @@ sandbox-run *ARGS:
         exit 1
     fi
 
+    canonical="$(cd "$home" && pwd -P)"
     # `case` rather than a pipe into `grep -q`: under `set -o pipefail`, grep
     # exiting on its first match can SIGPIPE the writer and fail a gate that
     # passed. That already happened here once.
     case "$gate" in
-        *"Package directory: "*"$(basename "$home")/packages"*) ;;
+        *"Packages: ~/packages"$'\n'*"sandbox-sentinel"*) ;;
+        *"Packages: $home/packages"$'\n'*"sandbox-sentinel"*) ;;
+        *"Packages: $canonical/packages"$'\n'*"sandbox-sentinel"*) ;;
         *)
             echo "gate failed: the binary did not read the sandbox config; refusing to run" >&2
             printf '%s\n' "$gate" >&2
