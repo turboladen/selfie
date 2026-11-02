@@ -2149,4 +2149,182 @@ mod conflicting_path_tests {
         );
         assert!(parts.contains(&&Part::Name("bar".into())), "{parts:?}");
     }
+
+    // Each package error, with values holding U+200B, and its sentence.
+    fn package_errors() -> Vec<(PackageError, String)> {
+        let (name, environment, required_by) = ("n\u{200B}m", "w\u{200B}k", "r\u{200B}q");
+        let file = || PathBuf::from("/p\u{200B}k/a.yml");
+        let cause = || {
+            PackageParseError::new(
+                file(),
+                PackageParseKind::InvalidName {
+                    name: "a\u{200B}".to_string(),
+                },
+            )
+        };
+        let unloadable = |prefix: &str| {
+            format!(
+                "{prefix} package `{name}` from /p\u{200B}k/a.yml: its name 'a\u{200B}' is not a \
+                 valid spec name. Rename the file: {}.",
+                crate::package::SPEC_NAME_RULE
+            )
+        };
+        vec![
+            (
+                PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    files_examined: 0,
+                    search_patterns: Vec::new(),
+                    declared_by: Vec::new(),
+                },
+                format!("Package `{name}` not found in path /p\u{200B}k"),
+            ),
+            (
+                PackageError::PackageNotFound {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    files_examined: 1,
+                    search_patterns: Vec::new(),
+                    declared_by: vec![NameDeclaration {
+                        path: "/p\u{200B}k/bar.yml".into(),
+                        name: "foo".to_string(),
+                    }],
+                },
+                format!(
+                    "Package `{name}` not found in path /p\u{200B}k. p\u{200B}k/bar.yml declares \
+                     `name: foo`; a package is named by its file, so use 'bar'"
+                ),
+            ),
+            (
+                PackageError::MultiplePackagesFound {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    conflicting_paths: vec![
+                        "/p\u{200B}k/m.yml".into(),
+                        "/p\u{200B}k/m.yaml".into(),
+                    ],
+                    files_examined: 2,
+                    search_patterns: Vec::new(),
+                },
+                format!(
+                    "Multiple packages found with name `{name}` in path /p\u{200B}k: m.yml, m.yaml. \
+                     Names are compared ignoring case, and `.yml` and `.yaml` name the same \
+                     package, so these files all claim one name. Rename or remove all but one."
+                ),
+            ),
+            (
+                PackageError::ParseError {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    failed_file: file(),
+                    cause: cause(),
+                },
+                unloadable("Parse error in"),
+            ),
+            (
+                PackageError::UnreadableFile {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    failed_file: file(),
+                    cause: cause(),
+                },
+                unloadable("Cannot read"),
+            ),
+            (
+                PackageError::UnusableName {
+                    name: name.to_string(),
+                    packages_path: "/p\u{200B}k".into(),
+                    failed_file: file(),
+                    cause: cause(),
+                },
+                unloadable("Cannot use"),
+            ),
+            (
+                PackageError::EnvironmentNotFound {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    available_environments: Vec::new(),
+                    package_file: file(),
+                    required_by: None,
+                },
+                format!("Environment `{environment}` not found in package `{name}`"),
+            ),
+            (
+                PackageError::EnvironmentNotFound {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    available_environments: Vec::new(),
+                    package_file: file(),
+                    required_by: Some(required_by.to_string()),
+                },
+                format!(
+                    "Environment `{environment}` not found in package `{name}`, which \
+                     `{required_by}` requires"
+                ),
+            ),
+            (
+                PackageError::NoCheckCommand {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    package_file: file(),
+                    other_envs_with_check: Vec::new(),
+                },
+                format!(
+                    "No check command defined for package `{name}` in environment `{environment}`"
+                ),
+            ),
+            (
+                PackageError::PackageAlreadyExists {
+                    name: name.to_string(),
+                    file_path: file(),
+                },
+                format!("Package `{name}` already exists at /p\u{200B}k/a.yml"),
+            ),
+            (
+                PackageError::PackagePathOccupied {
+                    name: name.to_string(),
+                    file_path: file(),
+                },
+                format!(
+                    "Cannot create `{name}`: /p\u{200B}k/a.yml is already taken by something selfie \
+                     did not find under that name; selfie will not write over it."
+                ),
+            ),
+            (
+                PackageError::NoInstallCommand {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    package_file: file(),
+                    other_envs_with_install: Vec::new(),
+                    required_by: None,
+                },
+                format!(
+                    "No install command defined for package `{name}` in environment `{environment}`"
+                ),
+            ),
+            (
+                PackageError::NoInstallCommand {
+                    package_name: name.to_string(),
+                    environment: environment.to_string(),
+                    package_file: file(),
+                    other_envs_with_install: Vec::new(),
+                    required_by: Some(required_by.to_string()),
+                },
+                format!(
+                    "No install command defined for package `{name}` in environment \
+                     `{environment}`, which `{required_by}` requires"
+                ),
+            ),
+        ]
+    }
+
+    // Every package error's sentence, whole, so a change to how they are built
+    // cannot change their words.
+    #[test]
+    fn a_package_errors_sentences_are_worded_whole() {
+        for (error, sentence) in package_errors() {
+            assert_eq!(error.to_string(), sentence);
+        }
+    }
 }
