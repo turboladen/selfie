@@ -3100,6 +3100,35 @@ impl OperationSuccess {
 }
 
 impl OperationFailure {
+    /// This failure's sentence, with the same words as its `Display`, naming as
+    /// parts every value its kind names as parts.
+    #[must_use]
+    pub fn message(&self) -> Message {
+        // The arms not named here word their values as text until each kind is
+        // Composed (selfie-2kwj).
+        match self {
+            Self::Package(error) => Message::of(error),
+            Self::DependencyError(failure) => Message::of(failure),
+            Self::PackageList(error) => Message::of(error),
+            Self::Repository(error) => Message::of(error),
+            Self::UnplacedSpec(write) => Message::of(write),
+            Self::DeployState(failure) => Message::of(failure),
+            Self::UnusableDotfilesDirectory(refusal) => Message::of(refusal),
+            Self::Stopped(stop) => Message::of(stop),
+            Self::Track(message) => message.clone(),
+            Self::UnreadableSpec {
+                package_name,
+                reason,
+            } => Parts::new()
+                .text("Cannot use package `")
+                .name(package_name)
+                .text("`: ")
+                .text(reason.as_str())
+                .into(),
+            other => Parts::new().text(other.to_string()).into(),
+        }
+    }
+
     /// The label for this failure, such as `"not_installed_after_install"`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
@@ -6277,6 +6306,100 @@ mod tests {
         assert!(!none.contains("failed"), "{none}");
         assert!(none.ends_with("1 refused"), "{none}");
         assert!(one.contains("0 refused, 1 failed"), "{one}");
+    }
+
+    // A failure's message has its `Display`'s words, and names as parts what
+    // each Composed kind names.
+    #[test]
+    fn a_failures_message_keeps_its_words() {
+        // Each holds U+200B, so a kind worded as text makes `values_of` panic.
+        let named: Vec<(OperationFailure, &[&str])> = vec![
+            (
+                OperationFailure::Package(
+                    crate::package::port::PackageError::PackageAlreadyExists {
+                        name: "a\u{200B}b".to_string(),
+                        file_path: "/p\u{200B}k/a.yml".into(),
+                    },
+                ),
+                &["a\u{200B}b", "/p\u{200B}k/a.yml"],
+            ),
+            (
+                OperationFailure::missing_dependency(
+                    "a\u{200B}b".to_string(),
+                    "d\u{200B}p".to_string(),
+                ),
+                &["a\u{200B}b", "d\u{200B}p"],
+            ),
+            (
+                OperationFailure::PackageList(crate::package::port::PackageListError::new(
+                    "/p\u{200B}k".into(),
+                    crate::fs::DirectoryState::Absent(crate::fs::AbsentReason::Occupied {
+                        kind: "regular file",
+                    }),
+                )),
+                &["/p\u{200B}k"],
+            ),
+            (
+                OperationFailure::from(crate::package::port::PackageRepoError::Occupied {
+                    path: "/p\u{200B}k/a.yml".into(),
+                }),
+                &["/p\u{200B}k/a.yml"],
+            ),
+            (
+                OperationFailure::UnplacedSpec(UnplacedWrite {
+                    action: SpecWrite::Update,
+                    package_name: "a\u{200B}b".to_string(),
+                    path: "/p\u{200B}k/a.yml".into(),
+                }),
+                &["a\u{200B}b", "/p\u{200B}k/a.yml"],
+            ),
+            (
+                OperationFailure::DeployState(
+                    crate::dotfile_service::DeployStateFailure::StoppedAfterRecording {
+                        target: "/t\u{200B}x".into(),
+                    },
+                ),
+                &["/t\u{200B}x"],
+            ),
+            (
+                OperationFailure::UnusableDotfilesDirectory(
+                    crate::package::collect::directory::TrackDirectoryRefusal::SharedWithPackages(
+                        "/p\u{200B}k".into(),
+                    ),
+                ),
+                &["/p\u{200B}k"],
+            ),
+            (
+                OperationFailure::Stopped(crate::dotfile_service::ApplyStop::Package {
+                    name: "a\u{200B}b".to_string(),
+                }),
+                &["a\u{200B}b"],
+            ),
+            (
+                OperationFailure::Track(Message::from(
+                    Parts::new()
+                        .text("Cannot track ")
+                        .path(std::path::Path::new("/t\u{200B}x")),
+                )),
+                &["/t\u{200B}x"],
+            ),
+            (
+                OperationFailure::UnreadableSpec {
+                    package_name: "a\u{200B}b".to_string(),
+                    reason: "unknown field 'bogus'".to_string(),
+                },
+                &["a\u{200B}b"],
+            ),
+            (
+                OperationFailure::Generic("could not collect packages".to_string()),
+                &[],
+            ),
+        ];
+        for (failure, named) in &named {
+            let message = failure.message();
+            assert_eq!(message.to_string(), failure.to_string());
+            assert_eq!(crate::parts::values_of(&message), *named, "{failure}");
+        }
     }
 
     // A spec write refused as unplaced, whole for each action, so a change to how

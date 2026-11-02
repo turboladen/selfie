@@ -334,24 +334,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
             package_name,
             reason,
         } => uncreatable(package_name, reason),
-        OperationFailure::Package(error) => composed(error),
-        OperationFailure::DeployState(failure) => composed(failure),
-        OperationFailure::PackageList(error) => composed(error),
-        OperationFailure::Repository(error) => composed(error),
-        OperationFailure::DependencyError(failure) => composed(failure),
-        OperationFailure::UnplacedSpec(write) => composed(write),
-        OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
-        OperationFailure::Stopped(stop) => composed(stop),
-        OperationFailure::Track(message) => composed(message),
-        OperationFailure::UnreadableSpec {
-            package_name,
-            reason,
-        } => shown!(
-            "Cannot use package `{}`: {}",
-            Name::new(package_name),
-            message(reason)
-        ),
-        other => sentence(other).into(),
+        other => composed(&other.message()),
     }
 }
 

@@ -8,8 +8,7 @@ use selfie::commands::runner::TimedOut;
 use selfie::config::ConfigLoadError;
 use selfie::namespace::NamespaceConflict;
 use selfie::package::event::{
-    CheckFailure, OperationFailure, OperationType, SkipReason, SpecStatus, UncheckedSource,
-    UnknownStatus,
+    CheckFailure, OperationType, SkipReason, SpecStatus, UncheckedSource, UnknownStatus,
 };
 use selfie::parts::{Composed, Part, Parts, Program, Subcommand, SuggestedCommand};
 use selfie::sync_service::port::SyncError;
@@ -47,7 +46,6 @@ sentences!(
     CheckFailure,
     ConfigLoadError,
     NamespaceConflict,
-    OperationFailure,
     OperationType,
     ParseFailure,
     SkipReason,
