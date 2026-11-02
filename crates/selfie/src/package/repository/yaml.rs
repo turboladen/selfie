@@ -3677,4 +3677,124 @@ environments:
             "{err:?}"
         );
     }
+
+    // The sentences a spec file's read failure gives, whole, so a change to how
+    // they are built cannot change their words.
+    #[test]
+    fn a_spec_files_read_failures_are_worded_whole() {
+        let spec = Path::new("/test/packages/ghost.yml");
+        let cause = || Arc::new(std::io::Error::other("the cause"));
+        let cases = [
+            (
+                spec_read_failure(
+                    spec,
+                    FileSystemError::SymlinkedTarget {
+                        path: spec.to_path_buf(),
+                        points_to: Some(PathBuf::from("/elsewhere/x.yml")),
+                    },
+                ),
+                "selfie will not use the package file: it is a symlink to '/elsewhere/x.yml'",
+            ),
+            (
+                spec_read_failure(
+                    spec,
+                    FileSystemError::SymlinkedTarget {
+                        path: spec.to_path_buf(),
+                        points_to: None,
+                    },
+                ),
+                "selfie will not use the package file: it is a symlink",
+            ),
+            (
+                spec_read_failure(spec, FileSystemError::HomeDirNotFound),
+                "the package file could not be read: the home directory could not be determined",
+            ),
+            (
+                spec_read_failure(
+                    spec,
+                    FileSystemError::CannotCreateIn {
+                        path: PathBuf::from("/test/packages"),
+                        cause: cause(),
+                    },
+                ),
+                "the package file could not be read: /test/packages: the cause",
+            ),
+            (
+                spec_read_failure(
+                    spec,
+                    FileSystemError::IrregularTarget {
+                        path: spec.to_path_buf(),
+                        kind: "named pipe (fifo)",
+                    },
+                ),
+                "the package file is a named pipe (fifo), not a regular file. Replace it with a \
+                 regular file or remove it from the package directory.",
+            ),
+            (
+                PackageParseError::new(
+                    spec,
+                    PackageParseKind::InvalidName {
+                        name: "g\u{200B}host".to_string(),
+                    },
+                ),
+                "its name 'g\u{200B}host' is not a valid spec name. Rename the file: use only \
+                 letters other than the invisible Hangul fillers, digits, '-', '_', '.', '@' and \
+                 '+', with no dot at the start or end and no '.yml' or '.yaml' ending.",
+            ),
+        ];
+        for (error, sentence) in cases {
+            assert_eq!(error.to_string(), sentence);
+        }
+    }
+
+    // A package directory named `p<U+200B>k` holding a target spec `t`, two files
+    // claiming the name `m`, and a `g` with the unknown key `bo<U+200B>gus` in the
+    // environment `w<U+200B>k`, and the refusals a scan for `t`'s dependents gives.
+    fn dependent_scan_refusals() -> (TempDir, PathBuf, Vec<PackageParseError>) {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("p\u{200B}k");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        let spec = "environments:\n  test:\n    install: \"true\"\n";
+        std::fs::write(package_dir.join("t.yml"), format!("name: t\n{spec}")).unwrap();
+        std::fs::write(package_dir.join("m.yml"), format!("name: m\n{spec}")).unwrap();
+        std::fs::write(package_dir.join("m.yaml"), format!("name: m\n{spec}")).unwrap();
+        std::fs::write(
+            package_dir.join("g.yml"),
+            "name: g\nenvironments:\n  \"w\\u200Bk\":\n    install: \"true\"\n    \"bo\\u200Bgus\": 1\n",
+        )
+        .unwrap();
+        let repo = YamlPackageRepository::new(
+            RealFileSystem,
+            package_dir.clone(),
+            SpecOrigin::PackageDirectory,
+        );
+        let (_, unreadable) = repo.find_dependent_packages("t").unwrap();
+        (temp_dir, package_dir, unreadable)
+    }
+
+    // The two refusals the dependent scan gives a spec that loaded, whole.
+    #[test]
+    fn a_dependent_scans_refusals_are_worded_whole() {
+        let (_temp_dir, package_dir, unreadable) = dependent_scan_refusals();
+
+        let mut reasons: Vec<String> = unreadable.iter().map(ToString::to_string).collect();
+        reasons.sort_unstable();
+        let ambiguity = format!(
+            "selfie will not use the package file: Multiple packages found with name `m` in path \
+             {}: m.yaml, m.yml. Names are compared ignoring case, and `.yml` and `.yaml` name the \
+             same package, so these files all claim one name. Rename or remove all but one.",
+            package_dir.display()
+        );
+        assert_eq!(
+            reasons,
+            [
+                ambiguity.clone(),
+                ambiguity,
+                "selfie will not use the package file: in environment 'w\u{200B}k': unknown field \
+                 'bo\u{200B}gus'; expected one of: install, check, audit, dependencies, recommends, \
+                 dotfiles"
+                    .to_string(),
+            ]
+        );
+    }
 }

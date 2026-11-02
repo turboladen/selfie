@@ -1909,4 +1909,21 @@ mod conflicting_path_tests {
         assert!(rendered.contains("neovim.yml"), "got: {rendered}");
         assert!(rendered.contains("`.yml` and `.yaml`"), "got: {rendered}");
     }
+
+    // A not-found failure's hint, whole: each file by its directory and name, the
+    // `name:` value escaped, and the name to use.
+    #[test]
+    fn a_name_field_hint_is_worded_whole() {
+        let declared = [NameDeclaration {
+            path: PathBuf::from("/home/me/p\u{200B}k/bar.yml"),
+            name: "f\u{1b}oo".to_string(),
+        }];
+
+        assert_eq!(
+            name_field_hint(&declared).to_string(),
+            ". p\u{200B}k/bar.yml declares `name: f\\u{1b}oo`; a package is named by its file, so \
+             use 'bar'"
+        );
+        assert_eq!(name_field_hint(&[]).to_string(), "");
+    }
 }
