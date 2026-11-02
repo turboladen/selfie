@@ -159,6 +159,7 @@ impl From<&AuditResultData> for Audit {
             AuditResult::NotInstalled => AuditFinding::NotInstalled,
             AuditResult::NoAuditCommand => AuditFinding::NoAuditCommand,
             AuditResult::Error(error) => AuditFinding::Error(Output::new(error).into()),
+            AuditResult::Unconfigured(message) => AuditFinding::Error(composed(message)),
             // selfie's sentence naming the command, so prose: a carriage return
             // or an escape sequence in the command shows as an escape, where a
             // tool's output would keep only what follows the last return.
