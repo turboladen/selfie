@@ -336,7 +336,7 @@ impl SelfieServer {
         if selfie::package::is_blank_command(&params.install) {
             let payload = event_collector::failure_payload(
                 &selfie::package::event::OperationFailure::Generic(
-                    selfie::package::BLANK_INSTALL_GIVEN.to_string(),
+                    selfie::package::BLANK_INSTALL_GIVEN,
                 ),
             );
             return Ok(CallToolResult::error(vec![ContentBlock::text(

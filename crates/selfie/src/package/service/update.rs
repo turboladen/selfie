@@ -8,7 +8,7 @@ use crate::{
         EnvironmentConfig,
         event::{
             EventSender, OperationFailure, OperationResult, OperationSuccess, PackageUpdateFields,
-            SpecWrite,
+            SpecUpdateRefusal, SpecWrite,
         },
         port::PackageRepository,
         service::{
@@ -172,22 +172,24 @@ where
                 written.environment_field(env_name, "recommends");
             }
         } else {
-            return OperationResult::Failure(
-                format!("Environment '{env_name}' not found in package '{package_name}'").into(),
-            );
+            return OperationResult::Failure(OperationFailure::SpecUpdate(
+                SpecUpdateRefusal::EnvironmentNotFound {
+                    environment: env_name.clone(),
+                    package: package_name.to_string(),
+                },
+            ));
         }
     }
 
     // Handle add_environment
     if let Some(add_env) = fields.add_environment {
         if package.environments.value.contains_key(&add_env.name) {
-            return OperationResult::Failure(
-                format!(
-                    "Environment '{}' already exists in package '{package_name}'",
-                    add_env.name
-                )
-                .into(),
-            );
+            return OperationResult::Failure(OperationFailure::SpecUpdate(
+                SpecUpdateRefusal::EnvironmentExists {
+                    environment: add_env.name,
+                    package: package_name.to_string(),
+                },
+            ));
         }
 
         written.added_environment(&add_env.name);
@@ -212,9 +214,12 @@ where
             .shift_remove(remove_env)
             .is_none()
     {
-        return OperationResult::Failure(
-            format!("Environment '{remove_env}' not found in package '{package_name}'").into(),
-        );
+        return OperationResult::Failure(OperationFailure::SpecUpdate(
+            SpecUpdateRefusal::EnvironmentNotFound {
+                environment: remove_env.clone(),
+                package: package_name.to_string(),
+            },
+        ));
     }
     if fields.remove_environment.is_some() {
         written.top_level("environments");
@@ -695,6 +700,90 @@ mod tests {
         .await;
 
         assert!(matches!(result, OperationResult::Failure(_)));
+    }
+
+    // An update naming an environment the spec lacks, or adding one it has, is
+    // refused in words that name the environment and the package as names.
+    #[tokio::test]
+    async fn an_environment_an_update_cannot_use_is_named() {
+        async fn refused(fields: PackageUpdateFields) -> OperationFailure {
+            let mut mock_repo = MockPackageRepository::new();
+            let get_package = GetPackage::from_existing(
+                create_test_package("test-pkg"),
+                PathBuf::from("/test/packages/test-pkg.yml"),
+            );
+            mock_repo
+                .expect_get_package()
+                .return_once(move |_| Ok(get_package));
+            let (sender, _rx) = test_sender();
+            let result = handle_update(
+                "test-pkg",
+                fields,
+                &mock_repo,
+                &MockPackageRepository::new(),
+                &test_config(),
+                &sender,
+                &mut ProgressTracker::new(3),
+            )
+            .await;
+            let OperationResult::Failure(failure) = result else {
+                panic!("expected a refusal, got: {result:?}");
+            };
+            failure
+        }
+        let missing = "n\u{200B}o";
+
+        let edited = refused(PackageUpdateFields {
+            install: Some("true".to_string()),
+            environment: Some(missing.to_string()),
+            ..Default::default()
+        })
+        .await;
+        let removed = refused(PackageUpdateFields {
+            remove_environment: Some(missing.to_string()),
+            ..Default::default()
+        })
+        .await;
+        let added = refused(PackageUpdateFields {
+            add_environment: Some(AddEnvironment {
+                name: "test-env".to_string(),
+                install: "true".to_string(),
+                check: None,
+                audit: None,
+                dependencies: Vec::new(),
+                recommends: Vec::new(),
+            }),
+            ..Default::default()
+        })
+        .await;
+
+        for (failure, words, environment) in [
+            (
+                &edited,
+                "Environment 'n\u{200B}o' not found in package 'test-pkg'",
+                missing,
+            ),
+            (
+                &removed,
+                "Environment 'n\u{200B}o' not found in package 'test-pkg'",
+                missing,
+            ),
+            (
+                &added,
+                "Environment 'test-env' already exists in package 'test-pkg'",
+                "test-env",
+            ),
+        ] {
+            assert!(
+                matches!(failure, OperationFailure::SpecUpdate(_)),
+                "{failure:?}"
+            );
+            assert_eq!(failure.to_string(), words);
+            assert_eq!(
+                crate::parts::values_of(&failure.message()),
+                [environment, "test-pkg"]
+            );
+        }
     }
 
     #[tokio::test]

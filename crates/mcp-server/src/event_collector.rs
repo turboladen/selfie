@@ -3381,6 +3381,18 @@ mod tests {
         }
     }
 
+    // The JSON `failure`'s events collect to with `failure`, a generic one, given
+    // `sentence` as its error, to compare a typed failure's JSON with: a generic
+    // failure holds only a literal, so the sentence is put in afterwards.
+    async fn worded_as(
+        events: Vec<PackageEvent>,
+        sentence: &impl std::fmt::Display,
+    ) -> EventCollectorResult {
+        let mut worded = collect_events(Box::pin(stream::iter(events))).await;
+        worded.data["result"]["error"] = sentence.to_string().into();
+        worded
+    }
+
     // The deploy state's warning and failure travel typed, and the JSON is the
     // one their sentences gave as a plain warning and a generic failure.
     #[tokio::test]
@@ -3409,12 +3421,12 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Failure(OperationFailure::Generic(stopped.to_string())),
+                result: OperationResult::Failure(OperationFailure::Generic("")),
             },
         ];
 
         let typed = collect_events(Box::pin(stream::iter(typed))).await;
-        let worded = collect_events(Box::pin(stream::iter(worded))).await;
+        let worded = worded_as(worded, &stopped).await;
 
         assert_eq!(typed.data, worded.data);
         assert_eq!(typed.success, worded.success);
@@ -3465,12 +3477,12 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Failure(OperationFailure::Generic(refusal.to_string())),
+                result: OperationResult::Failure(OperationFailure::Generic("")),
             },
         ];
 
         let typed = collect_events(Box::pin(stream::iter(typed))).await;
-        let worded = collect_events(Box::pin(stream::iter(worded))).await;
+        let worded = worded_as(worded, &refusal).await;
 
         assert_eq!(typed.data, worded.data);
         assert_eq!(typed.success, worded.success);
@@ -3505,10 +3517,7 @@ mod tests {
             OperationFailure::Stopped(stop.clone()),
         ))))
         .await;
-        let worded = collect_events(Box::pin(stream::iter(completed(
-            OperationFailure::Generic(stop.to_string()),
-        ))))
-        .await;
+        let worded = worded_as(completed(OperationFailure::Generic("")), &stop).await;
 
         assert_eq!(typed.data, worded.data);
         assert_eq!(typed.success, worded.success);
@@ -3523,9 +3532,7 @@ mod tests {
     async fn test_collect_failure() {
         let events = vec![PackageEvent::Completed {
             operation_info: test_op_info(),
-            result: OperationResult::Failure(OperationFailure::Generic(
-                "something went wrong".to_string(),
-            )),
+            result: OperationResult::Failure(OperationFailure::Generic("something went wrong")),
         }];
 
         let stream: EventStream = Box::pin(stream::iter(events));
