@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::yaml::SourceLocation;
 
+use crate::parts::{Composed, Message, Parts};
 use crate::validation::{ValidationErrorCategory, ValidationIssue, ValidationIssues};
 
 use super::{
@@ -86,7 +87,7 @@ pub(crate) struct CrossSpecCollision {
     entries: (String, Vec<(PathBuf, String)>),
     environments: Vec<String>,
     // The clause naming every member and the target, as `describe` words it.
-    clause: String,
+    clause: Message,
     // Each member entry as (spec file, issue field, place of its target).
     members: Vec<(PathBuf, String, Option<SourceLocation>)>,
 }
@@ -121,12 +122,15 @@ impl CrossSpecCollision {
     /// Returns the errors for the entries of the spec file at `path`, each naming
     /// `environments` as where the members meet.
     pub(crate) fn issues_at(&self, path: &Path, environments: &[String]) -> Vec<ValidationIssue> {
-        let quoted: Vec<String> = environments.iter().map(|e| format!("'{e}'")).collect();
-        let message = format!(
-            "Dotfile entries {} in environment {}, so apply deploys none of them there",
-            self.clause,
-            quoted.join(", ")
-        );
+        let message: Message = Parts::new()
+            .text("Dotfile entries ")
+            .append(self.clause.parts())
+            .text(" in environment ")
+            .append(Parts::joined(environments, ", ", |environment| {
+                Parts::new().text("'").name(environment).text("'")
+            }))
+            .text(", so apply deploys none of them there")
+            .into();
         self.members
             .iter()
             .filter(|(member, _, _)| member == path)
@@ -134,7 +138,7 @@ impl CrossSpecCollision {
                 ValidationIssue::error_at(
                     ValidationErrorCategory::InvalidValue,
                     field,
-                    &message,
+                    message.clone(),
                     Some(super::KEEP_ONE_ENTRY_ACROSS_SPECS),
                     *location,
                 )
@@ -180,7 +184,7 @@ pub(crate) fn cross_spec_collisions(
         .map(|((entries, group), environments)| CrossSpecCollision {
             entries,
             environments: environments.iter().map(ToString::to_string).collect(),
-            clause: group.describe().to_string(),
+            clause: group.describe().into(),
             members: group
                 .members()
                 .iter()
@@ -219,9 +223,13 @@ pub fn validate_template_vars(
             ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &format!("{}.vars", reference.field),
-                &format!(
-                    "Dotfile var '{name}' is declared but never used in template '{}'",
-                    reference.source
+                Message::from(
+                    Parts::new()
+                        .text("Dotfile var '")
+                        .name(name)
+                        .text("' is declared but never used in template '")
+                        .path(Path::new(reference.source))
+                        .text("'"),
                 ),
                 Some("Check for a misspelling in the template or in the var name."),
             )
@@ -237,14 +245,17 @@ pub fn validate_template_vars(
 #[must_use]
 pub fn unreadable_template_issue(
     reference: &TemplateReference<'_>,
-    error: &impl std::fmt::Display,
+    error: &crate::fs::FileSystemError,
 ) -> ValidationIssue {
     ValidationIssue::error(
         ValidationErrorCategory::InvalidValue,
         &format!("{}.source", reference.field),
-        &format!(
-            "Dotfile template '{}' cannot be read: {error}",
-            reference.source
+        Message::from(
+            Parts::new()
+                .text("Dotfile template '")
+                .path(Path::new(reference.source))
+                .text("' cannot be read: ")
+                .append(error.parts()),
         ),
         Some("Templates are read during validation to check their placeholders."),
     )
@@ -268,7 +279,7 @@ fn unknown_top_level_keys(keys: &[UnknownKey]) -> Vec<ValidationIssue> {
             ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &unknown.key,
-                &unknown.message.to_string(),
+                unknown.message.clone(),
                 anchor_suggestion::<PackageField>(unknown).as_deref(),
             )
         })
@@ -291,7 +302,7 @@ fn unknown_environment_keys(package: &Package) -> Vec<ValidationIssue> {
             issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 &environment_field(env_name, &unknown.key),
-                &unknown.message.to_string(),
+                unknown.message.clone(),
                 anchor_suggestion::<EnvironmentField>(unknown).as_deref(),
             ));
         }
@@ -317,7 +328,7 @@ fn unknown_dotfile_issue(entry_key: UnknownEntryKey) -> ValidationIssue {
     ValidationIssue::error(
         ValidationErrorCategory::InvalidValue,
         &entry_key.field,
-        &entry_key.unknown.message.to_string(),
+        entry_key.unknown.message.clone(),
         Some(&suggestion),
     )
 }
@@ -476,10 +487,12 @@ impl Package {
             TopLevelKeys::Unchecked(error) => issues.push(ValidationIssue::error(
                 ValidationErrorCategory::InvalidValue,
                 "package",
-                &format!(
-                    "package '{}': {}",
-                    self.name(),
-                    RefusalReason::UncheckedTopLevel(error.clone())
+                Message::from(
+                    Parts::new()
+                        .text("package '")
+                        .name(self.name())
+                        .text("': ")
+                        .append(RefusalReason::UncheckedTopLevel(error.clone()).parts()),
                 ),
                 Some("Edit the file directly, or simplify it until selfie can read it."),
             )),
@@ -578,7 +591,12 @@ impl Package {
             issues.push(ValidationIssue::warning(
                 ValidationErrorCategory::Environment,
                 "environments",
-                &format!("Current environment '{current_env}' is not configured"),
+                Message::from(
+                    Parts::new()
+                        .text("Current environment '")
+                        .name(current_env)
+                        .text("' is not configured"),
+                ),
                 Some(&format!(
                     "Add an environment section for '{current_env}' if needed for this environment."
                 )),
@@ -818,9 +836,13 @@ impl Package {
                     issues.push(ValidationIssue::info(
                         ValidationErrorCategory::Advisory,
                         &format!("{field}.target"),
-                        &format!(
-                            "Environment '{env_name}' overrides the shared dotfile for target '{}'",
-                            dotfile.target()
+                        Message::from(
+                            Parts::new()
+                                .text("Environment '")
+                                .name(env_name)
+                                .text("' overrides the shared dotfile for target '")
+                                .path(Path::new(dotfile.target()))
+                                .text("'"),
                         ),
                         Some(
                             "This is allowed; the environment-specific source is used in that environment.",
@@ -836,12 +858,17 @@ impl Package {
                         issues.push(ValidationIssue::info(
                             ValidationErrorCategory::Advisory,
                             &format!("{field}.target"),
-                            &format!(
-                                "'{field}' ('{}') overrides the shared '{}' on a machine whose \
-                                 home is '{}'",
-                                dotfile.target(),
-                                shared.target(),
-                                home.display()
+                            Message::from(
+                                Parts::new()
+                                    .text("'")
+                                    .name(field.as_str())
+                                    .text("' ('")
+                                    .path(Path::new(dotfile.target()))
+                                    .text("') overrides the shared '")
+                                    .path(Path::new(shared.target()))
+                                    .text("' on a machine whose home is '")
+                                    .path(home.as_path())
+                                    .text("'"),
                             ),
                             Some(
                                 "Elsewhere both deploy. Spell both targets the same way if they \
@@ -858,9 +885,11 @@ impl Package {
             ValidationIssue::error_at(
                 ValidationErrorCategory::InvalidValue,
                 &format!("{}.target", first.field()),
-                &format!(
-                    "Dotfile entries {}, so apply deploys none of them",
-                    collision.describe()
+                Message::from(
+                    Parts::new()
+                        .text("Dotfile entries ")
+                        .append(collision.describe())
+                        .text(", so apply deploys none of them"),
                 ),
                 Some(super::KEEP_ONE_ENTRY),
                 SourceLocation::from_location(first.entry.target_location()),
@@ -1071,7 +1100,12 @@ impl Package {
                 issues.push(ValidationIssue::error_at(
                     ValidationErrorCategory::InvalidValue,
                     &format!("{field}.vars"),
-                    &format!("Dotfile var name '{name}' is not valid"),
+                    Message::from(
+                        Parts::new()
+                            .text("Dotfile var name '")
+                            .name(name.as_str())
+                            .text("' is not valid"),
+                    ),
                     Some("Names must match [A-Za-z_][A-Za-z0-9_]*."),
                     // `entry_loc`, not `command_loc`: a `vars` block belongs to a
                     // template, which has a `source` and no `command`, so the
@@ -1160,13 +1194,13 @@ impl Package {
             issues.push(ValidationIssue::warning(
                 ValidationErrorCategory::InvalidValue,
                 "name",
-                &format!(
-                    "Package name '{}' does not match filename '{}'",
-                    self.name(),
-                    self.path()
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
+                Message::from(
+                    Parts::new()
+                        .text("Package name '")
+                        .name(self.name())
+                        .text("' does not match filename '")
+                        .name(self.path().file_name().unwrap_or_default().to_string_lossy())
+                        .text("'"),
                 ),
                 Some(&format!(
                     "Consider renaming to match: either set name to '{stem}' or rename the file to '{}.yml'",
@@ -3327,7 +3361,7 @@ environments:
             "name: \"n\\u200Bm\"\ndotfiles:\n  - source: a\n    target: \"~/s\\u200Bx\"\n\
              environments:\n  \"w\\u200Bk\":\n    install: \"true\"\n    dotfiles:\n\
              \x20     - source: b\n        target: \"~/s\\u200Bx\"\n\
-             \x20     - source: c\n        target: \"/h\\u200Bm/s\\u200Bx\"\n\
+             \x20     - source: c\n        target: \"/Users/h\\u200Bm/s\\u200Bx\"\n\
              \x20     - source: d\n        target: \"~/c\\u200Bx\"\n\
              \x20     - source: e\n        target: \"~/c\\u200Bx\"\n\
              \x20     - source: f\n        target: \"~/v\"\n        vars:\n          \"b\\u200Bad\": x\n",
@@ -3340,10 +3374,9 @@ environments:
         package
     }
 
-    // The validation messages and suggestions that name a value, whole, so a
-    // change to how they are built cannot change their words.
-    #[test]
-    fn the_messages_naming_a_value_are_worded_whole() {
+    // Every issue whose message names a value, from the hostile fixtures, in
+    // the order the checks report them, leaving out the commands notice.
+    fn value_naming_issues() -> Vec<ValidationIssue> {
         let package = hostile_package();
         let mut issues = package.validate_environments_contents("e\u{200B}x");
         issues.extend(package.validate_dotfiles());
@@ -3379,9 +3412,22 @@ environments:
         for collision in cross_spec_collisions(&specs, &environments) {
             issues.extend(collision.into_issues_at(Path::new("/p\u{200B}k/a.yml")));
         }
+        issues
+            .into_iter()
+            .filter(|issue| {
+                !(issue.category() == ValidationErrorCategory::Advisory
+                    && issue.field() == "dotfiles")
+            })
+            .collect()
+    }
+
+    // The validation messages and suggestions that name a value, whole, so a
+    // change to how they are built cannot change their words.
+    #[test]
+    fn the_messages_naming_a_value_are_worded_whole() {
+        let issues = value_naming_issues();
         let worded: Vec<(String, Option<String>)> = issues
             .iter()
-            .filter(|issue| !issue.message().starts_with("'selfie apply' executes"))
             .map(|issue| (issue.message().into_owned(), issue.suggestion().cloned()))
             .collect();
         let pinned = [
@@ -3393,6 +3439,14 @@ environments:
                 "Environment 'w\u{200B}k' overrides the shared dotfile for target '~/s\u{200B}x'",
                 Some(
                     "This is allowed; the environment-specific source is used in that environment.",
+                ),
+            ),
+            (
+                "'environments.w\u{200B}k.dotfiles[1]' ('/Users/h\u{200B}m/s\u{200B}x') overrides \
+                 the shared '~/s\u{200B}x' on a machine whose home is '/Users/h\u{200B}m'",
+                Some(
+                    "Elsewhere both deploy. Spell both targets the same way if they are meant to \
+                     be one file on every machine.",
                 ),
             ),
             (
@@ -3432,5 +3486,57 @@ environments:
             .map(|(message, suggestion)| (message.to_string(), suggestion.map(str::to_string)))
             .collect();
         assert_eq!(worded, pinned);
+    }
+
+    // Every value those messages name is a part of the kind the CLI escapes it
+    // as: an environment, a var, a spec or a file name as a name, and a target,
+    // a template or a directory as a path. `values_of` panics on a value written
+    // as text, and the kinds tell a name from a path, which it cannot.
+    #[test]
+    fn the_messages_naming_a_value_name_each_as_its_kind() {
+        use crate::parts::{Part, values_of};
+
+        let name = |value: &str| ("name", value.to_string());
+        let path = |value: &str| ("path", value.to_string());
+        let expected = [
+            vec![name("e\u{200B}x")],
+            vec![name("w\u{200B}k"), path("~/s\u{200B}x")],
+            vec![
+                name("environments.w\u{200B}k.dotfiles[1]"),
+                path("/Users/h\u{200B}m/s\u{200B}x"),
+                path("~/s\u{200B}x"),
+                path("/Users/h\u{200B}m"),
+            ],
+            vec![name("b\u{200B}ad")],
+            vec![name("w\u{200B}k"), name("w\u{200B}k"), path("~/c\u{200B}x")],
+            vec![name("n\u{200B}m"), name("n.yml")],
+            vec![name("u\u{200B}v"), path("t\u{200B}pl")],
+            vec![path("t\u{200B}pl"), path("/p\u{200B}k")],
+            vec![
+                name("a"),
+                name("w\u{200B}k"),
+                name("s"),
+                name("w\u{200B}k"),
+                path("~/t\u{200B}x"),
+                name("w\u{200B}k"),
+            ],
+        ];
+        let issues = value_naming_issues();
+        assert_eq!(issues.len(), expected.len());
+        for (issue, expected) in issues.iter().zip(expected) {
+            let message = issue.wording();
+            let parts = message.parts();
+            let kinds: Vec<(&str, String)> = parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    Part::Name(value) => Some(("name", value.to_string())),
+                    Part::Path(value) => Some(("path", value.display().to_string())),
+                    Part::Text(_) | Part::Command(_) => None,
+                })
+                .collect();
+            assert_eq!(kinds, expected, "{}", issue.message());
+            let values: Vec<String> = expected.into_iter().map(|(_, value)| value).collect();
+            assert_eq!(values_of(&message.parts().into()), values);
+        }
     }
 }

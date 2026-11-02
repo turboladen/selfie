@@ -171,12 +171,6 @@ impl From<&'static str> for IssueMessage {
     }
 }
 
-impl From<&String> for IssueMessage {
-    fn from(text: &String) -> Self {
-        Self::Text(text.clone())
-    }
-}
-
 impl From<crate::parts::Message> for IssueMessage {
     fn from(message: crate::parts::Message) -> Self {
         Self::Message(message)

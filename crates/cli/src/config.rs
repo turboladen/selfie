@@ -57,7 +57,7 @@ pub(crate) struct ConfigNotice {
 impl ConfigNotice {
     fn from_ignored_key(ignored: &IgnoredKey) -> Self {
         Self {
-            message: crate::received::message(ignored.message()).into(),
+            message: crate::received::composed(&ignored.message()),
             suggestion: crate::received::message(ignored.suggestion()).into(),
         }
     }

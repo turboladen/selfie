@@ -124,7 +124,7 @@ impl super::diagnostics::LoadedConfig {
             ValidationIssue::warning(
                 ValidationErrorCategory::Advisory,
                 ignored.key(),
-                crate::validation::IssueMessage::Text(ignored.message()),
+                ignored.message(),
                 Some(&ignored.suggestion()),
             )
         }));
@@ -236,21 +236,25 @@ fn validate_directory_path(
     let expanded_path = match super::expand_setting(fs, path) {
         Ok(expanded) => expanded,
         Err(error) => {
-            let message = format!(
-                "The `{field_name}` path could not be checked: could not resolve ~: {error}"
+            let message = crate::parts::Message::from(
+                crate::parts::Parts::new()
+                    .text(format!(
+                        "The `{field_name}` path could not be checked: could not resolve ~: "
+                    ))
+                    .append(crate::parts::Composed::parts(&error)),
             );
             return Err(if unresolved == Unresolved::Tolerated {
                 ValidationIssue::warning(
                     ValidationErrorCategory::Advisory,
                     field_name,
-                    crate::validation::IssueMessage::Text(message),
+                    message.clone(),
                     None,
                 )
             } else {
                 ValidationIssue::error(
                     ValidationErrorCategory::PathFormat,
                     field_name,
-                    crate::validation::IssueMessage::Text(message),
+                    message,
                     None,
                 )
             });

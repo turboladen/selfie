@@ -659,7 +659,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
                 .iter()
                 .map(|ignored| serde_json::json!({
                     "key": ignored.key(),
-                    "message": ignored.message(),
+                    "message": ignored.message().to_string(),
                     "suggestion": ignored.suggestion(),
                 }))
                 .collect::<Vec<_>>(),

@@ -728,24 +728,27 @@ enum FileChangeKind {
 // cannot both survive a checkout on a case-insensitive file system; two
 // extensions can, and telling someone their `.yml`/`.yaml` pair will be
 // discarded sends them looking for a difference that is not there.
-fn name_collision_message(names: &[String]) -> String {
+fn name_collision_message(names: &[String]) -> crate::parts::Message {
+    use crate::parts::Parts;
+
     let mut folded: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
     folded.sort();
     let capitalization_differs = folded.windows(2).any(|pair| pair[0] == pair[1]);
 
-    let joined = names.join(" and ");
+    let joined = Parts::joined(names, " and ", |name| Parts::new().name(name.as_str()));
 
     if capitalization_differs {
-        format!(
-            "{joined} fold to one package name, and checking this out on a case-insensitive \
-             file system discards one of them. Rename all but one before pushing."
+        joined.text(
+            " fold to one package name, and checking this out on a case-insensitive file \
+             system discards one of them. Rename all but one before pushing.",
         )
     } else {
-        format!(
-            "{joined} name the same package under different extensions, so no command can \
-             resolve it. Rename or remove all but one before pushing."
+        joined.text(
+            " name the same package under different extensions, so no command can resolve \
+             it. Rename or remove all but one before pushing.",
         )
     }
+    .into()
 }
 
 /// Validate all changed YAML package files in the spec directories `specs` lists,
@@ -825,7 +828,7 @@ fn validate_changes_against(
                 level: crate::validation::ValidationLevel::Error,
                 category: PushIssueCategory::NameCollision,
                 field: "-".to_string(),
-                message: crate::validation::IssueMessage::Text(name_collision_message(&names)),
+                message: name_collision_message(&names).into(),
                 location: None,
                 suggestion: None,
             }],
@@ -934,9 +937,12 @@ fn apply_refusal_issue(
         level: crate::validation::ValidationLevel::Error,
         category: super::port::PushIssueCategory::ApplyRefusal,
         field: "-".to_string(),
-        message: crate::validation::IssueMessage::Text(format!(
-            "'selfie apply' would refuse this package: {unreported}"
-        )),
+        message: crate::parts::Message::from(
+            crate::parts::Parts::new()
+                .text("'selfie apply' would refuse this package: ")
+                .append(crate::parts::Composed::parts(&unreported)),
+        )
+        .into(),
         location: None,
         // A refusal carries its remedy in its message.
         suggestion: None,
@@ -4173,6 +4179,38 @@ environments:
         );
     }
 
+    // An appended refusal names each unknown key as a part, so the push table
+    // escapes it.
+    #[test]
+    fn an_appended_refusal_names_its_keys_as_parts() {
+        let yaml = "name: myapp\nenvironments:\n  test-env:\n    install: \"true\"\n    \
+                    \"au\\u200Bdt\": x\n";
+        let mut package: crate::package::Package = crate::yaml::parse(yaml).unwrap();
+        package.set_source(
+            std::path::PathBuf::from("/packages/myapp.yml"),
+            yaml.to_string(),
+            crate::package::SpecOrigin::PackageDirectory,
+        );
+        let refusal = package
+            .spec_refusal("test-env")
+            .expect("the unknown key is refused");
+
+        let issue = super::apply_refusal_issue(&refusal, &[]).expect("nothing reported it yet");
+        let crate::validation::IssueMessage::Message(message) = &issue.message else {
+            panic!("expected parts, got {:?}", issue.message);
+        };
+        assert!(
+            message
+                .to_string()
+                .starts_with("'selfie apply' would refuse this package: "),
+            "{message}"
+        );
+        assert!(
+            crate::parts::values_of(message).contains(&"au\u{200B}dt".to_string()),
+            "{message:?}"
+        );
+    }
+
     // A refusal with two reasons, one of them reported by the validator, appends
     // only the other, so the reported key is not said twice.
     #[test]
@@ -4725,7 +4763,8 @@ environments:
     #[test]
     fn the_extension_refusal_does_not_blame_capitalization() {
         let rendered =
-            name_collision_message(&["neovim.yaml".to_string(), "neovim.yml".to_string()]);
+            name_collision_message(&["neovim.yaml".to_string(), "neovim.yml".to_string()])
+                .to_string();
 
         assert!(rendered.contains("different extensions"), "got: {rendered}");
         assert!(!rendered.contains("case-insensitive"), "got: {rendered}");
@@ -4737,10 +4776,30 @@ environments:
     #[test]
     fn the_case_refusal_names_the_file_that_is_lost() {
         let rendered =
-            name_collision_message(&["Neovim.yml".to_string(), "neovim.yml".to_string()]);
+            name_collision_message(&["Neovim.yml".to_string(), "neovim.yml".to_string()])
+                .to_string();
 
         assert!(rendered.contains("case-insensitive"), "got: {rendered}");
         assert!(rendered.contains("discards"), "got: {rendered}");
+    }
+
+    // The refusal for files claiming one name, whole, with each file named as a
+    // name so the CLI escapes it.
+    #[test]
+    fn a_name_collision_names_each_file_as_a_name() {
+        let refusal =
+            name_collision_message(&["n\u{200B}v.yaml".to_string(), "n\u{200B}v.yml".to_string()]);
+
+        assert_eq!(
+            refusal.to_string(),
+            "n\u{200B}v.yaml and n\u{200B}v.yml name the same package under different \
+             extensions, so no command can resolve it. Rename or remove all but one before \
+             pushing."
+        );
+        assert_eq!(
+            crate::parts::values_of(&refusal),
+            ["n\u{200B}v.yaml", "n\u{200B}v.yml"]
+        );
     }
 
     // Folding is Unicode, matching the loader's name comparison.
@@ -4881,8 +4940,21 @@ mod standalone_specs {
 
     fn push(root: &Path, packages: &Path, dotfiles: &Path, changed: &str) -> String {
         let changes = vec![(PathBuf::from(changed), FileChangeKind::Modified)];
+        // Each issue's message as its words, so an assertion reads the sentence.
         match gate(root, packages, dotfiles, &changes, "test") {
             Ok(()) => String::new(),
+            Err(crate::sync_service::SyncError::ValidationFailed { failures }) => failures
+                .iter()
+                .flat_map(|failure| {
+                    failure.issues.iter().map(|issue| {
+                        format!(
+                            "{} {:?} {}: {}",
+                            failure.path, issue.category, issue.field, issue.message
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
             Err(error) => format!("{error:?}"),
         }
     }

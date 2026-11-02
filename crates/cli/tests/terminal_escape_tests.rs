@@ -12,7 +12,10 @@ use std::fs;
 use icu_properties::props::{DefaultIgnorableCodePoint, GeneralCategory};
 use icu_properties::{CodePointMapData, CodePointSetData};
 
-use common::{FAILED, SELFIE_ENV, git, sandboxed_std_command, setup_default_test_config};
+use common::{
+    FAILED, SELFIE_ENV, git, package_repo_with_remote, sandboxed_std_command,
+    setup_default_test_config,
+};
 
 // What each fixture field carries, written as YAML double-quoted escapes: CSI
 // (clear screen), OSC (retitle, ended by BEL), a right-to-left override, a
@@ -1560,4 +1563,61 @@ fn a_missing_dependency_is_named_escaped() {
         "{failed}"
     );
     assert!(!failed.contains('\u{200B}'), "{failed:?}");
+}
+
+// Two specs whose entries collide on a target name the target and their
+// environment escaped in `spec validate`'s message cell, on one row, with a
+// line feed in the target escaped.
+#[test]
+fn spec_validate_names_a_collisions_target_escaped_on_one_row() {
+    let temp = setup_default_test_config();
+    let entry = |name: &str| {
+        format!(
+            "name: {name}\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    dotfiles:\n\
+             \x20     - source: rc\n        target: \"~/t\\u200Bx\\nl\"\n"
+        )
+    };
+    hostile_package_directory(&temp, &[("a.yml", &entry("a")), ("s.yml", &entry("s"))]);
+
+    for args in [
+        &["spec", "validate", "a"][..],
+        &["spec", "validate", "--all"][..],
+    ] {
+        let printed = printed(&temp, args);
+
+        let rows: Vec<&str> = printed
+            .lines()
+            .filter(|line| line.contains("Dotfile entries package 'a'"))
+            .collect();
+        assert!(!rows.is_empty(), "{args:?}: {printed}");
+        for row in rows {
+            assert!(row.contains(r"~/t\u{200b}x\nl"), "{args:?}: {row}");
+            assert!(
+                row.contains("so apply deploys none of them there"),
+                "{args:?}: {row}"
+            );
+            assert!(!row.contains('\u{200B}'), "{args:?}: {row:?}");
+        }
+    }
+}
+// A push refused for files claiming one name names each file escaped, so a
+// U+200B shows and a line feed keeps the refusal on its table row.
+#[test]
+fn sync_push_names_files_claiming_one_name_escaped_on_one_row() {
+    let temp = setup_default_test_config();
+    let packages = temp.path().join("packages");
+    for file in ["n\u{200B}v\nx.yml", "n\u{200B}v\nx.yaml"] {
+        fs::write(packages.join(file), plain_spec("nv")).unwrap();
+    }
+    package_repo_with_remote(&temp);
+    fs::write(packages.join("o.yml"), plain_spec("o")).unwrap();
+
+    let printed = printed(&temp, &["sync", "push", "--yes"]);
+
+    let row = line_with(&printed, "name the same package under different extensions");
+    assert!(
+        row.contains(r"n\u{200b}v\nx.yaml and n\u{200b}v\nx.yml name the same package"),
+        "{row}"
+    );
+    assert!(!printed.contains('\u{200B}'), "{printed:?}");
 }
