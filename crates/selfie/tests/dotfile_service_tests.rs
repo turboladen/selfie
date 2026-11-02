@@ -235,6 +235,16 @@ fn refused_count(events: &[PackageEvent]) -> usize {
     }
 }
 
+// Entries an apply skipped, from its completion.
+fn entries_skipped_count(events: &[PackageEvent]) -> usize {
+    match get_operation_result(events).expect("no Completed event") {
+        OperationResult::Success(OperationSuccess::DotfilesApplied { skipped_count, .. }) => {
+            *skipped_count
+        }
+        other => panic!("expected DotfilesApplied, got {other:?}"),
+    }
+}
+
 // Helper to create a package YAML file with a dotfiles section
 fn create_package_with_dotfiles(
     package_dir: &std::path::Path,
@@ -18584,7 +18594,7 @@ mod orphans {
         assert_eq!(
             a.package(),
             Some("alpha"),
-            "placing a record leaves its package alone"
+            "placing a record names the package that deploys it"
         );
     }
 
@@ -18608,17 +18618,7 @@ mod orphans {
         .unwrap();
         // The save fails after the run's own write check has passed, as on a
         // full disk: permissions that refuse it are refused before the run.
-        let fs = StateWritesFailAfter {
-            inner: RealFileSystem,
-            state_file: dirs.state_dir.join("deploy-state.yml"),
-            allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        };
-        let events = collect_events(
-            dirs.service_with_fs(fs, FakeCommandRunner::new())
-                .apply_all(ApplyOptions::default())
-                .await,
-        )
-        .await;
+        let events = apply_refusing_state_writes(&dirs).await;
 
         assert!(
             matches!(
@@ -18637,6 +18637,273 @@ mod orphans {
             "{events:#?}"
         );
         assert_eq!(state_in(&dirs).get(&key).unwrap().base(), None);
+    }
+
+    // Move spec `name` and its source directory from `from` to `to`, content
+    // unchanged, so every target it deploys stays in sync.
+    fn move_spec(name: &str, from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        let spec = format!("{name}.yml");
+        std::fs::rename(from.join(&spec), to.join(&spec)).unwrap();
+        std::fs::rename(from.join(name), to.join(name)).unwrap();
+    }
+
+    fn base_of(dirs: &TestDirs, key: &str) -> Option<selfie::package::event::BaseKind> {
+        state_in(dirs).get(key).unwrap().base()
+    }
+
+    // The base each orphan event names, in event order.
+    fn orphan_bases(
+        events: &[PackageEvent],
+    ) -> Vec<Option<(selfie::package::event::BaseKind, PathBuf)>> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PackageEvent::DotfileOrphaned { source, .. } => Some(
+                    source
+                        .base()
+                        .map(|base| (base.kind, base.directory.clone())),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // The regression test for a record that keeps the directory it was first
+    // deployed from. A spec moved between the two directories with its content
+    // unchanged is only ever found in sync, so the in-sync pass is what has to
+    // move the record with it, and an orphan it becomes is shown where it was
+    // last read. `beta` stays in the package directory so the orphan check has
+    // something to judge against, and so that, walked after `alpha` on the move
+    // back, an in-sync record with nothing to change follows a placed one.
+    #[tokio::test]
+    async fn a_record_follows_its_spec_between_the_two_directories() {
+        use selfie::package::event::BaseKind;
+
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        package(&dirs, "beta", &["b"]);
+        run_apply_all(&dirs).await;
+        let key = target(&dirs, "a");
+        assert_eq!(base_of(&dirs, &key), Some(BaseKind::PackageDirectory));
+        let checksum = state_in(&dirs).get(&key).unwrap().checksum().to_string();
+
+        move_spec("alpha", &dirs.package_dir, &dirs.dotfiles_dir);
+        run_dry_run(&dirs).await;
+        assert_eq!(
+            base_of(&dirs, &key),
+            Some(BaseKind::PackageDirectory),
+            "a dry run changes no record"
+        );
+        let events = run_apply_all(&dirs).await;
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { target, .. } if *target == key
+            )),
+            "the moved entry is found in sync: {events:#?}"
+        );
+        let state = state_in(&dirs);
+        let a = state.get(&key).unwrap();
+        assert_eq!(a.base(), Some(BaseKind::DotfilesDirectory));
+        assert_eq!(a.source(), "alpha/a");
+        assert_eq!(a.package(), Some("alpha"));
+        assert_eq!(a.checksum(), checksum, "placing keeps the checksum");
+
+        move_spec("alpha", &dirs.dotfiles_dir, &dirs.package_dir);
+        run_apply_all(&dirs).await;
+        assert_eq!(base_of(&dirs, &key), Some(BaseKind::PackageDirectory));
+
+        move_spec("alpha", &dirs.package_dir, &dirs.dotfiles_dir);
+        run_apply_all(&dirs).await;
+        std::fs::remove_file(dirs.dotfiles_dir.join("alpha.yml")).unwrap();
+        let events = run_apply_all(&dirs).await;
+        assert_eq!(
+            orphan_bases(&events),
+            vec![Some((
+                BaseKind::DotfilesDirectory,
+                dirs.dotfiles_dir.clone()
+            ))],
+            "{events:#?}"
+        );
+    }
+
+    // An apply that finds its one target in sync with a record already in place
+    // attempts no state write: every write is refused, and an attempted one
+    // would warn.
+    async fn assert_an_apply_writes_no_state(dirs: &TestDirs) {
+        let events = apply_refusing_state_writes(dirs).await;
+        assert_eq!(entries_skipped_count(&events), 1, "{events:#?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DeployStateWarning { .. })),
+            "{events:#?}"
+        );
+    }
+
+    // A spec renamed and moved with its content unchanged is found in sync, and
+    // its record ends naming the new package, source and directory.
+    #[tokio::test]
+    async fn a_renamed_and_moved_spec_leaves_its_record_current() {
+        use selfie::package::event::BaseKind;
+
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        package(&dirs, "beta", &["b"]);
+        run_apply_all(&dirs).await;
+        let key = target(&dirs, "a");
+        std::fs::remove_file(dirs.package_dir.join("alpha.yml")).unwrap();
+        let gamma = dirs.dotfiles_dir.join("gamma");
+        std::fs::create_dir_all(&gamma).unwrap();
+        std::fs::rename(dirs.package_dir.join("alpha/a"), gamma.join("a")).unwrap();
+        create_package_with_dotfiles(&dirs.dotfiles_dir, "gamma", &[("gamma/a", &key)]);
+
+        let events = run_apply_all(&dirs).await;
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { target, .. } if *target == key
+            )),
+            "the renamed entry is found in sync: {events:#?}"
+        );
+        let state = state_in(&dirs);
+        let a = state.get(&key).unwrap();
+        assert_eq!(a.package(), Some("gamma"));
+        assert_eq!(a.source(), "gamma/a");
+        assert_eq!(a.base(), Some(BaseKind::DotfilesDirectory));
+    }
+
+    // A spec renamed and moved while another spec cannot be loaded is found in
+    // sync, and its record still ends naming the new package. The unloadable
+    // spec stops the orphan check, whose tidy would otherwise name it, so the
+    // in-sync pass has to move the package with the source and directory.
+    #[tokio::test]
+    async fn a_renamed_spec_names_its_package_when_the_orphan_check_cannot_run() {
+        use selfie::package::event::BaseKind;
+
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        run_apply_all(&dirs).await;
+        let key = target(&dirs, "a");
+        std::fs::remove_file(dirs.package_dir.join("alpha.yml")).unwrap();
+        let gamma = dirs.dotfiles_dir.join("gamma");
+        std::fs::create_dir_all(&gamma).unwrap();
+        std::fs::rename(dirs.package_dir.join("alpha/a"), gamma.join("a")).unwrap();
+        create_package_with_dotfiles(&dirs.dotfiles_dir, "gamma", &[("gamma/a", &key)]);
+        std::fs::write(dirs.package_dir.join("broken.yml"), "name: [unclosed\n").unwrap();
+        seed(&dirs, &target(&dirs, "unjudged"), "broken/unjudged", None);
+
+        let events = run_apply_all(&dirs).await;
+
+        assert_eq!(skipped_checks(&events), 1, "the check stopped: {events:#?}");
+        let state = state_in(&dirs);
+        let a = state.get(&key).unwrap();
+        assert_eq!(a.package(), Some("gamma"), "{events:#?}");
+        assert_eq!(a.source(), "gamma/a");
+        assert_eq!(a.base(), Some(BaseKind::DotfilesDirectory));
+    }
+
+    // A spec beside one that cannot be loaded, which may name the same target,
+    // still deploys. Its record follows it to its new directory once, and the
+    // next apply finds it in place and writes nothing.
+    #[tokio::test]
+    async fn a_record_beside_an_unloadable_spec_is_placed_once() {
+        use selfie::package::event::BaseKind;
+
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        run_apply_all(&dirs).await;
+        let key = target(&dirs, "a");
+        move_spec("alpha", &dirs.package_dir, &dirs.dotfiles_dir);
+        std::fs::write(dirs.package_dir.join("broken.yml"), "name: [unclosed\n").unwrap();
+
+        run_apply_all(&dirs).await;
+        assert_eq!(base_of(&dirs, &key), Some(BaseKind::DotfilesDirectory));
+
+        let events = apply_refusing_state_writes(&dirs).await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DeployStateWarning { .. })),
+            "{events:#?}"
+        );
+        assert_eq!(base_of(&dirs, &key), Some(BaseKind::DotfilesDirectory));
+    }
+
+    // A record already in place compares equal on the next in-sync pass, so a
+    // run that changes nothing writes nothing.
+    #[tokio::test]
+    async fn an_in_sync_record_already_in_place_is_not_saved_again() {
+        let dirs = TestDirs::new();
+        package(&dirs, "alpha", &["a"]);
+        run_apply_all(&dirs).await;
+
+        assert_an_apply_writes_no_state(&dirs).await;
+    }
+
+    // A record track wrote is spelled as apply spells it, so the first apply
+    // after a track finds it in place and writes nothing.
+    #[tokio::test]
+    async fn a_tracked_record_is_not_saved_again_by_an_apply() {
+        let dirs = TestDirs::new();
+        let rc = dirs.target_dir.join("starship.toml");
+        std::fs::write(&rc, "format").unwrap();
+        collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("starship", rc.to_str().unwrap())
+                .await,
+        )
+        .await;
+        assert!(recorded(&dirs, &rc.display().to_string()));
+
+        assert_an_apply_writes_no_state(&dirs).await;
+    }
+
+    // Two specs deploying one target are both refused before anything is read,
+    // so the record they share is never placed by either and cannot flip between
+    // their directories. Both sources hold what the target holds, so without the
+    // refusal each would be found in sync, and the dotfiles-directory spec,
+    // walked last, would place the record there.
+    #[tokio::test]
+    async fn colliding_entries_leave_their_shared_record_as_it_was() {
+        use selfie::package::event::BaseKind;
+
+        let dirs = TestDirs::new();
+        package(&dirs, "app", &["rc"]);
+        run_apply_all(&dirs).await;
+        let key = target(&dirs, "rc");
+        assert_eq!(base_of(&dirs, &key), Some(BaseKind::PackageDirectory));
+        let other = dirs.dotfiles_dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("rc"), "app rc").unwrap();
+        create_package_with_dotfiles(&dirs.dotfiles_dir, "other", &[("other/rc", &key)]);
+
+        let events = run_apply_all(&dirs).await;
+
+        // The record is asserted before the count, so that a run without the
+        // refusal fails on what it did to the record.
+        let state = state_in(&dirs);
+        let rc = state.get(&key).unwrap();
+        assert_eq!(rc.base(), Some(BaseKind::PackageDirectory), "{events:#?}");
+        assert_eq!(rc.source(), "app/rc");
+        assert_eq!(refused_count(&events), 2, "{events:#?}");
+    }
+
+    // An apply of everything whose every write to the state file fails.
+    async fn apply_refusing_state_writes(dirs: &TestDirs) -> Vec<PackageEvent> {
+        let fs = StateWritesFailAfter {
+            inner: RealFileSystem,
+            state_file: dirs.state_dir.join("deploy-state.yml"),
+            allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        collect_events(
+            dirs.service_with_fs(fs, FakeCommandRunner::new())
+                .apply_all(ApplyOptions::default())
+                .await,
+        )
+        .await
     }
 
     // A named apply attributes only its own package's records.
@@ -18721,18 +18988,8 @@ mod orphans {
         std::fs::write(dirs.target_dir.join("new"), "app new").unwrap();
         seed(&dirs, &target(&dirs, "new"), "app/new", Some("app"));
         seed(&dirs, &target(&dirs, "gone"), "app/gone", Some("app"));
-        let fs = StateWritesFailAfter {
-            inner: RealFileSystem,
-            state_file: dirs.state_dir.join("deploy-state.yml"),
-            allowed: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        };
 
-        let events = collect_events(
-            dirs.service_with_fs(fs, FakeCommandRunner::new())
-                .apply_all(ApplyOptions::default())
-                .await,
-        )
-        .await;
+        let events = apply_refusing_state_writes(&dirs).await;
         let tidy = warning_messages(&events)
             .into_iter()
             .filter(|message| message.contains("Could not tidy the deploy state"))
@@ -21169,7 +21426,7 @@ mod collisions_with_unreadable_specs {
         }
     }
 
-    fn skipped_count(events: &[PackageEvent]) -> usize {
+    fn spec_skipped_count(events: &[PackageEvent]) -> usize {
         events
             .iter()
             .filter(|e| matches!(e, PackageEvent::SpecSkipped { .. }))
@@ -21403,7 +21660,7 @@ mod collisions_with_unreadable_specs {
             ]],
             "{events:?}"
         );
-        assert_eq!(skipped_count(&events), 2, "{events:?}");
+        assert_eq!(spec_skipped_count(&events), 2, "{events:?}");
         let line_at = events
             .iter()
             .position(|e| matches!(e, PackageEvent::CollisionsUnchecked { .. }))
@@ -21461,7 +21718,7 @@ mod collisions_with_unreadable_specs {
             ]],
             "{events:?}"
         );
-        assert_eq!(skipped_count(&events), 2, "{events:?}");
+        assert_eq!(spec_skipped_count(&events), 2, "{events:?}");
     }
 
     #[tokio::test]

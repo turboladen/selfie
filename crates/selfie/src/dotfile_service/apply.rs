@@ -312,7 +312,8 @@ where
     // conflation is what let `selfie apply` exit 0 having deployed nothing
     // (selfie-c28).
     let mut tally = ApplyTally::default();
-    // Whether a record gained its base, for the one save at the end.
+    // Whether an in-sync record's base, source or package was set or corrected,
+    // for the one save at the end.
     let mut placed = false;
 
     // Set when the run stops early. Held rather than returned so every stop
@@ -637,10 +638,15 @@ where
                                 break 'entry EntryOutcome::Unrecorded(reason);
                             }
                         }
-                        // A tracked record that names no base gains one, so an orphan
-                        // it later becomes can be shown against it. Only in memory:
-                        // the run saves once at its end, and a failure to save it
-                        // costs nothing but the location, so it never stops the run.
+                        // A tracked record names the directory, source and package
+                        // this entry is read from now, whether it named none or
+                        // others, so an orphan it later becomes is shown where its
+                        // spec last was. The package moves with the other two because
+                        // the orphan check that also names it can stop early.
+                        // A spec moved between the two directories with its content
+                        // unchanged reaches only this arm. Only in memory: the run
+                        // saves once at its end, and a failure to save it costs
+                        // nothing but the location, so it never stops the run.
                         if let crate::package::event::DotfileSource::File(
                             crate::package::event::RepoPath {
                                 base: Some(base),
@@ -648,16 +654,12 @@ where
                             },
                         ) = &event_source
                             && let Ledger::Record(recorder) = &mut ledger
-                            && recorder
-                                .loaded()
-                                .state()
-                                .get(&target_key)
-                                .is_some_and(|e| e.base().is_none())
                         {
                             placed |= recorder.state_mut().place(
                                 &target_key,
                                 &path.to_string_lossy(),
                                 base.kind,
+                                package_name.as_deref(),
                             );
                         }
 
