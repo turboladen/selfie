@@ -932,13 +932,12 @@ where
                     .text("',")
             };
             // Only a check that ran after the install leaves a gap here. Its
-            // failure names the check command and its directory as text until
-            // the check failure is Composed (selfie-2kwj).
+            // failure's parts name the check command and its directory.
             sender
                 .send_composed_warning(Message::from(
                     whose
                         .text(" installed, but its check gave no answer: ")
-                        .text(gap.reason().to_string()),
+                        .append(crate::parts::Composed::parts(gap.reason())),
                 ))
                 .await;
         }
