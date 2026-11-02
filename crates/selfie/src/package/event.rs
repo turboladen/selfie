@@ -1491,6 +1491,9 @@ pub enum OperationFailure {
     DependencyError(DependencyFailure),
     /// Package listing/directory issues
     PackageList(crate::package::port::PackageListError),
+    /// A repository refused or failed to read, write or remove a spec, for a
+    /// reason other than the package's own or the listing's.
+    Repository(RepositoryFailure),
     /// The process holds privilege it must not write dotfiles with.
     ///
     /// Typed rather than folded into [`Generic`](Self::Generic) so a test can
@@ -1725,6 +1728,7 @@ impl std::fmt::Display for OperationFailure {
                 write!(f, "Dependency error: {dep_err}")
             }
             OperationFailure::PackageList(list_err) => write!(f, "{list_err}"),
+            OperationFailure::Repository(error) => write!(f, "{error}"),
             // Both halves, because this is the one-string rendering an adapter
             // falls back to when it has nowhere separate to put a suggestion.
             OperationFailure::Privilege(refusal) => {
@@ -3289,6 +3293,29 @@ impl OperationFailure {
     }
 }
 
+/// A repository's failure that is neither a package's own nor a listing's,
+/// which [`OperationFailure`] carries as variants of their own.
+// Built only by `From<PackageRepoError> for OperationFailure`, which routes the
+// package and listing variants elsewhere, so the field stays private.
+#[derive(Debug, Clone)]
+pub struct RepositoryFailure(crate::package::port::PackageRepoError);
+
+impl RepositoryFailure {
+    /// The repository's error.
+    #[must_use]
+    pub fn error(&self) -> &crate::package::port::PackageRepoError {
+        &self.0
+    }
+}
+
+crate::parts::display_from_parts!(RepositoryFailure);
+
+impl Composed for RepositoryFailure {
+    fn parts(&self) -> Parts<'_> {
+        self.0.parts()
+    }
+}
+
 impl From<crate::package::port::PackageRepoError> for OperationFailure {
     fn from(err: crate::package::port::PackageRepoError) -> Self {
         match err {
@@ -3298,27 +3325,20 @@ impl From<crate::package::port::PackageRepoError> for OperationFailure {
             crate::package::port::PackageRepoError::PackageListError(list_err) => {
                 OperationFailure::PackageList(list_err)
             }
-            crate::package::port::PackageRepoError::IoError(io_err) => {
-                OperationFailure::Generic(format!("IO error: {io_err}"))
-            }
-            crate::package::port::PackageRepoError::FileSystemError(fs_err) => {
-                OperationFailure::Generic(format!("File system error: {fs_err}"))
-            }
-            // All rendered by their own `Display`, and none wrapped in a prefix.
-            // `UntrustedKeys`, the one refusal for unknown keys at every level,
-            // already names the offending field paths, or the parse failure that
-            // stands in for them. `UnwritablePath` is worded for the direction it
-            // refuses and must not pick up the "File system error: " frame above,
-            // which would reintroduce the target-facing phrasing it exists to
-            // avoid. Each message is worth stating in exactly one place.
-            err @ (crate::package::port::PackageRepoError::Unserializable(_)
+            // Each is its own sentence, with no prefix added here. `UnwritablePath`
+            // is worded for the direction it refuses, and a file system error's own
+            // "target" wording must not be put in front of it. Named one by one, so
+            // a new variant has to choose where it goes.
+            error @ (crate::package::port::PackageRepoError::IoError(_)
+            | crate::package::port::PackageRepoError::FileSystemError(_)
+            | crate::package::port::PackageRepoError::Unserializable(_)
             | crate::package::port::PackageRepoError::UntrustedKeys { .. }
             | crate::package::port::PackageRepoError::UnwritablePath { .. }
             | crate::package::port::PackageRepoError::Occupied { .. }
             | crate::package::port::PackageRepoError::ChangedSinceLoad { .. }
-            | crate::package::port::PackageRepoError::AnotherFileAnswers { .. }
-            | crate::package::port::PackageRepoError::NotLoaded { .. }) => {
-                OperationFailure::Generic(err.to_string())
+            | crate::package::port::PackageRepoError::NotLoaded { .. }
+            | crate::package::port::PackageRepoError::AnotherFileAnswers { .. }) => {
+                OperationFailure::Repository(RepositoryFailure(error))
             }
         }
     }

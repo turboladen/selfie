@@ -226,7 +226,7 @@ fn repository_write_refusal(source_path: &Path, refusal: &FileSystemError) -> Me
             None => Parts::new().text("it is a symlink"),
         },
         FileSystemError::IrregularTarget { kind, .. } => {
-            Parts::new().text(format!("it is a {kind}"))
+            Parts::new().text(format!("it is a {}", kind.label()))
         }
         // Not a refusal: a permission problem, a full disk. Rendered as-is,
         // because the filesystem's own message is the useful one and it makes no
@@ -938,7 +938,7 @@ mod tests {
             },
             FileSystemError::IrregularTarget {
                 path: source.to_path_buf(),
-                kind: "named pipe (fifo)",
+                kind: crate::fs::IrregularKind::Fifo,
             },
         ] {
             let message = repository_write_refusal(source, &refusal).to_string();
@@ -1087,7 +1087,7 @@ mod tests {
         fs.expect_irregular_target_refusal().returning(|path| {
             Some(FileSystemError::IrregularTarget {
                 path: path.path().to_path_buf(),
-                kind: "named pipe (fifo)",
+                kind: crate::fs::IrregularKind::Fifo,
             })
         });
 
@@ -1351,7 +1351,7 @@ mod tests {
                 copy,
                 &FileSystemError::IrregularTarget {
                     path: copy.to_path_buf(),
-                    kind: "socket",
+                    kind: crate::fs::IrregularKind::Socket,
                 }
             )
             .to_string(),
@@ -1544,7 +1544,7 @@ mod tests {
             fs.expect_irregular_target_refusal().returning(|path| {
                 Some(FileSystemError::IrregularTarget {
                     path: path.path().to_path_buf(),
-                    kind: "named pipe (fifo)",
+                    kind: crate::fs::IrregularKind::Fifo,
                 })
             });
             already_tracked_refusal(&fs, &target).map(|warning| warning.to_string())

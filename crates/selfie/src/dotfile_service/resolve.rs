@@ -1170,7 +1170,7 @@ mod tests {
         fs.expect_irregular_target_refusal().returning(|path| {
             Some(crate::fs::filesystem::FileSystemError::IrregularTarget {
                 path: path.path().to_path_buf(),
-                kind: "socket",
+                kind: crate::fs::IrregularKind::Socket,
             })
         });
         let irregular =

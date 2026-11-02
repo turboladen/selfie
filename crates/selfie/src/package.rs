@@ -671,16 +671,6 @@ pub(crate) fn describe_unknown_keys<F: KnownFields>(
 // Joins clauses into sentences with ". ", capitalizing every one after the
 // first. Each clause starts lowercase, because the first follows a caller's
 // colon, so only the later ones need a capital.
-fn join_sentences(clauses: impl IntoIterator<Item = impl AsRef<str>>) -> String {
-    join_sentence_parts(
-        clauses
-            .into_iter()
-            .map(|clause| crate::parts::Parts::new().text(clause.as_ref().to_string())),
-    )
-    .to_string()
-}
-
-// The rule `join_sentences` states, for clauses built from parts.
 pub(crate) fn join_sentence_parts<'a>(
     clauses: impl IntoIterator<Item = crate::parts::Parts<'a>>,
 ) -> crate::parts::Parts<'a> {
@@ -764,11 +754,11 @@ fn describe_unknown_key_in<F: KnownFields>(key: &str) -> crate::parts::Parts<'_>
 ///
 /// # Errors
 ///
-/// Returns the parse failure, rendered for a reader. The package parsed once
-/// already, so a failure here means the two views of the file disagree.
+/// Returns the parse failure. The package parsed once already, so a failure
+/// here means the two views of the file disagree.
 pub(crate) fn parse_top_level(
     raw_yaml: &str,
-) -> Result<HashMap<String, serde_json::Value>, String> {
+) -> Result<HashMap<String, serde_json::Value>, crate::yaml::ParseFailure> {
     // Not a workaround: serde-saphyr answers an empty map for empty input today.
     // It does not document that, and the answer decides whether apply warns about
     // an empty file, so it is pinned here rather than inherited.
@@ -781,9 +771,7 @@ pub(crate) fn parse_top_level(
     // and a YAML value it cannot hold, such as a mapping keyed by a sequence, is
     // what makes this parse fail where the package's own parse succeeded.
     //
-    // The failure is rendered here rather than carried, because the caller stores
-    // it in a `TopLevelKeys` that a `Package` clones.
-    crate::yaml::parse(raw_yaml).map_err(|e| e.to_string())
+    crate::yaml::parse(raw_yaml)
 }
 
 /// What a package file's top level holds that a package does not accept.
@@ -797,7 +785,7 @@ pub(crate) enum TopLevelKeys {
     Checked(Vec<UnknownKey>),
     /// The file could not be read back, so its top-level keys were never
     /// examined. Carries the parse failure for a caller to report.
-    Unchecked(String),
+    Unchecked(crate::yaml::ParseFailure),
 }
 
 /// The top-level keys of `raw_yaml` that a package file does not accept.
@@ -2617,7 +2605,7 @@ environments:
 
         match top_level_keys(YAML_THAT_CANNOT_BE_RE_READ) {
             TopLevelKeys::Unchecked(error) => assert!(
-                !error.is_empty(),
+                !error.to_string().is_empty(),
                 "the failure must be carried, for a caller to report"
             ),
             other => panic!("expected Unchecked, got {other:?}"),

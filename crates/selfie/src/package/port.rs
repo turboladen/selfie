@@ -9,7 +9,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use thiserror::Error;
 
 use crate::{
     fs::{DirectoryState, FileSystem, filesystem::FileSystemError},
@@ -192,26 +191,21 @@ impl MockPackageRepository {
 /// This enum represents all possible failures when interacting with the
 /// package repository, providing detailed context for debugging and
 /// error handling.
-#[derive(Error, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum PackageRepoError {
     /// Package-specific error (not found, parse error, etc.)
-    #[error(transparent)]
     PackageError(Box<PackageError>),
 
     /// Package listing operation failed
-    #[error(transparent)]
-    PackageListError(#[from] PackageListError),
+    PackageListError(PackageListError),
 
     /// IO error during repository operation
-    #[error("IO error: {0}")]
     IoError(Arc<std::io::Error>),
 
     /// File system error during repository operation
-    #[error("File system error: {0}")]
     FileSystemError(FileSystemError),
 
     /// The package could not be written as YAML, so nothing was saved.
-    #[error("The package cannot be written as YAML: {0}")]
     Unserializable(crate::yaml::SerializeFailure),
 
     /// Refused to rewrite a package file because it carries keys the struct does
@@ -223,7 +217,6 @@ pub enum PackageRepoError {
     // The remedy names editing the file rather than a selfie command on purpose:
     // every command that could rewrite the file is refused by this same guard, so
     // pointing at one would send the user back to a tool that just refused them.
-    #[error("{}", untrusted_keys_sentence(path, levels.levels()))]
     UntrustedKeys {
         /// The file that would have been rewritten.
         path: PathBuf,
@@ -243,15 +236,11 @@ pub enum PackageRepoError {
     // their "target" is a symlink when they ran `selfie spec update` names a
     // thing that is not in the sentence they typed.
     // `a_refused_package_path_does_not_call_it_a_target` holds this.
-    #[error(
-        "refusing to write {path}: {reason}. \
-         Remove what is at that path, or choose another name."
-    )]
     UnwritablePath {
         /// The package file selfie declined to write.
         path: PathBuf,
-        /// What was found there, phrased to follow a colon.
-        reason: String,
+        /// What was found there.
+        reason: UnwritableReason,
     },
 
     /// Refused to create a package file because something is already at its
@@ -260,10 +249,6 @@ pub enum PackageRepoError {
     // reaches it: every caller finds the path free first, so the occupant arrived
     // during the write, and whether it is a spec for the same name is unknown. So
     // it gives no remedy beyond looking.
-    #[error(
-        "something appeared at {path} while selfie was writing the spec there; nothing was \
-         written over it. Run the command again to see what is there."
-    )]
     Occupied {
         /// The package file selfie declined to create.
         path: PathBuf,
@@ -276,10 +261,6 @@ pub enum PackageRepoError {
     // since a run that reads the file again either acts on what is there or
     // reports why it cannot. A read failure that says nothing about the file is
     // passed through as itself rather than called a change.
-    #[error(
-        "{path} changed after selfie read it, so {refused}. \
-         Run the command again, which reads the file as it is now."
-    )]
     ChangedSinceLoad {
         /// The spec selfie declined to change.
         path: PathBuf,
@@ -290,7 +271,6 @@ pub enum PackageRepoError {
     /// Refused to rewrite or remove a spec this repository did not load from the
     /// path it would change, so there is nothing to tell a change by. Nothing was
     /// written or removed.
-    #[error("refusing to change {path}: this repository did not load the spec from it")]
     NotLoaded {
         /// The path selfie declined to change.
         path: PathBuf,
@@ -298,16 +278,98 @@ pub enum PackageRepoError {
 
     /// Refused to remove a spec because another file now answers to its name, so
     /// removing the loaded one would not remove the package. Nothing was removed.
-    #[error(
-        "{answering} now answers to the name of {path}, which selfie read, so nothing was \
-         removed. Run the command again, which reads the spec as it is now."
-    )]
     AnotherFileAnswers {
         /// The spec selfie loaded and declined to remove.
         path: PathBuf,
         /// The file the name resolves to now.
         answering: PathBuf,
     },
+}
+
+crate::parts::display_from_parts!(PackageRepoError);
+
+// A package or listing error is this error, so its own `source()` is this one's.
+// No other variant chains its cause: each writes the cause into its sentence, and
+// a consumer walking the chain would print it twice.
+impl std::error::Error for PackageRepoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PackageError(error) => error.source(),
+            Self::PackageListError(error) => error.source(),
+            Self::IoError(_)
+            | Self::FileSystemError(_)
+            | Self::Unserializable(_)
+            | Self::UntrustedKeys { .. }
+            | Self::UnwritablePath { .. }
+            | Self::Occupied { .. }
+            | Self::ChangedSinceLoad { .. }
+            | Self::NotLoaded { .. }
+            | Self::AnotherFileAnswers { .. } => None,
+        }
+    }
+}
+
+impl Composed for PackageRepoError {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::PackageError(error) => error.parts(),
+            Self::PackageListError(error) => error.parts(),
+            Self::IoError(error) => Parts::new().text("IO error: ").cause(&**error),
+            Self::FileSystemError(error) => Parts::new()
+                .text("File system error: ")
+                .append(error.parts()),
+            Self::Unserializable(failure) => Parts::new()
+                .text("The package cannot be written as YAML: ")
+                .cause(failure),
+            Self::UntrustedKeys { path, levels } => untrusted_keys_parts(path, levels.levels()),
+            Self::UnwritablePath { path, reason } => Parts::new()
+                .text("refusing to write ")
+                .path(path)
+                .text(": ")
+                .append(reason.parts())
+                .text(". Remove what is at that path, or choose another name."),
+            Self::Occupied { path } => Parts::new().text("something appeared at ").path(path).text(
+                " while selfie was writing the spec there; nothing was written over it. Run \
+                     the command again to see what is there.",
+            ),
+            Self::ChangedSinceLoad { path, refused } => Parts::new().path(path).text(format!(
+                " changed after selfie read it, so {refused}. Run the command again, which \
+                     reads the file as it is now."
+            )),
+            Self::NotLoaded { path } => Parts::new()
+                .text("refusing to change ")
+                .path(path)
+                .text(": this repository did not load the spec from it"),
+            Self::AnotherFileAnswers { path, answering } => Parts::new()
+                .path(answering)
+                .text(" now answers to the name of ")
+                .path(path)
+                .text(
+                    ", which selfie read, so nothing was removed. Run the command again, which \
+                     reads the spec as it is now.",
+                ),
+        }
+    }
+}
+
+/// What [`PackageRepoError::UnwritablePath`] found at a package file's path.
+#[derive(Debug, Clone)]
+pub enum UnwritableReason {
+    /// A symlink.
+    Symlink(SymlinkReason),
+    /// A fifo, socket or device node.
+    Irregular(crate::fs::IrregularKind),
+}
+
+crate::parts::display_from_parts!(UnwritableReason);
+
+impl Composed for UnwritableReason {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::Symlink(reason) => reason.parts(),
+            Self::Irregular(kind) => Parts::new().text(format!("it is a {}", kind.label())),
+        }
+    }
 }
 
 /// What [`PackageRepoError::ChangedSinceLoad`] declined to do to a spec.
@@ -337,6 +399,12 @@ impl From<Arc<std::io::Error>> for PackageRepoError {
 impl From<FileSystemError> for PackageRepoError {
     fn from(error: FileSystemError) -> Self {
         Self::FileSystemError(error)
+    }
+}
+
+impl From<PackageListError> for PackageRepoError {
+    fn from(error: PackageListError) -> Self {
+        Self::PackageListError(error)
     }
 }
 
@@ -552,13 +620,16 @@ impl LookupFailure {
     }
 }
 
-impl std::fmt::Display for LookupFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+crate::parts::display_from_parts!(LookupFailure);
+
+// A failed lookup is the error it holds.
+impl Composed for LookupFailure {
+    fn parts(&self) -> Parts<'_> {
         match self {
             Self::NotFound(NotFound(error))
             | Self::AmbiguousName(AmbiguousName { error, .. })
             | Self::Unloadable(UnloadableSpec { error, .. })
-            | Self::PackageDirectoryUnreadable(UnreadableDirectory(error)) => write!(f, "{error}"),
+            | Self::PackageDirectoryUnreadable(UnreadableDirectory(error)) => error.parts(),
         }
     }
 }
@@ -850,7 +921,7 @@ pub enum UntrustedLevel {
     EnvironmentFields(Vec<String>),
     /// The top level could not be read back, carrying why, so whether it holds
     /// a key the struct would drop is unknown.
-    UncheckedTopLevel(String),
+    UncheckedTopLevel(crate::yaml::ParseFailure),
 }
 
 /// The levels a [`PackageRepoError::UntrustedKeys`] refusal names: never
@@ -903,9 +974,10 @@ impl UntrustedLevel {
     }
 
     // What this level holds and what a rewrite would cost, as a clause, each noun
-    // agreeing with its own count. `after_keys` says a level naming keys comes
-    // before this one in the message.
-    fn clause(&self, after_keys: bool) -> String {
+    // agreeing with its own count, and each key's field path, which the file
+    // spells, as a name. `after_keys` says a level naming keys comes before this
+    // one in the message.
+    fn clause(&self, after_keys: bool) -> Parts<'_> {
         let fields = self.fields();
         let several = fields.len() > 1;
         let harm = match self {
@@ -919,50 +991,61 @@ impl UntrustedLevel {
             Self::EnvironmentFields(_) => "whatever it was set to",
             Self::UncheckedTopLevel(_) => {
                 let other = if after_keys { "other " } else { "" };
-                return format!(
+                return Parts::new().text(format!(
                     "its top level could not be read back, so any {other}key selfie does not \
                      model would be dropped without warning"
-                );
+                ));
             }
         };
         let key = if several { "keys" } else { "key" };
-        format!(
-            "unrecognized {}. Saving would delete the {key} and {harm}",
-            fields.join(", ")
-        )
+        Parts::new()
+            .text("unrecognized ")
+            .append(Parts::joined(fields, ", ", |field| {
+                Parts::new().name(field)
+            }))
+            .text(format!(". Saving would delete the {key} and {harm}"))
     }
 }
 
 // The refusal names the file once and gives one remedy, after a clause per
 // level. An unread top level comes last, as `untrusted_keys_refusal` orders
-// it, and its parse failure ends the message: it is several lines of source
-// snippet, the part a reader can act on last, and anything after it reads as
-// part of it. Nothing is known about an unread top level, and a rewrite
-// serializes from the struct regardless, so declining costs the user a retry
-// where writing would delete silently.
-fn untrusted_keys_sentence(path: &Path, levels: &[UntrustedLevel]) -> String {
-    let path = path.display();
+// it, and its parse failure ends the message: it is the parser's own words and
+// where it stopped, the part a reader can act on last, and anything after it
+// would read as part of it. Nothing is known about an unread top level, and a
+// rewrite serializes from the struct regardless, so declining costs the user a
+// retry where writing would delete silently.
+fn untrusted_keys_parts<'a>(path: &'a Path, levels: &'a [UntrustedLevel]) -> Parts<'a> {
     let fields: usize = levels.iter().map(|level| level.fields().len()).sum();
     let keys = if fields > 1 { "keys" } else { "key" };
+    let edit = Parts::new().text("Edit ").path(path);
     let remedy = match levels {
-        [UntrustedLevel::UncheckedTopLevel(error)] => format!(
-            "Edit {path} directly, or simplify it until selfie can read it. The read failed \
-             with: {error}"
-        ),
-        [_, .., UntrustedLevel::UncheckedTopLevel(error)] => format!(
-            "Edit {path} directly to correct or remove the {keys}, and simplify it until selfie \
-             can read it. The read failed with: {error}"
-        ),
-        _ => format!("Edit {path} directly to correct or remove the {keys}."),
+        [UntrustedLevel::UncheckedTopLevel(_)] => {
+            edit.text(" directly, or simplify it until selfie can read it.")
+        }
+        [_, .., UntrustedLevel::UncheckedTopLevel(_)] => edit.text(format!(
+            " directly to correct or remove the {keys}, and simplify it until selfie can read \
+             it."
+        )),
+        _ => edit.text(format!(" directly to correct or remove the {keys}.")),
+    };
+    let failure = match levels.last() {
+        Some(UntrustedLevel::UncheckedTopLevel(error)) => {
+            Parts::new().text(" The read failed with: ").cause(error)
+        }
+        _ => Parts::new(),
     };
     let clauses = levels
         .iter()
         .enumerate()
         .map(|(i, level)| level.clause(i > 0));
-    format!(
-        "refusing to rewrite {path}: {}. {remedy}",
-        super::join_sentences(clauses)
-    )
+    Parts::new()
+        .text("refusing to rewrite ")
+        .path(path)
+        .text(": ")
+        .append(super::join_sentence_parts(clauses))
+        .text(". ")
+        .append(remedy)
+        .append(failure)
 }
 
 /// The ambiguity sentence for files that all sit in one directory, named
@@ -1521,7 +1604,7 @@ pub enum PackageParseKind {
     ///
     /// Reading one blocks until a writer arrives, so it is refused before the
     /// read rather than reported after it.
-    IrregularFile { kind: &'static str },
+    IrregularFile { kind: crate::fs::IrregularKind },
 
     /// selfie declined the package file: the filesystem port refused to read
     /// it, or selfie read it and the spec guard will not use what it says
@@ -1560,8 +1643,9 @@ impl Composed for PackageParseKind {
                 .text("the package file could not be read: ")
                 .append(reason.parts()),
             Self::IrregularFile { kind } => Parts::new().text(format!(
-                "the package file is a {kind}, not a regular file. Replace it with a regular \
-                 file or remove it from the package directory."
+                "the package file is a {}, not a regular file. Replace it with a regular \
+                 file or remove it from the package directory.",
+                kind.label()
             )),
             Self::Refused(reason) => Parts::new()
                 .text("selfie will not use the package file: ")
@@ -2486,7 +2570,11 @@ mod conflicting_path_tests {
             levels: UntrustedLevels::new(levels).unwrap(),
         };
         let top = || UntrustedLevel::TopLevelFields(vec!["configs".to_string()]);
-        let unchecked = || UntrustedLevel::UncheckedTopLevel("the read failure".to_string());
+        let unchecked = || {
+            UntrustedLevel::UncheckedTopLevel(
+                crate::yaml::parse::<serde_json::Value>("[").unwrap_err(),
+            )
+        };
         let cases = [
             (PackageRepoError::IoError(cause()), "IO error: the cause"),
             (
@@ -2519,23 +2607,11 @@ mod conflicting_path_tests {
                  Edit /p/a.yml directly to correct or remove the keys.",
             ),
             (
-                untrusted(vec![unchecked()]),
-                "refusing to rewrite /p/a.yml: its top level could not be read back, so any key \
-                 selfie does not model would be dropped without warning. Edit /p/a.yml directly, \
-                 or simplify it until selfie can read it. The read failed with: the read failure",
-            ),
-            (
-                untrusted(vec![top(), unchecked()]),
-                "refusing to rewrite /p/a.yml: unrecognized configs. Saving would delete the key \
-                 and everything under it. Its top level could not be read back, so any other key \
-                 selfie does not model would be dropped without warning. Edit /p/a.yml directly to \
-                 correct or remove the key, and simplify it until selfie can read it. The read \
-                 failed with: the read failure",
-            ),
-            (
                 PackageRepoError::UnwritablePath {
                     path: path(),
-                    reason: "it is a symlink to '/elsewhere/a.yml'".to_string(),
+                    reason: UnwritableReason::Symlink(SymlinkReason {
+                        to: Some("/elsewhere/a.yml".into()),
+                    }),
                 },
                 "refusing to write /p/a.yml: it is a symlink to '/elsewhere/a.yml'. Remove what is \
                  at that path, or choose another name.",
@@ -2543,7 +2619,7 @@ mod conflicting_path_tests {
             (
                 PackageRepoError::UnwritablePath {
                     path: path(),
-                    reason: "it is a named pipe (fifo)".to_string(),
+                    reason: UnwritableReason::Irregular(crate::fs::IrregularKind::Fifo),
                 },
                 "refusing to write /p/a.yml: it is a named pipe (fifo). Remove what is at that \
                  path, or choose another name.",
@@ -2586,5 +2662,212 @@ mod conflicting_path_tests {
             assert_eq!(error.to_string(), sentence);
             assert_eq!(OperationFailure::from(error).to_string(), sentence);
         }
+        // The parse failure ends these two in the parser's own words, which only
+        // selfie's frame around them pins.
+        let read = crate::yaml::parse::<serde_json::Value>("[")
+            .unwrap_err()
+            .to_string();
+        let unread = [
+            (
+                untrusted(vec![unchecked()]),
+                format!(
+                    "refusing to rewrite /p/a.yml: its top level could not be read back, so any \
+                     key selfie does not model would be dropped without warning. Edit /p/a.yml \
+                     directly, or simplify it until selfie can read it. The read failed with: \
+                     {read}"
+                ),
+            ),
+            (
+                untrusted(vec![top(), unchecked()]),
+                format!(
+                    "refusing to rewrite /p/a.yml: unrecognized configs. Saving would delete the \
+                     key and everything under it. Its top level could not be read back, so any \
+                     other key selfie does not model would be dropped without warning. Edit \
+                     /p/a.yml directly to correct or remove the key, and simplify it until selfie \
+                     can read it. The read failed with: {read}"
+                ),
+            ),
+        ];
+        for (error, sentence) in unread {
+            assert_eq!(error.to_string(), sentence);
+            assert_eq!(OperationFailure::from(error).to_string(), sentence);
+        }
+        // An I/O cause's trailing line break is not part of the sentence.
+        let trailing = PackageRepoError::IoError(Arc::new(std::io::Error::other("the cause\n")));
+        assert_eq!(trailing.to_string(), "IO error: the cause");
+    }
+
+    // Every path and key a repository error gives is a part of its own, so a value
+    // holding U+200B never sits inside selfie's words, and each failure but a
+    // package's or a listing's own becomes `OperationFailure::Repository`.
+    #[test]
+    fn a_repository_error_names_its_values_as_parts() {
+        use crate::package::event::OperationFailure;
+        use crate::parts::values_of;
+
+        let path = || PathBuf::from("/p\u{200B}k/a.yml");
+        let cause = || Arc::new(std::io::Error::other("the cause"));
+        let cases = [
+            (PackageRepoError::IoError(cause()), vec![]),
+            (
+                PackageRepoError::FileSystemError(FileSystemError::CannotCreateIn {
+                    path: "/p\u{200B}k".into(),
+                    cause: cause(),
+                }),
+                vec!["/p\u{200B}k"],
+            ),
+            (
+                PackageRepoError::UntrustedKeys {
+                    path: path(),
+                    levels: UntrustedLevels::new(vec![
+                        UntrustedLevel::EnvironmentFields(vec![
+                            "environments.w\u{200B}k.a\u{200B}udt".to_string(),
+                        ]),
+                        UntrustedLevel::TopLevelFields(vec![
+                            "co\u{200B}nfigs".to_string(),
+                            "x".to_string(),
+                        ]),
+                    ])
+                    .unwrap(),
+                },
+                vec![
+                    "/p\u{200B}k/a.yml",
+                    "environments.w\u{200B}k.a\u{200B}udt",
+                    "co\u{200B}nfigs",
+                    "x",
+                    "/p\u{200B}k/a.yml",
+                ],
+            ),
+            (
+                PackageRepoError::UntrustedKeys {
+                    path: path(),
+                    levels: UntrustedLevels::new(vec![UntrustedLevel::UncheckedTopLevel(
+                        crate::yaml::parse::<serde_json::Value>("[").unwrap_err(),
+                    )])
+                    .unwrap(),
+                },
+                vec!["/p\u{200B}k/a.yml", "/p\u{200B}k/a.yml"],
+            ),
+            (
+                PackageRepoError::UnwritablePath {
+                    path: path(),
+                    reason: UnwritableReason::Symlink(SymlinkReason {
+                        to: Some("/else\u{200B}where".into()),
+                    }),
+                },
+                vec!["/p\u{200B}k/a.yml", "/else\u{200B}where"],
+            ),
+            (
+                PackageRepoError::UnwritablePath {
+                    path: path(),
+                    reason: UnwritableReason::Irregular(crate::fs::IrregularKind::Fifo),
+                },
+                vec!["/p\u{200B}k/a.yml"],
+            ),
+            (
+                PackageRepoError::Occupied { path: path() },
+                vec!["/p\u{200B}k/a.yml"],
+            ),
+            (
+                PackageRepoError::ChangedSinceLoad {
+                    path: path(),
+                    refused: RefusedChange::Write,
+                },
+                vec!["/p\u{200B}k/a.yml"],
+            ),
+            (
+                PackageRepoError::NotLoaded { path: path() },
+                vec!["/p\u{200B}k/a.yml"],
+            ),
+            (
+                PackageRepoError::AnotherFileAnswers {
+                    path: path(),
+                    answering: "/p\u{200B}k/A.yaml".into(),
+                },
+                vec!["/p\u{200B}k/A.yaml", "/p\u{200B}k/a.yml"],
+            ),
+        ];
+        for (error, values) in cases {
+            assert_eq!(values_of(&error.parts().into()), values, "{error}");
+            assert!(
+                matches!(
+                    OperationFailure::from(error),
+                    OperationFailure::Repository(_)
+                ),
+                "a repository error became another failure"
+            );
+        }
+    }
+
+    // A failed lookup names what the error it holds names, as the same parts.
+    #[test]
+    fn a_failed_lookup_names_its_values_as_parts() {
+        use crate::parts::values_of;
+
+        let error = PackageRepoError::from(PackageError::MultiplePackagesFound {
+            name: "m".to_string(),
+            packages_path: "/p\u{200B}k".into(),
+            conflicting_paths: vec!["/p\u{200B}k/m.yml".into(), "/p\u{200B}k/m.yaml".into()],
+            files_examined: 2,
+            search_patterns: Vec::new(),
+        });
+        let expected = values_of(&error.parts().into());
+        let failure = error.into_lookup_failure().expect("a lookup returns it");
+
+        assert_eq!(values_of(&failure.parts().into()), expected);
+        assert_eq!(expected, ["m", "/p\u{200B}k", "m.yml", "m.yaml"]);
+    }
+
+    // A repository error names a refused key as a name and its file as a path,
+    // which `values_of` alone cannot tell apart.
+    #[test]
+    fn a_repository_error_names_a_key_as_a_name_and_a_file_as_a_path() {
+        use crate::parts::Part;
+
+        let error = PackageRepoError::UntrustedKeys {
+            path: "/p/a.yml".into(),
+            levels: UntrustedLevels::new(vec![UntrustedLevel::TopLevelFields(vec![
+                "configs".to_string(),
+            ])])
+            .unwrap(),
+        };
+        let answers = PackageRepoError::AnotherFileAnswers {
+            path: "/p/a.yml".into(),
+            answering: "/p/A.yaml".into(),
+        };
+
+        let parts = error.parts();
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+        assert!(parts.contains(&&Part::Name("configs".into())), "{parts:?}");
+        assert!(
+            parts.contains(&&Part::Path(Path::new("/p/a.yml").into())),
+            "{parts:?}"
+        );
+        let parts = answers.parts();
+        let parts: Vec<&Part<'_>> = parts.into_iter().collect();
+        assert!(
+            parts.contains(&&Part::Path(Path::new("/p/A.yaml").into())),
+            "{parts:?}"
+        );
+    }
+
+    // A package or listing error's `source()` is the repository error's, and no
+    // other variant chains its cause, which its sentence already says.
+    #[test]
+    fn a_repository_error_forwards_only_a_wrapped_errors_chain() {
+        use std::error::Error as _;
+
+        let listing = PackageListError::new(
+            "/p".into(),
+            DirectoryState::Absent(crate::fs::AbsentReason::Empty),
+        );
+        let wrapped = PackageRepoError::from(listing.clone());
+
+        assert_eq!(wrapped.source().is_some(), listing.source().is_some());
+        assert!(
+            PackageRepoError::IoError(Arc::new(std::io::Error::other("x")))
+                .source()
+                .is_none()
+        );
     }
 }

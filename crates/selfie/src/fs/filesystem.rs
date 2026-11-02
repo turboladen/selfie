@@ -62,8 +62,8 @@ pub enum TargetRead {
     },
     /// A fifo, socket or device node, never read from.
     Irregular {
-        /// What is there, for the sentence: `named pipe (fifo)`, `socket`.
-        kind: &'static str,
+        /// What is there.
+        kind: IrregularKind,
     },
     /// A regular file is there, and selfie may not open or read it.
     Unreadable(Arc<io::Error>),
@@ -807,6 +807,32 @@ impl From<Arc<io::Error>> for IoFailure {
     }
 }
 
+/// A file that is neither a regular file, a directory nor a symlink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrregularKind {
+    /// A named pipe, whose `open` blocks until the other end opens.
+    Fifo,
+    /// A Unix socket.
+    Socket,
+    /// A character device node.
+    CharacterDevice,
+    /// A block device node.
+    BlockDevice,
+}
+
+impl IrregularKind {
+    /// What a sentence calls it: `named pipe (fifo)`, `socket`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fifo => "named pipe (fifo)",
+            Self::Socket => "socket",
+            Self::CharacterDevice => "character device",
+            Self::BlockDevice => "block device",
+        }
+    }
+}
+
 /// Every way a file system operation here can fail.
 // No variant has a source: a CLI error with a chain longer than one prints the
 // chain, so a source here would print the cause twice.
@@ -847,7 +873,7 @@ pub enum FileSystemError {
     /// *following* stat, so it covers a symlink pointing at a fifo as well as a
     /// bare one. A plain symlink is [`SymlinkedTarget`](Self::SymlinkedTarget)
     /// instead, asked with a non-following stat; do not conflate the two.
-    IrregularTarget { path: PathBuf, kind: &'static str },
+    IrregularTarget { path: PathBuf, kind: IrregularKind },
 
     /// A new file cannot be created under `path`: the directory it was asked
     /// about, or the nearest ancestor of it that exists, refuses one.
@@ -889,7 +915,8 @@ impl Composed for FileSystemError {
                     .text(" and selfie will not write through it")
             }
             Self::IrregularTarget { path, kind } => Parts::new().path(path).text(format!(
-                ": target resolves to a {kind} and selfie will not write to it"
+                ": target resolves to a {} and selfie will not write to it",
+                kind.label()
             )),
             Self::CannotCreateIn { path, cause } => {
                 Parts::new().path(path).text(": ").cause(&**cause)
@@ -959,7 +986,8 @@ pub enum OpenRefusal {
 pub(crate) fn repository_read_refusal(refusal: &FileSystemError) -> Parts<'_> {
     match refusal {
         FileSystemError::IrregularTarget { kind, .. } => Parts::new().text(format!(
-            "the repository file is a {kind} and selfie will not read it"
+            "the repository file is a {} and selfie will not read it",
+            kind.label()
         )),
         // Fails **closed**, and deliberately not a `_ => {}` that would skip the
         // guard. `irregular_target_refusal` returns only `IrregularTarget` today,

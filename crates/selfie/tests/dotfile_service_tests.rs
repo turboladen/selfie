@@ -1021,7 +1021,7 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         {
             return Some(selfie::fs::FileSystemError::IrregularTarget {
                 path: fifo.clone(),
-                kind: "named pipe (fifo)",
+                kind: selfie::fs::IrregularKind::Fifo,
             });
         }
         if let Some((blind, looks, asked)) = &self.irregular_blind_for
@@ -1525,7 +1525,7 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         }
         Some(selfie::fs::FileSystemError::IrregularTarget {
             path: path.path().to_path_buf(),
-            kind: "character device",
+            kind: selfie::fs::IrregularKind::CharacterDevice,
         })
     }
 

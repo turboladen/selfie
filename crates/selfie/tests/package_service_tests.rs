@@ -4005,7 +4005,7 @@ mod a_spec_path_taken_during_create {
             created.path.display()
         );
         match get_operation_result(&created.events) {
-            Some(OperationResult::Failure(failure @ OperationFailure::Generic(_))) => {
+            Some(OperationResult::Failure(failure @ OperationFailure::Repository(_))) => {
                 assert_eq!(failure.to_string(), expected);
             }
             other => panic!("an appeared spec must refuse the create, got {other:?}"),
@@ -4124,7 +4124,7 @@ mod a_spec_changed_after_it_was_loaded {
             path.display()
         );
         match get_operation_result(events) {
-            Some(OperationResult::Failure(failure @ OperationFailure::Generic(_))) => {
+            Some(OperationResult::Failure(failure @ OperationFailure::Repository(_))) => {
                 assert_eq!(failure.to_string(), expected);
             }
             other => panic!("a changed spec must refuse the update, got {other:?}"),
@@ -4267,7 +4267,7 @@ mod a_spec_changed_before_removal {
             path.display()
         );
         match get_operation_result(events) {
-            Some(OperationResult::Failure(failure @ OperationFailure::Generic(_))) => {
+            Some(OperationResult::Failure(failure @ OperationFailure::Repository(_))) => {
                 assert_eq!(failure.to_string(), expected);
             }
             other => panic!("a changed spec must refuse the removal, got {other:?}"),

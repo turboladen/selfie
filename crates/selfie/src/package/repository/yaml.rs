@@ -17,7 +17,7 @@ use crate::{
         port::{
             ListPackagesOutput, PackageError, PackageListError, PackageParseError,
             PackageParseKind, PackageRepoError, PackageRepository, RefusedChange, RefusedSpecFile,
-            SymlinkReason, UnreadableSpecFile, UntrustedLevel, UntrustedLevels,
+            SymlinkReason, UnreadableSpecFile, UntrustedLevel, UntrustedLevels, UnwritableReason,
         },
     },
     parts::Composed,
@@ -380,17 +380,14 @@ impl<F: FileSystem> YamlPackageRepository<F> {
                 FileSystemError::SymlinkedTarget { points_to, .. } => {
                     PackageRepoError::UnwritablePath {
                         path: path.to_path_buf(),
-                        reason: match points_to {
-                            Some(dest) => {
-                                format!("it is a symlink to '{}'", dest.display())
-                            }
-                            None => "it is a symlink".to_string(),
-                        },
+                        reason: UnwritableReason::Symlink(SymlinkReason {
+                            to: points_to.clone(),
+                        }),
                     }
                 }
                 FileSystemError::IrregularTarget { kind, .. } => PackageRepoError::UnwritablePath {
                     path: path.to_path_buf(),
-                    reason: format!("it is a {kind}"),
+                    reason: UnwritableReason::Irregular(*kind),
                 },
                 // Not a refusal -- a permission problem, a full disk. The
                 // filesystem's own message already names the path and the
@@ -1602,7 +1599,7 @@ mod tests {
         package_dir: &Path,
         good: &Path,
         irregular: &Path,
-        kind: &'static str,
+        kind: crate::fs::IrregularKind,
     ) -> MockFileSystem {
         let mut fs = MockFileSystem::default();
         fs.mock_directories_exist();
@@ -1629,7 +1626,8 @@ mod tests {
         let package_dir = PathBuf::from("/test/packages");
         let good = package_dir.join("good.yml");
         let ghost = package_dir.join("ghost.yml");
-        let fs = fs_with_one_irregular_spec(&package_dir, &good, &ghost, "named pipe (fifo)");
+        let fs =
+            fs_with_one_irregular_spec(&package_dir, &good, &ghost, crate::fs::IrregularKind::Fifo);
 
         let output = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
             .list_packages()
@@ -1665,7 +1663,8 @@ mod tests {
         let package_dir = PathBuf::from("/test/packages");
         let good = package_dir.join("good.yml");
         let ghost = package_dir.join("ghost.yml");
-        let fs = fs_with_one_irregular_spec(&package_dir, &good, &ghost, "named pipe (fifo)");
+        let fs =
+            fs_with_one_irregular_spec(&package_dir, &good, &ghost, crate::fs::IrregularKind::Fifo);
 
         let error = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
             .get_package("ghost")
@@ -1686,7 +1685,12 @@ mod tests {
         let package_dir = PathBuf::from("/test/packages");
         let good = package_dir.join("good.yml");
         let sock = package_dir.join("sock.yml");
-        let fs = fs_with_one_irregular_spec(&package_dir, &good, &sock, "socket");
+        let fs = fs_with_one_irregular_spec(
+            &package_dir,
+            &good,
+            &sock,
+            crate::fs::IrregularKind::Socket,
+        );
 
         let output = YamlPackageRepository::new(fs, package_dir, SpecOrigin::PackageDirectory)
             .list_packages()
@@ -3119,7 +3123,10 @@ environments:
     fn an_empty_level_list_is_not_a_refusal() {
         assert!(UntrustedLevels::new(Vec::new()).is_none());
         assert!(
-            UntrustedLevels::new(vec![UntrustedLevel::UncheckedTopLevel("e".into())]).is_some()
+            UntrustedLevels::new(vec![UntrustedLevel::UncheckedTopLevel(
+                crate::yaml::parse::<serde_json::Value>("[").unwrap_err(),
+            )])
+            .is_some()
         );
     }
 
@@ -3448,7 +3455,7 @@ environments:
             },
             FileSystemError::IrregularTarget {
                 path: PathBuf::from("/test/packages/test-package.yml"),
-                kind: "named pipe (fifo)",
+                kind: crate::fs::IrregularKind::Fifo,
             },
         ] {
             let message = save_package_refused_with(refusal);
@@ -3730,7 +3737,7 @@ environments:
                     spec,
                     FileSystemError::IrregularTarget {
                         path: spec.to_path_buf(),
-                        kind: "named pipe (fifo)",
+                        kind: crate::fs::IrregularKind::Fifo,
                     },
                 ),
                 "the package file is a named pipe (fifo), not a regular file. Replace it with a \

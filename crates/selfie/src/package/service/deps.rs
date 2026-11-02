@@ -737,7 +737,7 @@ mod tests {
                     cause: crate::package::port::PackageParseError::new(
                         "/tmp/brokendep.yml",
                         crate::package::port::PackageParseKind::IrregularFile {
-                            kind: "named pipe (fifo)",
+                            kind: crate::fs::IrregularKind::Fifo,
                         },
                     ),
                 }

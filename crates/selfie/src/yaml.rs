@@ -193,7 +193,7 @@ impl std::fmt::Display for SourceLocation {
 //
 // Accepted, because a location is what makes the message actionable and the file
 // is owner-only. Do not restate this as "nothing the file contained".
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseFailure {
     wording: Wording,
     location: Option<SourceLocation>,
@@ -204,7 +204,7 @@ pub struct ParseFailure {
 // `Classified` cannot carry file content at all: both halves are `&'static str`.
 // `Parser` can, which is why every value it holds has to come from the gate in
 // `parser_wording` rather than from anywhere a message happens to be available.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Wording {
     /// Selfie's own vocabulary, optionally followed by a noun the deserializer
     /// supplied -- a field name or a type name, never a value from the file.

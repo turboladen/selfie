@@ -574,7 +574,7 @@ mod tests {
         fs.expect_irregular_target_refusal().returning(|path| {
             Some(FileSystemError::IrregularTarget {
                 path: path.path().to_path_buf(),
-                kind: "named pipe (fifo)",
+                kind: crate::fs::IrregularKind::Fifo,
             })
         });
 
@@ -624,7 +624,7 @@ mod tests {
         fifo.expect_irregular_target_refusal().returning(|path| {
             Some(FileSystemError::IrregularTarget {
                 path: path.path().to_path_buf(),
-                kind: "named pipe (fifo)",
+                kind: crate::fs::IrregularKind::Fifo,
             })
         });
         assert!(matches!(
@@ -641,7 +641,7 @@ mod tests {
     fn a_symlink_refusal_that_is_not_a_symlinked_target_still_refuses() {
         let refused = classify_link(Some(FileSystemError::IrregularTarget {
             path: PathBuf::from("/home/u/.config/app/creds"),
-            kind: "named pipe (fifo)",
+            kind: crate::fs::IrregularKind::Fifo,
         }));
 
         let Err(carried) = refused else {
@@ -713,7 +713,7 @@ mod tests {
         assert_eq!(
             message(FileSystemError::IrregularTarget {
                 path: PathBuf::from(TARGET),
-                kind: "named pipe (fifo)",
+                kind: crate::fs::IrregularKind::Fifo,
             }),
             some(
                 "Skipping 'app/my creds': /home/u/my app/creds: target resolves to a named pipe \
@@ -787,7 +787,7 @@ mod tests {
         assert_eq!(
             message(TargetState::Irregular(FileSystemError::IrregularTarget {
                 path: PathBuf::from(TARGET),
-                kind: "socket",
+                kind: crate::fs::IrregularKind::Socket,
             })),
             "Skipping 'app/my creds': /home/u/my app/creds: target resolves to a socket and \
              selfie will not write to it"
@@ -939,7 +939,7 @@ mod tests {
         };
         let irregular = || FileSystemError::IrregularTarget {
             path: PathBuf::from(T),
-            kind: "socket",
+            kind: crate::fs::IrregularKind::Socket,
         };
         let write = |error: FileSystemError| {
             classify_write(SRC, &target, &error)
