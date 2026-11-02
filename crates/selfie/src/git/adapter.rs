@@ -117,7 +117,7 @@ fn open_repo(scope: ConfigScope, path: &Path) -> Result<gix::Repository, GitSync
             path: path.to_path_buf(),
         },
         other => GitSyncError::OperationFailed {
-            operation: GitMessage::new("discover repository"),
+            operation: "discover repository",
             message: GitMessage::new(other),
         },
     })
@@ -152,35 +152,48 @@ fn is_executable(path: &Path) -> bool {
 }
 
 /// Shorthand for creating a [`GitSyncError::OperationFailed`] from any error.
-fn git_sync_err(operation: &str, e: impl std::fmt::Display) -> GitSyncError {
+fn git_sync_err(operation: &'static str, e: impl std::fmt::Display) -> GitSyncError {
     GitSyncError::OperationFailed {
-        operation: GitMessage::new(operation),
+        operation,
         message: GitMessage::new(e),
     }
 }
 
-/// Run a `git` CLI command in the given directory.
+/// Run a `git` CLI command in the given directory. A failure names it by
+/// `operation`, such as `git fetch`.
 ///
 /// Stdin is set to `Stdio::null` and `GIT_TERMINAL_PROMPT=0` to prevent git
 /// from blocking on credential prompts, which is critical for non-interactive
 /// callers like the MCP server.
-fn run_git(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Result<String, GitSyncError> {
-    let output = git_output(scope, repo_root, args)?;
+// The label is a literal rather than `args` joined, since an argument can come
+// from git's own output, such as a commit ID.
+fn run_git(
+    scope: ConfigScope,
+    repo_root: &Path,
+    operation: &'static str,
+    args: &[&str],
+) -> Result<String, GitSyncError> {
+    let output = git_output(scope, repo_root, operation, args)?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
-        Err(failure(args, &output, ""))
+        Err(failure(operation, &output, ""))
     }
 }
 
 // Run `git` and hand back its output whatever its exit status, for a caller
 // that reads stdout of a failed run. Fails only when git cannot be started.
-fn git_output(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Result<Output, GitSyncError> {
+fn git_output(
+    scope: ConfigScope,
+    repo_root: &Path,
+    operation: &'static str,
+    args: &[&str],
+) -> Result<Output, GitSyncError> {
     git_command(scope, repo_root, args)
         .output()
         .map_err(|e| GitSyncError::OperationFailed {
-            operation: GitMessage::new(format!("git {}", args.join(" "))),
+            operation,
             message: GitMessage::new(e),
         })
 }
@@ -194,7 +207,7 @@ fn git_output(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Result<Out
 //
 // `status_lines` is extra text for the message, which is redacted and bounded
 // together with stderr.
-fn failure(args: &[&str], output: &Output, status_lines: &str) -> GitSyncError {
+fn failure(operation: &'static str, output: &Output, status_lines: &str) -> GitSyncError {
     let mut text = output.stderr.trim_ascii().to_vec();
     if !status_lines.is_empty() {
         if !text.is_empty() {
@@ -203,7 +216,7 @@ fn failure(args: &[&str], output: &Output, status_lines: &str) -> GitSyncError {
         text.extend_from_slice(status_lines.as_bytes());
     }
     GitSyncError::OperationFailed {
-        operation: GitMessage::new(format!("git {}", args.join(" "))),
+        operation,
         message: GitMessage::from_stderr(&text),
     }
 }
@@ -224,6 +237,9 @@ fn git_command(scope: ConfigScope, repo_root: &Path, args: &[&str]) -> Command {
 // The arguments `push` runs git with. `--porcelain` puts one tab-separated
 // status line per ref on stdout, which the classification below reads.
 const PUSH_ARGS: [&str; 2] = ["push", "--porcelain"];
+
+// How a failure names the push.
+const PUSH: &str = "git push --porcelain";
 
 // Whether `git push --porcelain` refused to send `current_ref`, the branch being
 // pushed, because the remote has commits it lacks. The current branch is named
@@ -409,19 +425,24 @@ impl GitSyncProvider for GixGitAdapter {
         let root = repo
             .workdir()
             .ok_or_else(|| GitSyncError::OperationFailed {
-                operation: GitMessage::new("discover"),
+                operation: "discover",
                 message: GitMessage::new("bare repository"),
             })?
             .to_path_buf();
         let root = dunce::canonicalize(&root).unwrap_or(root);
 
         // Get branch name via git CLI (more reliable across gix versions)
-        let branch = run_git(self.scope, &root, &["rev-parse", "--abbrev-ref", "HEAD"])
-            .ok()
-            .filter(|b| b != "HEAD"); // Detached HEAD → None
+        let branch = run_git(
+            self.scope,
+            &root,
+            "git rev-parse --abbrev-ref HEAD",
+            &["rev-parse", "--abbrev-ref", "HEAD"],
+        )
+        .ok()
+        .filter(|b| b != "HEAD"); // Detached HEAD → None
 
         // Get remote name via git CLI
-        let remote_name = run_git(self.scope, &root, &["remote"])
+        let remote_name = run_git(self.scope, &root, "git remote", &["remote"])
             .ok()
             .and_then(|output| output.lines().next().map(String::from));
 
@@ -436,7 +457,7 @@ impl GitSyncProvider for GixGitAdapter {
         let repo = open_repo(self.scope, repo_root)?;
 
         let raw = collect_raw_status(&repo).map_err(|msg| GitSyncError::OperationFailed {
-            operation: GitMessage::new("status"),
+            operation: "status",
             message: GitMessage::new(msg),
         })?;
 
@@ -446,7 +467,12 @@ impl GitSyncProvider for GixGitAdapter {
 
         // Detect deleted files via git CLI (gix status doesn't surface deletions cleanly)
         let mut deleted = Vec::new();
-        if let Ok(output) = run_git(self.scope, repo_root, &["ls-files", "--deleted"]) {
+        if let Ok(output) = run_git(
+            self.scope,
+            repo_root,
+            "git ls-files --deleted",
+            &["ls-files", "--deleted"],
+        ) {
             for line in output.lines().filter(|l| !l.is_empty()) {
                 deleted.push(PathBuf::from(line));
             }
@@ -478,7 +504,7 @@ impl GitSyncProvider for GixGitAdapter {
         let workdir = repo
             .workdir()
             .ok_or_else(|| GitSyncError::OperationFailed {
-                operation: GitMessage::new("stage"),
+                operation: "stage",
                 message: GitMessage::new("bare repository"),
             })?;
 
@@ -553,18 +579,23 @@ impl GitSyncProvider for GixGitAdapter {
         // The classification reads the porcelain status lines rather than
         // git's messages, so it holds under any locale and leaves git's own
         // error text, which is relayed to the user, in their language.
-        let output = git_output(self.scope, repo_root, &PUSH_ARGS)?;
+        let output = git_output(self.scope, repo_root, PUSH, &PUSH_ARGS)?;
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             // A detached HEAD has no branch to pull into, so it has no current
             // ref and keeps the generic failure.
-            let current_ref =
-                run_git(self.scope, repo_root, &["symbolic-ref", "--quiet", "HEAD"]).ok();
+            let current_ref = run_git(
+                self.scope,
+                repo_root,
+                "git symbolic-ref --quiet HEAD",
+                &["symbolic-ref", "--quiet", "HEAD"],
+            )
+            .ok();
             return Err(
                 if current_ref.is_some_and(|current| push_was_rejected(&stdout, &current)) {
                     GitSyncError::PushRejected
                 } else {
-                    failure(&PUSH_ARGS, &output, &failed_ref_lines(&stdout))
+                    failure(PUSH, &output, &failed_ref_lines(&stdout))
                 },
             );
         }
@@ -573,7 +604,7 @@ impl GitSyncProvider for GixGitAdapter {
 
     fn fetch(&self, repo_root: &Path) -> Result<(), GitSyncError> {
         // Shells out for the same reason as push — SSH/credential integration.
-        run_git(self.scope, repo_root, &["fetch"])?;
+        run_git(self.scope, repo_root, "git fetch", &["fetch"])?;
         Ok(())
     }
 
@@ -592,13 +623,29 @@ impl GitSyncProvider for GixGitAdapter {
             return Ok(FastForwardResult::Diverged);
         }
 
-        let old_head = run_git(self.scope, repo_root, &["rev-parse", "HEAD"])?;
-        run_git(self.scope, repo_root, &["merge", "--ff-only", "@{u}"])?;
-        let new_head = run_git(self.scope, repo_root, &["rev-parse", "HEAD"])?;
+        let old_head = run_git(
+            self.scope,
+            repo_root,
+            "git rev-parse HEAD",
+            &["rev-parse", "HEAD"],
+        )?;
+        run_git(
+            self.scope,
+            repo_root,
+            "git merge --ff-only @{u}",
+            &["merge", "--ff-only", "@{u}"],
+        )?;
+        let new_head = run_git(
+            self.scope,
+            repo_root,
+            "git rev-parse HEAD",
+            &["rev-parse", "HEAD"],
+        )?;
 
         let commit_count = run_git(
             self.scope,
             repo_root,
+            "git rev-list --count",
             &["rev-list", "--count", &format!("{old_head}..{new_head}")],
         )?
         .parse::<usize>()
@@ -620,6 +667,7 @@ impl GitSyncProvider for GixGitAdapter {
         let output = run_git(
             self.scope,
             repo_root,
+            "git diff --name-status",
             &["diff", "--name-status", &from.0, &to.0],
         )?;
         Ok(output.lines().filter_map(parse_diff_line).collect())
@@ -639,6 +687,7 @@ impl GixGitAdapter {
         let counts = run_git(
             self.scope,
             repo_root,
+            "git rev-list --left-right --count HEAD...@{u}",
             &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
         )?;
         let mut parts = counts.split_whitespace().map(str::parse::<usize>);
@@ -759,7 +808,7 @@ mod tests {
 
     // Run `git` with `args` in `path` as this crate's isolated adapter runs it.
     fn git(path: &Path, args: &[&str]) -> Result<String, GitSyncError> {
-        run_git(ConfigScope::Isolated, path, args)
+        run_git(ConfigScope::Isolated, path, "git", args)
     }
 
     // Create a temporary git repo, returning the tempdir handle and its path.
@@ -1196,7 +1245,7 @@ mod tests {
             stderr: Vec::new(),
         };
 
-        let error = failure(&PUSH_ARGS, &output, "!\tx:y\t[rejected] (z)");
+        let error = failure(PUSH, &output, "!\tx:y\t[rejected] (z)");
 
         assert!(
             matches!(

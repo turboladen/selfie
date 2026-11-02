@@ -41,16 +41,15 @@ pub enum GitSyncError {
     )]
     CommitDisabled,
 
-    /// A git operation failed. Both fields are redacted and bounded by their
-    /// [`GitMessage`] type rather than by convention.
-    // `message` is the one that matters: it carries git's stderr, which a
-    // non-interactive git can fill with a remote URL carrying a credential.
-    // `operation` is a literal at every site but one — `run_git` builds it from
-    // the argument list, so a future `run_git(root, &["push", &url])` would put a
-    // URL there too. Typing both means one rule instead of two.
+    /// A git operation failed. `operation` names it in selfie's own words, and
+    /// `message` is git's text, redacted and bounded by its [`GitMessage`] type.
+    // `message` carries git's stderr, which a non-interactive git can fill with
+    // a remote URL carrying a credential, so only a `GitMessage` can hold it.
+    // `operation` is a `&'static str`, so no argument list, which can hold a URL
+    // or a commit ID, can become the label.
     #[error("{operation}: {message}")]
     OperationFailed {
-        operation: GitMessage,
+        operation: &'static str,
         message: GitMessage,
     },
 }

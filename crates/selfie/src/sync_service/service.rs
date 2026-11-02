@@ -87,7 +87,7 @@ where
 /// Git operations do filesystem and network I/O that can block the async
 /// executor. This helper moves them to a dedicated thread via
 /// [`tokio::task::spawn_blocking`].
-async fn blocking_git<F, T>(op: &str, f: F) -> Result<T, GitSyncError>
+async fn blocking_git<F, T>(op: &'static str, f: F) -> Result<T, GitSyncError>
 where
     F: FnOnce() -> Result<T, GitSyncError> + Send + 'static,
     T: Send + 'static,
@@ -108,7 +108,7 @@ where
             format!("blocking task failed: {e}")
         };
         GitSyncError::OperationFailed {
-            operation: GitMessage::new(op),
+            operation: op,
             message: GitMessage::new(message),
         }
     })?
@@ -3558,7 +3558,7 @@ mod credential_egress_tests {
     impl GitFailingWith {
         fn error(&self) -> GitSyncError {
             GitSyncError::OperationFailed {
-                operation: GitMessage::new("git push"),
+                operation: "git push",
                 message: GitMessage::from_stderr(leaky_git_stderr().as_bytes()),
             }
         }
