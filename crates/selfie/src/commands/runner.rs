@@ -442,7 +442,8 @@ impl crate::parts::Composed for UnusableDirectory {
         let [command, directory, why] = crate::parts::shares(
             [
                 self.command.len(),
-                self.working_directory.as_os_str().len(),
+                // Measured as shown: a byte that is not UTF-8 shows as U+FFFD.
+                self.working_directory.to_string_lossy().len(),
                 cause.len(),
             ],
             MAX_BOUNDED_BYTES,
@@ -764,6 +765,35 @@ impl BoundedText {
     // `share` bytes of the input, and adds one marker when it cuts.
     pub(crate) fn bound_within(bytes: &[u8], share: usize) -> Self {
         Self::keeping_ends(bytes, share / 2)
+    }
+
+    // `bound_within` for text already decoded, such as a path decoded lossily.
+    // It cuts on character boundaries, so the text cannot grow when it is cut,
+    // and each end keeps at most `share / 2` of its bytes.
+    pub(crate) fn text_within(text: &str, share: usize) -> Self {
+        let end = share / 2;
+        if text.len() <= 2 * end {
+            return Self(text.to_string());
+        }
+        let mut head = end;
+        while !text.is_char_boundary(head) {
+            head -= 1;
+        }
+        let mut tail = text.len() - end;
+        while !text.is_char_boundary(tail) {
+            tail += 1;
+        }
+        let elided = tail - head;
+        let cut = format!(
+            "{}… ({elided} bytes elided) …{}",
+            &text[..head],
+            &text[tail..]
+        );
+        if cut.len() < text.len() {
+            Self(cut)
+        } else {
+            Self(text.to_string())
+        }
     }
 
     // Keeps `end` input bytes at each end, the same number at both.

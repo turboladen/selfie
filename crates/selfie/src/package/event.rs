@@ -5622,6 +5622,38 @@ mod tests {
         assert_eq!(kinds, ["name"]);
     }
 
+    // A directory that is not UTF-8 is decoded before it is cut, so its share
+    // counts the bytes it shows: a byte that decodes to a three-byte U+FFFD
+    // takes three bytes of the share, and no character is split.
+    #[cfg(unix)]
+    #[test]
+    fn a_long_directory_that_is_not_utf8_is_cut_as_shown() {
+        use crate::commands::runner::UnusableDirectory;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut bytes = b"/".to_vec();
+        bytes.extend(std::iter::repeat_n(0xFF, 1500));
+        let directory = std::path::Path::new(std::ffi::OsStr::from_bytes(&bytes));
+        let unusable = UnusableDirectory::new(
+            "true",
+            directory,
+            std::sync::Arc::new(std::io::Error::other("gone")),
+        );
+
+        // "true" and "gone" keep 4 bytes each, which leaves the directory 1992
+        // bytes, 996 at each end: "/" and 331 U+FFFD at the head, 332 at the
+        // tail, of the 4501 bytes it decodes to.
+        let replacement = "\u{FFFD}";
+        assert_eq!(
+            unusable.to_string(),
+            format!(
+                "Cannot run 'true' in /{}… (2511 bytes elided) …{}: gone",
+                replacement.repeat(331),
+                replacement.repeat(332)
+            )
+        );
+    }
+
     // A cause that ends in a line break is shown without it, since the
     // sentence could go on after it.
     #[test]

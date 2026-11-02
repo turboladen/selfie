@@ -697,7 +697,9 @@ A failure that names the command itself, such as a check that timed out, cuts a 
 names a working directory selfie could not enter gives the command, the directory and the reason a
 share each of the 2000 bytes. One short enough to fit its share is kept whole and leaves the rest to
 the others; one that is cut keeps the same number of bytes at each end, and adds the marker naming
-how many went. A cut directory is shown as text, since it no longer names a file.
+how many went. A cut directory is shown as text, since it no longer names a file. A directory whose
+name is not valid UTF-8 is measured as it is shown, each such byte as the three-byte `U+FFFD`, and
+is cut between characters, so an end can keep a byte or two less than its half of the share.
 
 Where that standard error travels depends on which report carries it. An install or check failure
 shows it in the terminal only — the value an MCP client receives names the command and its exit code
