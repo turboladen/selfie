@@ -2965,6 +2965,7 @@ impl OperationSuccess {
                 // package with no audit command has nothing to run.
                 AuditResult::Error(_)
                 | AuditResult::CouldNotRun(_)
+                | AuditResult::Unconfigured(_)
                 | AuditResult::NoAuditCommand => Outcome::Failed,
             },
             // A package with no audit command is left out of every count: across
@@ -4940,6 +4941,11 @@ pub enum AuditResult {
     /// The audit command gave no answer, for a reason selfie names.
     #[strum(to_string = "with errors")]
     CouldNotRun(CheckFailure),
+    /// The spec configures nothing for the current environment, so there was
+    /// no audit command to run. The message names the environment and the
+    /// package.
+    #[strum(to_string = "with errors")]
+    Unconfigured(Message),
 }
 
 impl AuditResult {

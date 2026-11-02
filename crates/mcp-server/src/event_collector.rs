@@ -1122,6 +1122,7 @@ fn audit_details(result: &AuditResult) -> Value {
         AuditResult::NotInstalled | AuditResult::NoAuditCommand => Value::Null,
         AuditResult::Error(e) => serde_json::json!({ "error": e }),
         AuditResult::CouldNotRun(failure) => serde_json::json!({ "error": failure.to_string() }),
+        AuditResult::Unconfigured(message) => serde_json::json!({ "error": message.to_string() }),
     }
 }
 
