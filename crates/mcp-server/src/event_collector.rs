@@ -2110,7 +2110,7 @@ mod tests {
         let failed = |failure| EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(failure));
         let gaps = vec![
             failed(CheckFailure::CouldNotStart {
-                message: BoundedText::of(&"no shell"),
+                message: test_common::message("no shell"),
             })
             .gap("slow")
             .expect("a check that could not start is a gap"),
@@ -2321,7 +2321,7 @@ mod tests {
         for audit_result in [
             AuditResult::Error("Audit command failed (exit code 1): ".to_string()),
             AuditResult::CouldNotRun(CheckFailure::CouldNotStart {
-                message: selfie::commands::BoundedText::bound(b"spawn failed"),
+                message: test_common::message("spawn failed"),
             }),
         ] {
             let events = vec![PackageEvent::Completed {
@@ -2543,7 +2543,7 @@ mod tests {
         };
         let events = vec![
             row(CheckResult::CouldNotRun(CheckFailure::CouldNotStart {
-                message: selfie::commands::BoundedText::bound(b"m"),
+                message: test_common::message("m"),
             })),
             row(CheckResult::CouldNotRun(CheckFailure::TimedOut(
                 selfie::commands::runner::TimedOut::new(
@@ -3622,7 +3622,7 @@ mod tests {
             (UnknownStatus::NoCheckCommand, "no_check_command"),
             (
                 UnknownStatus::CheckFailed(CheckFailure::Canceled {
-                    message: selfie::commands::BoundedText::bound(b"m"),
+                    message: test_common::message("m"),
                 }),
                 "canceled",
             ),

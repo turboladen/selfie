@@ -13,7 +13,6 @@ use std::{
     time::Duration,
 };
 
-use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -524,10 +523,9 @@ fn timed_out_parts(command: &str, timeout: Duration) -> crate::parts::Parts<'_> 
 ///
 /// Represents all possible failure modes when executing system commands,
 /// providing detailed context for debugging and error handling.
-#[derive(Error, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum CommandError {
     /// Command execution exceeded the specified timeout
-    #[error("{}", timed_out_parts(command, *timeout))]
     Timeout {
         command: String,
         timeout: Duration,
@@ -535,7 +533,6 @@ pub enum CommandError {
     },
 
     /// IO error occurred while running the command
-    #[error("IO Error executing command '{command}': {cause}")]
     IoError {
         command: String,
         working_directory: PathBuf,
@@ -544,7 +541,6 @@ pub enum CommandError {
 
     /// The program that runs the command, normally a shell, could not be
     /// started. No part of the command ran.
-    #[error("Could not start '{program}' to run '{command}': {cause}")]
     SpawnFailed {
         command: String,
         program: String,
@@ -554,7 +550,6 @@ pub enum CommandError {
 
     /// The directory the command was to run in could not be entered. No part of
     /// the command ran.
-    #[error("{0}")]
     WorkingDirectoryUnusable(UnusableDirectory),
 
     /// One of the command's output pipes could not be read to the end.
@@ -576,7 +571,6 @@ pub enum CommandError {
     // Carries no output bytes by construction, which
     // `OperationFailure::from(CommandError)` depends on and this variant's
     // `Display` has to satisfy.
-    #[error("Failed reading {stream} of command '{command}': {cause}")]
     OutputReadFailed {
         command: String,
         working_directory: PathBuf,
@@ -585,7 +579,6 @@ pub enum CommandError {
     },
 
     /// Command was canceled via a cancellation token
-    #[error("Command canceled: {command}")]
     Canceled {
         command: String,
         working_directory: PathBuf,
@@ -601,19 +594,90 @@ pub enum CommandError {
     /// there is no way to find out which bytes are the command's.
     ///
     /// Carries no output bytes, like every other variant here.
-    #[error("Could not separate the output of command '{command}' from the shell's")]
     ContentMarkersAbsent {
         command: String,
         working_directory: PathBuf,
     },
 
     /// Failed to capture stdout during streaming execution
-    #[error("Failed spawning stdout during command: {0}")]
     StdoutSpawn(String),
 
     /// Failed to capture stderr during streaming execution
-    #[error("Failed spawning stderr during command: {0}")]
     StderrSpawn(String),
+}
+
+crate::parts::display_from_parts!(error CommandError);
+
+impl crate::parts::Composed for CommandError {
+    // Every sentence names the spec's own command, a part of its own that
+    // bounds it, and otherwise only selfie's words and an `io::Error`, so none
+    // carries the command's output. Where the command shares a sentence with a
+    // cause or a program, which can be long too, they split one bound.
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        use crate::parts::{Parts, shares};
+
+        match self {
+            Self::Timeout {
+                command, timeout, ..
+            } => timed_out_parts(command, *timeout),
+            Self::IoError { command, cause, .. } => {
+                let cause = crate::parts::cause_words(&**cause);
+                let [ran, why] = shares([command.len(), cause.len()], MAX_BOUNDED_BYTES);
+                Parts::new()
+                    .text("IO Error executing command '")
+                    .spec_command_within(command, ran)
+                    .text("': ")
+                    .cause_within(&cause, why)
+            }
+            Self::SpawnFailed {
+                command,
+                program,
+                cause,
+                ..
+            } => {
+                let cause = crate::parts::cause_words(&**cause);
+                let [shell, ran, why] = shares(
+                    [program.len(), command.len(), cause.len()],
+                    MAX_BOUNDED_BYTES,
+                );
+                Parts::new()
+                    .text("Could not start '")
+                    .path_within(Path::new(program), shell)
+                    .text("' to run '")
+                    .spec_command_within(command, ran)
+                    .text("': ")
+                    .cause_within(&cause, why)
+            }
+            Self::WorkingDirectoryUnusable(unusable) => unusable.parts(),
+            Self::OutputReadFailed {
+                command,
+                stream,
+                cause,
+                ..
+            } => {
+                let cause = crate::parts::cause_words(&**cause);
+                let [ran, why] = shares([command.len(), cause.len()], MAX_BOUNDED_BYTES);
+                Parts::new()
+                    .text(format!("Failed reading {stream} of command '"))
+                    .spec_command_within(command, ran)
+                    .text("': ")
+                    .cause_within(&cause, why)
+            }
+            Self::Canceled { command, .. } => Parts::new()
+                .text("Command canceled: ")
+                .spec_command(command),
+            Self::ContentMarkersAbsent { command, .. } => Parts::new()
+                .text("Could not separate the output of command '")
+                .spec_command(command)
+                .text("' from the shell's"),
+            Self::StdoutSpawn(command) => Parts::new()
+                .text("Failed spawning stdout during command: ")
+                .spec_command(command),
+            Self::StderrSpawn(command) => Parts::new()
+                .text("Failed spawning stderr during command: ")
+                .spec_command(command),
+        }
+    }
 }
 
 /// How many **input bytes** a [`BoundedText`] keeps, across both ends together.

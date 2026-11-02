@@ -405,7 +405,7 @@ mod tests {
         );
         let unreadable = check_ending(
             &CheckResult::CouldNotRun(CheckFailure::ResultUnreadable {
-                message: crate::commands::BoundedText::bound(b"m"),
+                message: crate::parts::Parts::new().text("m").into(),
             }),
             &token,
         );

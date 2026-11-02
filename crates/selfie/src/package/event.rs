@@ -1570,6 +1570,10 @@ pub enum OperationFailure {
     /// `sync push` refused to commit, since committing is disabled. Nothing
     /// was staged or committed.
     PushDisabled,
+    /// A check gave no answer, for a reason that is not the command's own
+    /// failure: it was canceled, could not start, or its result could not be
+    /// read, or selfie failed running it.
+    Check(CheckFailure),
     /// Generic failure with a freeform message
     Generic(String),
 }
@@ -1799,6 +1803,7 @@ impl std::fmt::Display for OperationFailure {
             OperationFailure::Stopped(stop) => write!(f, "{stop}"),
             OperationFailure::Track(message) => write!(f, "{message}"),
             OperationFailure::Git(failure) => write!(f, "{failure}"),
+            OperationFailure::Check(failure) => write!(f, "{failure}"),
             OperationFailure::PushDisabled => {
                 write!(f, "{}", crate::git::sync_provider::commit_disabled())
             }
@@ -3144,6 +3149,7 @@ impl OperationFailure {
                 .into(),
             Self::Git(failure) => Message::of(failure),
             Self::PushDisabled => crate::git::sync_provider::commit_disabled().into(),
+            Self::Check(failure) => Message::of(failure),
             Self::UnreadableSpec {
                 package_name,
                 reason,
@@ -4200,15 +4206,19 @@ impl UnknownStatus {
     }
 }
 
-impl fmt::Display for UnknownStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+crate::parts::display_from_parts!(UnknownStatus);
+
+impl Composed for UnknownStatus {
+    fn parts(&self) -> Parts<'_> {
         match self {
-            Self::LookupFailed(failure) => write!(f, "{failure}"),
-            Self::Refused { reason, .. } => write!(f, "is refused: {reason}"),
-            Self::NotInEnvironment => f.write_str("not in current environment"),
-            Self::NoCheckCommand => f.write_str("no check command"),
-            Self::CheckFailed(failure) => write!(f, "{failure}"),
-            Self::Error(error) => write!(f, "{error}"),
+            Self::LookupFailed(failure) => failure.parts(),
+            Self::Refused { reason, .. } => {
+                Parts::new().text("is refused: ").append(reason.parts())
+            }
+            Self::NotInEnvironment => Parts::new().text("not in current environment"),
+            Self::NoCheckCommand => Parts::new().text("no check command"),
+            Self::CheckFailed(failure) => failure.parts(),
+            Self::Error(error) => error.parts(),
         }
     }
 }
@@ -4764,14 +4774,14 @@ pub enum CheckResult {
 pub enum CheckFailure {
     /// The run was canceled while the check ran.
     Canceled {
-        /// The error's sentence, naming the command, bounded.
-        message: crate::commands::BoundedText,
+        /// The error's sentence, naming the command as a part of its own.
+        message: Message,
     },
     /// selfie could not start the check, or could not attach to its output
     /// once it had, so the check may not have run at all.
     CouldNotStart {
-        /// The error's sentence, naming the command, bounded.
-        message: crate::commands::BoundedText,
+        /// The error's sentence, naming the command as a part of its own.
+        message: Message,
     },
     /// The directory the check was to run in could not be entered. No part of
     /// the check ran.
@@ -4781,8 +4791,8 @@ pub enum CheckFailure {
     /// The check started, and selfie could not read its result to the end:
     /// its output, or its exit status.
     ResultUnreadable {
-        /// The error's sentence, naming the command, bounded.
-        message: crate::commands::BoundedText,
+        /// The error's sentence, naming the command as a part of its own.
+        message: Message,
     },
     /// The task running the check failed, which is a bug in selfie and not in
     /// the check command.
@@ -4800,19 +4810,22 @@ impl CheckFailure {
     }
 }
 
-impl fmt::Display for CheckFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+crate::parts::display_from_parts!(CheckFailure);
+
+impl Composed for CheckFailure {
+    fn parts(&self) -> Parts<'_> {
         match self {
             Self::Canceled { message }
             | Self::CouldNotStart { message }
-            | Self::ResultUnreadable { message } => f.write_str(message.as_str()),
-            Self::WorkingDirectoryUnusable(unusable) => write!(f, "{unusable}"),
-            Self::TimedOut(timed_out) => write!(f, "{timed_out}"),
-            Self::Internal { message } => write!(
-                f,
-                "selfie failed while running the check, which is a bug in selfie and not in \
-                 the check command: {message}"
-            ),
+            | Self::ResultUnreadable { message } => message.parts(),
+            Self::WorkingDirectoryUnusable(unusable) => unusable.parts(),
+            Self::TimedOut(timed_out) => timed_out.parts(),
+            Self::Internal { message } => Parts::new()
+                .text(
+                    "selfie failed while running the check, which is a bug in selfie and not in \
+                     the check command: ",
+                )
+                .text(message.as_str()),
         }
     }
 }
@@ -4830,7 +4843,7 @@ impl From<&CheckFailure> for OperationFailure {
             CheckFailure::Canceled { .. }
             | CheckFailure::CouldNotStart { .. }
             | CheckFailure::ResultUnreadable { .. }
-            | CheckFailure::Internal { .. } => OperationFailure::Generic(failure.to_string()),
+            | CheckFailure::Internal { .. } => OperationFailure::Check(failure.clone()),
         }
     }
 }
@@ -4848,12 +4861,12 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
         // before extending.
         match err {
             CommandError::Canceled { .. } => Self::Canceled {
-                message: crate::commands::BoundedText::of(err),
+                message: Message::of(err),
             },
             CommandError::SpawnFailed { .. }
             | CommandError::StdoutSpawn(_)
             | CommandError::StderrSpawn(_) => Self::CouldNotStart {
-                message: crate::commands::BoundedText::of(err),
+                message: Message::of(err),
             },
             CommandError::WorkingDirectoryUnusable(unusable) => {
                 Self::WorkingDirectoryUnusable(unusable.clone())
@@ -4864,7 +4877,7 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
             CommandError::OutputReadFailed { .. }
             | CommandError::ContentMarkersAbsent { .. }
             | CommandError::IoError { .. } => Self::ResultUnreadable {
-                message: crate::commands::BoundedText::of(err),
+                message: Message::of(err),
             },
         }
     }
@@ -5054,14 +5067,20 @@ pub(crate) fn every_check_failure() -> [CheckFailure; 6] {
     let message = || crate::commands::BoundedText::of(&"m");
     [
         CheckFailure::TimedOut(TimedOut::new("c", std::time::Duration::from_secs(1))),
-        CheckFailure::CouldNotStart { message: message() },
+        CheckFailure::CouldNotStart {
+            message: crate::parts::Parts::new().text("m").into(),
+        },
         CheckFailure::WorkingDirectoryUnusable(crate::commands::runner::UnusableDirectory::new(
             "c",
             "/nowhere",
             std::sync::Arc::new(std::io::Error::other("gone")),
         )),
-        CheckFailure::ResultUnreadable { message: message() },
-        CheckFailure::Canceled { message: message() },
+        CheckFailure::ResultUnreadable {
+            message: crate::parts::Parts::new().text("m").into(),
+        },
+        CheckFailure::Canceled {
+            message: crate::parts::Parts::new().text("m").into(),
+        },
         CheckFailure::Internal { message: message() },
     ]
 }
@@ -5099,7 +5118,7 @@ mod tests {
             EnvironmentStatus::Unknown(reason).gap(name).unwrap()
         };
         let unanswered = UnknownStatus::CheckFailed(CheckFailure::CouldNotStart {
-            message: crate::commands::BoundedText::of(&"no shell".to_string()),
+            message: crate::parts::Parts::new().text("no shell").into(),
         });
         let error = UnknownStatus::Error(
             crate::package::port::PackageError::PackageAlreadyExists {
@@ -5309,6 +5328,90 @@ mod tests {
             internal.to_string(),
             "selfie failed while running the check, which is a bug in selfie and not in the \
              check command: Task failed: boom"
+        );
+    }
+
+    // A check failure names the spec's command as a spec command, and the
+    // program that would not start as a path, whichever runner error it came
+    // from.
+    #[test]
+    fn a_check_failures_values_are_parts() {
+        use crate::commands::runner::CommandError;
+        use crate::parts::Part;
+
+        let failure = CheckFailure::from(&CommandError::SpawnFailed {
+            command: "c\u{200B}md".to_string(),
+            program: "/bin/s\u{200B}h".to_string(),
+            working_directory: "/w".into(),
+            cause: std::sync::Arc::new(std::io::Error::other("the cause")),
+        });
+        let kinds: Vec<(&str, String)> = failure
+            .parts()
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::SpecCommand(command) => Some(("spec command", command.as_str().into())),
+                Part::Path(path) => Some(("path", path.display().to_string())),
+                Part::Name(name) => Some(("name", name.to_string())),
+                Part::Text(_) | Part::Command(_) | Part::Foreign(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("path", "/bin/s\u{200B}h".to_string()),
+                ("spec command", "c\u{200B}md".to_string())
+            ]
+        );
+        assert_eq!(
+            crate::parts::values_of(&UnknownStatus::CheckFailed(failure).parts().into()),
+            ["/bin/s\u{200B}h", "c\u{200B}md"]
+        );
+    }
+
+    // A check whose program would not start names the program, the command and
+    // the cause, any of which can be long. They split one diagnostic's bound,
+    // each cut to the same number of bytes at both ends of its share with one
+    // marker, and the cut program names no file, so it is a name.
+    #[test]
+    fn a_check_that_could_not_start_stays_within_the_bound() {
+        use crate::commands::runner::{CommandError, MAX_BOUNDED_BYTES};
+        use crate::parts::Part;
+
+        let command = format!("chead{}ctail", "c".repeat(3000));
+        let program = format!("/phead{}ptail", "p".repeat(3000));
+        let cause = format!("ehead{}etail", "e".repeat(3000));
+        let failure = CheckFailure::from(&CommandError::SpawnFailed {
+            command: command.clone(),
+            program: program.clone(),
+            working_directory: "/w".into(),
+            cause: std::sync::Arc::new(std::io::Error::other(cause.clone())),
+        });
+
+        // All three are longer than a third of the bound, so each gets a third.
+        let end = MAX_BOUNDED_BYTES / 3 / 2;
+        let cut = |value: &str| {
+            format!(
+                "{}… ({} bytes elided) …{}",
+                &value[..end],
+                value.len() - 2 * end,
+                &value[value.len() - end..]
+            )
+        };
+        assert_eq!(
+            failure.to_string(),
+            format!(
+                "Could not start '{}' to run '{}': {}",
+                cut(&program),
+                cut(&command),
+                cut(&cause)
+            )
+        );
+        assert!(
+            failure
+                .parts()
+                .into_iter()
+                .all(|part| !matches!(part, Part::Path(_))),
+            "{failure:?}"
         );
     }
 
@@ -5887,9 +5990,16 @@ mod tests {
     fn every_check_failure_has_its_label() {
         let message = || crate::commands::BoundedText::bound(b"m");
         let cases = [
-            (CheckFailure::Canceled { message: message() }, "canceled"),
             (
-                CheckFailure::CouldNotStart { message: message() },
+                CheckFailure::Canceled {
+                    message: crate::parts::Parts::new().text("m").into(),
+                },
+                "canceled",
+            ),
+            (
+                CheckFailure::CouldNotStart {
+                    message: crate::parts::Parts::new().text("m").into(),
+                },
                 "could_not_start",
             ),
             (
@@ -5909,7 +6019,9 @@ mod tests {
                 "timed_out",
             ),
             (
-                CheckFailure::ResultUnreadable { message: message() },
+                CheckFailure::ResultUnreadable {
+                    message: crate::parts::Parts::new().text("m").into(),
+                },
                 "result_unreadable",
             ),
             (CheckFailure::Internal { message: message() }, "internal"),
