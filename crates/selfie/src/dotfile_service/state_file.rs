@@ -951,6 +951,27 @@ mod tests {
         assert!(warning.contains("cannot create it under '/'"), "{warning}");
     }
 
+    // A state directory under one that may not be searched is blamed on that
+    // directory, the one to fix, not on the state directory the walk could not stat.
+    #[test]
+    fn an_unsearchable_parent_is_the_directory_named_as_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let locked = test_common::LockedDir::create(&dir.path().join("locked"), 0o600);
+        if !locked.refuses_new_files() {
+            eprintln!("SKIP: this user can write into a 0o600 directory");
+            return;
+        }
+        let directory = locked.path().join("state");
+
+        let Some(StateLoadFailure::StateDirectoryNotWritable { blocked, .. }) =
+            creation_failure_at(&crate::fs::RealFileSystem, &directory, true)
+        else {
+            panic!("a state directory under an unsearchable one cannot be created");
+        };
+
+        assert_eq!(blocked, locked.path());
+    }
+
     // The typo remedy is offered only for a directory the user named: the default
     // has no setting to correct.
     #[test]

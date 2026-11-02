@@ -1012,6 +1012,13 @@ impl FileSystem for RealFileSystem {
         path.exists()
     }
 
+    // A trailing slash makes `lstat` follow a link at the final component, so
+    // components drop it first, as in `directory_state`.
+    fn is_symlink(&self, path: &Path) -> bool {
+        let path: PathBuf = path.components().collect();
+        fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
+    }
+
     fn expand_path(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
         let binding = path.to_string_lossy();
         let expanded = shellexpand::tilde(&binding);
@@ -3152,6 +3159,50 @@ mod directory_state_tests {
             return;
         }
         assert_eq!(blamed(locked.path()), Some(locked.path().to_path_buf()));
+    }
+
+    // Nothing below a directory that may not be searched can be stat'ed, so that
+    // directory is blamed for every path below it, however deep, rather than the
+    // path the walk stopped at.
+    #[test]
+    fn a_directory_that_may_not_be_searched_is_blamed_for_paths_below_it() {
+        let dir = tempdir().unwrap();
+        let locked = test_common::LockedDir::create(&dir.path().join("locked"), 0o600);
+        if !locked.refuses_new_files() {
+            eprintln!("SKIP: this user can write into a 0o600 directory");
+            return;
+        }
+        for below in [
+            locked.path().join("state"),
+            locked.path().join("state/deeper"),
+        ] {
+            assert_eq!(
+                blamed(&below),
+                Some(locked.path().to_path_buf()),
+                "{below:?}"
+            );
+        }
+    }
+
+    // A link whose destination may not be searched was itself lstat'ed, so it is
+    // the path refused, for itself and below it, and the walk does not climb past
+    // it to the writable directory holding it.
+    #[test]
+    fn a_link_into_an_unsearchable_directory_is_refused_as_the_link() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("locked/inner")).unwrap();
+        let locked = test_common::LockedDir::create(&dir.path().join("locked"), 0o600);
+        if !locked.refuses_new_files() {
+            eprintln!("SKIP: this user can write into a 0o600 directory");
+            return;
+        }
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(locked.path().join("inner"), &link).unwrap();
+
+        let slashed = PathBuf::from(format!("{}/", link.display()));
+        for below in [link.clone(), slashed, link.join("state")] {
+            assert_eq!(blamed(&below), Some(link.clone()), "{below:?}");
+        }
     }
 
     // A missing directory is judged by the nearest ancestor that exists, which is

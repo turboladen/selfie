@@ -715,6 +715,10 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.path_exists(path)
     }
 
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.0.is_symlink(path)
+    }
+
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.0.expand_path(path)
     }
@@ -1044,6 +1048,10 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         self.inner.path_exists(path)
     }
 
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
+    }
+
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.expand_path(path)
     }
@@ -1164,6 +1172,9 @@ impl selfie::fs::FileSystem for HomeAt {
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.0.path_exists(path)
+    }
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.0.is_symlink(path)
     }
     fn list_directory(
         &self,
@@ -1291,6 +1302,10 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
+    }
+
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
     }
 
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
@@ -1423,6 +1438,10 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
+    }
+
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
     }
 
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
@@ -1558,6 +1577,10 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         self.inner.path_exists(path)
     }
 
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
+    }
+
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.expand_path(path)
     }
@@ -1689,6 +1712,9 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
+    }
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
     }
     fn list_directory(
         &self,
@@ -8113,6 +8139,9 @@ mod symlinked_targets {
             }
             fn path_exists(&self, path: &Path) -> bool {
                 self.0.path_exists(path)
+            }
+            fn is_symlink(&self, path: &Path) -> bool {
+                self.0.is_symlink(path)
             }
             fn expand_path(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
                 self.0.expand_path(path)
