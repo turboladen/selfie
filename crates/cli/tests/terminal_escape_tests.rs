@@ -1600,6 +1600,7 @@ fn spec_validate_names_a_collisions_target_escaped_on_one_row() {
         }
     }
 }
+
 // A push refused for files claiming one name names each file escaped, so a
 // U+200B shows and a line feed keeps the refusal on its table row.
 #[test]
@@ -1620,4 +1621,26 @@ fn sync_push_names_files_claiming_one_name_escaped_on_one_row() {
         "{row}"
     );
     assert!(!printed.contains('\u{200B}'), "{printed:?}");
+}
+
+// A spec whose `name:` field does not match its file name names it escaped, and
+// the suggestion beside it does not repeat it.
+#[test]
+fn spec_validate_names_a_mismatched_name_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(
+        &temp,
+        &[(
+            "n.yml",
+            &format!(
+                "name: \"n\\u200Bm\"\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n"
+            ),
+        )],
+    );
+
+    let printed = printed(&temp, &["spec", "validate", "n"]);
+
+    let row = line_with(&printed, "does not match filename");
+    assert!(row.contains(r"Package name 'n\u{200b}m'"), "{row}");
+    assert!(!row.contains('\u{200B}'), "{row:?}");
 }

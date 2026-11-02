@@ -21,8 +21,8 @@ pub(crate) const FRONTEND_SECTIONS: &[&str] = &["cli"];
 /// Naming the replacement turns a warning someone has to investigate into one
 /// they can act on.
 // Matched case-insensitively, so `Configs_Directory` gets the same hint. The
-// user's own spelling is echoed back rather than the canonical form, so they can
-// find the line in their file.
+// message echoes the user's own spelling rather than the canonical form, so they
+// can find the line in their file; the suggestion names only the replacement.
 const RENAMED_KEYS: &[(&str, &str)] = &[("configs_directory", "dotfiles_directory")];
 
 /// A key in the configuration file that selfie read and did not use.
@@ -77,11 +77,9 @@ impl IgnoredKey {
     #[must_use]
     pub fn suggestion(&self) -> String {
         match self.renamed_to {
-            Some(to) => format!("Rename `{}` to `{to}`.", self.key),
-            None => format!(
-                "Remove `{}`, or check it against the settings in the configuration guide.",
-                self.key
-            ),
+            Some(to) => format!("Rename it to `{to}`."),
+            None => "Remove it, or check it against the settings in the configuration guide."
+                .to_string(),
         }
     }
 }
@@ -305,6 +303,23 @@ mod tests {
         assert_eq!(crate::parts::values_of(&message), ["ver\u{200B}bose"]);
     }
 
+    // An ignored key's suggestion names no key, since the message beside it
+    // already names the one the user wrote.
+    #[test]
+    fn an_ignored_keys_suggestion_names_no_key() {
+        let unknown = library_ignored_keys(top_level(&["ver\u{200B}bose"]));
+        let renamed = library_ignored_keys(top_level(&["Configs_Directory"]));
+
+        assert_eq!(
+            unknown[0].suggestion(),
+            "Remove it, or check it against the settings in the configuration guide."
+        );
+        assert_eq!(
+            renamed[0].suggestion(),
+            "Rename it to `dotfiles_directory`."
+        );
+    }
+
     #[test]
     fn a_renamed_key_names_its_replacement() {
         let keys = library_ignored_keys(top_level(&["configs_directory"]));
@@ -343,7 +358,6 @@ mod tests {
 
         assert_eq!(keys[0].key(), "Configs_Directory");
         assert!(keys[0].message().to_string().contains("Configs_Directory"));
-        assert!(keys[0].suggestion().contains("Configs_Directory"));
     }
 
     // Validation must not stop at the first problem.

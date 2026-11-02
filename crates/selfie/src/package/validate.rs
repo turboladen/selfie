@@ -597,9 +597,12 @@ impl Package {
                         .name(current_env)
                         .text("' is not configured"),
                 ),
-                Some(&format!(
-                    "Add an environment section for '{current_env}' if needed for this environment."
-                )),
+                // The message beside it names the environment, so the remedy does
+                // not repeat it.
+                Some(
+                    "Add an environment section for this machine's environment if it needs \
+                     one.",
+                ),
             ));
         }
 
@@ -1199,13 +1202,20 @@ impl Package {
                         .text("Package name '")
                         .name(self.name())
                         .text("' does not match filename '")
-                        .name(self.path().file_name().unwrap_or_default().to_string_lossy())
+                        .name(
+                            self.path()
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy(),
+                        )
                         .text("'"),
                 ),
-                Some(&format!(
-                    "Consider renaming to match: either set name to '{stem}' or rename the file to '{}.yml'",
-                    self.name()
-                )),
+                // The message beside it names both, so the remedy does not repeat
+                // either.
+                Some(
+                    "Rename the file to match its `name:`, or set `name:` to the file name \
+                     without its extension.",
+                ),
             ));
         }
 
@@ -3433,7 +3443,10 @@ environments:
         let pinned = [
             (
                 "Current environment 'e\u{200B}x' is not configured",
-                Some("Add an environment section for 'e\u{200B}x' if needed for this environment."),
+                Some(
+                    "Add an environment section for this machine's environment if it needs \
+                     one.",
+                ),
             ),
             (
                 "Environment 'w\u{200B}k' overrides the shared dotfile for target '~/s\u{200B}x'",
@@ -3462,8 +3475,8 @@ environments:
             (
                 "Package name 'n\u{200B}m' does not match filename 'n.yml'",
                 Some(
-                    "Consider renaming to match: either set name to 'n' or rename the file to \
-                     'n\u{200B}m.yml'",
+                    "Rename the file to match its `name:`, or set `name:` to the file name \
+                     without its extension.",
                 ),
             ),
             (
