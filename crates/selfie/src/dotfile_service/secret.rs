@@ -37,6 +37,7 @@ use super::refusal::{
     refusal_for,
 };
 use super::state_file::StateLoadFailure;
+use crate::parts::{Composed as _, Parts};
 
 /// The program a command runs: its first word after any leading `NAME=value`
 /// assignments, as the shell reads it, or `None` for a command the shell would
@@ -472,8 +473,11 @@ where
                 // carries resolved content.
                 let failure = Failure::new(
                     EntryOperation::Resolve,
-                    format_args!("Failed to resolve '{}'", target.entry.target()),
-                    &e,
+                    Parts::new()
+                        .text("Failed to resolve '")
+                        .path(Path::new(target.entry.target()))
+                        .text("'"),
+                    e.parts(),
                 );
                 self.fail(target, failure).await;
                 Err(match e.failed_command(target.entry).and_then(program_of) {
@@ -566,8 +570,8 @@ where
             // would print the path twice.
             let failure = Failure::new(
                 EntryOperation::PermissionFix,
-                "Failed to tighten permissions",
-                &e,
+                Parts::new().text("Failed to tighten permissions"),
+                e.parts(),
             );
             return Err(self.write_failed(target, &e, failure).await);
         }

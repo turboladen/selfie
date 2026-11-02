@@ -943,7 +943,7 @@ impl EventSender {
             package,
             spec_target,
             operation = ?failure.operation,
-            message = &failure.message,
+            message = %failure.message,
         );
         self.send(PackageEvent::DotfileFailed {
             operation_info,
@@ -4327,31 +4327,29 @@ pub struct Failure {
     /// What selfie was doing.
     pub operation: EntryOperation,
     /// The error the operation returned, as a sentence fragment.
-    pub error: String,
+    pub error: crate::parts::Message,
     /// The failure as a sentence for a person, naming the operation.
-    pub message: String,
+    pub message: crate::parts::Message,
 }
 
 impl Failure {
     /// A failure of `operation` with `error`, worded as `head` followed by the
     /// error.
-    pub(crate) fn new(
-        operation: EntryOperation,
-        head: impl fmt::Display,
-        error: impl fmt::Display,
-    ) -> Self {
-        let error = error.to_string();
+    pub(crate) fn new(operation: EntryOperation, head: Parts<'_>, error: Parts<'_>) -> Self {
+        let error = crate::parts::Message::from(error);
         Self {
             operation,
-            message: format!("{head}: {error}"),
+            message: head.text(": ").append(error.parts()).into(),
             error,
         }
     }
 
     /// The same failure with `remedy`, one or more sentences, after the error.
-    pub(crate) fn with_remedy(mut self, remedy: &str) -> Self {
-        self.message = format!("{}. {remedy}", self.message);
-        self
+    pub(crate) fn with_remedy(self, remedy: Parts<'_>) -> Self {
+        Self {
+            message: self.message.parts().text(". ").append(remedy).into(),
+            ..self
+        }
     }
 }
 

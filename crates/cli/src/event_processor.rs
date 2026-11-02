@@ -280,7 +280,8 @@ impl EventProcessor {
                     .print_warning(received::composed(&refusal.message));
             }
             PackageEvent::DotfileFailed { failure, .. } => {
-                self.display.print_error(received::message(failure.message));
+                self.display
+                    .print_error(received::composed(&failure.message));
             }
 
             PackageEvent::Completed {
@@ -1631,8 +1632,8 @@ mod tests {
             spec_target: "~/.creds".to_string(),
             failure: Failure {
                 operation: EntryOperation::Resolve,
-                error: "no session".to_string(),
-                message: "Failed to resolve '~/.creds': no session".to_string(),
+                error: test_common::message("no session"),
+                message: test_common::message("Failed to resolve '~/.creds': no session"),
             },
         };
         let printed = printed_for(DisplayManager::new(false), vec![refused, failed]).await;

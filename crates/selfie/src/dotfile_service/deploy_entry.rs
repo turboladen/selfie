@@ -17,6 +17,7 @@ use crate::{
     package::event::{
         ConflictReport, DotfileSource, EntryOperation, EventSender, Failure, Refusal, RepoPath,
     },
+    parts::{Composed as _, Parts},
 };
 
 use super::apply::EntryOutcome;
@@ -481,7 +482,11 @@ pub(super) fn conflict_diff(current: &[u8], unit: &DeployUnit<'_>) -> String {
 pub(super) fn write_failure(error: &FileSystemError) -> Failure {
     // The error already names the target; naming it in the head too would print
     // the path twice.
-    Failure::new(EntryOperation::Write, "Failed to write", error)
+    Failure::new(
+        EntryOperation::Write,
+        Parts::new().text("Failed to write"),
+        error.parts(),
+    )
 }
 
 /// Record `unit` in the loaded state and write the state back. On failure,

@@ -690,8 +690,8 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "package": package,
             "spec_target": spec_target,
             "operation": label(failure.operation),
-            "error": failure.error,
-            "message": failure.message,
+            "error": failure.error.to_string(),
+            "message": failure.message.to_string(),
         })),
         PackageEvent::DotfileDeploying { source, target, .. } => Some(with_source(
             serde_json::json!({
@@ -1445,8 +1445,8 @@ mod tests {
                 spec_target: "~/.batrc".to_string(),
                 failure: Failure {
                     operation,
-                    error: "Permission denied".to_string(),
-                    message: "Failed to write: Permission denied".to_string(),
+                    error: test_common::message("Permission denied"),
+                    message: test_common::message("Failed to write: Permission denied"),
                 },
             }];
 

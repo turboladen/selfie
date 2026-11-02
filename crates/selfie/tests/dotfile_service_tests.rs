@@ -146,7 +146,7 @@ fn warning_messages(events: &[PackageEvent]) -> Vec<String> {
             PackageEvent::DeployStateWarning { warning, .. } => vec![warning.to_string()],
             PackageEvent::DotfilesDirectoryWarning { warning, .. } => vec![warning.to_string()],
             PackageEvent::DotfileRefused { refusal, .. } => vec![refusal.message.to_string()],
-            PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.clone()],
+            PackageEvent::DotfileFailed { failure, .. } => vec![failure.message.to_string()],
             PackageEvent::PackagesRefused {
                 reason, packages, ..
             } => packages
@@ -22825,6 +22825,53 @@ mod entry_sentences {
         assert_eq!(
             refusal_values(&events),
             [vec![target(&dirs, "b"), "o\u{200B}p".to_string()]]
+        );
+    }
+
+    // Every path a failed entry names is a part of the failure's sentence and
+    // of its error: the resolved entry's target, and the directory a write
+    // could not write in.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_path_in_an_entry_failure_is_a_part() {
+        let dirs = TestDirs::new();
+        let shut = dirs.target_dir.join("s\u{200B}hut");
+        std::fs::create_dir_all(&shut).unwrap();
+        std::fs::write(dirs.package_dir.join("rc"), "x\n").unwrap();
+        let resolved = target(&dirs, "c\u{200B}reds");
+        let written = shut.join("rc").display().to_string();
+        package(
+            &dirs,
+            "f",
+            &format!(
+                "  - command: \"op read a\"\n    target: \"{resolved}\"\n  \
+                 - source: rc\n    target: \"{written}\"\n"
+            ),
+        );
+        let Some(_restore) = made_unwritable(&shut) else {
+            return;
+        };
+        let runner = FakeCommandRunner::new().failing("op read a", b"locked\n");
+
+        let service = dirs.service_with_runner(runner);
+        let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+        let values: Vec<(Vec<String>, Vec<String>)> = failed(&events)
+            .into_iter()
+            .map(|failure| {
+                (
+                    selfie::parts::values_of(&failure.message),
+                    selfie::parts::values_of(&failure.error),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            values,
+            [
+                (vec![resolved], vec![]),
+                (vec![written.clone()], vec![written]),
+            ],
+            "{events:?}"
         );
     }
 }
