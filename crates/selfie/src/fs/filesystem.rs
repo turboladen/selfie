@@ -537,7 +537,10 @@ pub trait FileSystem: Send + Sync {
     /// The refusal that keeps a new file from being created in `directory`, or
     /// `None` when its permissions allow one. An absent `directory` is judged by
     /// whether it could be created: the nearest ancestor that exists must be a
-    /// directory that allows a new entry, with nothing else in the way.
+    /// directory that allows a new entry, with nothing else in the way. A
+    /// directory that may not be searched is refused for every path below it;
+    /// when no ancestor up to the root or `.` can be checked, the refusal names
+    /// the topmost one. A symlink is refused as itself, whatever its destination.
     ///
     /// A permission check, not a write: a later write can still fail, for example
     /// on a full disk or where an existing file at the name refuses replacement.
@@ -547,6 +550,12 @@ pub trait FileSystem: Send + Sync {
             Some(FileSystemError::CannotCreateIn {
                 path: path.to_path_buf(),
                 cause: Arc::new(io::Error::from(kind)),
+            })
+        };
+        let undetermined = |path: PathBuf, error: &io::Error| {
+            Some(FileSystemError::CannotCreateIn {
+                path,
+                cause: Arc::new(io::Error::new(error.kind(), error.to_string())),
             })
         };
         // Walked through `directory_state`, so a file, a dangling link or an
@@ -561,15 +570,12 @@ pub trait FileSystem: Send + Sync {
         loop {
             match self.directory_state(&candidate) {
                 DirectoryState::Directory => return self.access_refusal(&candidate),
-                DirectoryState::Absent(AbsentReason::Empty) => {
-                    // A walk that cannot climb further, at the root or at `.`,
-                    // has found nothing to create the directory in.
-                    let parent = parent_dir(&candidate);
-                    if candidate.parent().is_none() || parent == candidate {
-                        return refusal(&candidate, io::ErrorKind::NotFound);
-                    }
-                    candidate = parent.to_path_buf();
-                }
+                // A walk that cannot climb further has found nothing to create the
+                // directory in.
+                DirectoryState::Absent(AbsentReason::Empty) => match climb(&candidate) {
+                    Some(parent) => candidate = parent,
+                    None => return refusal(&candidate, io::ErrorKind::NotFound),
+                },
                 DirectoryState::Absent(AbsentReason::ParentNotADirectory { parent }) => {
                     return refusal(&parent, io::ErrorKind::NotADirectory);
                 }
@@ -580,11 +586,20 @@ pub trait FileSystem: Send + Sync {
                 DirectoryState::Absent(AbsentReason::DanglingSymlink { .. }) => {
                     return refusal(&candidate, io::ErrorKind::AlreadyExists);
                 }
+                // Nothing below a directory that may not be searched can be
+                // lstat'ed, so the walk climbs to that directory. A link here was
+                // lstat'ed and is refused as itself, whatever its destination is.
+                DirectoryState::Unknown(error)
+                    if error.kind() == io::ErrorKind::PermissionDenied
+                        && !self.is_symlink(&candidate) =>
+                {
+                    match climb(&candidate) {
+                        Some(parent) => candidate = parent,
+                        None => return undetermined(candidate, &error),
+                    }
+                }
                 DirectoryState::Unlistable(error) | DirectoryState::Unknown(error) => {
-                    return Some(FileSystemError::CannotCreateIn {
-                        path: candidate,
-                        cause: Arc::new(io::Error::new(error.kind(), error.to_string())),
-                    });
+                    return undetermined(candidate, &error);
                 }
             }
         }
@@ -637,6 +652,10 @@ pub trait FileSystem: Send + Sync {
 
     /// Whether `path` exists, as either a file or a directory.
     fn path_exists(&self, path: &Path) -> bool;
+
+    /// Whether a symlink is at `path` itself, asked without following it. False
+    /// when nothing is there or the question cannot be answered.
+    fn is_symlink(&self, path: &Path) -> bool;
 
     /// What is at a directory path: a directory, absent with a reason, unlistable, or
     /// unknown.
@@ -949,6 +968,13 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
+}
+
+// The directory a walk climbs to from `path`, or `None` at the root or at `.`,
+// where it cannot climb further.
+fn climb(path: &Path) -> Option<PathBuf> {
+    let parent = parent_dir(path);
+    (path.parent().is_some() && parent != path).then(|| parent.to_path_buf())
 }
 
 /// Helpers that set up common expectations, so library and CLI tests can drive

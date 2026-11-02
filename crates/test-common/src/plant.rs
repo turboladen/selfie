@@ -297,6 +297,9 @@ impl FileSystem for PlantsBeforeWrite {
     fn path_exists(&self, path: &Path) -> bool {
         RealFileSystem.path_exists(path)
     }
+    fn is_symlink(&self, path: &Path) -> bool {
+        RealFileSystem.is_symlink(path)
+    }
     fn directory_state(&self, path: &Path) -> DirectoryState {
         RealFileSystem.directory_state(path)
     }

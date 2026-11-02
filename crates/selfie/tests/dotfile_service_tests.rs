@@ -716,6 +716,10 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.path_exists(path)
     }
 
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.0.is_symlink(path)
+    }
+
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.0.expand_path(path)
     }
@@ -1045,6 +1049,10 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         self.inner.path_exists(path)
     }
 
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
+    }
+
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.expand_path(path)
     }
@@ -1165,6 +1173,9 @@ impl selfie::fs::FileSystem for HomeAt {
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.0.path_exists(path)
+    }
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.0.is_symlink(path)
     }
     fn list_directory(
         &self,
@@ -1292,6 +1303,10 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
+    }
+
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
     }
 
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
@@ -1424,6 +1439,10 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
 
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
+    }
+
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
     }
 
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
@@ -1559,6 +1578,10 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         self.inner.path_exists(path)
     }
 
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
+    }
+
     fn expand_path(&self, path: &std::path::Path) -> Result<PathBuf, selfie::fs::FileSystemError> {
         self.inner.expand_path(path)
     }
@@ -1690,6 +1713,9 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
     }
     fn path_exists(&self, path: &std::path::Path) -> bool {
         self.inner.path_exists(path)
+    }
+    fn is_symlink(&self, path: &std::path::Path) -> bool {
+        self.inner.is_symlink(path)
     }
     fn list_directory(
         &self,
@@ -8115,6 +8141,9 @@ mod symlinked_targets {
             fn path_exists(&self, path: &Path) -> bool {
                 self.0.path_exists(path)
             }
+            fn is_symlink(&self, path: &Path) -> bool {
+                self.0.is_symlink(path)
+            }
             fn expand_path(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
                 self.0.expand_path(path)
             }
@@ -14219,13 +14248,105 @@ mod backups_before_overwrite {
             .expect("the failure must be reported");
         assert!(
             warning.contains(target.to_str().unwrap())
-                && warning.contains("--state-directory")
+                && warning.contains("state_directory")
                 && warning.contains("The target is unchanged"),
             "{warning}"
         );
         assert!(
+            warning.contains(&format!(
+                "Move '{}' out of the way.",
+                dirs.state_dir.join("backups").display()
+            )),
+            "the remedy must name the file in the way: {warning}"
+        );
+        assert!(
             !warning.contains("Failed to write"),
             "a copy that could not be made is not a failed target write: {warning}"
+        );
+    }
+
+    // The one backup failure in `events`, which must also have left the target
+    // and every deployment alone.
+    fn the_backup_failure(events: &[PackageEvent], target: &std::path::Path) -> String {
+        assert_eq!(
+            std::fs::read_to_string(target).unwrap(),
+            "hand-edited",
+            "the target must be left exactly as it was"
+        );
+        assert_eq!(failures(events), vec![EntryOperation::Backup]);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, PackageEvent::DotfileDeployed { .. })),
+            "nothing was deployed: {events:?}"
+        );
+        warning_messages(events)
+            .into_iter()
+            .find(|message| message.contains("Failed to keep a copy"))
+            .expect("the failure must be reported")
+    }
+
+    // A backups directory that refuses a new entry (0o500) and one that may not
+    // be searched (0o600) are both the directory to fix. Root ignores the mode, so
+    // the backup succeeds there and the case is skipped.
+    #[tokio::test]
+    async fn a_locked_backups_directory_is_named_in_the_refusal() {
+        for mode in [0o500, 0o600] {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("config.toml");
+            one_entry(&dirs, "myapp", "from-repo", &target, Some("hand-edited"));
+            let backups = test_common::LockedDir::create(&dirs.state_dir.join("backups"), mode);
+            if !backups.refuses_new_files() {
+                eprintln!("skipped: this user can write a {mode:o} directory");
+                continue;
+            }
+
+            let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+            let warning = the_backup_failure(&events, &target);
+
+            assert!(
+                warning.contains(&format!(
+                    "Give your user write and search access to '{}'.",
+                    backups.path().display()
+                )),
+                "{mode:o}: {warning}"
+            );
+        }
+    }
+
+    // An earlier run made the target's own directory under `backups`, and that
+    // directory is the one refusing now, not `backups` above it.
+    #[tokio::test]
+    async fn a_read_only_per_target_directory_is_named_rather_than_the_root() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        one_entry(&dirs, "myapp", "v1", &target, Some("first-hand-edit"));
+        let _ = collect_events(dirs.service().apply_all(accepting()).await).await;
+        let per_target: Vec<PathBuf> = std::fs::read_dir(dirs.state_dir.join("backups"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(
+            per_target.len(),
+            1,
+            "the first apply kept one copy: {per_target:?}"
+        );
+        let locked = test_common::LockedDir::create(&per_target[0], 0o500);
+        if !locked.refuses_new_files() {
+            eprintln!("skipped: this user can write a 0o500 directory");
+            return;
+        }
+        std::fs::write(&target, "hand-edited").unwrap();
+
+        let events = collect_events(dirs.service().apply_all(accepting()).await).await;
+        let warning = the_backup_failure(&events, &target);
+
+        assert!(
+            warning.contains(&format!(
+                "Give your user write and search access to '{}'.",
+                locked.path().display()
+            )),
+            "{warning}"
         );
     }
 
