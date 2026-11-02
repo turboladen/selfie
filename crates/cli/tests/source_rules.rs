@@ -1695,7 +1695,8 @@ fn composed_types() -> Vec<String> {
 }
 
 // Each type `sentence.rs` lists in `sentences!`, by name.
-fn sentence_types() -> Vec<String> {
+// Every type `sentence.rs` lists in `sentences!`, as written there.
+fn sentence_list() -> Vec<syn::Type> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sentence.rs");
     let file = syn::parse_file(&std::fs::read_to_string(path).unwrap()).unwrap();
     file.items
@@ -1709,8 +1710,11 @@ fn sentence_types() -> Vec<String> {
             _ => None,
         })
         .flatten()
-        .map(|ty| last_segment(&ty))
         .collect()
+}
+
+fn sentence_types() -> Vec<String> {
+    sentence_list().iter().map(last_segment).collect()
 }
 
 // A library type whose sentence is built from parts is shown through
@@ -1724,8 +1728,13 @@ fn no_type_built_from_parts_is_a_sentence() {
         composed.iter().any(|name| name == "OperationSuccess"),
         "the walk found no Composed impl it should: {composed:?}"
     );
+    // `std::io::Error` is a foreign type, which can never be Composed, so it stays
+    // on the list whatever moves off it. It is matched by its whole path, since
+    // another `Error` on the list would satisfy a match on its last segment.
     assert!(
-        sentences.iter().any(|name| name == "PackageError"),
+        sentence_list()
+            .iter()
+            .any(|ty| ty.to_token_stream().to_string() == "std :: io :: Error"),
         "the walk found no sentences! list: {sentences:?}"
     );
 
