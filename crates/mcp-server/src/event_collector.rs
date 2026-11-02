@@ -678,7 +678,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "spec_target": spec_target,
             "condition": label(refusal.condition),
             "location": label(refusal.at),
-            "message": refusal.message,
+            "message": refusal.message.to_string(),
         })),
         PackageEvent::DotfileFailed {
             package,
@@ -1815,7 +1815,7 @@ mod tests {
                 refusal: Refusal {
                     condition,
                     at,
-                    message: "Skipping 'bat/config': a sentence".to_string(),
+                    message: test_common::message("Skipping 'bat/config': a sentence"),
                 },
             }];
 

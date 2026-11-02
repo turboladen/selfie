@@ -277,7 +277,7 @@ impl EventProcessor {
             // The run's result counts each, so the exit code comes from there.
             PackageEvent::DotfileRefused { refusal, .. } => {
                 self.display
-                    .print_warning(received::message(refusal.message));
+                    .print_warning(received::composed(&refusal.message));
             }
             PackageEvent::DotfileFailed { failure, .. } => {
                 self.display.print_error(received::message(failure.message));
@@ -1622,7 +1622,7 @@ mod tests {
             refusal: Refusal {
                 condition: Condition::Symlink,
                 at: Location::Target,
-                message: "Skipping 'bat/config': a symlink is there".to_string(),
+                message: test_common::message("Skipping 'bat/config': a symlink is there"),
             },
         };
         let failed = PackageEvent::DotfileFailed {

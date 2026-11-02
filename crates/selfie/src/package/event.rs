@@ -917,7 +917,7 @@ impl EventSender {
             spec_target,
             condition = ?refusal.condition,
             at = ?refusal.at,
-            message = &refusal.message,
+            message = %refusal.message,
         );
         self.send(PackageEvent::DotfileRefused {
             operation_info,
@@ -4268,16 +4268,19 @@ pub struct Refusal {
     /// Where it was found.
     pub at: Location,
     /// The refusal as a sentence for a person, with its remedy where it has one.
-    pub message: String,
+    pub message: crate::parts::Message,
 }
 
 impl Refusal {
     /// A refusal for `condition` found `at`, worded by `message`.
-    pub(crate) fn found((condition, at): (Condition, Location), message: String) -> Self {
+    pub(crate) fn found(
+        (condition, at): (Condition, Location),
+        message: impl Into<crate::parts::Message>,
+    ) -> Self {
         Self {
             condition,
             at,
-            message,
+            message: message.into(),
         }
     }
 }

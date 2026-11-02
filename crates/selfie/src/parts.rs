@@ -308,6 +308,33 @@ macro_rules! display_from_parts {
 }
 pub(crate) use display_from_parts;
 
+/// The names and paths `message` names, in order, each as its value's text.
+///
+/// # Panics
+///
+/// Panics when a text part of `message` holds U+200B.
+// A test's hostile values each hold U+200B, which no word of selfie's does, so a
+// value flattened into the sentence's text is not returned and fails the
+// assertion instead.
+#[cfg(any(test, feature = "with_mocks"))]
+#[track_caller]
+#[must_use]
+pub fn values_of(message: &Message) -> Vec<String> {
+    let parts = message.parts();
+    parts
+        .into_iter()
+        .filter_map(|part| match part {
+            Part::Text(text) => {
+                assert!(!text.contains('\u{200B}'), "{text:?} in {parts:?}");
+                None
+            }
+            Part::Name(name) => Some(name.to_string()),
+            Part::Path(path) => Some(path.display().to_string()),
+            Part::Command(_) => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

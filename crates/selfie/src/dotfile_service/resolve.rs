@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use super::refusal::{guarded, located, repository_condition};
+use super::refusal::{guarded, located, repository_condition, skipping};
 use super::template;
 use crate::commands::{BoundedText, CommandError, CommandRunner};
 use crate::fs::filesystem::{FileSystem, repository_read_refusal};
@@ -114,10 +114,7 @@ impl Composed for ResolveError {
                 .text("dotfile for '")
                 .path(target)
                 .text("' has no content to resolve"),
-            Self::TemplateEscapesPackage { template } => parts
-                .text("dotfile template '")
-                .path(template)
-                .text("' escapes the package directory"),
+            Self::TemplateEscapesPackage { template } => escapes_parts(template),
         }
     }
 }
@@ -157,9 +154,11 @@ impl ResolveError {
     /// `None` for a failure of the resolve itself. `entry_target` is the target
     /// as the package file spells it.
     pub(crate) fn as_refusal(&self, entry_target: &str) -> Option<Refusal> {
-        let condition = match self {
-            Self::TemplateUnreadable(unreadable) => return Some(unreadable.refusal(entry_target)),
-            Self::TemplateEscapesPackage { .. } => Condition::Escapes,
+        match self {
+            Self::TemplateUnreadable(unreadable) => Some(unreadable.refusal(entry_target)),
+            Self::TemplateEscapesPackage { template } => {
+                Some(escaping_template_refusal(entry_target, template))
+            }
             Self::CommandFailed { .. }
             | Self::BindingFailed { .. }
             | Self::EmptyOutput { .. }
@@ -167,14 +166,29 @@ impl ResolveError {
             | Self::UnseparableOutput { .. }
             | Self::UnseparableBinding { .. }
             | Self::TooLarge
-            | Self::NotSecretBearing { .. } => return None,
-        };
-        Some(Refusal {
-            condition,
-            at: Location::Template,
-            message: format!("Skipping '{entry_target}': {self}"),
-        })
+            | Self::NotSecretBearing { .. } => None,
+        }
     }
+}
+
+/// The refusal of the entry whose target the package file spells `entry_target`,
+/// for a `template` that escapes the package directory.
+// The classifier and a resolve that finds the same template both refuse through
+// here, so the refusal has one condition, one location and one wording.
+pub(crate) fn escaping_template_refusal(entry_target: &str, template: &Path) -> Refusal {
+    Refusal::found(
+        (Condition::Escapes, Location::Template),
+        skipping(entry_target).append(escapes_parts(template)),
+    )
+}
+
+// That `template` escapes the package directory, as a resolve error and the
+// refusal both word it.
+fn escapes_parts(template: &Path) -> Parts<'_> {
+    Parts::new()
+        .text("dotfile template '")
+        .path(template)
+        .text("' escapes the package directory")
 }
 
 /// A template [`read_template`] would not or could not read.
@@ -195,7 +209,7 @@ impl UnreadableTemplate {
     pub(crate) fn refusal(&self, entry_target: &str) -> Refusal {
         Refusal::found(
             (self.condition, self.at),
-            format!("Skipping '{entry_target}': {self}"),
+            skipping(entry_target).append(self.parts()),
         )
     }
 }
@@ -1163,13 +1177,58 @@ mod tests {
             read_template(&fs, "my.tpl", Path::new("/pkg/my.tpl")).expect_err("refused");
 
         assert_eq!(
-            escapes.as_refusal("~/my rc").expect("a refusal").message,
+            escapes
+                .as_refusal("~/my rc")
+                .expect("a refusal")
+                .message
+                .to_string(),
             "Skipping '~/my rc': dotfile template '../my.tpl' escapes the package directory"
         );
         assert_eq!(
-            irregular.refusal("~/my rc").message,
+            irregular.refusal("~/my rc").message.to_string(),
             "Skipping '~/my rc': dotfile template 'my.tpl' cannot be read: the repository file \
              is a socket and selfie will not read it. Replace it with a regular file."
         );
+    }
+
+    // A var name is a name part and a target or template a path part, so a
+    // U+200B in one shows escaped; a command and stderr stay the text their
+    // author and the command wrote.
+    #[test]
+    fn a_resolve_error_names_its_names_and_paths_as_parts() {
+        let name = || "v\u{200B}ar".to_string();
+        let cases = [
+            (
+                ResolveError::BindingFailed {
+                    name: name(),
+                    stderr: "locked".to_string(),
+                },
+                vec!["v\u{200B}ar"],
+            ),
+            (
+                ResolveError::EmptyBinding { name: name() },
+                vec!["v\u{200B}ar"],
+            ),
+            (
+                ResolveError::UnseparableBinding { name: name() },
+                vec!["v\u{200B}ar"],
+            ),
+            (
+                ResolveError::NotSecretBearing {
+                    target: PathBuf::from("~/t\u{200B}"),
+                },
+                vec!["~/t\u{200B}"],
+            ),
+            (
+                ResolveError::TemplateEscapesPackage {
+                    template: PathBuf::from("../t\u{200B}.tpl"),
+                },
+                vec!["../t\u{200B}.tpl"],
+            ),
+        ];
+
+        for (error, values) in cases {
+            assert_eq!(crate::parts::values_of(&error.parts().into()), values);
+        }
     }
 }

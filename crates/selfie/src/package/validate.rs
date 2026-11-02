@@ -180,7 +180,7 @@ pub(crate) fn cross_spec_collisions(
         .map(|((entries, group), environments)| CrossSpecCollision {
             entries,
             environments: environments.iter().map(ToString::to_string).collect(),
-            clause: group.describe(),
+            clause: group.describe().to_string(),
             members: group
                 .members()
                 .iter()

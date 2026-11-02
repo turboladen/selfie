@@ -12,6 +12,7 @@ pub mod fixtures;
 pub mod git;
 pub mod listing;
 pub mod locked;
+pub mod messages;
 pub mod package;
 pub mod plant;
 pub mod runner;
@@ -42,6 +43,7 @@ pub use fixtures::{
 pub use git::{isolated_git, isolated_git_adapter};
 pub use listing::{every_directory_state, every_listing_error};
 pub use locked::LockedDir;
+pub use messages::{every_message, message};
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use plant::{PLANTED, Plant, PlantsBeforeWrite, Rewrite};
 pub use runner::FakeCommandRunner;

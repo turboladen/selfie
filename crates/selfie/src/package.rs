@@ -205,17 +205,21 @@ impl InvalidEntry<'_> {
     }
 }
 
-impl std::fmt::Display for InvalidEntry<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+crate::parts::display_from_parts!(InvalidEntry<'_>);
+
+// An unknown key enters as the text that words it, since that text is shared
+// with the other levels' refusals; a var name is a name.
+impl crate::parts::Composed for InvalidEntry<'_> {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        let parts = crate::parts::Parts::new();
         match self {
-            Self::Shape => f.write_str(
+            Self::Shape => parts.text(
                 "set exactly one of 'source' or 'command', with 'vars' only alongside 'source'",
             ),
-            Self::UnknownKeys(keys) => f.write_str(&describe_unknown_keys::<DotfileField>(keys)),
-            Self::VarName(name) => write!(
-                f,
-                "dotfile var name '{name}' cannot be substituted, so the placeholder would deploy \
-                 verbatim; names must match [A-Za-z_][A-Za-z0-9_]*"
+            Self::UnknownKeys(keys) => parts.text(describe_unknown_keys::<DotfileField>(keys)),
+            Self::VarName(name) => parts.text("dotfile var name '").name(*name).text(
+                "' cannot be substituted, so the placeholder would deploy verbatim; names must \
+                 match [A-Za-z_][A-Za-z0-9_]*",
             ),
         }
     }
@@ -386,9 +390,19 @@ impl<'a> ScopedEntry<'a> {
     /// The path naming the entry, such as `dotfiles[0]` or
     /// `environments.work.dotfiles[1]`.
     pub(crate) fn field(&self) -> String {
+        self.field_parts().to_string()
+    }
+
+    /// The same path as parts, with the environment as a name.
+    pub(crate) fn field_parts(&self) -> crate::parts::Parts<'a> {
+        let entry = dotfile_field(self.index);
+        let parts = crate::parts::Parts::new();
         match self.environment {
-            None => dotfile_field(self.index),
-            Some(environment) => environment_field(environment, &dotfile_field(self.index)),
+            None => parts.text(entry),
+            Some(environment) => parts
+                .text("environments.")
+                .name(environment)
+                .text(format!(".{entry}")),
         }
     }
 
@@ -420,8 +434,9 @@ impl TargetCollision<'_> {
 
     /// The entries and the target, as a clause: `dotfiles[0] and dotfiles[1]
     /// both deploy to '/home/me/.x'`.
-    pub(crate) fn describe(&self) -> String {
-        deploy_to_clause(&self.fields(), &self.target)
+    pub(crate) fn describe(&self) -> crate::parts::Parts<'_> {
+        let fields = self.members.iter().map(ScopedEntry::field_parts).collect();
+        deploy_to_clause(fields, &self.target)
     }
 }
 
@@ -431,16 +446,18 @@ impl TargetCollision<'_> {
 /// # Panics
 ///
 /// If `members` is empty.
-pub(crate) fn deploy_to_clause(members: &[String], target: &TargetPath) -> String {
-    let (last, rest) = members
-        .split_last()
-        .expect("a collision has at least two entries");
-    let quantifier = if rest.len() == 1 { "both" } else { "all" };
-    format!(
-        "{} and {last} {quantifier} deploy to '{}'",
-        rest.join(", "),
-        target.display()
-    )
+pub(crate) fn deploy_to_clause<'a>(
+    mut members: Vec<crate::parts::Parts<'a>>,
+    target: &'a TargetPath,
+) -> crate::parts::Parts<'a> {
+    let last = members.pop().expect("a collision has at least two entries");
+    let quantifier = if members.len() == 1 { "both" } else { "all" };
+    crate::parts::Parts::joined(members, ", ", |member| member)
+        .text(" and ")
+        .append(last)
+        .text(format!(" {quantifier} deploy to '"))
+        .path(target.path())
+        .text("'")
 }
 
 /// What to do about a [`TargetCollision`].
@@ -3077,7 +3094,9 @@ environments:
 
 #[cfg(test)]
 mod spec_name_tests {
-    use super::{is_valid_spec_name, spec_name_from_file_name};
+    use super::{
+        DotfileEntry, ScopedEntry, TargetCollision, is_valid_spec_name, spec_name_from_file_name,
+    };
 
     // Dots inside a name are ordinary: a versioned package is a common spec.
     #[test]
@@ -3177,5 +3196,31 @@ mod spec_name_tests {
     fn a_dotfile_named_for_the_extension_is_not_a_spec() {
         assert_eq!(spec_name_from_file_name(".yml"), None);
         assert_eq!(spec_name_from_file_name(".yaml"), None);
+    }
+
+    // A collision names each entry's environment as a name, so a U+200B or a line
+    // feed in one shows escaped where the run's own lines show it escaped.
+    #[test]
+    fn a_collision_names_each_environment_as_a_name() {
+        let entry = DotfileEntry::new("rc", "~/x");
+        let collision = TargetCollision {
+            target: crate::fs::target::repository_path(std::path::Path::new("/h/x")),
+            members: vec![
+                ScopedEntry::environment("w\u{200B}o\nrk", 0, &entry),
+                ScopedEntry::environment("w\u{200B}o\nrk", 1, &entry),
+            ],
+        };
+
+        let message = crate::parts::Message::from(collision.describe());
+
+        assert_eq!(
+            crate::parts::values_of(&message),
+            ["w\u{200B}o\nrk", "w\u{200B}o\nrk", "/h/x"]
+        );
+        assert_eq!(
+            message.to_string(),
+            "environments.w\u{200B}o\nrk.dotfiles[0] and environments.w\u{200B}o\nrk.dotfiles[1] \
+             both deploy to '/h/x'"
+        );
     }
 }

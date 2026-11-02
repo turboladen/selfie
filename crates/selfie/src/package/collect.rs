@@ -636,26 +636,32 @@ impl<'c> CrossSpecGroup<'c> {
 
     /// Every member, as `package 'bat' (dotfiles[0])`, in the order collected, and
     /// the target they share, as one clause.
-    pub(crate) fn describe(&self) -> String {
-        let names: Vec<String> = self
+    pub(crate) fn describe(&self) -> crate::parts::Parts<'_> {
+        let names = self
             .members
             .iter()
-            .map(|(package, scoped)| format!("{} ({})", spec_label(package), scoped.field()))
+            .map(|(package, scoped)| {
+                spec_label(package)
+                    .text(" (")
+                    .append(scoped.field_parts())
+                    .text(")")
+            })
             .collect();
-        crate::package::deploy_to_clause(&names, &self.target)
+        crate::package::deploy_to_clause(names, &self.target)
     }
 }
 
 /// How a refusal names a spec: by the name lookup resolves it by, and as a package
 /// or a standalone dotfile spec.
-pub(crate) fn spec_label(package: &Package) -> String {
+pub(crate) fn spec_label(package: &Package) -> crate::parts::Parts<'static> {
     let name = package
         .spec_name()
         .unwrap_or_else(|| package.name().to_string());
-    match package.origin() {
-        SpecOrigin::DotfilesDirectory => format!("standalone dotfile '{name}'"),
-        SpecOrigin::PackageDirectory | SpecOrigin::Memory => format!("package '{name}'"),
-    }
+    let kind = match package.origin() {
+        SpecOrigin::DotfilesDirectory => "standalone dotfile '",
+        SpecOrigin::PackageDirectory | SpecOrigin::Memory => "package '",
+    };
+    crate::parts::Parts::new().text(kind).name(name).text("'")
 }
 
 #[cfg(test)]

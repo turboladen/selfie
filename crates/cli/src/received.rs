@@ -1694,4 +1694,46 @@ mod tests {
 
         assert_eq!(names, [r"a\nb", r"z\u{200b}w"]);
     }
+
+    // A message an event carries reads as the library words it, line breaks
+    // inside kept and at the end dropped.
+    #[test]
+    fn a_message_of_plain_values_reads_as_the_library_words_it() {
+        assert_renders_as_its_display(&test_common::every_message("/d/p"));
+    }
+
+    // Every name and path in a message shows escaped, once for each time the
+    // library names it, so no line break or U+200B in one reaches the line raw.
+    // selfie's own text keeps its line breaks. A command shows its operand as it
+    // runs, and the note under it shows that operand escaped.
+    #[test]
+    fn a_message_names_each_value_escaped() {
+        use selfie::parts::{Composed as _, Part};
+        let value = "/d/t\u{200B}x\ny";
+        let mut named = 0;
+        for message in test_common::every_message(value) {
+            let shown = composed(&message).into_string();
+            let library = message.to_string();
+            if message
+                .parts()
+                .into_iter()
+                .any(|part| matches!(part, Part::Command(_)))
+            {
+                assert!(
+                    shown.ends_with(r"Escaped: mkdir -p -- '/d/t\u{200b}x\ny'"),
+                    "{shown:?}"
+                );
+                continue;
+            }
+
+            assert!(!shown.contains('\u{200B}'), "{shown:?}");
+            assert_eq!(
+                shown.matches(r"/d/t\u{200b}x\ny").count(),
+                library.matches(value).count(),
+                "{shown:?} from {library:?}"
+            );
+            named += library.matches(value).count();
+        }
+        assert!(named > 0, "no message names the value");
+    }
 }
