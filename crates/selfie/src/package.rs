@@ -21,7 +21,7 @@ pub mod git_adapter {
 }
 
 pub use self::builder::{EnvironmentConfigBuilder, PackageBuilder};
-pub(crate) use self::refusal::{SpecRefusal, UnknownEntryKey};
+pub(crate) use self::refusal::{RefusalReason, SpecRefusal, UnknownEntryKey};
 pub use self::service::{InstallOptions, PackageService, SpecService};
 
 // Core package entity and related types
@@ -644,16 +644,25 @@ pub(crate) fn describe_unknown_keys<F: KnownFields>(keys: &[UnknownKey]) -> Stri
         sentences.push(format!("{messages}. {}", F::ANCHOR_ADVICE));
     }
     if !plain.is_empty() {
-        let messages = join_messages(plain.into_iter());
-        // A second sentence starts with a capital; every message starts with a
-        // lowercase word or a quote.
-        sentences.push(if sentences.is_empty() {
-            messages
-        } else {
-            capitalize(&messages)
-        });
+        sentences.push(join_messages(plain.into_iter()));
     }
-    sentences.join(". ")
+    join_sentences(sentences)
+}
+
+// Joins clauses into sentences with ". ", capitalizing every one after the
+// first. Each clause starts lowercase, because the first follows a caller's
+// colon, so only the later ones need a capital.
+fn join_sentences(clauses: impl IntoIterator<Item = impl AsRef<str>>) -> String {
+    let mut joined = String::new();
+    for (i, clause) in clauses.into_iter().enumerate() {
+        if i == 0 {
+            joined.push_str(clause.as_ref());
+        } else {
+            joined.push_str(". ");
+            joined.push_str(&capitalize(clause.as_ref()));
+        }
+    }
+    joined
 }
 
 fn capitalize(text: &str) -> String {
@@ -661,6 +670,19 @@ fn capitalize(text: &str) -> String {
     chars.next().map_or_else(String::new, |first| {
         first.to_uppercase().chain(chars).collect()
     })
+}
+
+// Asserts that `fragments` occur in `haystack` in this order, each after the
+// end of the one before.
+#[cfg(test)]
+pub(crate) fn assert_in_order(haystack: &str, fragments: &[&str]) {
+    let mut from = 0;
+    for fragment in fragments {
+        let at = haystack[from..]
+            .find(fragment)
+            .unwrap_or_else(|| panic!("{fragment:?} missing or out of order: {haystack}"));
+        from += at + fragment.len();
+    }
 }
 
 /// Judge one key against level `F`, returning `None` when it is accepted.
