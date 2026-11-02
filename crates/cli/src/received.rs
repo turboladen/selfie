@@ -338,6 +338,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         OperationFailure::DeployState(failure) => composed(failure),
         OperationFailure::PackageList(error) => composed(error),
         OperationFailure::Repository(error) => composed(error),
+        OperationFailure::DependencyError(failure) => composed(failure),
         OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
         OperationFailure::Stopped(stop) => composed(stop),
         OperationFailure::Track(message) => composed(message),
@@ -1701,5 +1702,21 @@ mod tests {
             shown,
             r"refusing to write /p\u{200b}k/a.yml: it is a symlink to '/else\u{200b}where'. Remove what is at that path, or choose another name."
         );
+    }
+
+    // A dependency failure shown as a failure says "Dependency error: " once.
+    #[test]
+    fn a_dependency_failure_is_shown_with_its_frame_once() {
+        use selfie::package::event::DependencyFailure;
+
+        let shown = failure(&OperationFailure::DependencyError(
+            DependencyFailure::MissingDependency {
+                package_name: "a".to_string(),
+                dependency_name: "b".to_string(),
+            },
+        ))
+        .into_string();
+
+        assert_eq!(shown.matches("Dependency error: ").count(), 1, "{shown}");
     }
 }

@@ -280,7 +280,7 @@ use std::{
 use futures::Stream;
 
 use crate::commands::runner::TimedOut;
-use crate::parts::{Composed, Parts};
+use crate::parts::{Composed, Message, Parts};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -852,13 +852,13 @@ impl EventSender {
     pub(crate) async fn send_recommend_failed(
         &self,
         recommend_name: impl fmt::Display,
-        error: impl fmt::Display,
+        error: Box<OperationFailure>,
     ) {
         let operation_info = self.touch_operation_info();
         self.send(PackageEvent::RecommendFailed {
             operation_info,
             recommend_name: recommend_name.to_string(),
-            error: error.to_string(),
+            error,
         })
         .await;
     }
@@ -1708,7 +1708,7 @@ pub enum DependencyFailure {
         ///
         /// `None` when the user named this package themselves.
         required_by: Option<String>,
-        reason: String,
+        reason: Message,
     },
 }
 
@@ -1724,9 +1724,7 @@ impl std::fmt::Display for OperationFailure {
                 write!(f, "{unusable}")
             }
             OperationFailure::CommandError(cmd_err) => write!(f, "Command error: {cmd_err}"),
-            OperationFailure::DependencyError(dep_err) => {
-                write!(f, "Dependency error: {dep_err}")
-            }
+            OperationFailure::DependencyError(dep_err) => write!(f, "{dep_err}"),
             OperationFailure::PackageList(list_err) => write!(f, "{list_err}"),
             OperationFailure::Repository(error) => write!(f, "{error}"),
             // Both halves, because this is the one-string rendering an adapter
@@ -1871,42 +1869,54 @@ impl std::fmt::Display for CommandFailure {
     }
 }
 
-impl std::fmt::Display for DependencyFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+crate::parts::display_from_parts!(DependencyFailure);
+
+// Every dependency failure starts with the words "Dependency error: ". The frame
+// is the failure's own, so it is written once whatever carries it.
+impl Composed for DependencyFailure {
+    fn parts(&self) -> Parts<'_> {
+        let parts = Parts::new().text("Dependency error: ");
         match self {
             DependencyFailure::CircularDependency {
                 package_name,
                 cycle,
-            } => write!(
-                f,
-                "Circular dependency detected for package `{package_name}`: {}",
-                cycle.join(" -> ")
-            ),
+            } => parts
+                .text("Circular dependency detected for package `")
+                .name(package_name)
+                .text("`: ")
+                .append(Parts::joined(cycle, " -> ", |name| Parts::new().name(name))),
             DependencyFailure::MissingDependency {
                 package_name,
                 dependency_name,
-            } => write!(
-                f,
-                "Package `{package_name}` depends on `{dependency_name}`, which was not found"
-            ),
+            } => parts
+                .text("Package `")
+                .name(package_name)
+                .text("` depends on `")
+                .name(dependency_name)
+                .text("`, which was not found"),
             DependencyFailure::UnreadableSpec {
                 package_name,
                 required_by: Some(parent),
                 reason,
-            } => write!(
-                f,
-                "Package `{parent}` depends on `{package_name}`, which carries a spec selfie will \
-                 not read, so its dependencies are unknown: {reason}"
-            ),
+            } => parts
+                .text("Package `")
+                .name(parent)
+                .text("` depends on `")
+                .name(package_name)
+                .text(
+                    "`, which carries a spec selfie will not read, so its dependencies are \
+                     unknown: ",
+                )
+                .append(reason.parts()),
             DependencyFailure::UnreadableSpec {
                 package_name,
                 required_by: None,
                 reason,
-            } => write!(
-                f,
-                "Package `{package_name}` carries a spec selfie will not read, so its dependencies \
-                 are unknown: {reason}"
-            ),
+            } => parts
+                .text("Package `")
+                .name(package_name)
+                .text("` carries a spec selfie will not read, so its dependencies are unknown: ")
+                .append(reason.parts()),
         }
     }
 }
@@ -3283,7 +3293,7 @@ impl OperationFailure {
     pub fn unreadable_spec(
         package_name: String,
         required_by: Option<String>,
-        reason: String,
+        reason: Message,
     ) -> Self {
         OperationFailure::DependencyError(DependencyFailure::UnreadableSpec {
             package_name,
@@ -3632,7 +3642,9 @@ pub enum PackageEvent {
     RecommendFailed {
         operation_info: OperationInfo,
         recommend_name: String,
-        error: String,
+        /// Why it failed, as the failure itself, so a consumer renders it as it
+        /// renders any other.
+        error: Box<OperationFailure>,
     },
 
     /// A package a recommend needs settled earlier in the same install run, so
@@ -6390,5 +6402,160 @@ mod settle_tests {
 
             assert_eq!(arrives(&mut returned).await, Some(SettleOutcome::Canceled));
         }
+    }
+
+    // Every dependency failure's sentence, whole, as the failure that carries it
+    // writes it, so a change to how they are built cannot change their words.
+    #[test]
+    fn a_dependency_failures_sentences_are_worded_whole() {
+        let reason = "Parse error in package `b` from /p/b.yml: the package file could not be read";
+        let cases = [
+            (
+                DependencyFailure::CircularDependency {
+                    package_name: "a".to_string(),
+                    cycle: vec!["a".to_string(), "b".to_string(), "a".to_string()],
+                },
+                "Dependency error: Circular dependency detected for package `a`: a -> b -> a"
+                    .to_string(),
+            ),
+            (
+                DependencyFailure::MissingDependency {
+                    package_name: "a".to_string(),
+                    dependency_name: "b".to_string(),
+                },
+                "Dependency error: Package `a` depends on `b`, which was not found".to_string(),
+            ),
+            (
+                DependencyFailure::UnreadableSpec {
+                    package_name: "b".to_string(),
+                    required_by: Some("a".to_string()),
+                    reason: Parts::new().text(reason).into(),
+                },
+                format!(
+                    "Dependency error: Package `a` depends on `b`, which carries a spec selfie will \
+                     not read, so its dependencies are unknown: {reason}"
+                ),
+            ),
+            (
+                DependencyFailure::UnreadableSpec {
+                    package_name: "b".to_string(),
+                    required_by: None,
+                    reason: Parts::new().text(reason).into(),
+                },
+                format!(
+                    "Dependency error: Package `b` carries a spec selfie will not read, so its \
+                     dependencies are unknown: {reason}"
+                ),
+            ),
+        ];
+        for (failure, sentence) in cases {
+            assert_eq!(
+                OperationFailure::DependencyError(failure).to_string(),
+                sentence
+            );
+        }
+    }
+
+    // Every name a dependency failure gives is a name part, and an unreadable
+    // spec's reason keeps the parts of the failure it came from, so a value
+    // holding U+200B never sits inside selfie's words.
+    #[test]
+    fn a_dependency_failure_names_its_values_as_parts() {
+        use crate::parts::Part;
+
+        let reason: Message = Parts::new()
+            .text("Parse error in package `")
+            .name("b\u{200B}")
+            .text("` from ")
+            .path(std::path::Path::new("/p\u{200B}k/b.yml"))
+            .into();
+        let cases = [
+            (
+                DependencyFailure::CircularDependency {
+                    package_name: "a\u{200B}".to_string(),
+                    cycle: vec!["a\u{200B}".to_string(), "b\u{200B}".to_string()],
+                },
+                vec![
+                    ("name", "a\u{200B}"),
+                    ("name", "a\u{200B}"),
+                    ("name", "b\u{200B}"),
+                ],
+            ),
+            (
+                DependencyFailure::MissingDependency {
+                    package_name: "a\u{200B}".to_string(),
+                    dependency_name: "b\u{200B}".to_string(),
+                },
+                vec![("name", "a\u{200B}"), ("name", "b\u{200B}")],
+            ),
+            (
+                DependencyFailure::UnreadableSpec {
+                    package_name: "b\u{200B}".to_string(),
+                    required_by: Some("a\u{200B}".to_string()),
+                    reason: reason.clone(),
+                },
+                vec![
+                    ("name", "a\u{200B}"),
+                    ("name", "b\u{200B}"),
+                    ("name", "b\u{200B}"),
+                    ("path", "/p\u{200B}k/b.yml"),
+                ],
+            ),
+            (
+                DependencyFailure::UnreadableSpec {
+                    package_name: "b\u{200B}".to_string(),
+                    required_by: None,
+                    reason,
+                },
+                vec![
+                    ("name", "b\u{200B}"),
+                    ("name", "b\u{200B}"),
+                    ("path", "/p\u{200B}k/b.yml"),
+                ],
+            ),
+        ];
+        // A value written as text has no part, so it is missing from the list.
+        for (failure, expected) in cases {
+            let kinds: Vec<(&str, String)> = failure
+                .parts()
+                .into_iter()
+                .filter_map(|part| match part {
+                    Part::Name(value) => Some(("name", value.to_string())),
+                    Part::Path(value) => Some(("path", value.display().to_string())),
+                    Part::Text(_) | Part::Command(_) => None,
+                })
+                .collect();
+            let expected: Vec<(&str, String)> = expected
+                .into_iter()
+                .map(|(kind, value)| (kind, value.to_string()))
+                .collect();
+            assert_eq!(kinds, expected, "{failure}");
+        }
+    }
+
+    // A dependency failure, alone or carried by the failure that holds it, says
+    // "Dependency error: " once, since the frame belongs to the dependency
+    // failure alone.
+    #[test]
+    fn a_dependency_error_says_so_once() {
+        let dependency = || DependencyFailure::MissingDependency {
+            package_name: "a".to_string(),
+            dependency_name: "b".to_string(),
+        };
+
+        assert_eq!(
+            dependency()
+                .to_string()
+                .matches("Dependency error: ")
+                .count(),
+            1
+        );
+        assert_eq!(
+            OperationFailure::DependencyError(dependency())
+                .to_string()
+                .matches("Dependency error: ")
+                .count(),
+            1
+        );
     }
 }

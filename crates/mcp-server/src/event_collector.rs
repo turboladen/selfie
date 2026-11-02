@@ -629,7 +629,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         } => Some(serde_json::json!({
             "type": "recommend_failed",
             "package": recommend_name,
-            "error": error,
+            "error": error.to_string(),
         })),
         PackageEvent::SettledEarlier {
             package_name,
@@ -3806,5 +3806,45 @@ mod tests {
             "not installed"
         );
         assert!(env_data["dependency_statuses"][1]["reason"].is_null());
+    }
+
+    // A failed recommend's row carries the failure's own sentence, so the MCP
+    // server says what the CLI says, without the CLI's escapes.
+    #[test]
+    fn a_failed_recommend_carries_its_failures_sentence() {
+        let failure =
+            OperationFailure::from(selfie::package::port::PackageError::PackageAlreadyExists {
+                name: "b".to_string(),
+                file_path: "/p\u{200B}k/b.yml".into(),
+            });
+        let sentence = failure.to_string();
+        let rows = event_to_json(&PackageEvent::RecommendFailed {
+            operation_info: test_op_info(),
+            recommend_name: "b".to_string(),
+            error: Box::new(failure),
+        });
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["type"], "recommend_failed");
+        assert_eq!(rows[0]["error"], sentence.as_str());
+    }
+
+    // A recommend refused for a spec selfie will not read carries the words the
+    // row carried when it held the failure's sentence as a string.
+    #[test]
+    fn a_failed_recommends_unreadable_spec_keeps_its_words() {
+        let rows = event_to_json(&PackageEvent::RecommendFailed {
+            operation_info: test_op_info(),
+            recommend_name: "b".to_string(),
+            error: Box::new(OperationFailure::UnreadableSpec {
+                package_name: "b".to_string(),
+                reason: "unknown field 'bogus'".to_string(),
+            }),
+        });
+
+        assert_eq!(
+            rows[0]["error"],
+            "Cannot use package `b`: unknown field 'bogus'"
+        );
     }
 }

@@ -97,7 +97,7 @@ fn recommend_failures(events: &[PackageEvent]) -> Vec<(String, String)> {
                 recommend_name,
                 error,
                 ..
-            } => Some((recommend_name.clone(), error.clone())),
+            } => Some((recommend_name.clone(), error.to_string())),
             _ => None,
         })
         .collect()

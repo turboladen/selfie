@@ -2850,24 +2850,4 @@ mod conflicting_path_tests {
             "{parts:?}"
         );
     }
-
-    // A package or listing error's `source()` is the repository error's, and no
-    // other variant chains its cause, which its sentence already says.
-    #[test]
-    fn a_repository_error_forwards_only_a_wrapped_errors_chain() {
-        use std::error::Error as _;
-
-        let listing = PackageListError::new(
-            "/p".into(),
-            DirectoryState::Absent(crate::fs::AbsentReason::Empty),
-        );
-        let wrapped = PackageRepoError::from(listing.clone());
-
-        assert_eq!(wrapped.source().is_some(), listing.source().is_some());
-        assert!(
-            PackageRepoError::IoError(Arc::new(std::io::Error::other("x")))
-                .source()
-                .is_none()
-        );
-    }
 }

@@ -234,7 +234,7 @@ where
                 ) => OperationFailure::unreadable_spec(
                     package_name.to_string(),
                     Some(parent),
-                    failure.to_string(),
+                    crate::parts::Message::of(&failure),
                 ),
                 Ok(
                     failure @ crate::package::port::LookupFailure::PackageDirectoryUnreadable(_),
@@ -260,7 +260,7 @@ where
             return Err(Box::new(OperationFailure::unreadable_spec(
                 package_name.to_string(),
                 parent,
-                refusal.to_string(),
+                crate::parts::Message::of(&refusal),
             )));
         }
 
@@ -758,7 +758,7 @@ mod tests {
                 assert_eq!(package_name, "brokendep");
                 assert_eq!(required_by.as_deref(), Some("pkg-a"));
                 assert!(
-                    reason.contains("named pipe (fifo)"),
+                    reason.to_string().contains("named pipe (fifo)"),
                     "the reason must say what selfie could not do with the file, got: {reason}"
                 );
             }

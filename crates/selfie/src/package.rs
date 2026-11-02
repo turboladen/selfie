@@ -770,7 +770,6 @@ pub(crate) fn parse_top_level(
     // none of its own. Only keys are inspected, so the values need no fidelity —
     // and a YAML value it cannot hold, such as a mapping keyed by a sequence, is
     // what makes this parse fail where the package's own parse succeeded.
-    //
     crate::yaml::parse(raw_yaml)
 }
 

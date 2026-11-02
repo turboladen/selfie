@@ -1484,3 +1484,80 @@ fn a_refused_spec_save_names_the_spec_and_its_key_escaped() {
     );
     assert!(!refusal.contains('\u{200B}'), "{refusal:?}");
 }
+
+// A failed recommend names the failure's file escaped, as the failure would on
+// a line of its own.
+#[test]
+fn a_failed_recommend_names_its_failures_file_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(
+        &temp,
+        &[
+            (
+                "r.yml",
+                &format!(
+                    "name: r\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \
+                     recommends: [b]\n"
+                ),
+            ),
+            ("b.yml", "name: b\nenvironments: [\n"),
+        ],
+    );
+
+    let printed = printed(&temp, &["package", "install", "r"]);
+
+    let failed = line_with(&printed, "b failed: Parse error in package");
+    assert!(failed.contains(r"p\u{200b}k/b.yml"), "{failed}");
+    assert!(!failed.contains('\u{200B}'), "{failed:?}");
+}
+
+// A dependency that will not load is named, with its file, escaped on one line.
+#[test]
+fn a_dependency_failure_names_the_failed_dependency_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(
+        &temp,
+        &[
+            (
+                "d.yml",
+                &format!(
+                    "name: d\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \
+                     dependencies: [b]\n"
+                ),
+            ),
+            ("b.yml", "name: b\nenvironments: [\n"),
+        ],
+    );
+
+    let printed = printed(&temp, &["package", "install", "d"]);
+
+    let failed = line_with(&printed, "Dependency error: Package `d` depends on `b`");
+    assert!(failed.contains(r"p\u{200b}k/b.yml"), "{failed}");
+    assert!(!failed.contains('\u{200B}'), "{failed:?}");
+}
+
+// A dependency the spec names that no spec answers to is named escaped, since
+// the name comes from the spec's own text.
+#[test]
+fn a_missing_dependency_is_named_escaped() {
+    let temp = setup_default_test_config();
+    hostile_package_directory(
+        &temp,
+        &[(
+            "d.yml",
+            &format!(
+                "name: d\nenvironments:\n  {SELFIE_ENV}:\n    install: \"true\"\n    \
+                 dependencies: [\"m\\u200Bx\"]\n"
+            ),
+        )],
+    );
+
+    let printed = printed(&temp, &["package", "install", "d"]);
+
+    let failed = line_with(&printed, "Dependency error: Package `d` depends on");
+    assert!(
+        failed.contains(r"`m\u{200b}x`, which was not found"),
+        "{failed}"
+    );
+    assert!(!failed.contains('\u{200B}'), "{failed:?}");
+}
