@@ -376,15 +376,20 @@ writer escapes every escape sequence (§1.8).
    `TrackDirectoryRefusal` a standalone track gives over a directory it could not use; the
    `ApplyStop` an apply with `stop_on_error` gives for a stop other than the deploy state's; the
    `Message` a dotfile entry's `Refusal` carries as its sentence and its `Failure` as its sentence
-   and its error, and the `Message` a track's `OperationFailure::Track` carries; and a validation
-   issue's message, `IssueMessage`, which is its own text, the deploy state's notice or a
-   `DirectoryIssue`.
+   and its error, and the `Message` a track's `OperationFailure::Track` carries; the
+   `ComposedWarning` a `PackageEvent::ComposedWarning` carries; and a validation issue's message,
+   `IssueMessage`, which is its own text, the deploy state's notice or a `DirectoryIssue`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as
    a `String`, such as a warning or a refused package's reason, moves to a `Message` when it is next
-   changed, and until then `message` shows it as `Prose`. These stay plain strings: a suggestion, a
-   step's progress text, and a sentence the CLI words itself.
+   changed, and until then `message` shows it as `Prose`. A new or changed warning that names a
+   path, a file or a name is worded from parts and sent through `send_composed_warning`. A warning
+   worded from parts travels as `PackageEvent::ComposedWarning`. Its `ComposedWarning` has a variant
+   of its own only for a kind an adapter tells apart, the deploy state's or the dotfiles
+   directory's, and is otherwise a `Message`. It is named for the mechanism while the `Warning`
+   event still carries Strings, and becomes `Warning` once that event is gone. These stay plain
+   strings: a suggestion, a step's progress text, and a sentence the CLI words itself.
 
 ## Consequences
 
