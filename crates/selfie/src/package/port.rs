@@ -2472,4 +2472,119 @@ mod conflicting_path_tests {
             assert_eq!(shown, kinds, "{error}");
         }
     }
+
+    // Every repository error's sentence, whole, and the failure each becomes, so a
+    // change to how they are built cannot change their words.
+    #[test]
+    fn a_repository_errors_sentences_are_worded_whole() {
+        use crate::package::event::OperationFailure;
+
+        let path = || PathBuf::from("/p/a.yml");
+        let cause = || Arc::new(std::io::Error::other("the cause"));
+        let untrusted = |levels: Vec<UntrustedLevel>| PackageRepoError::UntrustedKeys {
+            path: path(),
+            levels: UntrustedLevels::new(levels).unwrap(),
+        };
+        let top = || UntrustedLevel::TopLevelFields(vec!["configs".to_string()]);
+        let unchecked = || UntrustedLevel::UncheckedTopLevel("the read failure".to_string());
+        let cases = [
+            (PackageRepoError::IoError(cause()), "IO error: the cause"),
+            (
+                PackageRepoError::FileSystemError(FileSystemError::CannotCreateIn {
+                    path: "/p".into(),
+                    cause: cause(),
+                }),
+                "File system error: /p: the cause",
+            ),
+            (
+                PackageRepoError::Unserializable(crate::yaml::SerializeFailure::Value),
+                "The package cannot be written as YAML: a value in it has a shape YAML cannot hold",
+            ),
+            (
+                untrusted(vec![top()]),
+                "refusing to rewrite /p/a.yml: unrecognized configs. Saving would delete the key \
+                 and everything under it. Edit /p/a.yml directly to correct or remove the key.",
+            ),
+            (
+                untrusted(vec![
+                    UntrustedLevel::DotfileFields {
+                        fields: vec!["dotfiles[0].var".to_string(), "dotfiles[1].x".to_string()],
+                        entries: 2,
+                    },
+                    UntrustedLevel::EnvironmentFields(vec!["environments.work.audt".to_string()]),
+                ]),
+                "refusing to rewrite /p/a.yml: unrecognized dotfiles[0].var, dotfiles[1].x. Saving \
+                 would delete the keys and silently make the entries deployable. Unrecognized \
+                 environments.work.audt. Saving would delete the key and whatever it was set to. \
+                 Edit /p/a.yml directly to correct or remove the keys.",
+            ),
+            (
+                untrusted(vec![unchecked()]),
+                "refusing to rewrite /p/a.yml: its top level could not be read back, so any key \
+                 selfie does not model would be dropped without warning. Edit /p/a.yml directly, \
+                 or simplify it until selfie can read it. The read failed with: the read failure",
+            ),
+            (
+                untrusted(vec![top(), unchecked()]),
+                "refusing to rewrite /p/a.yml: unrecognized configs. Saving would delete the key \
+                 and everything under it. Its top level could not be read back, so any other key \
+                 selfie does not model would be dropped without warning. Edit /p/a.yml directly to \
+                 correct or remove the key, and simplify it until selfie can read it. The read \
+                 failed with: the read failure",
+            ),
+            (
+                PackageRepoError::UnwritablePath {
+                    path: path(),
+                    reason: "it is a symlink to '/elsewhere/a.yml'".to_string(),
+                },
+                "refusing to write /p/a.yml: it is a symlink to '/elsewhere/a.yml'. Remove what is \
+                 at that path, or choose another name.",
+            ),
+            (
+                PackageRepoError::UnwritablePath {
+                    path: path(),
+                    reason: "it is a named pipe (fifo)".to_string(),
+                },
+                "refusing to write /p/a.yml: it is a named pipe (fifo). Remove what is at that \
+                 path, or choose another name.",
+            ),
+            (
+                PackageRepoError::Occupied { path: path() },
+                "something appeared at /p/a.yml while selfie was writing the spec there; nothing \
+                 was written over it. Run the command again to see what is there.",
+            ),
+            (
+                PackageRepoError::ChangedSinceLoad {
+                    path: path(),
+                    refused: RefusedChange::Write,
+                },
+                "/p/a.yml changed after selfie read it, so nothing was written to it. Run the \
+                 command again, which reads the file as it is now.",
+            ),
+            (
+                PackageRepoError::ChangedSinceLoad {
+                    path: path(),
+                    refused: RefusedChange::Removal,
+                },
+                "/p/a.yml changed after selfie read it, so it was not removed. Run the command \
+                 again, which reads the file as it is now.",
+            ),
+            (
+                PackageRepoError::NotLoaded { path: path() },
+                "refusing to change /p/a.yml: this repository did not load the spec from it",
+            ),
+            (
+                PackageRepoError::AnotherFileAnswers {
+                    path: path(),
+                    answering: "/p/A.yaml".into(),
+                },
+                "/p/A.yaml now answers to the name of /p/a.yml, which selfie read, so nothing was \
+                 removed. Run the command again, which reads the spec as it is now.",
+            ),
+        ];
+        for (error, sentence) in cases {
+            assert_eq!(error.to_string(), sentence);
+            assert_eq!(OperationFailure::from(error).to_string(), sentence);
+        }
+    }
 }
