@@ -423,6 +423,7 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         OperationFailure::PackageList(error) => composed(error),
         OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
         OperationFailure::Stopped(stop) => composed(stop),
+        OperationFailure::Track(message) => composed(message),
         OperationFailure::UnreadableSpec {
             package_name,
             reason,

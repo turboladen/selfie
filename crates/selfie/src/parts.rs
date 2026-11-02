@@ -194,6 +194,22 @@ impl<'a> Parts<'a> {
         self
     }
 
+    // The same parts with one `suffix` taken off the end of the last part, when
+    // that part is a text ending in it. A text left empty is dropped, as `text`
+    // never adds one.
+    pub(crate) fn without_final(mut self, suffix: char) -> Self {
+        if let Some(Part::Text(text)) = self.0.last_mut()
+            && let Some(kept) = text.strip_suffix(suffix)
+        {
+            if kept.is_empty() {
+                self.0.pop();
+            } else {
+                *text = Cow::Owned(kept.to_string());
+            }
+        }
+        self
+    }
+
     pub(crate) fn append(mut self, other: Parts<'a>) -> Self {
         self.0.extend(other.0);
         self
@@ -509,6 +525,27 @@ mod tests {
                     .name("p\u{A0}k")
                     .text("'.")
             )
+        );
+    }
+
+    // One final stop comes off the last text, a text that held only the stop is
+    // dropped rather than left empty, and a last part that is not a text is left
+    // alone.
+    #[test]
+    fn without_final_takes_one_stop_off_the_last_text() {
+        let path = Path::new("/p.");
+
+        assert_eq!(
+            listed(&Parts::new().text("done..").without_final('.')),
+            [Part::Text("done.".into())]
+        );
+        assert_eq!(
+            listed(&Parts::new().name("n").text(".").without_final('.')),
+            [Part::Name("n".into())]
+        );
+        assert_eq!(
+            listed(&Parts::new().path(path).without_final('.')),
+            [Part::Path(path.into())]
         );
     }
 }

@@ -752,3 +752,86 @@ fn an_uncheckable_dotfiles_directory_is_named_once_as_a_path() {
     assert_eq!(warning.matches(r"l\u{200b}oop").count(), 1, "{warning}");
     assert!(!both.contains('\u{200B}'), "a raw U+200B: {both:?}");
 }
+
+// A track's failure names the target as a path, on either entry point, so a
+// U+200B in it shows escaped and nothing of it reaches the line raw.
+#[test]
+fn a_track_failure_names_its_target_as_a_path() {
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("dotfiles")).unwrap();
+    std::fs::create_dir_all(home.join("d\u{200B}ir")).unwrap();
+    let packages = home.join("packages");
+    std::fs::create_dir_all(&packages).unwrap();
+    std::fs::write(
+        packages.join("bat.yaml"),
+        format!("name: bat\nenvironments:\n  {SELFIE_ENV}:\n    install: \"echo i\"\n"),
+    )
+    .unwrap();
+    let directory = home.join("d\u{200B}ir");
+
+    for (args, spelled) in [
+        (
+            vec!["dotfiles", "track", "n", directory.to_str().unwrap()],
+            r"d\u{200b}ir'",
+        ),
+        (
+            vec!["package", "track-dotfile", "bat", "t\u{200B}x"],
+            r"'t\u{200b}x'",
+        ),
+    ] {
+        let output = sandboxed_command(&temp)
+            .env("HOME", &home)
+            .args(&args)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(output.status.code(), Some(FAILED), "{args:?}: {stderr}");
+        assert!(!stderr.contains('\u{200B}'), "{args:?}: {stderr:?}");
+        assert!(stderr.contains(spelled), "{args:?}: {stderr}");
+    }
+}
+
+// The remedy for a target another package deploys is a command part: the
+// sentence names the target escaped, and the command, which keeps its operand
+// runnable, is followed by its note with the operand escaped.
+#[test]
+fn a_tracked_elsewhere_remedy_carries_its_note() {
+    let temp = setup_default_test_config();
+    let home = temp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(home.join("dotfiles")).unwrap();
+    let target = home.join("t\u{200B}racked");
+    std::fs::write(&target, "x").unwrap();
+    let packages = home.join("packages");
+    std::fs::create_dir_all(packages.join("pk")).unwrap();
+    std::fs::write(packages.join("pk").join("rc"), "x").unwrap();
+    std::fs::write(
+        packages.join("pk.yaml"),
+        format!(
+            "name: pk\nenvironments:\n  {SELFIE_ENV}:\n    install: \"echo i\"\ndotfiles:\n  \
+             - source: pk/rc\n    target: \"~/t\\u200Bracked\"\n"
+        ),
+    )
+    .unwrap();
+
+    let output = sandboxed_command(&temp)
+        .env("HOME", &home)
+        .args(["dotfiles", "track", "n", target.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let spelled = format!("{}/t\\u{{200b}}racked", home.display());
+
+    assert_eq!(output.status.code(), Some(FAILED), "{stderr}");
+    assert!(
+        stderr.contains(&format!("Cannot track '{spelled}'")),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "Escaped: selfie package track-dotfile pk '{spelled}'"
+        )),
+        "{stderr}"
+    );
+}

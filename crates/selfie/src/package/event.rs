@@ -1576,6 +1576,9 @@ pub enum OperationFailure {
     /// An apply with `stop_on_error` on stopped over a refusal: after a
     /// refused or failed entry, or before applying anything.
     Stopped(crate::dotfile_service::ApplyStop),
+    /// A track refused or failed: what was in the way of the copy or the spec,
+    /// and what became of anything it had already written.
+    Track(crate::parts::Message),
     /// Generic failure with a freeform message
     Generic(String),
 }
@@ -1845,6 +1848,7 @@ impl std::fmt::Display for OperationFailure {
             OperationFailure::DeployState(failure) => write!(f, "{failure}"),
             OperationFailure::UnusableDotfilesDirectory(refusal) => write!(f, "{refusal}"),
             OperationFailure::Stopped(stop) => write!(f, "{stop}"),
+            OperationFailure::Track(message) => write!(f, "{message}"),
             OperationFailure::Generic(msg) => write!(f, "{msg}"),
         }
     }
