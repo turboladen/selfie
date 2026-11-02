@@ -202,6 +202,57 @@ pub trait GitSyncProvider: Send + Sync {
 mod tests {
     use super::*;
 
+    // Every git sync error, whole.
+    #[test]
+    fn each_git_sync_error_is_worded_whole() {
+        let cases = [
+            (
+                GitSyncError::NotARepo {
+                    path: PathBuf::from("/r\u{200B}p"),
+                },
+                "not a git repository: /r\u{200B}p",
+            ),
+            (
+                GitSyncError::NoRemote {
+                    branch: "m\u{200B}n".to_string(),
+                },
+                "no remote configured for branch 'm\u{200B}n'",
+            ),
+            (
+                GitSyncError::DirtyWorkingTree,
+                "working tree is dirty — commit or stash changes first",
+            ),
+            (
+                GitSyncError::Diverged,
+                "remote has diverged — resolve manually with git",
+            ),
+            (
+                GitSyncError::PushRejected,
+                "the remote has new commits. Run 'selfie sync pull' first",
+            ),
+            (
+                GitSyncError::CommitDisabled,
+                "sync push is disabled: its commit can record every tracked file as deleted. \
+                 Commit and push the repository with git until this is fixed",
+            ),
+            (
+                GitSyncError::OperationFailed {
+                    operation: "git fetch",
+                    message: GitMessage::new("cannot read '/q\u{200B}r'"),
+                },
+                "git fetch: cannot read '/q\u{200B}r'",
+            ),
+        ];
+        for (error, sentence) in cases {
+            assert_eq!(error.to_string(), sentence);
+        }
+        let status = super::super::GitStatusError::StatusError(GitMessage::new("cannot read '/q'"));
+        assert_eq!(
+            status.to_string(),
+            "failed to query git status: cannot read '/q'"
+        );
+    }
+
     #[test]
     fn commit_id_display_abbreviates() {
         let id = CommitId("abc1234def5678".to_string());
