@@ -7,6 +7,7 @@
 
 use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use selfie::dotfile_service::track::Tracker;
+use selfie::parts::SuggestedCommand;
 use std::collections::HashSet;
 
 use selfie::{
@@ -363,15 +364,16 @@ fn suggest_name(file_path: &str) -> String {
 /// from choosing a name selfie cannot use.
 fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Option<Shown> {
     let path = error.path();
+    // The listing error's own sentence starts with the path, so each arm that
+    // shows it names the path no other way.
     Some(match error.state().clone() {
         // A directory that classified cleanly and still would not list
         // could not be *listed*, which is the same answer an unlistable
         // one gets.
-        DirectoryState::Directory => shown!(
-            "The dotfiles directory at {} could not be listed, so selfie cannot tell whether a \
-             spec in it already tracks this file: {}",
-            DisplayPath::of(path),
-            crate::received::sentence(error)
+        DirectoryState::Directory | DirectoryState::Unlistable(_) => shown!(
+            "The dotfiles directory could not be listed, so selfie cannot tell whether a spec in \
+             it already tracks this file: {}",
+            crate::received::composed(error)
         ),
         // An empty path is silent unless the user named it, which is the rule
         // `dotfiles_directory_is_expected` states: an empty default is the
@@ -396,24 +398,21 @@ fn dotfiles_absence_warning(config: &CliConfig, error: &PackageListError) -> Opt
                 DisplayPath::of(path),
                 crate::received::composed(&reason)
             );
-            match crate::formatters::mkdir_command(path).filter(|_| reason.creatable()) {
-                Some(mkdir) => crate::terminal_text::noted(
-                    shown!("{} Create it with: {}", sentence, mkdir),
+            match SuggestedCommand::make_directory(path).filter(|_| reason.creatable()) {
+                Some(mkdir) => crate::received::noted_suggestion(
+                    shown!(
+                        "{} Create it with: {}",
+                        sentence,
+                        crate::received::suggested(&mkdir)
+                    ),
                     &mkdir,
                 ),
                 None => sentence,
             }
         }
-        DirectoryState::Unlistable(_) => shown!(
-            "The dotfiles directory could not be listed, so selfie cannot tell whether a spec in \
-             it already tracks this file: {} — {}",
-            DisplayPath::of(path),
-            crate::received::sentence(error)
-        ),
         DirectoryState::Unknown(_) => shown!(
-            "The dotfiles directory could not be checked: {} — {}",
-            DisplayPath::of(path),
-            crate::received::sentence(error)
+            "The dotfiles directory could not be checked: {}",
+            crate::received::composed(error)
         ),
     })
 }
@@ -427,7 +426,7 @@ fn package_listing_warning(error: &PackageListError) -> Shown {
     shown!(
         "The package directory {}, so its specs were not checked for an entry that already \
          tracks this file",
-        crate::received::sentence(error)
+        crate::received::composed(error)
     )
 }
 
@@ -545,7 +544,7 @@ fn load_package_names(repo: &impl PackageRepository) -> Result<(Vec<String>, Vec
         Err(listing) if listing.may_be_created() => Ok((Vec::new(), Vec::new())),
         Err(e) => Err(shown!(
             "Failed to list packages: {}",
-            crate::received::sentence(e)
+            crate::received::composed(&e)
         )),
     }
 }

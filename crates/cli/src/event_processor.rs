@@ -5,9 +5,8 @@
 //! handler that returns `true` for an event it rendered itself and `false` to
 //! take the default rendering.
 
-use crate::formatters::mkdir_command;
 use crate::received;
-use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, noted, shown};
+use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
 use futures::StreamExt;
 use selfie::package::{
     event::{
@@ -16,6 +15,7 @@ use selfie::package::{
     },
     port::{PackageError, PackageParseKind},
 };
+use selfie::parts::SuggestedCommand;
 
 use crate::display_manager::Channel;
 use crate::display_manager::{Diff, DisplayManager, ErrorDetail};
@@ -270,6 +270,9 @@ impl EventProcessor {
             PackageEvent::DeployStateWarning { warning, .. } => {
                 self.display.print_warning(received::composed(&warning));
             }
+            PackageEvent::DotfilesDirectoryWarning { warning, .. } => {
+                self.display.print_warning(received::composed(&warning));
+            }
 
             // The run's result counts each, so the exit code comes from there.
             PackageEvent::DotfileRefused { refusal, .. } => {
@@ -344,9 +347,8 @@ impl EventProcessor {
                             // repository classified the path once and the error carries
                             // the answer, so this renders it rather than looking again.
                             self.display.print_error(shown!(
-                                "Package directory at {} {}",
-                                DisplayPath::of(listing.path()),
-                                received::message(listing.clause())
+                                "Package directory at {}",
+                                received::composed(&listing)
                             ));
                             // `selfie config` requires a subcommand and has only
                             // one, `validate`, so it is not a way to set the
@@ -365,7 +367,7 @@ impl EventProcessor {
                                 selfie::fs::DirectoryState::Absent(reason)
                                     if reason.creatable() =>
                                 {
-                                    mkdir_command(listing.path())
+                                    SuggestedCommand::make_directory(listing.path())
                                 }
                                 _ => None,
                             };
@@ -375,8 +377,12 @@ impl EventProcessor {
                                 // whitespace, so a comma or a period touching the
                                 // closing quote is inside the word, and the pasted
                                 // command creates a directory whose name carries it.
-                                Some(mkdir) => noted(
-                                    shown!("{}. Or create it with: {}", settings, mkdir),
+                                Some(mkdir) => received::noted_suggestion(
+                                    shown!(
+                                        "{}. Or create it with: {}",
+                                        settings,
+                                        received::suggested(&mkdir)
+                                    ),
                                     &mkdir,
                                 ),
                                 None => settings.into(),

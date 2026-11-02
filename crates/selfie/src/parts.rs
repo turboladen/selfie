@@ -22,8 +22,8 @@ pub enum Part<'a> {
     Name(&'a str),
     /// A path, including one spelled as a spec spells it, such as `~/.bashrc`.
     Path(&'a Path),
-    /// A `selfie` command for the user to run.
-    Command(SelfieCommand),
+    /// A command for the user to run.
+    Command(SuggestedCommand),
 }
 
 /// A `selfie` subcommand a sentence offers.
@@ -42,46 +42,79 @@ impl Subcommand {
     }
 }
 
-/// A `selfie` command for the user to run: a subcommand and one operand,
-/// such as a spec name, held as the shell words that pass it: the operand
-/// quoted as one word, after a `--` word when it starts with a dash.
+/// What a suggested command runs, before its operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Program {
+    /// `selfie` and a subcommand.
+    Selfie(Subcommand),
+    /// `mkdir -p --`, which creates a directory and every directory above it.
+    MakeDirectory,
+}
+
+impl fmt::Display for Program {
+    /// Writes the words before the operand: `selfie apply`, `mkdir -p --`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Selfie(subcommand) => write!(f, "selfie {}", subcommand.word()),
+            Self::MakeDirectory => f.write_str("mkdir -p --"),
+        }
+    }
+}
+
+/// A command a sentence suggests the user run: a [`Program`] and one operand,
+/// such as a spec name or a path, held as the shell words that pass it.
 ///
 /// Its operand always has those words, so the command can always be written
 /// out to run as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelfieCommand {
-    subcommand: Subcommand,
+pub struct SuggestedCommand {
+    program: Program,
     word: String,
 }
 
-impl SelfieCommand {
-    /// The command running `subcommand` on `operand`, or `None` when
-    /// `operand` holds NUL, which no shell word can carry.
+impl SuggestedCommand {
+    /// The command running `subcommand` on `operand`, quoted as one shell word
+    /// after `--` when it starts with a dash, or `None` when `operand` holds
+    /// NUL, which no shell word can carry.
     #[must_use]
-    pub fn new(subcommand: Subcommand, operand: &str) -> Option<Self> {
-        crate::fs::shell_operand(operand).map(|word| Self { subcommand, word })
+    pub fn selfie(subcommand: Subcommand, operand: &str) -> Option<Self> {
+        crate::fs::shell_operand(operand).map(|word| Self {
+            program: Program::Selfie(subcommand),
+            word,
+        })
     }
 
-    /// The subcommand it runs.
+    /// The command creating the directory at `path`, quoted as shell words
+    /// that expand to it with a leading `~/` left outside the quotes, or `None`
+    /// when `path` holds NUL.
     #[must_use]
-    pub fn subcommand(&self) -> Subcommand {
-        self.subcommand
+    pub fn make_directory(path: &Path) -> Option<Self> {
+        // `--` ends mkdir's option list. Without it a directory named `-p` or
+        // `-foo` is read as options, so the command fails or creates something
+        // the user did not ask for.
+        crate::fs::shell_quote(path).map(|word| Self {
+            program: Program::MakeDirectory,
+            word,
+        })
     }
 
-    /// The shell words that pass the operand: the operand quoted as one word,
-    /// after a `--` word when it starts with a dash, as a command line shows
-    /// them.
+    /// What it runs.
+    #[must_use]
+    pub fn program(&self) -> Program {
+        self.program
+    }
+
+    /// The shell words that pass the operand, as a command line shows them.
     #[must_use]
     pub fn word(&self) -> &str {
         &self.word
     }
 }
 
-impl fmt::Display for SelfieCommand {
-    /// Writes `selfie <subcommand> <operand>`, the operand quoted as one shell
-    /// word, after `--` when it starts with a dash.
+impl fmt::Display for SuggestedCommand {
+    /// Writes the program's words, then the operand's.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "selfie {} {}", self.subcommand.word(), self.word)
+        write!(f, "{} {}", self.program, self.word)
     }
 }
 
@@ -141,7 +174,7 @@ impl<'a> Parts<'a> {
             })
     }
 
-    pub(crate) fn command(mut self, command: SelfieCommand) -> Self {
+    pub(crate) fn command(mut self, command: SuggestedCommand) -> Self {
         self.0.push(Part::Command(command));
         self
     }
@@ -163,7 +196,7 @@ impl<'p, 'a> IntoIterator for &'p Parts<'a> {
 
 impl fmt::Display for Parts<'_> {
     /// Writes each part as it is, a path through [`Path::display`] and a
-    /// command as [`SelfieCommand`] writes it.
+    /// command as [`SuggestedCommand`] writes it.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for part in self {
             match part {
@@ -258,6 +291,35 @@ mod tests {
 
         assert_eq!(joined.to_string(), "a, b, c");
         assert_eq!(listed(&none), []);
+    }
+
+    // A directory's command quotes the path as the shell expands it, a
+    // leading `~/` outside the quotes, after `--`, and a selfie command quotes
+    // a name whole. Neither exists for an operand holding NUL.
+    #[test]
+    fn a_suggested_command_quotes_its_operand_for_its_program() {
+        let mkdir = |path: &str| {
+            SuggestedCommand::make_directory(Path::new(path)).map(|command| command.to_string())
+        };
+        let apply = |name: &str| {
+            SuggestedCommand::selfie(Subcommand::Apply, name).map(|command| command.to_string())
+        };
+        let some = |text: &str| Some(text.to_string());
+
+        assert_eq!(
+            mkdir("/home/me/dotfiles"),
+            some("mkdir -p -- /home/me/dotfiles")
+        );
+        assert_eq!(
+            mkdir("/home/me/my dotfiles"),
+            some("mkdir -p -- '/home/me/my dotfiles'")
+        );
+        assert_eq!(mkdir("~/my dir"), some("mkdir -p -- ~/'my dir'"));
+        assert_eq!(mkdir("-foo"), some("mkdir -p -- -foo"));
+        assert_eq!(mkdir("/a\0b"), None);
+        assert_eq!(apply("~tool"), some("selfie apply '~tool'"));
+        assert_eq!(apply("-x"), some("selfie apply -- -x"));
+        assert_eq!(apply("a\0b"), None);
     }
 
     // An empty text adds no part, so an absent clause leaves no trace.

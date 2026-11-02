@@ -208,3 +208,54 @@ fn a_cause_ending_in_a_line_break_is_embedded_without_it() {
         ],
     );
 }
+
+const LISTINGS: &[&str] = &[
+    "/d/dots could not be listed",
+    "/d/dots does not exist",
+    "/d/dots is not a directory, it is a regular file",
+    "/d/dots is a symlink to nothing: it points at /d/gone",
+    "/d/dots is a symlink to nothing",
+    "/d/dots is below /d/file, which is not a directory",
+    "/d/dots could not be listed: permission denied",
+    "/d/dots could not be checked: permission denied",
+];
+
+#[test]
+fn every_listing_error_is_worded_as_pinned() {
+    let shown: Vec<String> = test_common::every_listing_error("/d")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_worded(&shown, LISTINGS);
+}
+
+// The two refusals of a dotfiles directory that would not list, as a warning
+// carries them, and the name check's two refusals over a directory it could
+// not read.
+#[test]
+fn every_directory_refusal_is_worded_as_pinned() {
+    use selfie::namespace::NamespaceValidationError;
+    use selfie::package::event::{CollectionRefusal, UnreadableDotfilesDirectory as Unreadable};
+
+    let errors = test_common::every_listing_error("/d");
+    let (absent, unlistable, unknown) = (&errors[1], &errors[6], &errors[7]);
+    let shown = [
+        CollectionRefusal::UnreadableDotfilesDirectory(Unreadable::Unlistable(unlistable.clone()))
+            .sentence(),
+        CollectionRefusal::UnreadableDotfilesDirectory(Unreadable::Uncheckable(unknown.clone()))
+            .sentence(),
+        NamespaceValidationError::PackageDirectoryUnreadable(absent.clone()).to_string(),
+        NamespaceValidationError::PackageDirectoryUnreadable(unlistable.clone()).to_string(),
+        NamespaceValidationError::DotfilesDirectoryUnreadable(unknown.clone()).to_string(),
+    ];
+    assert_worded(
+        &shown,
+        &[
+            "Failed to load standalone dotfiles: /d/dots could not be listed: permission denied",
+            "Could not check the standalone dotfiles directory: /d/dots could not be checked: permission denied",
+            "/d/dots does not exist",
+            "cannot tell whether the name is already taken: /d/dots could not be listed: permission denied",
+            "cannot tell whether the name is already taken: /d/dots could not be checked: permission denied",
+        ],
+    );
+}

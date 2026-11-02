@@ -1879,8 +1879,8 @@ mod validate_all_covers_standalone_specs {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                PackageEvent::Warning { message, .. }
-                    if message.contains("standalone dotfiles")
+                PackageEvent::DotfilesDirectoryWarning { warning, .. }
+                    if warning.to_string().contains("standalone dotfiles")
             )),
             "the warning must say which directory could not be read"
         );
@@ -2364,7 +2364,8 @@ mod validate_all_covers_standalone_specs {
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                PackageEvent::Warning { message, .. } if message.contains("is not a directory")
+                PackageEvent::DotfilesDirectoryWarning { warning, .. }
+                    if warning.to_string().contains("is not a directory")
             )),
             "{events:?}"
         );

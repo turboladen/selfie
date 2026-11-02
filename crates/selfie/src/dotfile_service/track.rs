@@ -406,8 +406,8 @@ where
     // directory that is not there would otherwise create it, turning a
     // mistyped `dotfiles_directory` into a new directory holding one spec.
     if let Err(error) = dotfiles_repo.find_package_files(name) {
-        return OperationResult::Failure(OperationFailure::Generic(
-            crate::package::collect::directory::track_listing_refusal(&error),
+        return OperationResult::Failure(OperationFailure::UnusableDotfilesDirectory(
+            crate::package::collect::directory::TrackDirectoryRefusal::new(error),
         ));
     }
 

@@ -154,6 +154,10 @@ pub enum IssueMessage {
     /// The deploy state's verdict.
     // Boxed: the notice is large, and most issues have none.
     DeployState(Box<DeployStateNotice>),
+    /// What is wrong with a spec directory.
+    // Boxed so a validation issue stays small enough to return in a `Result`
+    // without boxing it there.
+    Directory(Box<DirectoryIssue>),
 }
 
 crate::parts::display_from_parts!(IssueMessage);
@@ -163,6 +167,38 @@ impl crate::parts::Composed for IssueMessage {
         match self {
             Self::Text(text) => crate::parts::Parts::new().text(text.as_str()),
             Self::DeployState(notice) => notice.parts(),
+            Self::Directory(issue) => issue.parts(),
+        }
+    }
+}
+
+/// What a configuration issue says about a spec directory, with the paths its
+/// message names.
+#[derive(Debug, Clone)]
+pub enum DirectoryIssue {
+    /// The directory a setting names could not be listed, and why.
+    Listing {
+        /// The setting, such as `package_directory`.
+        setting: &'static str,
+        /// What the listing found at the path.
+        error: crate::package::port::PackageListError,
+    },
+    /// The standalone dotfiles directory, in the words a command reading it
+    /// warns with.
+    Dotfiles(crate::package::event::DotfilesDirectoryWarning),
+}
+
+crate::parts::display_from_parts!(DirectoryIssue);
+
+impl crate::parts::Composed for DirectoryIssue {
+    fn parts(&self) -> crate::parts::Parts<'_> {
+        match self {
+            Self::Listing { setting, error } => crate::parts::Parts::new()
+                .text("The `")
+                .text(*setting)
+                .text("` path ")
+                .append(error.parts()),
+            Self::Dotfiles(warning) => warning.parts(),
         }
     }
 }
@@ -298,6 +334,7 @@ impl ValidationIssue {
         match &self.message {
             IssueMessage::Text(text) => text.as_str().into(),
             IssueMessage::DeployState(notice) => notice.to_string().into(),
+            IssueMessage::Directory(issue) => issue.to_string().into(),
         }
     }
 
@@ -322,18 +359,53 @@ impl ValidationIssue {
         self.location
     }
 
+    /// An issue about the directory `field` names, at `level`, worded as
+    /// `issue` is.
+    pub(crate) fn of_directory(
+        level: ValidationLevel,
+        field: &str,
+        issue: DirectoryIssue,
+        suggestion: Option<&str>,
+    ) -> Self {
+        Self::worded(
+            level,
+            ValidationErrorCategory::PathFormat,
+            field,
+            IssueMessage::Directory(Box::new(issue)),
+            suggestion,
+        )
+    }
+
     /// An issue at `level` reporting `notice`, worded as the notice is.
     pub(crate) fn of_deploy_state(
         level: ValidationLevel,
         category: ValidationErrorCategory,
         notice: DeployStateNotice,
     ) -> Self {
+        Self::worded(
+            level,
+            category,
+            "state_directory",
+            IssueMessage::DeployState(Box::new(notice)),
+            None,
+        )
+    }
+
+    // An issue at `level` about `field`, worded by `message`, at no place in a
+    // file.
+    fn worded(
+        level: ValidationLevel,
+        category: ValidationErrorCategory,
+        field: &str,
+        message: IssueMessage,
+        suggestion: Option<&str>,
+    ) -> Self {
         Self {
             category,
-            field: "state_directory".to_string(),
-            message: IssueMessage::DeployState(Box::new(notice)),
+            field: field.to_string(),
+            message,
             level,
-            suggestion: None,
+            suggestion: suggestion.map(std::string::ToString::to_string),
             location: None,
         }
     }

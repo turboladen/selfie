@@ -200,6 +200,9 @@ where
                     RelayedDriftEvent::DeployState(warning) => {
                         sender.send_deploy_state_warning(warning).await;
                     }
+                    RelayedDriftEvent::DotfilesDirectory(warning) => {
+                        sender.send_dotfiles_directory_warning(warning).await;
+                    }
                     RelayedDriftEvent::SkippedSpec(error) => {
                         sender.send_spec_skipped(error).await;
                     }
@@ -1397,6 +1400,7 @@ fn remote_label(repo_info: &crate::git::sync_provider::RepoInfo) -> String {
 enum RelayedDriftEvent {
     Warning(String),
     DeployState(crate::dotfile_service::DeployStateWarning),
+    DotfilesDirectory(crate::package::event::DotfilesDirectoryWarning),
     SkippedSpec(crate::package::port::PackageParseError),
     PackagesRefused {
         kind: crate::package::event::RefusalKind,
@@ -1467,6 +1471,12 @@ async fn collect_drift_summary(stream: EventStream) -> DriftSummary {
                 summary
                     .relayed
                     .push(RelayedDriftEvent::DeployState(warning));
+            }
+            PackageEvent::DotfilesDirectoryWarning { warning, .. } => {
+                summary.warned += 1;
+                summary
+                    .relayed
+                    .push(RelayedDriftEvent::DotfilesDirectory(warning));
             }
             PackageEvent::SpecSkipped { error, .. } => {
                 summary.relayed.push(RelayedDriftEvent::SkippedSpec(error));
@@ -2397,6 +2407,40 @@ mod tests {
                 &summary.relayed[1],
                 RelayedDriftEvent::DotfileRefused { spec_target, refusal, .. }
                     if spec_target == "~/.batrc" && refusal.condition == Condition::Symlink
+            ),
+            "{summary:?}"
+        );
+    }
+
+    // A warning about the dotfiles directory is relayed whole, in its place,
+    // and counts as one warning, as the deploy state's is.
+    #[tokio::test]
+    async fn collect_drift_summary_relays_a_dotfiles_directory_warning() {
+        use crate::package::event::DotfilesDirectoryWarning;
+
+        let warning = DotfilesDirectoryWarning::Absent {
+            path: PathBuf::from("/d/dots"),
+            reason: crate::fs::AbsentReason::Empty,
+        };
+        let events = vec![
+            PackageEvent::Warning {
+                operation_info: test_operation_info(),
+                message: "first warning".to_string(),
+            },
+            PackageEvent::DotfilesDirectoryWarning {
+                operation_info: test_operation_info(),
+                warning: warning.clone(),
+            },
+        ];
+
+        let summary = collect_drift_summary(events_to_stream(events)).await;
+
+        assert_eq!(summary.warned, 2, "{summary:?}");
+        assert!(
+            matches!(
+                &summary.relayed[1],
+                RelayedDriftEvent::DotfilesDirectory(relayed)
+                    if relayed.to_string() == warning.to_string()
             ),
             "{summary:?}"
         );

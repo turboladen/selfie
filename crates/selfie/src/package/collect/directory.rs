@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::{
     fs::{AbsentReason, DirectoryState},
     package::port::PackageListError,
+    parts::{Composed, Parts, SuggestedCommand},
 };
 
 /// What a failed listing of the standalone dotfiles directory means.
@@ -20,11 +21,8 @@ pub(crate) enum UnlistedDotfilesDirectory {
         /// Why nothing is there, which decides the remedy.
         reason: AbsentReason,
     },
-    /// A directory that could not be listed, so it may hold standalone dotfiles.
-    Unlistable(PackageListError),
-    /// A path selfie could not classify. Nothing is known about it, so it may
-    /// hold standalone dotfiles just as an unlistable directory may.
-    Unknown(PackageListError),
+    /// A path that may hold standalone dotfiles selfie could not read.
+    Unreadable(UnreadableDotfilesDirectory),
 }
 
 impl UnlistedDotfilesDirectory {
@@ -50,11 +48,17 @@ impl UnlistedDotfilesDirectory {
                 path: error.path().to_path_buf(),
                 reason,
             },
-            DirectoryState::Unlistable(_) => Self::Unlistable(error),
-            DirectoryState::Unknown(_) => Self::Unknown(error),
+            DirectoryState::Unlistable(_) => {
+                Self::Unreadable(UnreadableDotfilesDirectory::Unlistable(error))
+            }
+            DirectoryState::Unknown(_) => {
+                Self::Unreadable(UnreadableDotfilesDirectory::Uncheckable(error))
+            }
             // A directory that classified cleanly and would not list. The listing
             // is the more recent answer and it failed, so it may be hiding entries.
-            DirectoryState::Directory => Self::Unlistable(error),
+            DirectoryState::Directory => {
+                Self::Unreadable(UnreadableDotfilesDirectory::Unlistable(error))
+            }
         }
     }
 
@@ -62,58 +66,134 @@ impl UnlistedDotfilesDirectory {
     /// cannot claim what it read is complete. An absent directory holds nothing,
     /// so a command warns about it and carries on.
     pub(crate) fn refuses_collection(&self) -> bool {
-        matches!(self, Self::Unlistable(_) | Self::Unknown(_))
+        matches!(self, Self::Unreadable(_))
     }
 }
 
-/// The warning for a command that carries on without the standalone dotfiles in
-/// the configured directory at `path`, where `reason` says what is there instead.
-pub(crate) fn absent_warning(path: &Path, reason: &AbsentReason) -> String {
-    format!(
-        "Dotfiles directory {} {} — standalone dotfiles will not be read.{}",
-        path.display(),
-        reason,
-        match reason.remedy(path) {
-            Some(command) => format!(" {command}"),
-            None => String::new(),
-        }
-    )
+/// A standalone dotfiles directory selfie could not read through, so it may
+/// hold standalone dotfiles a command did not see.
+#[derive(Debug, Clone)]
+pub enum UnreadableDotfilesDirectory {
+    /// A directory that could not be listed.
+    Unlistable(PackageListError),
+    /// A path selfie could not classify, so nothing is known about it. Kept apart
+    /// from an unlistable one because that one says a directory is there: this
+    /// one cannot say even that.
+    Uncheckable(PackageListError),
 }
 
-/// The refusal for tracking a standalone dotfile into the dotfiles directory at
-/// `path`, where `reason` says what is there instead.
-pub(crate) fn absent_track_refusal(path: &Path, reason: &AbsentReason) -> String {
-    format!(
-        "Cannot track a standalone dotfile: the dotfiles directory {} {}{}",
-        path.display(),
-        reason,
-        match reason.remedy(path) {
-            Some(command) => format!(" {command}"),
-            None => String::new(),
+impl UnreadableDotfilesDirectory {
+    /// The listing's error, which names the directory and says what is at it.
+    #[must_use]
+    pub fn error(&self) -> &PackageListError {
+        match self {
+            Self::Unlistable(error) | Self::Uncheckable(error) => error,
         }
-    )
+    }
 }
 
-/// The refusal for `track_standalone`, given the `error` a listing of the dotfiles
-/// directory reported.
+crate::parts::display_from_parts!(UnreadableDotfilesDirectory);
+
+impl Composed for UnreadableDotfilesDirectory {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::Unlistable(error) => Parts::new()
+                .text("Failed to load standalone dotfiles: ")
+                .append(error.parts()),
+            Self::Uncheckable(error) => Parts::new()
+                .text("Could not check the standalone dotfiles directory: ")
+                .append(error.parts()),
+        }
+    }
+}
+
+/// What a command reading the standalone dotfiles says about a directory it
+/// could not use: one it carries on without, or one it could not read through.
+#[derive(Debug, Clone)]
+pub enum DotfilesDirectoryWarning {
+    /// No directory is at the configured `path`, and `reason` says what is
+    /// there instead. The command carries on without standalone dotfiles.
+    Absent {
+        /// The path selfie looked at.
+        path: PathBuf,
+        /// What is there instead of a directory.
+        reason: AbsentReason,
+    },
+    /// A directory selfie could not read through. The command refuses what
+    /// needs every spec, and says so.
+    Unreadable(UnreadableDotfilesDirectory),
+}
+
+crate::parts::display_from_parts!(DotfilesDirectoryWarning);
+
+impl Composed for DotfilesDirectoryWarning {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::Absent { path, reason } => Parts::new()
+                .text("Dotfiles directory ")
+                .path(path)
+                .text(" ")
+                .append(reason.parts())
+                .text(" — standalone dotfiles will not be read.")
+                .append(remedy(path, reason)),
+            Self::Unreadable(unreadable) => unreadable.parts(),
+        }
+    }
+}
+
+/// The refusal to track a standalone dotfile into a dotfiles directory a
+/// listing of it could not read: the listing's error says what is at it.
 ///
 /// Every state refuses. A directory selfie could not read may hold the name
 /// about to be tracked, and one it could not classify is no better known, so
 /// neither can answer whether the name is free.
-pub(crate) fn track_listing_refusal(error: &PackageListError) -> String {
-    let path = error.path();
-    match error.state() {
-        DirectoryState::Absent(reason) => absent_track_refusal(path, reason),
-        // A directory that classified cleanly and still would not list could not be
-        // listed. Only an unclassifiable path is unchecked.
-        DirectoryState::Unlistable(_) | DirectoryState::Directory => format!(
-            "Cannot track a standalone dotfile: the dotfiles directory at {} could not be listed, so it may already hold this name — {error}",
-            path.display()
-        ),
-        DirectoryState::Unknown(_) => format!(
-            "Cannot track a standalone dotfile: the dotfiles directory at {} could not be checked — {error}",
-            path.display()
-        ),
+#[derive(Debug, Clone)]
+pub struct TrackDirectoryRefusal(PackageListError);
+
+impl TrackDirectoryRefusal {
+    /// The refusal for the dotfiles directory `error` reports.
+    #[must_use]
+    pub fn new(error: PackageListError) -> Self {
+        Self(error)
+    }
+}
+
+crate::parts::display_from_parts!(TrackDirectoryRefusal);
+
+impl Composed for TrackDirectoryRefusal {
+    fn parts(&self) -> Parts<'_> {
+        let error = &self.0;
+        let parts = Parts::new().text("Cannot track a standalone dotfile: the dotfiles directory ");
+        // The listing's own sentence starts with the path, so each arm that
+        // shows it names the path no other way.
+        match error.state() {
+            DirectoryState::Absent(reason) => parts
+                .path(error.path())
+                .text(" ")
+                .append(reason.parts())
+                .text(".")
+                .append(remedy(error.path(), reason)),
+            // A directory that classified cleanly and still would not list could
+            // not be listed. Only an unclassifiable path is unchecked.
+            DirectoryState::Unlistable(_) | DirectoryState::Directory => parts
+                .text("could not be listed, so it may already hold this name — ")
+                .append(error.parts()),
+            DirectoryState::Unknown(_) => {
+                parts.text("could not be checked — ").append(error.parts())
+            }
+        }
+    }
+}
+
+// The command that creates the directory at `path`, as a sentence of its own,
+// or nothing when `reason` is not one `mkdir -p` fixes. `mkdir -p` fails with
+// "File exists" against a plain file and "No such file or directory" against a
+// dangling symlink, so offering it for those sends the user to a command that
+// cannot work. A path no shell word can carry offers none either.
+fn remedy(path: &Path, reason: &AbsentReason) -> Parts<'static> {
+    match SuggestedCommand::make_directory(path).filter(|_| reason.creatable()) {
+        Some(mkdir) => Parts::new().text(" Create it with: ").command(mkdir),
+        None => Parts::new(),
     }
 }
 
@@ -125,6 +205,20 @@ mod tests {
 
     use super::*;
     use crate::fs::{FileSystem as _, RealFileSystem};
+
+    // The warning a command sends about an absent directory at `path`.
+    fn absent_warning(path: &Path, reason: &AbsentReason) -> String {
+        DotfilesDirectoryWarning::Absent {
+            path: path.to_path_buf(),
+            reason: reason.clone(),
+        }
+        .to_string()
+    }
+
+    // The refusal of a track into the directory `error` reports.
+    fn track_listing_refusal(error: &PackageListError) -> String {
+        TrackDirectoryRefusal::new(error.clone()).to_string()
+    }
 
     // The listing error a real repository builds for `path`: it classifies the path
     // itself, so a fixture cannot claim a state the file system would not produce.
@@ -227,7 +321,10 @@ mod tests {
 
         for sentence in [
             absent_warning(&link, &reason),
-            absent_track_refusal(&link, &reason),
+            track_listing_refusal(&PackageListError::new(
+                link.clone(),
+                DirectoryState::Absent(reason.clone()),
+            )),
         ] {
             assert!(sentence.contains("symlink to nothing"), "{sentence}");
             assert!(sentence.contains("elsewhere"), "{sentence}");
@@ -354,7 +451,9 @@ mod tests {
             assert!(
                 matches!(
                     UnlistedDotfilesDirectory::classify(unlistable_error(dir.path()), configured),
-                    UnlistedDotfilesDirectory::Unlistable(_)
+                    UnlistedDotfilesDirectory::Unreadable(UnreadableDotfilesDirectory::Unlistable(
+                        _
+                    ))
                 ),
                 "configured: {configured}"
             );
@@ -379,7 +478,7 @@ mod tests {
         );
         assert!(matches!(
             UnlistedDotfilesDirectory::classify(error.clone(), true),
-            UnlistedDotfilesDirectory::Unknown(_)
+            UnlistedDotfilesDirectory::Unreadable(UnreadableDotfilesDirectory::Uncheckable(_))
         ));
 
         let refusal = track_listing_refusal(&error);
@@ -464,8 +563,12 @@ mod tests {
             let service_name = match classified {
                 UnlistedDotfilesDirectory::Absent { .. }
                 | UnlistedDotfilesDirectory::OrdinarilyAbsent => "absent",
-                UnlistedDotfilesDirectory::Unlistable(_) => "unlistable",
-                UnlistedDotfilesDirectory::Unknown(_) => "unknown",
+                UnlistedDotfilesDirectory::Unreadable(UnreadableDotfilesDirectory::Unlistable(
+                    _,
+                )) => "unlistable",
+                UnlistedDotfilesDirectory::Unreadable(
+                    UnreadableDotfilesDirectory::Uncheckable(_),
+                ) => "unknown",
             };
             assert_eq!(
                 port_name,
@@ -476,6 +579,65 @@ mod tests {
         }
     }
 
+    // Each sentence about a dotfiles directory a command cannot use, whole, for
+    // every state the directory can be in.
+    #[test]
+    fn every_directory_sentence_is_worded_as_pinned() {
+        let denied = || Arc::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let errors: Vec<PackageListError> = [
+            DirectoryState::Directory,
+            DirectoryState::Absent(AbsentReason::Empty),
+            DirectoryState::Absent(AbsentReason::Occupied {
+                kind: "regular file",
+            }),
+            DirectoryState::Absent(AbsentReason::DanglingSymlink {
+                points_to: Some("/d/gone".into()),
+            }),
+            DirectoryState::Absent(AbsentReason::DanglingSymlink { points_to: None }),
+            DirectoryState::Absent(AbsentReason::ParentNotADirectory {
+                parent: "/d/file".into(),
+            }),
+            DirectoryState::Unlistable(denied()),
+            DirectoryState::Unknown(denied()),
+        ]
+        .into_iter()
+        .map(|state| PackageListError::new("/d/dots".into(), state))
+        .collect();
+        let mut shown = Vec::new();
+        for error in &errors {
+            if let DirectoryState::Absent(reason) = error.state() {
+                shown.push(absent_warning(error.path(), reason));
+                shown.push(track_listing_refusal(error));
+            }
+        }
+        shown.extend(errors.iter().map(track_listing_refusal));
+
+        let expected = [
+            "Dotfiles directory /d/dots does not exist — standalone dotfiles will not be read. Create it with: mkdir -p -- /d/dots",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots does not exist. Create it with: mkdir -p -- /d/dots",
+            "Dotfiles directory /d/dots is not a directory, it is a regular file — standalone dotfiles will not be read.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is not a directory, it is a regular file.",
+            "Dotfiles directory /d/dots is a symlink to nothing: it points at /d/gone — standalone dotfiles will not be read.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is a symlink to nothing: it points at /d/gone.",
+            "Dotfiles directory /d/dots is a symlink to nothing — standalone dotfiles will not be read.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is a symlink to nothing.",
+            "Dotfiles directory /d/dots is below /d/file, which is not a directory — standalone dotfiles will not be read.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is below /d/file, which is not a directory.",
+            "Cannot track a standalone dotfile: the dotfiles directory could not be listed, so it may already hold this name — /d/dots could not be listed",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots does not exist. Create it with: mkdir -p -- /d/dots",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is not a directory, it is a regular file.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is a symlink to nothing: it points at /d/gone.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is a symlink to nothing.",
+            "Cannot track a standalone dotfile: the dotfiles directory /d/dots is below /d/file, which is not a directory.",
+            "Cannot track a standalone dotfile: the dotfiles directory could not be listed, so it may already hold this name — /d/dots could not be listed: permission denied",
+            "Cannot track a standalone dotfile: the dotfiles directory could not be checked — /d/dots could not be checked: permission denied",
+        ];
+        assert_eq!(shown.len(), expected.len(), "{shown:#?}");
+        for (shown, expected) in shown.iter().zip(expected) {
+            assert_eq!(shown, expected);
+        }
+    }
+
     // Apply warns and track refuses about the same directory in one session, so
     // the two must say different things while naming the same fix.
     #[test]
@@ -483,7 +645,10 @@ mod tests {
         let dir = Path::new("/nonexistent/dotfiles");
 
         let warning = absent_warning(dir, &AbsentReason::Empty);
-        let refusal = absent_track_refusal(dir, &AbsentReason::Empty);
+        let refusal = track_listing_refusal(&PackageListError::new(
+            dir.to_path_buf(),
+            DirectoryState::Absent(AbsentReason::Empty),
+        ));
 
         assert_ne!(warning, refusal);
         assert!(warning.contains("will not be read"), "{warning}");

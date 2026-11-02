@@ -718,3 +718,37 @@ fn a_dangling_dotfiles_directory_names_its_destination_as_a_path() {
         "{warning}"
     );
 }
+
+// A dotfiles directory selfie cannot check is named once, as a path: U+200B in
+// it shows escaped and never raw in the warning `track` prints before it asks
+// anything.
+#[cfg(unix)]
+#[test]
+fn an_uncheckable_dotfiles_directory_is_named_once_as_a_path() {
+    let temp = common::setup_test_config("");
+    let home = temp.path();
+    let dotfiles = home.join("l\u{200B}oop");
+    std::os::unix::fs::symlink(&dotfiles, &dotfiles).unwrap();
+    std::fs::write(
+        home.join(".config/selfie/config.yaml"),
+        format!(
+            "environment: {SELFIE_ENV}\npackage_directory: {}\ndotfiles_directory: {}\n",
+            home.join("packages").display(),
+            dotfiles.display()
+        ),
+    )
+    .unwrap();
+    let untracked = home.join("untracked.conf");
+    std::fs::write(&untracked, "x").unwrap();
+
+    let output =
+        common::run_sandboxed(&temp, &["--no-color", "track", untracked.to_str().unwrap()]);
+    let both = format!("{}{}", output.stdout, output.stderr);
+
+    let warning = both
+        .lines()
+        .find(|line| line.contains("The dotfiles directory could not be checked"))
+        .unwrap_or_else(|| panic!("no warning about the dotfiles directory: {both}"));
+    assert_eq!(warning.matches(r"l\u{200b}oop").count(), 1, "{warning}");
+    assert!(!both.contains('\u{200B}'), "a raw U+200B: {both:?}");
+}

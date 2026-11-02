@@ -27,7 +27,7 @@ use selfie::yaml::SourceLocation;
 use crate::display_manager::Suggestion;
 use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
 
-pub(crate) use crate::sentence::{composed, message, sentence};
+pub(crate) use crate::sentence::{composed, message, noted_suggestion, sentence, suggested};
 
 /// `first`, or `second` when `first` is blank, as a tool's output; `None` when
 /// both are blank.
@@ -390,11 +390,12 @@ pub(crate) fn package_error(error: &PackageError) -> Shown {
     }
 }
 
-/// A repository's error, a package error composed as [`package_error`]
-/// composes it.
+/// A repository's error: a package error composed as [`package_error`]
+/// composes it, and a listing error from its parts.
 pub(crate) fn repo_error(error: &PackageRepoError) -> Shown {
     match error {
         PackageRepoError::PackageError(error) => package_error(error),
+        PackageRepoError::PackageListError(error) => composed(error),
         other => sentence(other).into(),
     }
 }
@@ -419,6 +420,8 @@ pub(crate) fn failure(failure: &OperationFailure) -> Shown {
         } => uncreatable(package_name, reason),
         OperationFailure::Package(error) => package_error(error),
         OperationFailure::DeployState(failure) => composed(failure),
+        OperationFailure::PackageList(error) => composed(error),
+        OperationFailure::UnusableDotfilesDirectory(refusal) => composed(refusal),
         OperationFailure::UnreadableSpec {
             package_name,
             reason,
@@ -1274,6 +1277,247 @@ mod tests {
                 "{name:?}"
             );
         }
+    }
+
+    // A suggested command reads as the library writes it, so the CLI and the
+    // MCP server offer the same command. A line break or a tab in its operand
+    // shows as an escape, and an invisible character stays, for the note under
+    // the command to show.
+    #[test]
+    fn a_suggested_command_reads_as_the_library_writes_it() {
+        use selfie::parts::{Subcommand, SuggestedCommand};
+        use std::path::Path;
+
+        let mut commands: Vec<SuggestedCommand> = ["/a", "/a b", "~/x y", "-foo"]
+            .into_iter()
+            .filter_map(|path| SuggestedCommand::make_directory(Path::new(path)))
+            .collect();
+        commands.extend(
+            ["tool", "my app", "-x", "~t"]
+                .into_iter()
+                .filter_map(|name| SuggestedCommand::selfie(Subcommand::Apply, name)),
+        );
+        assert_eq!(commands.len(), 8);
+        for command in &commands {
+            assert_eq!(suggested(command).to_string(), command.to_string());
+        }
+        let mkdir = |path: &str| {
+            suggested(&SuggestedCommand::make_directory(Path::new(path)).expect("no NUL"))
+                .to_string()
+        };
+        assert_eq!(mkdir("/a\nb\tc"), r"mkdir -p -- '/a\nb\tc'");
+        assert_eq!(mkdir("/a\u{200B}b"), "mkdir -p -- '/a\u{200B}b'");
+    }
+
+    // A command whose operand holds a line feed or a tab shows it escaped, so
+    // the line as shown does not run as written, and the note under it says
+    // so. A plain operand takes no note.
+    #[test]
+    fn a_command_showing_a_control_character_escaped_is_noted() {
+        use selfie::parts::SuggestedCommand;
+
+        let shown = |path: &str| {
+            let mkdir =
+                SuggestedCommand::make_directory(std::path::Path::new(path)).expect("no NUL");
+            noted_suggestion(shown!("Create it with: {}", suggested(&mkdir)), &mkdir).into_string()
+        };
+
+        for (path, escaped) in [("/d/a\nb", r"/d/a\nb"), ("/d/a\tb", r"/d/a\tb")] {
+            let lines: Vec<String> = shown(path).lines().map(str::to_string).collect();
+            assert_eq!(
+                lines,
+                [
+                    format!("Create it with: mkdir -p -- '{escaped}'"),
+                    format!("Escaped: mkdir -p -- '{escaped}'"),
+                ]
+            );
+        }
+        assert_eq!(shown("/d/ab"), "Create it with: mkdir -p -- /d/ab");
+    }
+
+    // A listing error and the name check's refusal over one read as the
+    // library words them, in every state.
+    #[test]
+    fn a_listing_error_reads_as_the_library_words_it() {
+        use selfie::namespace::NamespaceValidationError as Invalid;
+
+        let errors = test_common::every_listing_error("/d");
+        assert_renders_as_its_display(&errors);
+        let refusals: Vec<Invalid> = errors
+            .iter()
+            .flat_map(|error| {
+                [
+                    Invalid::PackageDirectoryUnreadable(error.clone()),
+                    Invalid::DotfilesDirectoryUnreadable(error.clone()),
+                ]
+            })
+            .collect();
+        assert_renders_as_its_display(&refusals);
+    }
+
+    // Each sentence about a dotfiles directory a command could not use, and
+    // each directory issue, for the listing error of every state.
+    fn directory_sentences(
+        root: &str,
+    ) -> (
+        Vec<selfie::package::event::DotfilesDirectoryWarning>,
+        Vec<selfie::package::event::TrackDirectoryRefusal>,
+        Vec<selfie::validation::DirectoryIssue>,
+    ) {
+        use selfie::fs::DirectoryState;
+        use selfie::package::event::{
+            DotfilesDirectoryWarning as Warning, TrackDirectoryRefusal,
+            UnreadableDotfilesDirectory as Unreadable,
+        };
+        use selfie::validation::DirectoryIssue;
+
+        let errors = test_common::every_listing_error(root);
+        let warnings: Vec<Warning> = errors
+            .iter()
+            .filter_map(|error| match error.state() {
+                DirectoryState::Absent(reason) => Some(Warning::Absent {
+                    path: error.path().to_path_buf(),
+                    reason: reason.clone(),
+                }),
+                DirectoryState::Unlistable(_) => {
+                    Some(Warning::Unreadable(Unreadable::Unlistable(error.clone())))
+                }
+                DirectoryState::Unknown(_) => {
+                    Some(Warning::Unreadable(Unreadable::Uncheckable(error.clone())))
+                }
+                DirectoryState::Directory => None,
+            })
+            .collect();
+        let refusals = errors
+            .iter()
+            .cloned()
+            .map(TrackDirectoryRefusal::new)
+            .collect();
+        let issues = errors
+            .iter()
+            .map(|error| DirectoryIssue::Listing {
+                setting: "dotfiles_directory",
+                error: error.clone(),
+            })
+            .chain(warnings.iter().cloned().map(DirectoryIssue::Dotfiles))
+            .collect();
+        (warnings, refusals, issues)
+    }
+
+    // A dotfiles directory's warning, a track's refusal over one and a
+    // directory issue read as the library words them, in every state.
+    #[test]
+    fn a_directory_sentence_reads_as_the_library_words_it() {
+        let (warnings, refusals, issues) = directory_sentences("/d");
+        assert_eq!(warnings.len(), 7);
+        assert_renders_as_its_display(&warnings);
+        assert_renders_as_its_display(&refusals);
+        assert_renders_as_its_display(&issues);
+    }
+
+    // Each of them names the directory as a path once, and a path inside the
+    // reason, such as a link's destination, as a path too. A raw U+200B or
+    // line feed never shows, outside the note that follows a command.
+    #[test]
+    fn a_directory_sentence_names_its_paths_as_paths() {
+        let root = "/d/g\u{200B}one\nx";
+        let escaped = r"/d/g\u{200b}one\nx";
+        let (warnings, refusals, issues) = directory_sentences(root);
+        let mut shown: Vec<String> = warnings
+            .iter()
+            .map(|warning| composed(warning).into_string())
+            .collect();
+        shown.extend(
+            refusals
+                .iter()
+                .map(|refusal| composed(refusal).into_string()),
+        );
+        shown.extend(
+            refusals
+                .iter()
+                .cloned()
+                .map(|refusal| failure(&OperationFailure::UnusableDotfilesDirectory(refusal)))
+                .map(Shown::into_string),
+        );
+        shown.extend(issues.iter().map(|issue| composed(issue).into_string()));
+        // Only an empty path is offered `mkdir -p`. Its command keeps the
+        // invisible character, so that it creates the path as written, and a
+        // note under it spells the command out. Every other sentence shows
+        // none raw.
+        let (offering, plain): (Vec<&String>, Vec<&String>) = shown
+            .iter()
+            .partition(|shown| shown.contains("Create it with: "));
+        assert_eq!(offering.len(), 4, "{offering:#?}");
+        for shown in &offering {
+            let lines: Vec<&str> = shown.lines().collect();
+            assert_eq!(lines.len(), 2, "{shown:?}");
+            let words = lines[0].split("Create it with: ").next().expect("a part");
+            assert!(!words.contains('\u{200B}'), "{shown:?}");
+            assert_eq!(
+                lines[1],
+                format!("Escaped: mkdir -p -- '{escaped}/dots'"),
+                "{shown:?}"
+            );
+        }
+        for shown in &plain {
+            assert!(!shown.contains(['\u{200B}', '\n']), "{shown:?}");
+        }
+        for shown in &shown {
+            let sentence = shown.lines().next().expect("a line");
+            let named = sentence.matches(&format!("{escaped}/dots")).count();
+            assert_eq!(named, 1, "{shown:?}");
+        }
+    }
+
+    // A listing error names its directory as a path, once, on every route the
+    // CLI shows it by: on its own, as an operation's failure, as a
+    // repository's error and inside the name check's refusal.
+    #[test]
+    fn a_listing_error_names_its_directory_once_as_a_path() {
+        use selfie::namespace::NamespaceValidationError as Invalid;
+        use selfie::package::port::PackageRepoError;
+
+        let directory = "/d/g\u{200B}one\nx";
+        for state in test_common::every_directory_state("/d") {
+            let error = selfie::package::port::PackageListError::new(directory.into(), state);
+            let routes = [
+                composed(&error),
+                failure(&OperationFailure::PackageList(error.clone())),
+                repo_error(&PackageRepoError::PackageListError(error.clone())),
+                composed(&Invalid::DotfilesDirectoryUnreadable(error.clone())),
+            ];
+            for shown in routes {
+                let shown = shown.into_string();
+                assert!(!shown.contains(['\u{200B}', '\n']), "{shown:?}");
+                assert_eq!(shown.matches(r"/d/g\u{200b}one\nx").count(), 1, "{shown:?}");
+            }
+        }
+    }
+
+    // A command in a composed sentence holding a character that reads as
+    // another is followed by a line showing it escaped, as a command the CLI
+    // composes is, and one holding none is not. The note stays under the line
+    // when the sentence ends a longer one.
+    #[test]
+    fn a_composed_command_carries_its_escaped_note() {
+        let failure = |name: &str| DeployStateFailure::TrackUnrecorded {
+            error: StateSaveError::Serialize(selfie::yaml::SerializeFailure::Value),
+            name: name.to_string(),
+            target: "~/.apprc".to_string(),
+            spec_path: "/p/app.yml".into(),
+            copy: "/d/apprc".into(),
+        };
+
+        let plain = composed(&failure("app")).into_string();
+        assert!(!plain.contains('\n'), "{plain:?}");
+        let hidden = shown!("Error: {}", composed(&failure("a\u{200B}b"))).into_string();
+        let lines: Vec<&str> = hidden.lines().collect();
+        assert_eq!(lines.len(), 2, "{hidden:?}");
+        assert!(
+            lines[0].starts_with("Error: ") && lines[0].contains("selfie apply 'a\u{200B}b'"),
+            "{hidden:?}"
+        );
+        assert_eq!(lines[1], r"Escaped: selfie apply 'a\u{200b}b'");
     }
 
     // A name in a composed sentence escapes a blank other than a space, as it
