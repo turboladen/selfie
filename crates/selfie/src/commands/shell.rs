@@ -285,11 +285,15 @@ impl CommandRunner for ShellCommandRunner {
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| CommandError::StdoutSpawn(command.to_string()))?;
+            .ok_or_else(|| CommandError::StdoutSpawn {
+                command: command.to_string(),
+            })?;
         let stderr = child
             .stderr
             .take()
-            .ok_or_else(|| CommandError::StderrSpawn(command.to_string()))?;
+            .ok_or_else(|| CommandError::StderrSpawn {
+                command: command.to_string(),
+            })?;
 
         let mut full_stdout = Vec::new();
         let mut full_stderr = Vec::new();
@@ -1315,16 +1319,20 @@ mod tests {
         assert!(canceled_error.to_string().contains("Command canceled"));
         assert!(canceled_error.to_string().contains("test-command"));
 
-        let stdout_error = CommandError::StdoutSpawn("stdout issue".to_string());
+        let stdout_error = CommandError::StdoutSpawn {
+            command: "echo out".to_string(),
+        };
         assert_eq!(
             stdout_error.to_string(),
-            "Failed spawning stdout during command: stdout issue"
+            "Failed spawning stdout during command: echo out"
         );
 
-        let stderr_error = CommandError::StderrSpawn("stderr issue".to_string());
+        let stderr_error = CommandError::StderrSpawn {
+            command: "echo err".to_string(),
+        };
         assert_eq!(
             stderr_error.to_string(),
-            "Failed spawning stderr during command: stderr issue"
+            "Failed spawning stderr during command: echo err"
         );
     }
 

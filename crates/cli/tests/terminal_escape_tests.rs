@@ -2057,3 +2057,112 @@ fn a_spec_command_in_a_failure_is_noted() {
         .collect();
     assert_eq!(widths.len(), 1, "{listed}");
 }
+
+// package status shows a status selfie could not answer for after "Unknown: ",
+// and a timed-out check's command noted on the line under it: in the
+// package's own status row, and in its dependency list, where each dependency
+// has its own line, so the note stays under the one it explains. A refused
+// dependency's reason names its key escaped.
+#[test]
+fn a_status_selfie_could_not_answer_for_is_noted_under_its_line() {
+    let temp = setup_default_test_config();
+    let spec = |name: &str, commands: &str| {
+        format!("name: {name}\nenvironments:\n  {SELFIE_ENV}:\n{commands}")
+    };
+    hostile_package_directory(
+        &temp,
+        &[
+            (
+                "x.yml",
+                &spec(
+                    "x",
+                    "    install: \"true\"\n    check: \"sleep 5 #\\u200Bx\"\n",
+                ),
+            ),
+            (
+                "y.yml",
+                &spec("y", "    install: \"true\"\n    check: \"true\"\n"),
+            ),
+            (
+                "two.yml",
+                &spec(
+                    "two",
+                    "    install: \"true\"\n    check: \"true\"\n    dependencies: [x, y]\n",
+                ),
+            ),
+            (
+                "g.yml",
+                &spec("g", "    install: \"true\"\n    \"k\\u200By\": 1\n"),
+            ),
+            (
+                "dg.yml",
+                &spec(
+                    "dg",
+                    "    install: \"true\"\n    check: \"true\"\n    dependencies: [g]\n",
+                ),
+            ),
+        ],
+    );
+    let config = temp.path().join(".config/selfie/config.yaml");
+    let mut settings = fs::read_to_string(&config).unwrap();
+    settings.push_str("command_timeout: 1\n");
+    fs::write(&config, settings).unwrap();
+
+    let printed_two = printed(&temp, &["package", "status", "two"]);
+    let lines: Vec<&str> = printed_two.lines().collect();
+    let x = lines
+        .iter()
+        .position(|line| line.contains("x: Unknown: `sleep 5 #"))
+        .unwrap_or_else(|| panic!("{printed_two}"));
+    assert!(
+        lines[x + 1].contains(r"Escaped: sleep 5 #\u{200b}x"),
+        "{printed_two}"
+    );
+    assert!(lines[x + 2].contains("y: "), "{printed_two}");
+
+    let printed_dg = printed(&temp, &["package", "status", "dg"]);
+    let g = line_with(&printed_dg, "g: Unknown: is refused:");
+    assert!(g.contains(r"unknown field 'k\u{200b}y'"), "{g}");
+    assert!(!g.contains('\u{200B}'), "{g:?}");
+}
+
+// A recommend whose check gives no answer after its install warns with the
+// check's command noted on the line under the warning.
+#[test]
+fn a_recommends_unanswered_check_is_noted() {
+    let temp = setup_default_test_config();
+    let spec = |name: &str, commands: &str| {
+        format!("name: {name}\nenvironments:\n  {SELFIE_ENV}:\n{commands}")
+    };
+    hostile_package_directory(
+        &temp,
+        &[
+            (
+                "s.yml",
+                &spec(
+                    "s",
+                    "    install: \"true\"\n    check: \"sleep 5 #\\u200Bs\"\n",
+                ),
+            ),
+            (
+                "r.yml",
+                &spec("r", "    install: \"true\"\n    recommends: [s]\n"),
+            ),
+        ],
+    );
+    let config = temp.path().join(".config/selfie/config.yaml");
+    let mut settings = fs::read_to_string(&config).unwrap();
+    settings.push_str("command_timeout: 1\n");
+    fs::write(&config, settings).unwrap();
+
+    let printed = printed(&temp, &["package", "install", "r"]);
+    let lines: Vec<&str> = printed.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.contains("installed, but its check gave no answer: "))
+        .unwrap_or_else(|| panic!("{printed}"));
+    assert!(
+        lines[at + 1].contains(r"Escaped: sleep 5 #\u{200b}s"),
+        "{printed}"
+    );
+}

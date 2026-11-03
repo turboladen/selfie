@@ -159,10 +159,11 @@ impl From<&AuditResultData> for Audit {
             AuditResult::NotInstalled => AuditFinding::NotInstalled,
             AuditResult::NoAuditCommand => AuditFinding::NoAuditCommand,
             AuditResult::Error(error) => AuditFinding::Error(Output::new(error).into()),
+            AuditResult::Unconfigured(message) => AuditFinding::Error(composed(message)),
             // selfie's sentence naming the command, so prose: a carriage return
             // or an escape sequence in the command shows as an escape, where a
             // tool's output would keep only what follows the last return.
-            AuditResult::CouldNotRun(failure) => AuditFinding::Error(sentence(failure).into()),
+            AuditResult::CouldNotRun(failure) => AuditFinding::Error(composed(failure)),
         };
         Self {
             package: Name::new(&data.package_name),
@@ -283,11 +284,7 @@ pub(crate) fn parse_reason(error: &PackageParseError) -> Shown {
 
 /// Why a dependency's status is unknown, with a lookup's error from its parts.
 pub(crate) fn unknown_status(status: &UnknownStatus) -> Shown {
-    match status {
-        UnknownStatus::LookupFailed(failure) => composed(failure),
-        UnknownStatus::Error(error) => composed(error),
-        other => sentence(other).into(),
-    }
+    composed(status)
 }
 
 /// An operation's failure, as the error line and the error summary both show

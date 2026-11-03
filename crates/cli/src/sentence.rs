@@ -7,9 +7,7 @@ use std::fmt::Display;
 
 use selfie::config::ConfigLoadError;
 use selfie::namespace::NamespaceConflict;
-use selfie::package::event::{
-    CheckFailure, OperationType, SkipReason, SpecStatus, UncheckedSource, UnknownStatus,
-};
+use selfie::package::event::{OperationType, SkipReason, SpecStatus, UncheckedSource};
 use selfie::parts::{Composed, Part, Parts, Program, Subcommand, SuggestedCommand};
 use selfie::yaml::ParseFailure;
 
@@ -42,7 +40,6 @@ macro_rules! sentences {
 }
 
 sentences!(
-    CheckFailure,
     ConfigLoadError,
     NamespaceConflict,
     OperationType,
@@ -50,7 +47,6 @@ sentences!(
     SkipReason,
     SpecStatus,
     UncheckedSource,
-    UnknownStatus,
     selfie::yaml::SerializeFailure,
     std::io::Error,
 );

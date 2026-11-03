@@ -242,7 +242,9 @@ impl AuditTally {
         match result {
             AuditResult::Conflicts { .. } => self.conflicts += 1,
             AuditResult::NotInstalled => self.not_installed += 1,
-            AuditResult::Error(_) | AuditResult::CouldNotRun(_) => self.errors += 1,
+            AuditResult::Error(_) | AuditResult::CouldNotRun(_) | AuditResult::Unconfigured(_) => {
+                self.errors += 1;
+            }
             AuditResult::Clean { .. } | AuditResult::NoAuditCommand => {}
         }
     }
@@ -303,10 +305,15 @@ where
                 package_name: package_name.to_string(),
                 environment: config.environment().to_string(),
                 audit_command: None,
-                result: AuditResult::Error(format!(
-                    "Environment '{}' not configured for package '{package_name}'",
-                    config.environment()
-                )),
+                result: AuditResult::Unconfigured(
+                    crate::parts::Parts::new()
+                        .text("Environment '")
+                        .name(config.environment())
+                        .text("' not configured for package '")
+                        .name(package_name)
+                        .text("'")
+                        .into(),
+                ),
             };
             let result = audit_result.result.clone();
             sender.send_audit_result(audit_result).await;
@@ -696,6 +703,61 @@ mod tests {
         tally.count(&AuditResult::CouldNotRun(CheckFailure::TimedOut(
             crate::commands::runner::TimedOut::new("c", std::time::Duration::from_secs(1)),
         )));
+        assert_eq!(tally.errors, 1);
+    }
+
+    // A package with nothing for the current environment, audited with the
+    // rest, is an error that names the environment and the package as names,
+    // in its words, and is counted where an error is.
+    #[tokio::test]
+    async fn an_unconfigured_environment_is_named_as_a_name() {
+        use crate::parts::{Composed as _, Part};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = crate::config::SelfieConfigBuilder::default()
+            .environment("w\u{200B}k")
+            .package_directory(temp_dir.path())
+            .build();
+        let package = PackageBuilder::default()
+            .name("test-pkg")
+            .environment("other", |b| b.install("true").audit_some("true"))
+            .path(temp_dir.path().join("test-pkg.yml"))
+            .build();
+        let pkg_path = temp_dir.path().join("test-pkg.yml");
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo
+            .expect_get_package()
+            .returning(move |_| Ok(GetPackage::from_existing(package.clone(), pkg_path.clone())));
+        let (sender, _rx) = test_sender();
+
+        let result = audit_single_in_bulk(
+            "test-pkg",
+            &mock_repo,
+            &config,
+            &MockCommandRunner::new(),
+            &sender,
+            &CancellationToken::new(),
+        )
+        .await;
+
+        let Some(AuditResult::Unconfigured(message)) = result else {
+            panic!("expected an unconfigured environment, got: {result:?}");
+        };
+        assert_eq!(
+            message.to_string(),
+            "Environment 'w\u{200B}k' not configured for package 'test-pkg'"
+        );
+        let names: Vec<String> = message
+            .parts()
+            .into_iter()
+            .filter_map(|part| match part {
+                Part::Name(name) => Some(name.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["w\u{200B}k", "test-pkg"]);
+        let mut tally = AuditTally::default();
+        tally.count(&AuditResult::Unconfigured(message));
         assert_eq!(tally.errors, 1);
     }
 

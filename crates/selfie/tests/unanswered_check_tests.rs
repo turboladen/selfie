@@ -551,9 +551,9 @@ async fn a_recommend_whose_post_install_check_times_out_leaves_the_run_clean() {
         1,
         "{events:?}"
     );
-    // The check's failure stays text until selfie-2kwj makes it Composed, so
-    // only the recommend is a part here.
-    assert_eq!(warning_values(&events), [["rec"]]);
+    // The check's failure is composed, so its command is a value beside the
+    // recommend.
+    assert_eq!(warning_values(&events), [["rec", "check-rec"]]);
 }
 
 // A recommend's own dependency is named as installed for the recommend, not
@@ -580,9 +580,9 @@ async fn a_recommends_dependency_is_named_for_the_recommend() {
         1,
         "{events:?}"
     );
-    // The check's failure stays text until selfie-2kwj makes it Composed, so
-    // only the two packages are parts here.
-    assert_eq!(warning_values(&events), [["lib", "rec"]]);
+    // The check's failure is composed, so its command is a value beside the
+    // two packages.
+    assert_eq!(warning_values(&events), [["lib", "rec", "check-lib"]]);
 }
 
 // An install command that fails is a warning naming the package, whole, so a
@@ -697,9 +697,13 @@ async fn a_shared_recommend_gap_is_warned_once_under_the_first_recommend() {
 // returns as an error.
 #[tokio::test]
 async fn a_post_install_check_that_could_not_start_fails_the_install() {
-    let events =
-        install_pkg_with_a_failing_check("pkg", CommandError::StdoutSpawn("check-pkg".to_string()))
-            .await;
+    let events = install_pkg_with_a_failing_check(
+        "pkg",
+        CommandError::StdoutSpawn {
+            command: "check-pkg".to_string(),
+        },
+    )
+    .await;
 
     let failure = failed(&events);
     assert!(

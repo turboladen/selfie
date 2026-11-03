@@ -360,7 +360,7 @@ mod tests {
         let result = status_style::format_list_status(
             &event::EnvironmentStatus::Unknown(event::UnknownStatus::CheckFailed(
                 event::CheckFailure::Canceled {
-                    message: selfie::commands::BoundedText::bound(b"Command canceled: check-x"),
+                    message: test_common::message("Command canceled: check-x"),
                 },
             )),
             false,
@@ -373,7 +373,7 @@ mod tests {
         let result = status_style::format_list_status(
             &event::EnvironmentStatus::Unknown(event::UnknownStatus::CheckFailed(
                 event::CheckFailure::ResultUnreadable {
-                    message: selfie::commands::BoundedText::bound(b"test error"),
+                    message: test_common::message("test error"),
                 },
             )),
             false,
@@ -726,7 +726,7 @@ mod tests {
             environments: vec![TEST_ENV.to_string()],
             status: event::EnvironmentStatus::Unknown(event::UnknownStatus::CheckFailed(
                 event::CheckFailure::Canceled {
-                    message: selfie::commands::BoundedText::bound(b"Command canceled: sleep 5"),
+                    message: test_common::message("Command canceled: sleep 5"),
                 },
             )),
         };
