@@ -24,7 +24,7 @@ use super::{
     runner::{
         CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
     },
-    terminal::{self, PromptHandler},
+    terminal::{self, Budget, PromptHandler},
 };
 
 mod content;
@@ -180,8 +180,9 @@ impl ShellCommandRunner {
             });
         }
 
+        let budget = Budget::new(timeout);
         let (mut child, has_terminal, asking) =
-            self.spawn(cmd, with_terminal, reported, working_dir)?;
+            self.spawn(cmd, with_terminal, reported, working_dir, &budget)?;
 
         // Both pipes are read *concurrently with* `wait()`, not after it. That is
         // what avoids the deadlock when a child produces more than the OS pipe
@@ -196,14 +197,12 @@ impl ShellCommandRunner {
             // finished inside its budget should be reported as finished, and an
             // unbiased `select!` picks at random when both arms are ready at once.
             biased;
-            result = tokio::time::timeout(
-                timeout,
-                collect(child.wait(), stdout, stderr, reported, &working_directory),
-            ) => result.unwrap_or_else(|_elapsed| Err(CommandError::Timeout {
+            result = collect(child.wait(), stdout, stderr, reported, &working_directory) => result,
+            () = budget.expired() => Err(CommandError::Timeout {
                 command: reported.to_string(),
                 timeout,
                 working_directory: working_directory.clone(),
-            })),
+            }),
             // Ahead of the terminal arm: Ctrl+C typed at a question cancels the
             // run, and the run should end canceled, not as a question nobody
             // could answer.
@@ -249,6 +248,7 @@ impl ShellCommandRunner {
         with_terminal: bool,
         reported: &'a str,
         working_dir: &'a Path,
+        budget: &'a Budget,
     ) -> Result<
         (
             tokio::process::Child,
@@ -261,7 +261,13 @@ impl ShellCommandRunner {
         let Started { child, terminal } = start(cmd, with_terminal)
             .map_err(|e| spawn_error(reported, &program, working_dir, e))?;
         let has_terminal = terminal.is_some();
-        let asking = terminal::watch(terminal, self.prompt.as_ref(), reported, working_dir);
+        let asking = terminal::watch(
+            terminal,
+            self.prompt.as_ref(),
+            budget,
+            reported,
+            working_dir,
+        );
         Ok((child, has_terminal, asking))
     }
 
@@ -331,7 +337,9 @@ impl CommandRunner for ShellCommandRunner {
         }
 
         let cmd = self.build_command(command, working_dir);
-        let (mut child, has_terminal, asking) = self.spawn(cmd, true, command, working_dir)?;
+        let budget = Budget::new(timeout);
+        let (mut child, has_terminal, asking) =
+            self.spawn(cmd, true, command, working_dir, &budget)?;
 
         let stdout = child
             .stdout
@@ -362,22 +370,20 @@ impl CommandRunner for ShellCommandRunner {
             // time. The old shape could not do that: its cancellation arm was
             // guarded `if !process_done`, so a completed command always won.
             biased;
-            result = tokio::time::timeout(
-                timeout,
-                drain_and_wait(
-                    &mut child,
-                    frames,
-                    &mut full_stdout,
-                    &mut full_stderr,
-                    &output_sender,
-                    command,
-                    &working_directory,
-                ),
-            ) => result.unwrap_or_else(|_elapsed| Err(CommandError::Timeout {
+            result = drain_and_wait(
+                &mut child,
+                frames,
+                &mut full_stdout,
+                &mut full_stderr,
+                &output_sender,
+                command,
+                &working_directory,
+            ) => result,
+            () = budget.expired() => Err(CommandError::Timeout {
                 command: command.to_string(),
                 timeout,
                 working_directory: working_directory.clone(),
-            })),
+            }),
             // Ahead of the terminal arm, as in `run_buffered`.
             () = token.cancelled() => Err(CommandError::Canceled {
                 command: command.to_string(),

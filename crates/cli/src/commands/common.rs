@@ -128,7 +128,16 @@ fn terminal_prompts(display: DisplayManager) -> PromptHandler {
             let asked = tokio::task::spawn_blocking(move || display.terminal_question(&prompt));
             match asked.await {
                 Ok(Ok(text)) => Some(TerminalAnswer::new(text)),
-                Ok(Err(_)) | Err(_) => None,
+                // The command fails as unanswered whatever the reason, so the
+                // reason is logged here, where it is known.
+                Ok(Err(failure)) => {
+                    tracing::debug!(?failure, "a command's question went unanswered");
+                    None
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "the task asking a command's question failed");
+                    None
+                }
             }
         }
     })

@@ -8,6 +8,8 @@
 
 use std::{future::Future, path::Path, pin::Pin, sync::Arc, time::Duration};
 
+use tokio::{sync::watch, time::Instant};
+
 use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
 use pty_process::{Pts, Pty};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -115,6 +117,58 @@ impl std::fmt::Debug for PromptHandler {
     }
 }
 
+/// The time one command may run, which does not pass while a question of its
+/// own waits for an answer.
+// A person typing a password is not the command running, and a budget that kept
+// counting would end the command in the middle of the answer. The deadline is
+// `None` while paused, and `left` holds what was unspent at that moment.
+pub(crate) struct Budget {
+    deadline: watch::Sender<Option<Instant>>,
+    left: std::sync::Mutex<Duration>,
+}
+
+impl Budget {
+    pub(crate) fn new(timeout: Duration) -> Self {
+        Self {
+            deadline: watch::Sender::new(Some(Instant::now() + timeout)),
+            left: std::sync::Mutex::new(timeout),
+        }
+    }
+
+    fn pause(&self) {
+        if let Some(at) = *self.deadline.borrow()
+            && let Ok(mut left) = self.left.lock()
+        {
+            *left = at.saturating_duration_since(Instant::now());
+        }
+        self.deadline.send_replace(None);
+    }
+
+    fn resume(&self) {
+        let left = self.left.lock().map_or(Duration::ZERO, |left| *left);
+        self.deadline.send_replace(Some(Instant::now() + left));
+    }
+
+    /// Resolves once the time has run out, not counting any time paused.
+    pub(crate) async fn expired(&self) {
+        let mut changes = self.deadline.subscribe();
+        loop {
+            let deadline = *changes.borrow_and_update();
+            match deadline {
+                Some(at) => {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(at) => return,
+                        _ = changes.changed() => {}
+                    }
+                }
+                None => {
+                    let _ = changes.changed().await;
+                }
+            }
+        }
+    }
+}
+
 /// The selfie side of a command's terminal.
 pub(crate) struct Terminal {
     pty: Pty,
@@ -130,19 +184,29 @@ pub(crate) struct Terminal {
 /// provide one, in which case the command runs without a terminal. The `Pts`
 /// goes to the command.
 pub(crate) fn open() -> Option<(Terminal, Pts)> {
+    // A command that runs without a terminal inherits selfie's own, so a prompt it
+    // writes to `/dev/tty` reaches the user behind whatever selfie is drawing.
+    // Each way of ending up there is logged, because nothing else says so.
+    const WITHOUT: &str = "a command runs without a terminal of its own";
     let (pty, pts) = pty_process::open()
-        .inspect_err(|error| tracing::debug!(%error, "no pseudo-terminal for a command"))
+        .inspect_err(|error| tracing::warn!(%error, "{WITHOUT}: no pseudo-terminal"))
         .ok()?;
     // Echo is off so that what selfie writes back, which may be a password, is
     // never copied onto the terminal's output and read as the next prompt. A
     // program that wants echo, such as `sudo`, turns it on or off for itself.
     // The settings go on the slave side because macOS refuses them on a master
     // whose slave is not open yet.
-    if let Ok(mut settings) = tcgetattr(&pts) {
-        settings.local_flags.remove(LocalFlags::ECHO);
-        let _ = tcsetattr(&pts, SetArg::TCSANOW, &settings);
-    }
-    let slave = std::os::fd::AsFd::as_fd(&pts).try_clone_to_owned().ok()?;
+    let mut settings = tcgetattr(&pts)
+        .inspect_err(|error| tracing::warn!(%error, "{WITHOUT}: no terminal settings"))
+        .ok()?;
+    settings.local_flags.remove(LocalFlags::ECHO);
+    tcsetattr(&pts, SetArg::TCSANOW, &settings)
+        .inspect_err(|error| tracing::warn!(%error, "{WITHOUT}: echo stays on"))
+        .ok()?;
+    let slave = std::os::fd::AsFd::as_fd(&pts)
+        .try_clone_to_owned()
+        .inspect_err(|error| tracing::warn!(%error, "{WITHOUT}: no spare descriptor"))
+        .ok()?;
     Some((Terminal { pty, _slave: slave }, pts))
 }
 
@@ -154,6 +218,7 @@ pub(crate) fn open() -> Option<(Terminal, Pts)> {
 pub(crate) async fn watch(
     terminal: Option<Terminal>,
     handler: Option<&PromptHandler>,
+    budget: &Budget,
     command: &str,
     working_directory: &Path,
 ) -> CommandError {
@@ -176,10 +241,12 @@ pub(crate) async fn watch(
                 let prompt =
                     TerminalPrompt::new(&String::from_utf8_lossy(&std::mem::take(&mut shown)));
                 let asked = BoundedText::bound(prompt.text().as_bytes());
+                budget.pause();
                 let answer = match handler {
                     Some(handler) => (handler.0)(prompt).await,
                     None => None,
                 };
+                budget.resume();
                 let Some(answer) = answer else {
                     return CommandError::InputRequired {
                         command: command.to_string(),

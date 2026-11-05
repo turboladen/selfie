@@ -432,9 +432,14 @@ mod prompts {
     // a prompt it does not know, such as one in another language or one that asks
     // for a PIN, and showing a secret cannot be undone while hiding an answer
     // costs the user only the echo.
+    //
+    // The form has to open with a bracket, as in `[y/N]` or `(yes/no)`. A bare
+    // `y/n` also occurs inside "passkey/nonce" and "API key/name".
     pub(super) fn is_confirmation(question: &str) -> bool {
         let question = question.to_lowercase();
-        ["y/n", "yes/no"].iter().any(|form| question.contains(form))
+        ["[y/n", "(y/n", "[yes/no", "(yes/no"]
+            .iter()
+            .any(|form| question.contains(form))
     }
 
     impl Prompt for dialoguer::Confirm<'_> {
@@ -3536,7 +3541,12 @@ mod tests {
     // secret asked for in words selfie does not know is still not shown.
     #[test]
     fn only_a_confirmation_is_asked_shown() {
-        for shown in ["Continue? [y/N]", "Proceed (yes/no)?", "Install now [Y/n]"] {
+        for shown in [
+            "Continue? [y/N]",
+            "Proceed (yes/no)?",
+            "Install now [Y/n]",
+            "Are you sure you want to continue connecting (yes/no/[fingerprint])?",
+        ] {
             assert!(prompts::is_confirmation(shown), "{shown}");
         }
         for hidden in [
@@ -3546,6 +3556,8 @@ mod tests {
             "PIN:",
             "Enter token:",
             "Apple ID:",
+            "Enter passkey/nonce:",
+            "API key/name:",
             "",
         ] {
             assert!(!prompts::is_confirmation(hidden), "{hidden}");

@@ -254,3 +254,43 @@ async fn an_answer_is_not_echoed_into_the_next_question() {
         texts[1]
     );
 }
+
+#[tokio::test]
+async fn time_spent_answering_does_not_count_against_the_timeout() {
+    // The handler takes longer than the whole budget to answer.
+    let handler = PromptHandler::new(|_| async {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        Some(TerminalAnswer::new("slow-typist".to_string()))
+    });
+    let dir = dir();
+
+    let output =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(2))
+            .with_prompt_handler(handler)
+            .execute(ASKS, dir.path(), &CancellationToken::new())
+            .await
+            .unwrap();
+
+    assert_eq!(output.stdout_str(), "got:slow-typist");
+}
+
+#[tokio::test]
+async fn the_time_left_after_an_answer_still_ends_the_command() {
+    let (handler, _) = answering("quick");
+    let dir = dir();
+    let started = Instant::now();
+
+    let error =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(2))
+            .with_prompt_handler(handler)
+            .execute(
+                &format!("{ASKS}; sleep 30"),
+                dir.path(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+
+    assert!(matches!(error, CommandError::Timeout { .. }), "{error:?}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
