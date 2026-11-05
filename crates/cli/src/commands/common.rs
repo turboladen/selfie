@@ -5,7 +5,7 @@
 
 use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use selfie::{
-    commands::{PromptHandler, ShellCommandRunner, TerminalAnswer, TerminalReply},
+    commands::{PromptHandler, ShellCommandRunner, TerminalAnswer},
     dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
     fs::{filesystem::FileSystem, real::RealFileSystem},
     git::GixGitAdapter,
@@ -127,8 +127,8 @@ fn terminal_prompts(display: DisplayManager) -> PromptHandler {
             // dialoguer waits on the terminal, so it reads off the async threads.
             let asked = tokio::task::spawn_blocking(move || display.terminal_question(&prompt));
             match asked.await {
-                Ok(Ok(text)) => TerminalReply::Answer(TerminalAnswer::new(text)),
-                Ok(Err(_)) | Err(_) => TerminalReply::Decline,
+                Ok(Ok(text)) => Some(TerminalAnswer::new(text)),
+                Ok(Err(_)) | Err(_) => None,
             }
         }
     })

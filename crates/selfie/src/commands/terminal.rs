@@ -48,11 +48,21 @@ impl TerminalPrompt {
         &self.text
     }
 
-    /// The last line of [`text`](Self::text), which is the question itself;
-    /// the lines above it are what the command said before asking.
+    /// The last line of [`text`](Self::text), which is the question itself.
     #[must_use]
     pub fn question(&self) -> &str {
-        self.text.rsplit('\n').next().unwrap_or_default().trim()
+        self.split().1.trim()
+    }
+
+    /// The lines above [`question`](Self::question), which is what the command
+    /// said before it asked. Empty when it said nothing.
+    #[must_use]
+    pub fn said(&self) -> &str {
+        self.split().0.trim()
+    }
+
+    fn split(&self) -> (&str, &str) {
+        self.text.rsplit_once('\n').unwrap_or(("", &self.text))
     }
 }
 
@@ -76,22 +86,13 @@ impl std::fmt::Debug for TerminalAnswer {
     }
 }
 
-/// How a [`PromptHandler`] settled a [`TerminalPrompt`].
-#[derive(Debug)]
-pub enum TerminalReply {
-    /// The user answered.
-    Answer(TerminalAnswer),
-    /// Nobody can answer, so the command fails with
-    /// [`CommandError::InputRequired`].
-    Decline,
-}
-
-type ReplyFuture = Pin<Box<dyn Future<Output = TerminalReply> + Send>>;
+type ReplyFuture = Pin<Box<dyn Future<Output = Option<TerminalAnswer>> + Send>>;
 
 /// Answers the prompts a command writes to its terminal.
 ///
-/// A runner built without one fails any command that asks, because nothing can
-/// answer. The caller supplies the handler because only it knows whether a
+/// A handler answers with `None` when nobody can, which fails the command with
+/// [`CommandError::InputRequired`]. A runner built without one fails any command
+/// that asks. The caller supplies the handler because only it knows whether a
 /// person is at a terminal.
 #[derive(Clone)]
 pub struct PromptHandler(Arc<dyn Fn(TerminalPrompt) -> ReplyFuture + Send + Sync>);
@@ -102,7 +103,7 @@ impl PromptHandler {
     pub fn new<F, Fut>(answer: F) -> Self
     where
         F: Fn(TerminalPrompt) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = TerminalReply> + Send + 'static,
+        Fut: Future<Output = Option<TerminalAnswer>> + Send + 'static,
     {
         Self(Arc::new(move |prompt| Box::pin(answer(prompt))))
     }
@@ -151,12 +152,14 @@ pub(crate) fn open() -> Option<(Terminal, Pts)> {
 /// resolves while the command runs and asks nothing, and it stays pending once
 /// the terminal closes, so the caller races it against the command's exit.
 pub(crate) async fn watch(
-    terminal: Terminal,
+    terminal: Option<Terminal>,
     handler: Option<&PromptHandler>,
     command: &str,
     working_directory: &Path,
 ) -> CommandError {
-    let Terminal { mut pty, _slave } = terminal;
+    let Some(Terminal { mut pty, _slave }) = terminal else {
+        return std::future::pending().await;
+    };
     let mut shown = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
@@ -164,33 +167,37 @@ pub(crate) async fn watch(
         // program has stopped writing.
         let asking = !shown.is_empty() && !shown.ends_with(b"\n");
         let read = if asking {
-            match tokio::time::timeout(QUIET, pty.read(&mut chunk)).await {
-                Ok(read) => read,
-                Err(_quiet) => {
-                    let prompt = prompt_from(&shown);
-                    shown.clear();
-                    let asked = BoundedText::bound(prompt.text().as_bytes());
-                    let Some(reply) = answer(handler, prompt).await else {
-                        return CommandError::InputRequired {
-                            command: command.to_string(),
-                            working_directory: working_directory.to_path_buf(),
-                            prompt: asked,
-                        };
-                    };
-                    let mut line = Zeroizing::new(reply.0.as_bytes().to_vec());
-                    line.push(b'\n');
-                    if pty.write_all(&line).await.is_err() {
-                        break;
-                    }
-                    continue;
-                }
-            }
+            tokio::time::timeout(QUIET, pty.read(&mut chunk)).await
         } else {
-            pty.read(&mut chunk).await
+            Ok(pty.read(&mut chunk).await)
         };
         match read {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
+            Err(_quiet) => {
+                let prompt =
+                    TerminalPrompt::new(&String::from_utf8_lossy(&std::mem::take(&mut shown)));
+                let asked = BoundedText::bound(prompt.text().as_bytes());
+                let answer = match handler {
+                    Some(handler) => (handler.0)(prompt).await,
+                    None => None,
+                };
+                let Some(answer) = answer else {
+                    return CommandError::InputRequired {
+                        command: command.to_string(),
+                        working_directory: working_directory.to_path_buf(),
+                        prompt: asked,
+                    };
+                };
+                // Two writes, so the answer is never copied into a buffer that
+                // holds the newline too and is freed without being wiped. A
+                // terminal in line mode hands nothing to the command until the
+                // newline arrives.
+                let sent = pty.write_all(answer.0.as_bytes()).await;
+                if sent.and(pty.write_all(b"\n").await).is_err() {
+                    break;
+                }
+            }
+            Ok(Ok(0) | Err(_)) => break,
+            Ok(Ok(read)) => {
                 shown.extend_from_slice(&chunk[..read]);
                 if shown.len() > KEPT_BYTES {
                     shown.drain(..shown.len() - KEPT_BYTES);
@@ -199,16 +206,4 @@ pub(crate) async fn watch(
         }
     }
     std::future::pending().await
-}
-
-async fn answer(handler: Option<&PromptHandler>, prompt: TerminalPrompt) -> Option<TerminalAnswer> {
-    let reply = (handler?.0)(prompt).await;
-    match reply {
-        TerminalReply::Answer(answer) => Some(answer),
-        TerminalReply::Decline => None,
-    }
-}
-
-fn prompt_from(bytes: &[u8]) -> TerminalPrompt {
-    TerminalPrompt::new(&String::from_utf8_lossy(bytes))
 }

@@ -106,6 +106,8 @@ impl fmt::Display for ForeignText<'_> {
 pub enum Subcommand {
     /// `selfie apply`.
     Apply,
+    /// `selfie package check`.
+    PackageCheck,
     /// `selfie package install`.
     PackageInstall,
     /// `selfie package track-dotfile`.
@@ -117,6 +119,7 @@ impl Subcommand {
     fn word(self) -> &'static str {
         match self {
             Self::Apply => "apply",
+            Self::PackageCheck => "package check",
             Self::PackageInstall => "package install",
             Self::PackageTrackDotfile => "package track-dotfile",
         }
@@ -167,13 +170,21 @@ impl SuggestedCommand {
         })
     }
 
-    /// The command running `selfie package install` on the package `name`,
-    /// quoted as one shell word after `--` when it starts with a dash, or
-    /// `None` when `name` holds NUL.
+    /// The command that runs `operation` again, for an operation on one named
+    /// package that has a command of its own. `None` for any other operation, and
+    /// when the package name holds NUL, which no shell word can carry. The name is
+    /// quoted as one shell word, after `--` when it starts with a dash.
     #[must_use]
-    pub fn install(name: &str) -> Option<Self> {
-        crate::fs::shell_operand(name).map(|word| Self {
-            program: Program::Selfie(Subcommand::PackageInstall),
+    pub fn for_operation(operation: &crate::package::event::OperationInfo) -> Option<Self> {
+        use crate::package::event::OperationType;
+
+        let subcommand = match operation.operation_type {
+            OperationType::PackageInstall => Subcommand::PackageInstall,
+            OperationType::PackageCheck => Subcommand::PackageCheck,
+            _ => return None,
+        };
+        crate::fs::shell_operand(&operation.package_name).map(|word| Self {
+            program: Program::Selfie(subcommand),
             word,
         })
     }

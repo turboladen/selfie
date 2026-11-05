@@ -1,22 +1,12 @@
-// What an install does when its command asks a question on the terminal, as
-// `sudo` does for a password. The question has to reach whoever can answer it,
-// and when nobody can, the install has to fail instead of waiting.
-
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
-use selfie::package::SpecOrigin;
 use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
 
 use selfie::{
-    commands::{PromptHandler, ShellCommandRunner, TerminalAnswer, TerminalReply},
-    config::SelfieConfigBuilder,
-    fs::RealFileSystem,
+    commands::{PromptHandler, ShellCommandRunner, TerminalAnswer},
     package::{
         event::{CheckFailure, OperationFailure, OperationResult, PackageEvent},
-        repository::YamlPackageRepository,
-        service::{InstallOptions, PackageService, PackageServiceImpl},
+        service::{InstallOptions, PackageService},
     },
 };
 
@@ -25,65 +15,35 @@ use selfie::{
 // check looks for.
 const INSTALL: &str = r#"printf 'Password: ' > /dev/tty; IFS= read -r pw < /dev/tty; [ "$pw" = open-sesame ] && touch installed"#;
 
-fn service(temp: &TempDir, runner: ShellCommandRunner) -> impl PackageService {
-    let package_dir = temp.path().to_path_buf();
+fn runner() -> ShellCommandRunner {
+    ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30))
+}
+
+// Install `pkg`, whose spec lives in `temp`, with `runner` running its commands.
+async fn install(temp: &TempDir, runner: ShellCommandRunner) -> Vec<PackageEvent> {
     std::fs::write(
-        package_dir.join("pkg.yml"),
+        temp.path().join("pkg.yml"),
         format!(
             "name: pkg\nenvironments:\n  test:\n    check: \"test -f installed\"\n    install: |-\n      {INSTALL}\n"
         ),
     )
     .unwrap();
+    let service = test_common::create_service_test_service_with_runner(temp, runner);
 
-    let config = SelfieConfigBuilder::default()
-        .environment("test")
-        .package_directory(&package_dir)
-        .build();
-
-    PackageServiceImpl::new(
-        YamlPackageRepository::new(RealFileSystem, package_dir, SpecOrigin::PackageDirectory),
-        YamlPackageRepository::new(
-            RealFileSystem,
-            config.dotfiles_directory(),
-            SpecOrigin::DotfilesDirectory,
-        ),
-        runner,
-        test_common::isolated_git_adapter(),
-        config,
-        CancellationToken::new(),
-    )
-}
-
-fn runner() -> ShellCommandRunner {
-    ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30))
-}
-
-async fn install(service: impl PackageService) -> Vec<PackageEvent> {
-    service
-        .install("pkg", InstallOptions::default())
-        .await
-        .collect()
-        .await
+    test_common::collect_events(service.install("pkg", InstallOptions::default()).await).await
 }
 
 fn completed(events: &[PackageEvent]) -> &OperationResult {
-    events
-        .iter()
-        .find_map(|event| match event {
-            PackageEvent::Completed { result, .. } => Some(result),
-            _ => None,
-        })
-        .expect("the install should complete")
+    test_common::get_operation_result(events).expect("the install should complete")
 }
 
 #[tokio::test]
 async fn an_install_that_asks_for_a_password_gets_the_answer_and_finishes() {
     let temp = TempDir::new().unwrap();
-    let handler = PromptHandler::new(|_| async {
-        TerminalReply::Answer(TerminalAnswer::new("open-sesame".to_string()))
-    });
+    let handler =
+        PromptHandler::new(|_| async { Some(TerminalAnswer::new("open-sesame".to_string())) });
 
-    let events = install(service(&temp, runner().with_prompt_handler(handler))).await;
+    let events = install(&temp, runner().with_prompt_handler(handler)).await;
 
     assert!(
         matches!(completed(&events), OperationResult::Success(_)),
@@ -100,7 +60,7 @@ async fn an_install_that_asks_and_cannot_be_answered_fails_naming_the_question()
     let temp = TempDir::new().unwrap();
     let started = Instant::now();
 
-    let events = install(service(&temp, runner())).await;
+    let events = install(&temp, runner()).await;
 
     assert!(
         started.elapsed() < Duration::from_secs(10),

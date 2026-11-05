@@ -411,10 +411,7 @@ mod prompts {
         ) -> Result<String, PromptFailure> {
             let question = Name::new(prompt.question());
             let text = self.prompt_text(question);
-            let said = prompt
-                .text()
-                .rsplit_once('\n')
-                .map_or("", |(said, _)| said.trim());
+            let said = prompt.said();
             let note = (!said.is_empty()).then(|| shown!("{}", Name::new(said)));
             let theme = self.theme();
             if is_confirmation(prompt.question()) {

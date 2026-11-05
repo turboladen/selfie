@@ -8,7 +8,7 @@ use std::{
 };
 
 use selfie::commands::{
-    CommandError, CommandRunner, PromptHandler, ShellCommandRunner, TerminalAnswer, TerminalReply,
+    CommandError, CommandRunner, PromptHandler, ShellCommandRunner, TerminalAnswer,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -33,7 +33,7 @@ fn answering(answer: &'static str) -> (PromptHandler, Arc<Mutex<Vec<String>>>) {
     let seen = Arc::clone(&asked);
     let handler = PromptHandler::new(move |prompt| {
         seen.lock().unwrap().push(prompt.question().to_string());
-        async move { TerminalReply::Answer(TerminalAnswer::new(answer.to_string())) }
+        async move { Some(TerminalAnswer::new(answer.to_string())) }
     });
     (handler, asked)
 }
@@ -109,7 +109,7 @@ async fn a_question_nothing_can_answer_fails_the_command_at_once() {
 
 #[tokio::test]
 async fn a_declined_question_fails_the_command_too() {
-    let handler = PromptHandler::new(|_| async { TerminalReply::Decline });
+    let handler = PromptHandler::new(|_| async { None });
     let dir = dir();
 
     let error = runner()
@@ -135,7 +135,7 @@ async fn a_failure_names_the_question_and_never_the_answer() {
 
     let sentence = error.to_string();
     assert!(sentence.contains("Password:"), "{sentence}");
-    assert!(sentence.contains("no terminal to ask on"), "{sentence}");
+    assert!(sentence.contains("nothing answered it"), "{sentence}");
 }
 
 #[tokio::test]
@@ -234,7 +234,7 @@ async fn an_answer_is_not_echoed_into_the_next_question() {
     let seen = Arc::clone(&texts);
     let handler = PromptHandler::new(move |prompt| {
         seen.lock().unwrap().push(prompt.text().to_string());
-        async { TerminalReply::Answer(TerminalAnswer::new("first-secret-value".to_string())) }
+        async { Some(TerminalAnswer::new("first-secret-value".to_string())) }
     });
     let dir = dir();
     // Neither question turns echo off, as `sudo` does for itself.

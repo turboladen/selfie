@@ -691,7 +691,7 @@ impl crate::parts::Composed for CommandError {
                 Parts::new()
                     .text("Command '")
                     .spec_command_within(command, ran)
-                    .text("' asked for input on its terminal, and this run has no terminal to ask on: ")
+                    .text("' asked for input on its terminal, and nothing answered it: ")
                     .cause_within(prompt.as_str(), asked)
             }
             Self::StdoutSpawn { command } => Parts::new()

@@ -180,14 +180,8 @@ impl ShellCommandRunner {
             });
         }
 
-        let program = program_of(&cmd);
-        let Started {
-            mut child,
-            terminal,
-        } = start(cmd, with_terminal)
-            .map_err(|e| spawn_error(reported, &program, working_dir, e))?;
-        let has_terminal = terminal.is_some();
-        let asking = self.watch_terminal(terminal, reported, working_dir);
+        let (mut child, has_terminal, asking) =
+            self.spawn(cmd, with_terminal, reported, working_dir)?;
 
         // Both pipes are read *concurrently with* `wait()`, not after it. That is
         // what avoids the deadlock when a child produces more than the OS pipe
@@ -246,23 +240,29 @@ impl ShellCommandRunner {
         })
     }
 
-    /// Answer `terminal`'s prompts, resolving only with the failure that ends the
-    /// command. Pending forever when there is no terminal.
-    fn watch_terminal(
-        &self,
-        terminal: Option<terminal::Terminal>,
-        command: &str,
-        working_dir: &Path,
-    ) -> impl Future<Output = CommandError> {
-        let handler = self.prompt.clone();
-        let command = command.to_string();
-        let working_dir = working_dir.to_path_buf();
-        async move {
-            match terminal {
-                Some(pty) => terminal::watch(pty, handler.as_ref(), &command, &working_dir).await,
-                None => std::future::pending().await,
-            }
-        }
+    /// Start `cmd` and return the child, whether it has a terminal, and the
+    /// future that answers that terminal's prompts. The future resolves only with
+    /// the failure that ends the command, and never when there is no terminal.
+    fn spawn<'a>(
+        &'a self,
+        cmd: Command,
+        with_terminal: bool,
+        reported: &'a str,
+        working_dir: &'a Path,
+    ) -> Result<
+        (
+            tokio::process::Child,
+            bool,
+            impl Future<Output = CommandError> + 'a,
+        ),
+        CommandError,
+    > {
+        let program = program_of(&cmd);
+        let Started { child, terminal } = start(cmd, with_terminal)
+            .map_err(|e| spawn_error(reported, &program, working_dir, e))?;
+        let has_terminal = terminal.is_some();
+        let asking = terminal::watch(terminal, self.prompt.as_ref(), reported, working_dir);
+        Ok((child, has_terminal, asking))
     }
 
     /// The default shell path, `/bin/sh`.
@@ -331,13 +331,7 @@ impl CommandRunner for ShellCommandRunner {
         }
 
         let cmd = self.build_command(command, working_dir);
-        let program = program_of(&cmd);
-        let Started {
-            mut child,
-            terminal,
-        } = start(cmd, true).map_err(|e| spawn_error(command, &program, working_dir, e))?;
-        let has_terminal = terminal.is_some();
-        let asking = self.watch_terminal(terminal, command, working_dir);
+        let (mut child, has_terminal, asking) = self.spawn(cmd, true, command, working_dir)?;
 
         let stdout = child
             .stdout
@@ -384,6 +378,7 @@ impl CommandRunner for ShellCommandRunner {
                 timeout,
                 working_directory: working_directory.clone(),
             })),
+            // Ahead of the terminal arm, as in `run_buffered`.
             () = token.cancelled() => Err(CommandError::Canceled {
                 command: command.to_string(),
                 working_directory: working_directory.clone(),
@@ -515,7 +510,7 @@ fn program_of(cmd: &Command) -> String {
 /// End a command that is being given up on, and every process it started when
 /// it had a terminal.
 // A command on its own terminal is a session leader, so the terminal's SIGINT
-// no longer reaches the programs it started, and killing the shell alone would
+// does not reach the programs it started, and killing the shell alone would
 // leave a `brew` or `mas` running after the run ended. The session leader's
 // process group id is its pid. Killing a group that is already gone is not an
 // error worth reporting.

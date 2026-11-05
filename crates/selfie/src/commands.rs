@@ -9,7 +9,7 @@ pub use runner::{
     OutputStream,
 };
 pub use shell::ShellCommandRunner;
-pub use terminal::{PromptHandler, TerminalAnswer, TerminalPrompt, TerminalReply};
+pub use terminal::{PromptHandler, TerminalAnswer, TerminalPrompt};
 
 #[cfg(feature = "with_mocks")]
 pub use runner::MockCommandRunner;

@@ -4794,7 +4794,7 @@ pub enum CheckFailure {
     /// The check ran past `command_timeout` and was stopped.
     TimedOut(TimedOut),
     /// The command asked for input on its terminal, such as a password, and the
-    /// run had no terminal to ask on, so it was ended.
+    /// run could not answer it, so it was ended.
     InputRequired {
         /// The error's sentence, naming the command and what it asked.
         message: Message,
