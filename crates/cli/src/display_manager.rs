@@ -396,8 +396,8 @@ mod prompts {
 
     impl DisplayManager {
         /// Ask the question a command wrote to its terminal and return what the
-        /// user typed. A question that names a password, passphrase or passcode
-        /// is asked with the answer hidden.
+        /// user typed. The answer is hidden unless the question is a yes-or-no
+        /// confirmation.
         ///
         /// What the command said above its question is noted over the prompt,
         /// escaped, because the command's own text may hold terminal escapes.
@@ -417,26 +417,27 @@ mod prompts {
                 .map_or("", |(said, _)| said.trim());
             let note = (!said.is_empty()).then(|| shown!("{}", Name::new(said)));
             let theme = self.theme();
-            if asks_for_secret(prompt.question()) {
-                self.prompt_under(note, HiddenLine { text })
-            } else {
+            if is_confirmation(prompt.question()) {
                 self.prompt_under(
                     note,
                     dialoguer::Input::<String>::with_theme(theme.as_ref())
                         .with_prompt(text)
                         .allow_empty(true),
                 )
+            } else {
+                self.prompt_under(note, HiddenLine { text })
             }
         }
     }
 
-    // Whether `question` asks for something that is not echoed back. A question
-    // that names none of these is shown as typed.
-    pub(super) fn asks_for_secret(question: &str) -> bool {
+    // Whether `question` is a yes-or-no confirmation, whose answer is shown as
+    // typed. Every other answer is hidden: a word list for secrets fails open on
+    // a prompt it does not know, such as one in another language or one that asks
+    // for a PIN, and showing a secret cannot be undone while hiding an answer
+    // costs the user only the echo.
+    pub(super) fn is_confirmation(question: &str) -> bool {
         let question = question.to_lowercase();
-        ["password", "passphrase", "passcode"]
-            .iter()
-            .any(|word| question.contains(word))
+        ["y/n", "yes/no"].iter().any(|form| question.contains(form))
     }
 
     impl Prompt for dialoguer::Confirm<'_> {
@@ -3534,19 +3535,23 @@ mod tests {
         assert!(dm.printed().is_empty(), "{:?}", dm.printed());
     }
 
-    // A question about a password is not echoed; one about anything else is.
+    // An answer is hidden unless the question is a yes-or-no confirmation, so a
+    // secret asked for in words selfie does not know is still not shown.
     #[test]
-    fn only_a_question_naming_a_password_is_asked_hidden() {
+    fn only_a_confirmation_is_asked_shown() {
+        for shown in ["Continue? [y/N]", "Proceed (yes/no)?", "Install now [Y/n]"] {
+            assert!(prompts::is_confirmation(shown), "{shown}");
+        }
         for hidden in [
             "Password:",
             "[sudo] password for me:",
-            "Enter passphrase for key '/k':",
-            "PASSCODE:",
+            "Passwort:",
+            "PIN:",
+            "Enter token:",
+            "Apple ID:",
+            "",
         ] {
-            assert!(prompts::asks_for_secret(hidden), "{hidden}");
-        }
-        for shown in ["Apple ID:", "Continue? [y/N]", "Press RETURN:", ""] {
-            assert!(!prompts::asks_for_secret(shown), "{shown}");
+            assert!(!prompts::is_confirmation(hidden), "{hidden}");
         }
     }
 

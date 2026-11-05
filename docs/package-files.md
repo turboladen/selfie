@@ -654,8 +654,8 @@ A command can ask a question through the terminal, as `sudo` does for a password
 an Apple ID. selfie runs every command with a terminal of its own, apart from the one a dotfile
 `command:` source runs. A question the command writes there, and then waits on with the line
 unfinished, is asked on your terminal with the spinner paused, and what you type goes back to the
-command. A question that names a password, passphrase or passcode is asked without showing what you
-type. Ctrl+C at the question cancels the run.
+command. What you type is not shown, except for a yes-or-no confirmation such as `[y/N]`. Ctrl+C at
+the question cancels the run.
 
 - The command's stdin is still closed, and its stdout and stderr are still captured, so a program
   that checks whether they are terminals sees what it always did. Only what it writes to `/dev/tty`
