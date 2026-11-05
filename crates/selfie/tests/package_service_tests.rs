@@ -3383,6 +3383,7 @@ mod blank_commands {
                 CommandError::Timeout {
                     command: "check-slow".to_string(),
                     timeout: std::time::Duration::from_secs(1),
+                    limit: selfie::commands::runner::TimeLimit::Total,
                     working_directory: std::path::PathBuf::from("/"),
                 },
             )
@@ -3399,7 +3400,11 @@ mod blank_commands {
             matches!(
                 failure(&events),
                 OperationFailure::CommandError(CommandFailure::TimedOut(timed_out))
-                    if *timed_out == TimedOut::new("check-slow", std::time::Duration::from_secs(1))
+                    if *timed_out == TimedOut::new(
+                        "check-slow",
+                        std::time::Duration::from_secs(1),
+                        selfie::commands::runner::TimeLimit::Total,
+                    )
             ),
             "{events:?}"
         );
@@ -3608,19 +3613,20 @@ mod timeouts {
     use std::{path::PathBuf, time::Duration};
 
     use selfie::{
-        commands::runner::{CommandError, TimedOut},
+        commands::runner::{CommandError, TimeLimit, TimedOut},
         package::event::CommandFailure,
     };
     use test_common::{FakeCommandRunner, create_service_test_service_with_runner};
 
     use super::*;
 
-    fn timing_out(command: &str) -> FakeCommandRunner {
+    fn timing_out(command: &str, limit: TimeLimit) -> FakeCommandRunner {
         FakeCommandRunner::new().erroring(
             command,
             CommandError::Timeout {
                 command: command.to_string(),
                 timeout: Duration::from_secs(2),
+                limit,
                 working_directory: PathBuf::from("/"),
             },
         )
@@ -3656,24 +3662,24 @@ mod timeouts {
 
     #[tokio::test]
     async fn a_check_that_times_out_fails_as_a_timeout() {
-        let events = run(timing_out("check-app"), true).await;
+        let events = run(timing_out("check-app", TimeLimit::Total), true).await;
 
         assert_eq!(
             timed_out(&events),
-            TimedOut::new("check-app", Duration::from_secs(2))
+            TimedOut::new("check-app", Duration::from_secs(2), TimeLimit::Total)
         );
     }
 
     #[tokio::test]
     async fn an_install_that_times_out_fails_as_the_same_timeout() {
         // The pre-install check answers "not installed", so the install runs.
-        let runner = timing_out("install-app").failing("check-app", b"");
+        let runner = timing_out("install-app", TimeLimit::Silence).failing("check-app", b"");
 
         let events = run(runner, false).await;
 
         assert_eq!(
             timed_out(&events),
-            TimedOut::new("install-app", Duration::from_secs(2))
+            TimedOut::new("install-app", Duration::from_secs(2), TimeLimit::Silence)
         );
     }
 }
@@ -3685,7 +3691,7 @@ mod checks_that_gave_no_answer {
     use std::{path::PathBuf, time::Duration};
 
     use selfie::{
-        commands::runner::{CommandError, TimedOut},
+        commands::runner::{CommandError, TimeLimit, TimedOut},
         package::event::{CheckFailure, CheckResult, EnvironmentStatus, UnknownStatus},
     };
     use test_common::{FakeCommandRunner, create_service_test_service_with_runner};
@@ -3702,12 +3708,13 @@ mod checks_that_gave_no_answer {
         )
     }
 
-    fn timing_out(command: &str) -> FakeCommandRunner {
+    fn timing_out(command: &str, limit: TimeLimit) -> FakeCommandRunner {
         FakeCommandRunner::new().erroring(
             command,
             CommandError::Timeout {
                 command: command.to_string(),
                 timeout: Duration::from_secs(2),
+                limit,
                 working_directory: PathBuf::from("/"),
             },
         )
@@ -3873,7 +3880,7 @@ mod checks_that_gave_no_answer {
         let dir = TempDir::new().unwrap();
         app_and_dep(&dir);
 
-        let statuses = dependency_statuses(&dir, timing_out("check-dep")).await;
+        let statuses = dependency_statuses(&dir, timing_out("check-dep", TimeLimit::Total)).await;
 
         assert!(
             matches!(
@@ -3882,7 +3889,7 @@ mod checks_that_gave_no_answer {
                     &dep.status,
                     EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
                         CheckFailure::TimedOut(timed_out)
-                    )) if *timed_out == TimedOut::new("check-dep", Duration::from_secs(2))
+                    )) if *timed_out == TimedOut::new("check-dep", Duration::from_secs(2), TimeLimit::Total)
                 )
             ),
             "{statuses:?}"

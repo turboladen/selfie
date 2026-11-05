@@ -2020,7 +2020,11 @@ mod tests {
         };
 
         let gap = EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(
-            TimedOut::new("check-dep", std::time::Duration::from_secs(1)),
+            TimedOut::new(
+                "check-dep",
+                std::time::Duration::from_secs(1),
+                selfie::commands::runner::TimeLimit::Total,
+            ),
         )))
         .gap("dep")
         .expect("a check that timed out is a gap");
@@ -2643,6 +2647,7 @@ mod tests {
                 selfie::commands::runner::TimedOut::new(
                     "check-p",
                     std::time::Duration::from_secs(1),
+                    selfie::commands::runner::TimeLimit::Total,
                 ),
             ))),
             row(CheckResult::Success {
@@ -2724,6 +2729,7 @@ mod tests {
                     CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
                         "sleep 5",
                         std::time::Duration::from_secs(1),
+                        selfie::commands::runner::TimeLimit::Total,
                     )),
                 )),
             },

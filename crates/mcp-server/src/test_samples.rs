@@ -72,6 +72,7 @@ pub(crate) fn every_labeled_reason() -> Vec<UnknownStatus> {
         CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
             "c",
             std::time::Duration::from_secs(1),
+            selfie::commands::runner::TimeLimit::Total,
         )),
         CheckFailure::CouldNotStart {
             message: test_common::message("m"),

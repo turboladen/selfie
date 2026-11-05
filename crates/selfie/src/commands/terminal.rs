@@ -123,6 +123,7 @@ impl std::fmt::Debug for PromptHandler {
 // counting would end the command in the middle of the answer. The deadline is
 // `None` while paused, and `left` holds what was unspent at that moment.
 pub(crate) struct Budget {
+    timeout: Duration,
     deadline: watch::Sender<Option<Instant>>,
     left: std::sync::Mutex<Duration>,
 }
@@ -130,6 +131,7 @@ pub(crate) struct Budget {
 impl Budget {
     pub(crate) fn new(timeout: Duration) -> Self {
         Self {
+            timeout,
             deadline: watch::Sender::new(Some(Instant::now() + timeout)),
             left: std::sync::Mutex::new(timeout),
         }
@@ -147,6 +149,22 @@ impl Budget {
     fn resume(&self) {
         let left = self.left.lock().map_or(Duration::ZERO, |left| *left);
         self.deadline.send_replace(Some(Instant::now() + left));
+    }
+
+    /// Gives the command its whole allowance again, so the budget counts time
+    /// since the last restart. A budget paused for a question stays paused and
+    /// resumes with the full allowance.
+    pub(crate) fn restart(&self) {
+        if let Ok(mut left) = self.left.lock() {
+            *left = self.timeout;
+        }
+        self.deadline.send_if_modified(|deadline| match deadline {
+            Some(at) => {
+                *at = Instant::now() + self.timeout;
+                true
+            }
+            None => false,
+        });
     }
 
     /// Resolves once the time has run out, not counting any time paused.
@@ -273,4 +291,49 @@ pub(crate) async fn watch(
         }
     }
     std::future::pending().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The clock is paused, so the sleeps below cost nothing and the deadlines
+    // are exact.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_gives_the_whole_allowance_again() {
+        let budget = Budget::new(Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        budget.restart();
+
+        // 9 seconds after the restart is inside the allowance; 10 is not.
+        let early = tokio::time::timeout(Duration::from_secs(9), budget.expired()).await;
+        assert!(
+            early.is_err(),
+            "the budget ran out before its restart allowance"
+        );
+        let late = tokio::time::timeout(Duration::from_secs(2), budget.expired()).await;
+        assert!(late.is_ok(), "the budget outlasted its restart allowance");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_while_paused_leaves_the_budget_paused_and_resumes_with_the_whole_allowance()
+    {
+        let budget = Budget::new(Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        budget.pause();
+
+        budget.restart();
+
+        let paused = tokio::time::timeout(Duration::from_secs(100), budget.expired()).await;
+        assert!(paused.is_err(), "a paused budget expired");
+        budget.resume();
+        let resumed = tokio::time::timeout(Duration::from_secs(9), budget.expired()).await;
+        assert!(
+            resumed.is_err(),
+            "resumed with less than the whole allowance"
+        );
+        let expired = tokio::time::timeout(Duration::from_secs(2), budget.expired()).await;
+        assert!(expired.is_ok());
+    }
 }

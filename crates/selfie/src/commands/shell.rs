@@ -23,6 +23,7 @@ use tokio_util::{
 use super::{
     runner::{
         CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
+        TimeLimit,
     },
     terminal::{self, Budget, PromptHandler},
 };
@@ -201,6 +202,7 @@ impl ShellCommandRunner {
             () = budget.expired() => Err(CommandError::Timeout {
                 command: reported.to_string(),
                 timeout,
+                limit: TimeLimit::Total,
                 working_directory: working_directory.clone(),
             }),
             // Ahead of the terminal arm: Ctrl+C typed at a question cancels the
@@ -357,10 +359,14 @@ impl CommandRunner for ShellCommandRunner {
         let mut full_stdout = Vec::new();
         let mut full_stderr = Vec::new();
 
+        // Tapped here, ahead of the relay in `drain_and_wait`, which may drop a
+        // chunk: output the receiver did not take is still output the command
+        // produced.
         let frames = futures::stream::select(
             tagged_frames(stdout, OutputStream::Stdout),
             tagged_frames(stderr, OutputStream::Stderr),
-        );
+        )
+        .inspect(|_| budget.restart());
 
         let outcome = tokio::select! {
             // Biased so a command that finished within its budget is reported as
@@ -379,9 +385,13 @@ impl CommandRunner for ShellCommandRunner {
                 command,
                 &working_directory,
             ) => result,
+            // The silence limit runs beside the drain rather than inside it, so
+            // it also covers a child that closed its pipes and keeps running,
+            // and one whose grandchild holds a pipe open after the child exits.
             () = budget.expired() => Err(CommandError::Timeout {
                 command: command.to_string(),
                 timeout,
+                limit: TimeLimit::Silence,
                 working_directory: working_directory.clone(),
             }),
             // Ahead of the terminal arm, as in `run_buffered`.
@@ -765,7 +775,7 @@ where
 //
 // The success path still requires both: the status and both pipes at EOF. That
 // avoids the ~64KB pipe-buffer deadlock, and is why a grandchild holding the pipe
-// open runs out the timeout rather than hanging past it.
+// open runs into the caller's silence limit rather than hanging past it.
 async fn drain_and_wait<S>(
     child: &mut tokio::process::Child,
     frames: S,
@@ -1160,7 +1170,7 @@ mod tests {
             .await;
 
         assert!(
-            matches!(result, Err(CommandError::Timeout { .. })),
+            stopped_by(&result, TimeLimit::Total),
             "a command past its timeout was reported as: {result:?}"
         );
         assert!(
@@ -1248,10 +1258,7 @@ mod tests {
             )
             .await;
 
-        assert!(
-            matches!(result, Err(CommandError::Timeout { .. })),
-            "{result:?}"
-        );
+        assert!(stopped_by(&result, TimeLimit::Total), "{result:?}");
         let survived = a_process_matching(MARKER);
         kill_processes_matching(MARKER);
         assert!(!survived, "the timed-out command's child is still running");
@@ -1276,10 +1283,7 @@ mod tests {
             )
             .await;
 
-        assert!(
-            matches!(result, Err(CommandError::Timeout { .. })),
-            "{result:?}"
-        );
+        assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
         let survived = a_process_matching(MARKER);
         kill_processes_matching(MARKER);
         assert!(!survived, "the timed-out command's child is still running");
@@ -1436,6 +1440,7 @@ mod tests {
         let timeout_error = CommandError::Timeout {
             command: "test-command".to_string(),
             timeout: Duration::from_millis(100),
+            limit: TimeLimit::Total,
             working_directory: PathBuf::from("/tmp"),
         };
         assert!(
@@ -2233,24 +2238,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_streaming_command_that_outruns_its_timeout_is_reported_as_a_timeout() {
-        let runner =
-            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
-        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let (result, _) = stream_with_timeout("sleep 30", Duration::from_millis(200)).await;
 
-        let result = runner
-            .execute_streaming(
-                "sleep 30",
-                Path::new("."),
-                Duration::from_millis(200),
-                tx,
-                &token(),
-            )
-            .await;
-
-        assert!(
-            matches!(result, Err(CommandError::Timeout { .. })),
-            "{result:?}"
-        );
+        assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
     }
 
     #[tokio::test]
@@ -2260,30 +2250,92 @@ mod tests {
         // shape's deadline arm was guarded `if !process_done`, so once the shell
         // exited nothing bounded the reads: the command ran ~8s past a 2s budget
         // and was then reported as `Ok`.
-        let runner =
-            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
-        let (tx, _rx) = tokio::sync::mpsc::channel(10);
-        let started = Instant::now();
-
-        let result = runner
-            .execute_streaming(
-                "trap '' HUP; sleep 8 & echo started",
-                Path::new("."),
-                Duration::from_secs(2),
-                tx,
-                &token(),
-            )
-            .await;
+        let (result, took) = stream_with_timeout(
+            "trap '' HUP; sleep 8 & echo started",
+            Duration::from_secs(2),
+        )
+        .await;
 
         assert!(
-            matches!(result, Err(CommandError::Timeout { .. })),
+            stopped_by(&result, TimeLimit::Silence),
             "a command past its timeout was not reported as one: {result:?}"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(6),
-            "the timeout was not enforced; took {:?}",
-            started.elapsed()
+            took < Duration::from_secs(6),
+            "the timeout was not enforced; took {took:?}"
         );
+    }
+
+    // Whether `result` is a timeout that `limit` stopped.
+    fn stopped_by(result: &Result<CommandOutput, CommandError>, limit: TimeLimit) -> bool {
+        matches!(
+            result,
+            Err(CommandError::Timeout { limit: stopped, .. }) if *stopped == limit
+        )
+    }
+
+    // Runs `script` through the streaming path with `timeout` and returns the
+    // result with the elapsed time.
+    async fn stream_with_timeout(
+        script: &str,
+        timeout: Duration,
+    ) -> (Result<CommandOutput, CommandError>, Duration) {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
+        let (tx, _rx) = tokio::sync::mpsc::channel(1000);
+        let started = Instant::now();
+        let result = runner
+            .execute_streaming(script, Path::new("."), timeout, tx, &token())
+            .await;
+        (result, started.elapsed())
+    }
+
+    // 8 lines 0.25s apart is ~2s of running against a 1s limit: a total-time
+    // limit stops it, a silence limit never sees a quiet second.
+    const STEADY_OUTPUT: &str = "for i in 1 2 3 4 5 6 7 8; do echo $i; sleep 0.25; done";
+
+    #[tokio::test]
+    async fn a_streaming_command_that_keeps_printing_outlives_its_timeout() {
+        let (result, took) = stream_with_timeout(STEADY_OUTPUT, Duration::from_secs(1)).await;
+
+        let output = result.expect("a command that keeps printing was stopped");
+        assert!(output.is_success());
+        assert_eq!(output.stdout(), b"1\n2\n3\n4\n5\n6\n7\n8\n");
+        assert!(took > Duration::from_millis(1500), "{took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_streaming_command_that_keeps_writing_stderr_outlives_its_timeout() {
+        let script = STEADY_OUTPUT.replace("echo $i", "echo $i >&2");
+
+        let (result, _) = stream_with_timeout(&script, Duration::from_secs(1)).await;
+
+        let output = result.expect("a command that keeps writing stderr was stopped");
+        assert!(output.is_success());
+        assert_eq!(output.stderr(), b"1\n2\n3\n4\n5\n6\n7\n8\n");
+    }
+
+    #[tokio::test]
+    async fn a_streaming_command_is_stopped_once_it_goes_quiet_after_printing() {
+        let (result, took) = stream_with_timeout("echo hi; sleep 30", Duration::from_secs(1)).await;
+
+        assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_streaming_command_that_closes_its_pipes_and_stays_silent_is_stopped() {
+        // The drain finishes its pipes at once and only `wait` is left, so this
+        // fails if the limit is enforced by the drain instead of beside it.
+        let (result, took) = stream_with_timeout(
+            "echo hi; exec >/dev/null 2>&1; sleep 33.73",
+            Duration::from_secs(1),
+        )
+        .await;
+
+        kill_processes_matching("sleep 33.73");
+        assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
+        assert!(took < Duration::from_secs(10), "{took:?}");
     }
 
     // NOTE: the `biased;` on the outer `select!` has no test, deliberately.
