@@ -15,8 +15,13 @@ mockall = { workspace = true, optional = true }
 # has no `geteuid`, and `libc`'s is `unsafe` -- this keeps the crate free of
 # `unsafe` for the same reason the dev entry below did. "fs" is for the `OFlag`
 # constants `RealFileSystem::read_file_no_follow` opens with, which `std` does not
-# name.
-nix = { workspace = true, features = ["fs", "user"] }
+# name. "term" turns off echo on a command's terminal, and "signal" is `killpg`,
+# which ends every process a command started on it.
+nix = { workspace = true, features = ["fs", "signal", "term", "user"] }
+# Gives a command a pseudo-terminal as its controlling terminal, so a prompt it
+# writes to `/dev/tty` reaches selfie instead of the user's screen. The crate holds
+# the `unsafe` that `setsid` and `TIOCSCTTY` need, which keeps this one free of it.
+pty-process = { version = "0.5.4", features = ["async"] }
 serde.workspace = true
 serde_ignored.workspace = true
 serde_json.workspace = true
@@ -42,6 +47,7 @@ tracing.workspace = true
 url = { version = "2.5.4", features = ["serde"] }
 uuid.workspace = true
 which = "8.0"
+zeroize = "1"
 
 [dev-dependencies]
 mockall.workspace = true

@@ -1,10 +1,11 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, ConflictReport, Coverage, DotfileSource, EnvironmentStatus, EventStream, Gap,
-    LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationResult, Outcome, PackageEvent,
-    SkipReason,
+    AuditResult, CheckFailure, ConflictReport, Coverage, DotfileSource, EnvironmentStatus,
+    EventStream, Gap, LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationInfo,
+    OperationResult, Outcome, PackageEvent, SkipReason,
 };
+use selfie::parts::SuggestedCommand;
 use selfie::validation::ValidationErrorCategory;
 use serde_json::Value;
 
@@ -14,8 +15,16 @@ pub struct EventCollectorResult {
 }
 
 /// The result payload for a failed operation.
-fn failure_json(failure: &OperationFailure) -> Value {
+fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -> Value {
     let mut payload = serde_json::json!({ "status": "failure", "error": format!("{failure}") });
+    // A command that asked for input, such as a password, cannot be answered
+    // here, so the assistant is told what the user runs where they can type.
+    if let OperationFailure::Check(check @ CheckFailure::InputRequired { .. }) = failure {
+        payload["kind"] = check.kind().into();
+        if let Some(command) = operation.and_then(SuggestedCommand::for_operation) {
+            payload["run_in_terminal"] = command.to_string().into();
+        }
+    }
     // Each issue as a validation result carries it, so an assistant fixes the field
     // without parsing the sentence in `error`.
     if let OperationFailure::InvalidSpec { issues, .. } = failure {
@@ -99,7 +108,7 @@ fn with_source(mut row: Value, source: &DotfileSource) -> Value {
 /// The whole payload for a call that failed before it ran an operation, shaped as
 /// a failed operation's is.
 pub(crate) fn failure_payload(failure: &OperationFailure) -> Value {
-    let mut result = failure_json(failure);
+    let mut result = failure_json(failure, None);
     result["outcome"] = label(Outcome::Failed);
     serde_json::json!({ "result": result, "data": [] })
 }
@@ -137,6 +146,7 @@ fn rows_of_type<'v>(collected: &'v Value, types: &[&str]) -> Vec<&'v Value> {
 
 pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
     let mut final_result = None;
+    let mut operation = None;
     let mut canceled = None;
     let mut data_events: Vec<Value> = Vec::new();
 
@@ -144,7 +154,13 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
 
     while let Some(event) = stream.next().await {
         match &event {
-            PackageEvent::Completed { result, .. } => final_result = Some(result.clone()),
+            PackageEvent::Completed {
+                result,
+                operation_info,
+            } => {
+                final_result = Some(result.clone());
+                operation = Some(operation_info.clone());
+            }
             PackageEvent::Canceled { reason, .. } => canceled = Some(reason.clone()),
             _ => {}
         }
@@ -184,7 +200,7 @@ pub async fn collect_events(stream: EventStream) -> EventCollectorResult {
                 serde_json::json!({ "status": "failed", "message": format!("{s}") }),
             ),
         },
-        Some(OperationResult::Failure(f)) => (false, failure_json(f)),
+        Some(OperationResult::Failure(f)) => (false, failure_json(f, operation.as_ref())),
         None => match canceled {
             Some(reason) => (
                 false,
@@ -2032,12 +2048,15 @@ mod tests {
     // the package and the package that needs it.
     #[test]
     fn an_install_its_check_says_did_not_take_carries_its_kind() {
-        let payload = failure_json(&OperationFailure::NotInstalledAfterInstall {
-            package_name: "dep".to_string(),
-            check_command: "check-dep".to_string(),
-            exit_code: Some(1),
-            required_by: Some("pkg".to_string()),
-        });
+        let payload = failure_json(
+            &OperationFailure::NotInstalledAfterInstall {
+                package_name: "dep".to_string(),
+                check_command: "check-dep".to_string(),
+                exit_code: Some(1),
+                required_by: Some("pkg".to_string()),
+            },
+            None,
+        );
 
         assert_eq!(payload["status"], "failure");
         assert_eq!(payload["kind"], "not_installed_after_install");
@@ -2050,12 +2069,86 @@ mod tests {
     fn an_uncreatable_spec_carries_its_kind() {
         use selfie::package::event::Uncreatable;
 
-        let payload = failure_json(&OperationFailure::Uncreatable {
-            package_name: "../x".to_string(),
-            reason: Uncreatable::InvalidName,
-        });
+        let payload = failure_json(
+            &OperationFailure::Uncreatable {
+                package_name: "../x".to_string(),
+                reason: Uncreatable::InvalidName,
+            },
+            None,
+        );
 
         assert_eq!(payload["kind"], "invalid_name");
+    }
+
+    fn asked_for_input() -> OperationFailure {
+        OperationFailure::from(selfie::commands::CommandError::InputRequired {
+            command: "sudo -v".to_string(),
+            working_directory: std::path::PathBuf::from("/p"),
+            prompt: selfie::commands::BoundedText::bound(b"Password:"),
+        })
+    }
+
+    fn operation(operation_type: OperationType, package: &str) -> OperationInfo {
+        OperationInfo {
+            operation_type,
+            package_name: package.to_string(),
+            ..test_op_info()
+        }
+    }
+
+    // A command that wants a password cannot be answered by the server, so the
+    // payload names the command the user runs where they can type it.
+    #[test]
+    fn an_install_that_asked_for_input_names_the_command_to_run_in_a_terminal() {
+        let install = operation(OperationType::PackageInstall, "noteplan");
+
+        let payload = failure_json(&asked_for_input(), Some(&install));
+
+        assert_eq!(payload["kind"], "input_required");
+        assert_eq!(
+            payload["run_in_terminal"],
+            "selfie package install noteplan"
+        );
+        assert!(payload["error"].as_str().unwrap().contains("Password:"));
+    }
+
+    // The command repeats the operation that asked, so a check that asked is not
+    // sent to an install, which changes the machine.
+    #[test]
+    fn a_check_that_asked_for_input_names_a_check_and_not_an_install() {
+        let check = operation(OperationType::PackageCheck, "noteplan");
+
+        let payload = failure_json(&asked_for_input(), Some(&check));
+
+        assert_eq!(payload["run_in_terminal"], "selfie package check noteplan");
+    }
+
+    // An operation with no command of its own for one package, and a failure
+    // that came with no operation, name no command.
+    #[test]
+    fn an_operation_without_a_command_of_its_own_names_none() {
+        let audit_all = operation(OperationType::PackageAudit, "");
+
+        for operation in [Some(&audit_all), None] {
+            let payload = failure_json(&asked_for_input(), operation);
+
+            assert_eq!(payload["kind"], "input_required");
+            assert!(payload.get("run_in_terminal").is_none());
+        }
+    }
+
+    // A package named like an option is passed after `--`, so the command runs
+    // as shown.
+    #[test]
+    fn the_command_to_run_quotes_a_package_named_like_an_option() {
+        let install = operation(OperationType::PackageInstall, "-odd name");
+
+        let payload = failure_json(&asked_for_input(), Some(&install));
+
+        assert_eq!(
+            payload["run_in_terminal"],
+            "selfie package install -- '-odd name'"
+        );
     }
 
     // An orphan is a row of its own and a count in the result, and leaves the

@@ -27,7 +27,7 @@ human-panic = "2"
 icu_properties = "2.2"
 selfie = { path = "../selfie/" }
 serde.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync"] }
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

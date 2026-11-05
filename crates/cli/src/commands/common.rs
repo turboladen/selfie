@@ -5,7 +5,7 @@
 
 use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use selfie::{
-    commands::ShellCommandRunner,
+    commands::{PromptHandler, ShellCommandRunner, TerminalAnswer},
     dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
     fs::{filesystem::FileSystem, real::RealFileSystem},
     git::GixGitAdapter,
@@ -108,6 +108,39 @@ pub(crate) fn file_name_of(package: &selfie::package::Package) -> Option<String>
 // inside this function.
 fn create_command_runner(config: &CliConfig) -> ShellCommandRunner {
     ShellCommandRunner::login_shell(config.command_timeout())
+}
+
+/// The handler that asks the user a question a command wrote to its terminal,
+/// such as the password `sudo` wants, on this process's own terminal.
+///
+/// Without a terminal to ask on it declines, which fails the command with a
+/// message that says so.
+fn terminal_prompts(display: DisplayManager) -> PromptHandler {
+    // Commands run concurrently, and two questions drawn at once would be
+    // unreadable and answered by the wrong keystrokes.
+    let one_at_a_time = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    PromptHandler::new(move |prompt| {
+        let display = display.clone();
+        let one_at_a_time = std::sync::Arc::clone(&one_at_a_time);
+        async move {
+            let _turn = one_at_a_time.lock().await;
+            // dialoguer waits on the terminal, so it reads off the async threads.
+            let asked = tokio::task::spawn_blocking(move || display.terminal_question(&prompt));
+            match asked.await {
+                Ok(Ok(text)) => Some(TerminalAnswer::new(text)),
+                // The command fails as unanswered whatever the reason, so the
+                // reason is logged here, where it is known.
+                Ok(Err(failure)) => {
+                    tracing::debug!(?failure, "a command's question went unanswered");
+                    None
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "the task asking a command's question failed");
+                    None
+                }
+            }
+        }
+    })
 }
 
 /// The standalone dotfiles repository for the configured `dotfiles_directory`.
@@ -438,10 +471,12 @@ pub(crate) fn check_editor_available(
 /// Create a package service with repository and command runner
 pub(crate) fn create_package_service(
     config: &CliConfig,
+    display: &DisplayManager,
     cancellation_token: CancellationToken,
-) -> impl PackageService + SpecService {
+) -> impl PackageService + SpecService + use<> {
     let repo = create_package_repository(config);
-    let command_runner = create_command_runner(config);
+    let command_runner =
+        create_command_runner(config).with_prompt_handler(terminal_prompts(display.clone()));
     PackageServiceImpl::new(
         repo,
         create_dotfiles_repository(config),
