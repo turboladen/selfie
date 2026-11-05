@@ -718,6 +718,7 @@ fn after_install(result: &CheckResult, package_name: &str) -> AfterInstall {
         | CheckFailure::WorkingDirectoryUnusable(_)
         | CheckFailure::Canceled { .. } => return AfterInstall::Failed(failure.clone()),
         CheckFailure::TimedOut(_)
+        | CheckFailure::InputRequired { .. }
         | CheckFailure::ResultUnreadable { .. }
         | CheckFailure::Internal { .. } => {}
     }

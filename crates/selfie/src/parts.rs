@@ -106,6 +106,8 @@ impl fmt::Display for ForeignText<'_> {
 pub enum Subcommand {
     /// `selfie apply`.
     Apply,
+    /// `selfie package install`.
+    PackageInstall,
     /// `selfie package track-dotfile`.
     PackageTrackDotfile,
 }
@@ -115,6 +117,7 @@ impl Subcommand {
     fn word(self) -> &'static str {
         match self {
             Self::Apply => "apply",
+            Self::PackageInstall => "package install",
             Self::PackageTrackDotfile => "package track-dotfile",
         }
     }
@@ -160,6 +163,17 @@ impl SuggestedCommand {
     pub fn apply(operand: &str) -> Option<Self> {
         crate::fs::shell_operand(operand).map(|word| Self {
             program: Program::Selfie(Subcommand::Apply),
+            word,
+        })
+    }
+
+    /// The command running `selfie package install` on the package `name`,
+    /// quoted as one shell word after `--` when it starts with a dash, or
+    /// `None` when `name` holds NUL.
+    #[must_use]
+    pub fn install(name: &str) -> Option<Self> {
+        crate::fs::shell_operand(name).map(|word| Self {
+            program: Program::Selfie(Subcommand::PackageInstall),
             word,
         })
     }

@@ -81,6 +81,9 @@ pub(crate) fn every_labeled_reason() -> Vec<UnknownStatus> {
             "/nowhere",
             std::sync::Arc::new(std::io::Error::other("gone")),
         )),
+        CheckFailure::InputRequired {
+            message: test_common::message("m"),
+        },
         CheckFailure::ResultUnreadable {
             message: test_common::message("m"),
         },

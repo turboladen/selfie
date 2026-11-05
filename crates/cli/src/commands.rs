@@ -85,7 +85,7 @@ async fn dispatch_spec_command(
 ) -> Exit {
     debug!("Handling spec command: {:?}", command);
 
-    let service = create_package_service(config, cancellation_token);
+    let service = create_package_service(config, &display, cancellation_token);
     match command {
         SpecSubcommands::Create {
             package_name,
@@ -133,7 +133,7 @@ async fn dispatch_package_command(
 ) -> Exit {
     debug!("Handling package command: {:?}", command);
 
-    let service = create_package_service(config, cancellation_token.clone());
+    let service = create_package_service(config, &display, cancellation_token.clone());
 
     match command {
         PackageSubcommands::Install {

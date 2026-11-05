@@ -198,11 +198,13 @@ fn selfie_words(subcommand: Subcommand) -> &'static [Literal] {
     // library's spelling; the parity test that every suggested command reads as
     // its Display is what keeps the two in step.
     const APPLY: &[Literal] = &[lit!("selfie"), lit!("apply")];
+    const INSTALL: &[Literal] = &[lit!("selfie"), lit!("package"), lit!("install")];
     const TRACK_DOTFILE: &[Literal] = &[lit!("selfie"), lit!("package"), lit!("track-dotfile")];
     // No catch-all, so a subcommand the library adds fails to compile here
     // until the CLI says how to show it.
     match subcommand {
         Subcommand::Apply => APPLY,
+        Subcommand::PackageInstall => INSTALL,
         Subcommand::PackageTrackDotfile => TRACK_DOTFILE,
     }
 }

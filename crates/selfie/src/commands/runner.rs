@@ -600,6 +600,18 @@ pub enum CommandError {
         working_directory: PathBuf,
     },
 
+    /// The command asked for input on its terminal and nothing could answer.
+    ///
+    /// Raised when a command writes a question to `/dev/tty` and the runner has
+    /// no [`PromptHandler`](crate::commands::PromptHandler), or its handler
+    /// declined. The command is ended, so nothing it started afterward ran.
+    /// Carries the question and no command output.
+    InputRequired {
+        command: String,
+        working_directory: PathBuf,
+        prompt: BoundedText,
+    },
+
     /// Failed to capture stdout during streaming execution
     StdoutSpawn { command: String },
 
@@ -671,6 +683,17 @@ impl crate::parts::Composed for CommandError {
                 .text("Could not separate the output of command '")
                 .spec_command(command)
                 .text("' from the shell's"),
+            Self::InputRequired {
+                command, prompt, ..
+            } => {
+                let [ran, asked] =
+                    shares([command.len(), prompt.as_str().len()], MAX_BOUNDED_BYTES);
+                Parts::new()
+                    .text("Command '")
+                    .spec_command_within(command, ran)
+                    .text("' asked for input on its terminal, and this run has no terminal to ask on: ")
+                    .cause_within(prompt.as_str(), asked)
+            }
             Self::StdoutSpawn { command } => Parts::new()
                 .text("Failed spawning stdout during command: ")
                 .spec_command(command),

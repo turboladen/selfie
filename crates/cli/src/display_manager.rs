@@ -394,6 +394,51 @@ mod prompts {
         }
     }
 
+    impl DisplayManager {
+        /// Ask the question a command wrote to its terminal and return what the
+        /// user typed. A question that names a password, passphrase or passcode
+        /// is asked with the answer hidden.
+        ///
+        /// What the command said above its question is noted over the prompt,
+        /// escaped, because the command's own text may hold terminal escapes.
+        ///
+        /// # Errors
+        ///
+        /// [`PromptFailure`] when the prompt got no answer.
+        pub(crate) fn terminal_question(
+            &self,
+            prompt: &selfie::commands::TerminalPrompt,
+        ) -> Result<String, PromptFailure> {
+            let question = Name::new(prompt.question());
+            let text = self.prompt_text(question);
+            let said = prompt
+                .text()
+                .rsplit_once('\n')
+                .map_or("", |(said, _)| said.trim());
+            let note = (!said.is_empty()).then(|| shown!("{}", Name::new(said)));
+            let theme = self.theme();
+            if asks_for_secret(prompt.question()) {
+                self.prompt_under(note, HiddenLine { text })
+            } else {
+                self.prompt_under(
+                    note,
+                    dialoguer::Input::<String>::with_theme(theme.as_ref())
+                        .with_prompt(text)
+                        .allow_empty(true),
+                )
+            }
+        }
+    }
+
+    // Whether `question` asks for something that is not echoed back. A question
+    // that names none of these is shown as typed.
+    pub(super) fn asks_for_secret(question: &str) -> bool {
+        let question = question.to_lowercase();
+        ["password", "passphrase", "passcode"]
+            .iter()
+            .any(|word| question.contains(word))
+    }
+
     impl Prompt for dialoguer::Confirm<'_> {
         type Answer = bool;
         fn ask(self) -> dialoguer::Result<bool> {
@@ -420,6 +465,42 @@ mod prompts {
         type Answer = Option<usize>;
         fn ask(self) -> dialoguer::Result<Option<usize>> {
             self.interact_opt()
+        }
+    }
+
+    // A line typed with nothing drawn for it, as `sudo` takes a password.
+    //
+    // Not dialoguer's `Password`: it reads with `read_secure_line`, which retries
+    // when a signal interrupts the read, so the wakeup that ends a prompt on
+    // Ctrl+C never reaches it and the run cannot exit. Reading keys is what the
+    // other prompts do, and `read_key` reports the interrupt.
+    struct HiddenLine {
+        text: String,
+    }
+
+    impl Prompt for HiddenLine {
+        type Answer = String;
+        fn ask(self) -> dialoguer::Result<String> {
+            use console::Key;
+
+            let term = console::Term::stderr();
+            term.write_str(&format!("? {} › ", self.text))?;
+            let mut typed = String::new();
+            let ended = loop {
+                match term.read_key() {
+                    Ok(Key::Enter) => break Ok(()),
+                    Ok(Key::Backspace) => {
+                        typed.pop();
+                    }
+                    Ok(Key::Char(typed_char)) => typed.push(typed_char),
+                    Ok(_) => {}
+                    Err(error) => break Err(error),
+                }
+            };
+            // The answer ends the line it was typed on, or the interrupt ends it.
+            term.write_line("")?;
+            ended?;
+            Ok(typed)
         }
     }
 
@@ -3406,6 +3487,67 @@ mod tests {
 
         assert!(matches!(failure, PromptFailure::NoTerminal), "{failure:?}");
         assert!(dm.printed().is_empty(), "{:?}", dm.printed());
+    }
+
+    // The question a command wrote to its terminal is asked, and what the user
+    // typed is what comes back.
+    #[test]
+    fn a_terminal_question_returns_what_the_user_typed() {
+        let dm = DisplayManager::new(false).answering(vec![answer("hunter2".to_string())]);
+
+        let typed = dm
+            .terminal_question(&selfie::commands::TerminalPrompt::new(
+                "[sudo] password for me:",
+            ))
+            .unwrap();
+
+        assert_eq!(typed, "hunter2");
+        assert!(dm.printed().is_empty(), "{:?}", dm.printed());
+    }
+
+    // What the command said above its question is shown with it, escaped, since
+    // the command's text may carry terminal escapes.
+    #[test]
+    fn what_a_command_said_above_its_question_is_noted_escaped() {
+        let dm = DisplayManager::new(false).answering(vec![answer(String::new())]);
+
+        dm.terminal_question(&selfie::commands::TerminalPrompt::new(
+            "Sorry, try again.\u{1b}[31m\nPassword:",
+        ))
+        .unwrap();
+
+        let printed = format!("{:?}", dm.printed());
+        assert!(printed.contains("Sorry, try again."), "{printed}");
+        assert!(!printed.contains('\u{1b}'), "{printed:?}");
+    }
+
+    // Nothing was asked, so nothing is noted.
+    #[test]
+    fn a_terminal_question_without_a_terminal_notes_nothing() {
+        let dm = DisplayManager::new(false);
+
+        let failure = dm
+            .terminal_question(&selfie::commands::TerminalPrompt::new("Sorry.\nPassword:"))
+            .unwrap_err();
+
+        assert!(matches!(failure, PromptFailure::NoTerminal), "{failure:?}");
+        assert!(dm.printed().is_empty(), "{:?}", dm.printed());
+    }
+
+    // A question about a password is not echoed; one about anything else is.
+    #[test]
+    fn only_a_question_naming_a_password_is_asked_hidden() {
+        for hidden in [
+            "Password:",
+            "[sudo] password for me:",
+            "Enter passphrase for key '/k':",
+            "PASSCODE:",
+        ] {
+            assert!(prompts::asks_for_secret(hidden), "{hidden}");
+        }
+        for shown in ["Apple ID:", "Continue? [y/N]", "Press RETURN:", ""] {
+            assert!(!prompts::asks_for_secret(shown), "{shown}");
+        }
     }
 
     // Without colors a prompt draws with the plain theme.

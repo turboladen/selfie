@@ -2,12 +2,14 @@
 
 pub mod runner;
 pub mod shell;
+mod terminal;
 
 pub use runner::{
     BoundedText, CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk,
     OutputStream,
 };
 pub use shell::ShellCommandRunner;
+pub use terminal::{PromptHandler, TerminalAnswer, TerminalPrompt, TerminalReply};
 
 #[cfg(feature = "with_mocks")]
 pub use runner::MockCommandRunner;

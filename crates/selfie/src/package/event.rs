@@ -4168,6 +4168,9 @@ impl UnknownStatus {
             Self::NotInEnvironment => "not in this environment",
             Self::NoCheckCommand => "no check command",
             Self::CheckFailed(CheckFailure::TimedOut(_)) => "timed out",
+            Self::CheckFailed(CheckFailure::InputRequired { .. }) => {
+                "its check asked for input there was no terminal to give"
+            }
             Self::CheckFailed(CheckFailure::CouldNotStart { .. }) => "its check could not start",
             Self::CheckFailed(CheckFailure::WorkingDirectoryUnusable(_)) => {
                 "its working directory is unusable"
@@ -4195,6 +4198,7 @@ impl UnknownStatus {
             Self::Error(_) => Coverage::Error,
             Self::CheckFailed(failure) => match failure {
                 CheckFailure::TimedOut(_) => Coverage::Unanswered,
+                CheckFailure::InputRequired { .. } => Coverage::Unanswered,
                 CheckFailure::CouldNotStart { .. } => Coverage::Unanswered,
                 CheckFailure::WorkingDirectoryUnusable(_) => Coverage::Unanswered,
                 CheckFailure::ResultUnreadable { .. } => Coverage::Unanswered,
@@ -4789,6 +4793,12 @@ pub enum CheckFailure {
     WorkingDirectoryUnusable(crate::commands::runner::UnusableDirectory),
     /// The check ran past `command_timeout` and was stopped.
     TimedOut(TimedOut),
+    /// The command asked for input on its terminal, such as a password, and the
+    /// run had no terminal to ask on, so it was ended.
+    InputRequired {
+        /// The error's sentence, naming the command and what it asked.
+        message: Message,
+    },
     /// The check started, and selfie could not read its result to the end:
     /// its output, or its exit status.
     ResultUnreadable {
@@ -4817,6 +4827,7 @@ impl Composed for CheckFailure {
     fn parts(&self) -> Parts<'_> {
         match self {
             Self::Canceled { message }
+            | Self::InputRequired { message }
             | Self::CouldNotStart { message }
             | Self::ResultUnreadable { message } => message.parts(),
             Self::WorkingDirectoryUnusable(unusable) => unusable.parts(),
@@ -4842,6 +4853,7 @@ impl From<&CheckFailure> for OperationFailure {
             ),
             // Each of these sentences names the command already.
             CheckFailure::Canceled { .. }
+            | CheckFailure::InputRequired { .. }
             | CheckFailure::CouldNotStart { .. }
             | CheckFailure::ResultUnreadable { .. }
             | CheckFailure::Internal { .. } => OperationFailure::Check(failure.clone()),
@@ -4875,6 +4887,9 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
             CommandError::Timeout {
                 command, timeout, ..
             } => Self::TimedOut(TimedOut::new(command.clone(), *timeout)),
+            CommandError::InputRequired { .. } => Self::InputRequired {
+                message: Message::of(err),
+            },
             CommandError::OutputReadFailed { .. }
             | CommandError::ContentMarkersAbsent { .. }
             | CommandError::IoError { .. } => Self::ResultUnreadable {

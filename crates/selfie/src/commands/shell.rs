@@ -20,8 +20,11 @@ use tokio_util::{
     sync::CancellationToken,
 };
 
-use super::runner::{
-    CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
+use super::{
+    runner::{
+        CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
+    },
+    terminal::{self, PromptHandler},
 };
 
 mod content;
@@ -44,6 +47,10 @@ pub struct ShellCommandRunner {
     /// started by Claude Desktop) where PATH doesn't include user-installed
     /// tools like ~/.cargo/bin, homebrew, fnm, etc.
     login: bool,
+
+    /// Who answers a prompt a command writes to its terminal. Without one, such
+    /// a command fails with [`CommandError::InputRequired`].
+    prompt: Option<PromptHandler>,
 }
 
 impl ShellCommandRunner {
@@ -64,6 +71,7 @@ impl ShellCommandRunner {
             shell: shell.to_string(),
             default_timeout,
             login: false,
+            prompt: None,
         }
     }
 
@@ -83,7 +91,23 @@ impl ShellCommandRunner {
             shell,
             default_timeout,
             login: true,
+            prompt: None,
         }
+    }
+
+    /// Let `handler` answer the prompts a command writes to its terminal, such
+    /// as the password `sudo` asks for.
+    ///
+    /// Every command except one whose stdout becomes file content runs with a
+    /// pseudo-terminal as its controlling terminal. A command's stdin is still
+    /// closed and its stdout and stderr are still captured, so a program that
+    /// checks them sees what it always did; only what it writes to `/dev/tty`
+    /// reaches the handler. Text that stops without a newline and stays quiet
+    /// counts as a question.
+    #[must_use]
+    pub fn with_prompt_handler(mut self, handler: PromptHandler) -> Self {
+        self.prompt = Some(handler);
+        self
     }
 
     /// Build a `Command` with the configured shell, login flag, and command
@@ -138,11 +162,12 @@ impl ShellCommandRunner {
     /// itself.
     async fn run_buffered(
         &self,
-        mut cmd: Command,
+        cmd: Command,
         reported: &str,
         working_dir: &Path,
         timeout: Duration,
         token: &CancellationToken,
+        with_terminal: bool,
     ) -> Result<CommandOutput, CommandError> {
         let start_time = Instant::now();
         let working_directory = working_dir.to_path_buf();
@@ -155,9 +180,14 @@ impl ShellCommandRunner {
             });
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| spawn_error(reported, &cmd, working_dir, e))?;
+        let program = program_of(&cmd);
+        let Started {
+            mut child,
+            terminal,
+        } = start(cmd, with_terminal)
+            .map_err(|e| spawn_error(reported, &program, working_dir, e))?;
+        let has_terminal = terminal.is_some();
+        let asking = self.watch_terminal(terminal, reported, working_dir);
 
         // Both pipes are read *concurrently with* `wait()`, not after it. That is
         // what avoids the deadlock when a child produces more than the OS pipe
@@ -180,10 +210,14 @@ impl ShellCommandRunner {
                 timeout,
                 working_directory: working_directory.clone(),
             })),
+            // Ahead of the terminal arm: Ctrl+C typed at a question cancels the
+            // run, and the run should end canceled, not as a question nobody
+            // could answer.
             () = token.cancelled() => Err(CommandError::Canceled {
                 command: reported.to_string(),
                 working_directory: working_directory.clone(),
             }),
+            error = asking => Err(error),
         };
 
         // The child is only borrowed above, so it is still ours to kill here.
@@ -197,7 +231,7 @@ impl ShellCommandRunner {
         // timeout arm. The read-failure arm is the one no test reaches: it needs
         // a genuine pipe failure from a real child.
         if outcome.is_err() {
-            let _ = child.kill().await;
+            abandon(&mut child, has_terminal).await;
         }
 
         let (status, stdout, stderr) = outcome?;
@@ -210,6 +244,25 @@ impl ShellCommandRunner {
             },
             duration: start_time.elapsed(),
         })
+    }
+
+    /// Answer `terminal`'s prompts, resolving only with the failure that ends the
+    /// command. Pending forever when there is no terminal.
+    fn watch_terminal(
+        &self,
+        terminal: Option<terminal::Terminal>,
+        command: &str,
+        working_dir: &Path,
+    ) -> impl Future<Output = CommandError> {
+        let handler = self.prompt.clone();
+        let command = command.to_string();
+        let working_dir = working_dir.to_path_buf();
+        async move {
+            match terminal {
+                Some(pty) => terminal::watch(pty, handler.as_ref(), &command, &working_dir).await,
+                None => std::future::pending().await,
+            }
+        }
     }
 
     /// The default shell path, `/bin/sh`.
@@ -251,6 +304,7 @@ impl CommandRunner for ShellCommandRunner {
             working_dir,
             timeout,
             token,
+            true,
         )
         .await
     }
@@ -276,11 +330,14 @@ impl CommandRunner for ShellCommandRunner {
             });
         }
 
-        let mut cmd = self.build_command(command, working_dir);
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| spawn_error(command, &cmd, working_dir, e))?;
+        let cmd = self.build_command(command, working_dir);
+        let program = program_of(&cmd);
+        let Started {
+            mut child,
+            terminal,
+        } = start(cmd, true).map_err(|e| spawn_error(command, &program, working_dir, e))?;
+        let has_terminal = terminal.is_some();
+        let asking = self.watch_terminal(terminal, command, working_dir);
 
         let stdout = child
             .stdout
@@ -331,6 +388,7 @@ impl CommandRunner for ShellCommandRunner {
                 command: command.to_string(),
                 working_directory: working_directory.clone(),
             }),
+            error = asking => Err(error),
         };
 
         // Every failure here abandons a child that may still be running: a
@@ -344,7 +402,7 @@ impl CommandRunner for ShellCommandRunner {
         // covers the timeout arm. The read-failure arm is the one no test
         // reaches: it needs a genuine pipe failure from a real child.
         if outcome.is_err() {
-            let _ = child.kill().await;
+            abandon(&mut child, has_terminal).await;
         }
 
         Ok(CommandOutput {
@@ -381,6 +439,7 @@ impl CommandRunner for ShellCommandRunner {
                 working_dir,
                 timeout,
                 token,
+                false,
             )
             .await?;
 
@@ -415,6 +474,61 @@ impl CommandRunner for ShellCommandRunner {
     }
 }
 
+/// A started command, and the terminal it was given.
+struct Started {
+    child: tokio::process::Child,
+    terminal: Option<terminal::Terminal>,
+}
+
+/// Start `cmd` with a terminal of its own when `with_terminal` asks for one
+/// and the system can provide one, and without one otherwise.
+// stdin, stdout and stderr are set again here because `pty_process::Command`
+// attaches the terminal to every descriptor the caller has not set on it, and
+// the settings made on `cmd` before the conversion do not count.
+fn start(cmd: Command, with_terminal: bool) -> std::io::Result<Started> {
+    let Some((pty, pts)) = with_terminal.then(terminal::open).flatten() else {
+        let mut cmd = cmd;
+        return Ok(Started {
+            child: cmd.spawn()?,
+            terminal: None,
+        });
+    };
+    let child = pty_process::Command::from(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn(pts)
+        .map_err(|error| match error {
+            pty_process::Error::Io(error) => error,
+            other => std::io::Error::other(other.to_string()),
+        })?;
+    Ok(Started {
+        child,
+        terminal: Some(pty),
+    })
+}
+
+fn program_of(cmd: &Command) -> String {
+    cmd.as_std().get_program().to_string_lossy().into_owned()
+}
+
+/// End a command that is being given up on, and every process it started when
+/// it had a terminal.
+// A command on its own terminal is a session leader, so the terminal's SIGINT
+// no longer reaches the programs it started, and killing the shell alone would
+// leave a `brew` or `mas` running after the run ended. The session leader's
+// process group id is its pid. Killing a group that is already gone is not an
+// error worth reporting.
+async fn abandon(child: &mut tokio::process::Child, has_terminal: bool) {
+    if has_terminal && let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let _ = child.kill().await;
+}
+
 /// Give the shell `dir` as `PWD`, so `pwd` and `$PWD` report the directory as
 /// given rather than with its symlinks resolved.
 // `current_dir` leaves the child selfie's own `PWD`. sh, bash, zsh, dash and fish
@@ -432,7 +546,7 @@ fn set_pwd(cmd: &mut Command, dir: &Path) {
 /// when `working_dir` was the cause, `SpawnFailed` naming the program otherwise.
 fn spawn_error(
     command: &str,
-    spawned: &Command,
+    program: &str,
     working_dir: &Path,
     source: std::io::Error,
 ) -> CommandError {
@@ -452,11 +566,7 @@ fn spawn_error(
     }
     CommandError::SpawnFailed {
         command: command.to_string(),
-        program: spawned
-            .as_std()
-            .get_program()
-            .to_string_lossy()
-            .into_owned(),
+        program: program.to_string(),
         working_directory: working_dir.to_path_buf(),
         cause: Arc::new(source),
     }
@@ -1032,13 +1142,16 @@ mod tests {
         // reads that follow would have no deadline at all: the command runs to
         // completion against an unenforced budget, and the caller is
         // told the command had succeeded.
+        //
+        // The grandchild ignores SIGHUP, which the terminal sends when the shell
+        // exits; otherwise it would end there and release the pipe on its own.
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
         let started = Instant::now();
 
         let result = runner
             .execute_in_dir(
-                "sleep 8 & echo started",
+                "trap '' HUP; sleep 8 & echo started",
                 Path::new("."),
                 Duration::from_secs(2),
                 &token(),
@@ -1052,6 +1165,33 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(6),
             "the timeout was not enforced; took {:?}",
+            started.elapsed()
+        );
+    }
+
+    // The shell is a session leader on its own terminal, so the kernel hangs up
+    // its process group when it exits. A background job that does not ignore
+    // SIGHUP ends with the command instead of outliving it.
+    #[tokio::test]
+    async fn a_background_job_is_hung_up_when_its_command_ends() {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
+        let started = Instant::now();
+
+        let output = runner
+            .execute_in_dir(
+                "sleep 8 & echo started",
+                Path::new("."),
+                Duration::from_secs(20),
+                &token(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.stdout_str(), "started\n");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the background sleep held the command for {:?}",
             started.elapsed()
         );
     }
@@ -2126,7 +2266,7 @@ mod tests {
 
         let result = runner
             .execute_streaming(
-                "sleep 8 & echo started",
+                "trap '' HUP; sleep 8 & echo started",
                 Path::new("."),
                 Duration::from_secs(2),
                 tx,
@@ -2267,6 +2407,7 @@ mod content_tests {
             shell: shell.to_str().unwrap().to_string(),
             default_timeout: TIMEOUT,
             login: true,
+            prompt: None,
         };
 
         let output = runner

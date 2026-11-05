@@ -648,6 +648,25 @@ install: |
   echo "Installation complete"
 ```
 
+### Commands that ask for a password
+
+A command can ask a question through the terminal, as `sudo` does for a password or `mas` does for
+an Apple ID. selfie runs every command with a terminal of its own, apart from the one a dotfile
+`command:` source runs. A question the command writes there, and then waits on with the line
+unfinished, is asked on your terminal with the spinner paused, and what you type goes back to the
+command. A question that names a password, passphrase or passcode is asked without showing what you
+type. Ctrl+C at the question cancels the run.
+
+- The command's stdin is still closed, and its stdout and stderr are still captured, so a program
+  that checks whether they are terminals sees what it always did. Only what it writes to `/dev/tty`
+  reaches you.
+- When selfie has no terminal to ask on, such as in a pipe or a CI job, or when it is driven through
+  the MCP server, the command is ended and the run fails naming the question. The MCP server's
+  result then has `kind: "input_required"` and `run_in_terminal`, the `selfie package install`
+  command for you to run where you can type.
+- The command's shell is a session leader on that terminal, so when it exits the kernel hangs up its
+  background jobs. A job that has to outlive the command ignores SIGHUP, for example with `nohup`.
+
 ### Command Output
 
 **Your commands' output is shown to whoever is running selfie. Write them as if everything they
