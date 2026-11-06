@@ -701,7 +701,11 @@ mod tests {
     fn an_audit_that_gave_no_answer_counts_as_an_error() {
         let mut tally = AuditTally::default();
         tally.count(&AuditResult::CouldNotRun(CheckFailure::TimedOut(
-            crate::commands::runner::TimedOut::new("c", std::time::Duration::from_secs(1)),
+            crate::commands::runner::TimedOut::new(
+                "c",
+                std::time::Duration::from_secs(1),
+                crate::commands::runner::TimeLimit::Total,
+            ),
         )));
         assert_eq!(tally.errors, 1);
     }
@@ -939,6 +943,7 @@ mod tests {
                 Err(CommandError::Timeout {
                     command: "Z".repeat(MAX_BOUNDED_BYTES * 3),
                     timeout: std::time::Duration::from_secs(5),
+                    limit: crate::commands::runner::TimeLimit::Total,
                     working_directory: std::path::PathBuf::from("/pkg"),
                 })
             })
@@ -1008,6 +1013,7 @@ mod tests {
                 CommandError::Timeout {
                     command: "sleep 9".to_string(),
                     timeout: std::time::Duration::from_secs(1),
+                    limit: crate::commands::runner::TimeLimit::Total,
                     working_directory: std::path::PathBuf::from("/pkg"),
                 },
                 "timed_out",

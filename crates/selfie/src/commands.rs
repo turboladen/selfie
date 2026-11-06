@@ -25,13 +25,42 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::commands::runner::CommandError;
+    use crate::commands::runner::{CommandError, TimeLimit, TimedOut};
+
+    #[test]
+    fn a_timeout_says_which_limit_stopped_the_command() {
+        let cases = [
+            (
+                TimeLimit::Silence,
+                "produced no output for 120 seconds",
+                "timed out after",
+            ),
+            (TimeLimit::Total, "timed out after 120 seconds", "no output"),
+        ];
+
+        for (limit, says, must_not_say) in cases {
+            let error = CommandError::Timeout {
+                command: "brew install gdal".to_string(),
+                timeout: Duration::from_secs(120),
+                limit,
+                working_directory: PathBuf::from("/"),
+            };
+            let recorded = TimedOut::new("brew install gdal", Duration::from_secs(120), limit);
+
+            for message in [error.to_string(), recorded.to_string()] {
+                assert!(message.contains(says), "{message}");
+                assert!(message.contains("`command_timeout`"), "{message}");
+                assert!(!message.contains(must_not_say), "{message}");
+            }
+        }
+    }
 
     #[test]
     fn test_timeout_error_contains_rich_context() {
         let error = CommandError::Timeout {
             command: "sleep 10".to_string(),
             timeout: Duration::from_secs(5),
+            limit: TimeLimit::Total,
             working_directory: PathBuf::from("/home/user/project"),
         };
 
@@ -46,6 +75,7 @@ mod tests {
                 command,
                 timeout,
                 working_directory,
+                ..
             } => {
                 assert_eq!(command, "sleep 10");
                 assert_eq!(timeout, Duration::from_secs(5));
@@ -88,6 +118,7 @@ mod tests {
         let error = CommandError::Timeout {
             command: "debug-test-command".to_string(),
             timeout: Duration::from_secs(30),
+            limit: TimeLimit::Total,
             working_directory: PathBuf::from("/debug/test"),
         };
 
@@ -146,6 +177,7 @@ mod tests {
         let timeout_error = CommandError::Timeout {
             command: "test".to_string(),
             timeout: Duration::from_secs(1),
+            limit: TimeLimit::Total,
             working_directory: PathBuf::from("/test"),
         };
 
@@ -162,6 +194,7 @@ mod tests {
         let error = CommandError::Timeout {
             command: command.to_string(),
             timeout,
+            limit: TimeLimit::Total,
             working_directory: working_dir.clone(),
         };
 
@@ -171,6 +204,7 @@ mod tests {
                 command: cmd,
                 timeout: t,
                 working_directory: wd,
+                ..
             } => {
                 format!(
                     "Command '{}' timed out after {:?} in directory '{}'",

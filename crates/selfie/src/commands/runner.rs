@@ -76,7 +76,8 @@ pub trait CommandRunner: Send + Sync {
     ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
 
     /// Like [`execute`](CommandRunner::execute), with an explicit timeout. The
-    /// command is terminated if it does not finish within `timeout`.
+    /// command is terminated if it does not finish within `timeout`. The error
+    /// is [`CommandError::Timeout`] with [`TimeLimit::Total`].
     ///
     /// # Errors
     ///
@@ -97,6 +98,11 @@ pub trait CommandRunner: Send + Sync {
     /// receiver falls behind, and drops it outright once the receiver is gone,
     /// so what arrives on the channel is not guaranteed to be the whole output.
     /// The returned [`CommandOutput`] holds all of it.
+    ///
+    /// `timeout` bounds silence, not run time: the command is terminated once
+    /// it has written nothing to stdout or stderr for `timeout`, and a command
+    /// that keeps writing is never terminated by it. The error is
+    /// [`CommandError::Timeout`] with [`TimeLimit::Silence`].
     ///
     /// # Errors
     ///
@@ -458,20 +464,31 @@ impl crate::parts::Composed for UnusableDirectory {
     }
 }
 
-/// A command selfie stopped because it ran past `command_timeout`.
+/// Which `command_timeout` limit stopped a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeLimit {
+    /// The command ran for `command_timeout` in total.
+    Total,
+    /// The command wrote nothing to stdout or stderr for `command_timeout`.
+    Silence,
+}
+
+/// A command selfie stopped at one of the two `command_timeout` limits, named by [`TimeLimit`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimedOut {
     command: String,
     timeout: Duration,
+    limit: TimeLimit,
 }
 
 impl TimedOut {
-    /// Records that `command` was stopped after `timeout`.
+    /// Records that `command` was stopped after `timeout`, by `limit`.
     #[must_use]
-    pub fn new(command: impl Into<String>, timeout: Duration) -> Self {
+    pub fn new(command: impl Into<String>, timeout: Duration, limit: TimeLimit) -> Self {
         Self {
             command: command.into(),
             timeout,
+            limit,
         }
     }
 
@@ -492,7 +509,7 @@ crate::parts::display_from_parts!(TimedOut);
 
 impl crate::parts::Composed for TimedOut {
     fn parts(&self) -> crate::parts::Parts<'_> {
-        timed_out_parts(&self.command, self.timeout)
+        timed_out_parts(&self.command, self.timeout, self.limit)
     }
 }
 
@@ -501,7 +518,7 @@ impl crate::parts::Composed for TimedOut {
 // Every runner selfie builds takes its timeout from `command_timeout`. The
 // command is the spec's own, and its part bounds it, since it is unbounded and
 // every adapter renders the sentence.
-fn timed_out_parts(command: &str, timeout: Duration) -> crate::parts::Parts<'_> {
+fn timed_out_parts(command: &str, timeout: Duration, limit: TimeLimit) -> crate::parts::Parts<'_> {
     // `command_timeout` is whole seconds, so only a test builds anything else.
     let (amount, unit) = if timeout.subsec_nanos() == 0 {
         (timeout.as_secs(), "second")
@@ -512,11 +529,15 @@ fn timed_out_parts(command: &str, timeout: Duration) -> crate::parts::Parts<'_> 
         )
     };
     let plural = if amount == 1 { "" } else { "s" };
+    let what = match limit {
+        TimeLimit::Total => "timed out after",
+        TimeLimit::Silence => "produced no output for",
+    };
     crate::parts::Parts::new()
         .text("`")
         .spec_command(command)
         .text(format!(
-            "` timed out after {amount} {unit}{plural}, the limit `command_timeout` sets"
+            "` {what} {amount} {unit}{plural}, the limit `command_timeout` sets"
         ))
 }
 
@@ -526,10 +547,11 @@ fn timed_out_parts(command: &str, timeout: Duration) -> crate::parts::Parts<'_> 
 /// providing detailed context for debugging and error handling.
 #[derive(Debug, Clone)]
 pub enum CommandError {
-    /// Command execution exceeded the specified timeout
+    /// Command execution exceeded its time limit, which `limit` names
     Timeout {
         command: String,
         timeout: Duration,
+        limit: TimeLimit,
         working_directory: PathBuf,
     },
 
@@ -631,8 +653,11 @@ impl crate::parts::Composed for CommandError {
 
         match self {
             Self::Timeout {
-                command, timeout, ..
-            } => timed_out_parts(command, *timeout),
+                command,
+                timeout,
+                limit,
+                ..
+            } => timed_out_parts(command, *timeout, *limit),
             Self::IoError { command, cause, .. } => {
                 let cause = crate::parts::cause_words(&**cause);
                 let [ran, why] = shares([command.len(), cause.len()], MAX_BOUNDED_BYTES);

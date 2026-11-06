@@ -105,7 +105,11 @@ mod tests {
 
         let long = "Z".repeat(30_000);
         let status = EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
-            CheckFailure::TimedOut(TimedOut::new(long, std::time::Duration::from_secs(1))),
+            CheckFailure::TimedOut(TimedOut::new(
+                long,
+                std::time::Duration::from_secs(1),
+                selfie::commands::runner::TimeLimit::Total,
+            )),
         ));
 
         let cell = format_list_status(&status, false);

@@ -35,6 +35,7 @@ fn timed_out(command: &str) -> CommandError {
     CommandError::Timeout {
         command: command.to_string(),
         timeout: Duration::from_secs(1),
+        limit: selfie::commands::runner::TimeLimit::Total,
         working_directory: PathBuf::from("/"),
     }
 }

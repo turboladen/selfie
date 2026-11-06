@@ -100,7 +100,8 @@ dotfiles_directory: ~/.config/selfie/dotfiles
 # selfie creates it on its first write, whether you name it here or take the default.
 state_directory: ~/.local/state/selfie
 
-# Command timeout in seconds (default: 60)
+# Command timeout in seconds (default: 60). An install command is stopped after this long
+# without output; every other command after this long in total.
 command_timeout: 300
 
 # Stop an apply at its first failure (default: false)
@@ -363,9 +364,18 @@ over `NO_COLOR`. Otherwise `NO_COLOR` set to any value, or `CLICOLOR=0`, turns c
 
 #### `command_timeout`
 
-Default timeout for package operations in seconds. Also bounds every dotfile provider command and
-template binding, applied per command rather than per entry — an entry with several bindings can
-take longer than this in total to resolve.
+Timeout for commands, in seconds. It means two things, depending on the command:
+
+- An **install command** is stopped after this many seconds with no output on stdout or stderr.
+  Output from either stream restarts the count, so a long build that keeps printing finishes however
+  long it takes, and Ctrl+C is what stops one that prints without progressing. A step that stays
+  silent longer than this still fails, as a quiet compile can. Raise the value for such a package.
+- Every other command is stopped after this many seconds **in total**: check and audit commands,
+  every dotfile provider command and every template binding. The limit applies per command rather
+  than per entry, so an entry with several bindings can take longer than this in total to resolve.
+
+The error says which limit stopped the command: "produced no output for N seconds" or "timed out
+after N seconds".
 
 ```yaml
 command_timeout: 600 # 10 minutes

@@ -2415,9 +2415,12 @@ impl From<crate::commands::runner::CommandError> for OperationFailure {
     fn from(err: crate::commands::runner::CommandError) -> Self {
         match err {
             crate::commands::runner::CommandError::Timeout {
-                command, timeout, ..
+                command,
+                timeout,
+                limit,
+                ..
             } => OperationFailure::CommandError(CommandFailure::TimedOut(TimedOut::new(
-                command, timeout,
+                command, timeout, limit,
             ))),
             crate::commands::runner::CommandError::WorkingDirectoryUnusable(unusable) => {
                 OperationFailure::CommandError(CommandFailure::WorkingDirectoryUnusable(unusable))
@@ -4885,8 +4888,11 @@ impl From<&crate::commands::runner::CommandError> for CheckFailure {
                 Self::WorkingDirectoryUnusable(unusable.clone())
             }
             CommandError::Timeout {
-                command, timeout, ..
-            } => Self::TimedOut(TimedOut::new(command.clone(), *timeout)),
+                command,
+                timeout,
+                limit,
+                ..
+            } => Self::TimedOut(TimedOut::new(command.clone(), *timeout, *limit)),
             CommandError::InputRequired { .. } => Self::InputRequired {
                 message: Message::of(err),
             },
@@ -5087,7 +5093,11 @@ pub(crate) fn warning_values(event: &PackageEvent) -> Option<Vec<String>> {
 pub(crate) fn every_check_failure() -> [CheckFailure; 6] {
     let message = || crate::commands::BoundedText::of(&"m");
     [
-        CheckFailure::TimedOut(TimedOut::new("c", std::time::Duration::from_secs(1))),
+        CheckFailure::TimedOut(TimedOut::new(
+            "c",
+            std::time::Duration::from_secs(1),
+            crate::commands::runner::TimeLimit::Total,
+        )),
         CheckFailure::CouldNotStart {
             message: crate::parts::Parts::new().text("m").into(),
         },
@@ -5315,6 +5325,7 @@ mod tests {
                 CommandError::Timeout {
                     command: command(),
                     timeout: Duration::from_secs(1),
+                    limit: crate::commands::runner::TimeLimit::Total,
                     working_directory: wd(),
                 },
                 timed_out.to_string(),
@@ -5469,13 +5480,18 @@ mod tests {
         use crate::commands::runner::{CommandError, UnusableDirectory};
         use std::time::Duration;
 
-        let timed_out = TimedOut::new("sleep 5 #\u{200B}", Duration::from_secs(1));
+        let timed_out = TimedOut::new(
+            "sleep 5 #\u{200B}",
+            Duration::from_secs(1),
+            crate::commands::runner::TimeLimit::Total,
+        );
         let timed_out_words =
             "`sleep 5 #\u{200B}` timed out after 1 second, the limit `command_timeout` sets";
         assert_eq!(timed_out.to_string(), timed_out_words);
         let timeout = CommandError::Timeout {
             command: "sleep 5 #\u{200B}".to_string(),
             timeout: Duration::from_secs(1),
+            limit: crate::commands::runner::TimeLimit::Total,
             working_directory: "/p".into(),
         };
         assert_eq!(timeout.to_string(), timed_out_words);
@@ -5555,6 +5571,7 @@ mod tests {
                 CommandFailure::TimedOut(TimedOut::new(
                     "c\u{200B}md",
                     std::time::Duration::from_secs(1),
+                    crate::commands::runner::TimeLimit::Total,
                 )),
                 vec![command()],
             ),
@@ -5577,7 +5594,12 @@ mod tests {
     #[test]
     fn a_long_command_is_bounded_inside_its_part() {
         let long = format!("head{}tail", "x".repeat(3000));
-        let sentence = TimedOut::new(long, std::time::Duration::from_secs(1)).to_string();
+        let sentence = TimedOut::new(
+            long,
+            std::time::Duration::from_secs(1),
+            crate::commands::runner::TimeLimit::Total,
+        )
+        .to_string();
 
         assert!(sentence.starts_with("`head"), "{sentence}");
         assert!(
@@ -5715,7 +5737,12 @@ mod tests {
     #[test]
     fn a_timeout_names_its_duration_and_the_setting() {
         let render = |timeout| {
-            TimedOut::new("sleep 5", std::time::Duration::from_millis(timeout)).to_string()
+            TimedOut::new(
+                "sleep 5",
+                std::time::Duration::from_millis(timeout),
+                crate::commands::runner::TimeLimit::Total,
+            )
+            .to_string()
         };
 
         assert_eq!(
@@ -5736,6 +5763,7 @@ mod tests {
             !OperationFailure::CommandError(CommandFailure::TimedOut(TimedOut::new(
                 "sleep 5",
                 std::time::Duration::from_secs(1),
+                crate::commands::runner::TimeLimit::Total,
             )))
             .to_string()
             .contains("Invalid command")
@@ -5850,6 +5878,7 @@ mod tests {
                 CommandError::Timeout {
                     command: cmd(),
                     timeout: Duration::from_secs(1),
+                    limit: crate::commands::runner::TimeLimit::Total,
                     working_directory: dir(),
                 },
                 "timed_out",
@@ -5927,7 +5956,12 @@ mod tests {
         let mut sentences = vec![
             execution(Some(1)).to_string(),
             execution(None).to_string(),
-            TimedOut::new(long.clone(), std::time::Duration::from_secs(1)).to_string(),
+            TimedOut::new(
+                long.clone(),
+                std::time::Duration::from_secs(1),
+                crate::commands::runner::TimeLimit::Total,
+            )
+            .to_string(),
             crate::commands::runner::UnusableDirectory::new(
                 long.clone(),
                 "/p",
@@ -6074,7 +6108,11 @@ mod tests {
                 "working_directory_unusable",
             ),
             (
-                CheckFailure::TimedOut(TimedOut::new("c", std::time::Duration::from_secs(1))),
+                CheckFailure::TimedOut(TimedOut::new(
+                    "c",
+                    std::time::Duration::from_secs(1),
+                    crate::commands::runner::TimeLimit::Total,
+                )),
                 "timed_out",
             ),
             (
@@ -6620,7 +6658,11 @@ mod tests {
             (
                 "audit that could not run",
                 audited(AuditResult::CouldNotRun(CheckFailure::TimedOut(
-                    TimedOut::new("c", std::time::Duration::from_secs(1)),
+                    TimedOut::new(
+                        "c",
+                        std::time::Duration::from_secs(1),
+                        crate::commands::runner::TimeLimit::Total,
+                    ),
                 ))),
                 Outcome::Failed,
             ),

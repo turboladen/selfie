@@ -294,3 +294,30 @@ async fn the_time_left_after_an_answer_still_ends_the_command() {
     assert!(matches!(error, CommandError::Timeout { .. }), "{error:?}");
     assert!(started.elapsed() < Duration::from_secs(10));
 }
+
+#[tokio::test]
+async fn time_spent_answering_does_not_count_as_silence_on_a_streaming_command() {
+    // The handler takes longer than the whole silence limit to answer, and the
+    // command writes nothing to its pipes while it waits.
+    let handler = PromptHandler::new(|_| async {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        Some(TerminalAnswer::new("slow-typist".to_string()))
+    });
+    let dir = dir();
+    let (sender, _receiver) = tokio::sync::mpsc::channel(10);
+
+    let output =
+        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30))
+            .with_prompt_handler(handler)
+            .execute_streaming(
+                ASKS,
+                dir.path(),
+                Duration::from_secs(2),
+                sender,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+    assert_eq!(output.stdout_str(), "got:slow-typist");
+}

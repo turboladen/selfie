@@ -232,6 +232,7 @@ mod tests {
         let failure = CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
             "sleep 9",
             std::time::Duration::from_secs(1),
+            selfie::commands::runner::TimeLimit::Total,
         ));
         let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(
             std::path::Path::new("/packages"),
@@ -293,6 +294,7 @@ mod tests {
         let failure = CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
             "sleep 9 # A\rB\u{1b}[2Jtail",
             std::time::Duration::from_secs(1),
+            selfie::commands::runner::TimeLimit::Total,
         ));
         let audit = AuditResultData {
             package_name: "p".to_string(),
@@ -324,6 +326,7 @@ mod tests {
         let failure = CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
             "sleep 9",
             std::time::Duration::from_secs(1),
+            selfie::commands::runner::TimeLimit::Total,
         ));
         let row = |result| AuditResultData {
             package_name: "p".to_string(),

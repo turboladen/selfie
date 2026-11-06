@@ -399,7 +399,11 @@ mod tests {
 
         let timed_out = check_ending(
             &CheckResult::CouldNotRun(CheckFailure::TimedOut(
-                crate::commands::runner::TimedOut::new("c", std::time::Duration::from_secs(1)),
+                crate::commands::runner::TimedOut::new(
+                    "c",
+                    std::time::Duration::from_secs(1),
+                    crate::commands::runner::TimeLimit::Total,
+                ),
             )),
             &token,
         );
