@@ -321,3 +321,28 @@ async fn time_spent_answering_does_not_count_as_silence_on_a_streaming_command()
 
     assert_eq!(output.stdout_str(), "got:slow-typist");
 }
+
+// Opening a pseudo-terminal can fail for an instant while another one closes,
+// and a command whose terminal could not be opened runs without one, so its
+// question never reaches the handler. Many commands starting and ending at once
+// on many threads are what make two opens meet a close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 16)]
+async fn commands_started_and_ended_together_are_each_given_a_terminal() {
+    let (handler, _) = answering("same");
+    let runner = runner().with_prompt_handler(handler);
+    let dir = dir();
+
+    let mut runs = tokio::task::JoinSet::new();
+    for _ in 0..64 {
+        let runner = runner.clone();
+        let path = dir.path().to_path_buf();
+        runs.spawn(async move { runner.execute(ASKS, &path, &CancellationToken::new()).await });
+    }
+
+    while let Some(finished) = runs.join_next().await {
+        let output = finished
+            .unwrap()
+            .unwrap_or_else(|error| panic!("a command was not run: {error:?}"));
+        assert_eq!(output.stdout_str(), "got:same");
+    }
+}

@@ -198,6 +198,26 @@ pub(crate) struct Terminal {
     _slave: std::os::fd::OwnedFd,
 }
 
+/// How many times a pseudo-terminal is opened before giving up on it.
+// On macOS, `posix_openpt` can fail with `ENXIO` ("Device not configured") for
+// an instant while another pseudo-terminal is closing, whether that one is
+// selfie's own or another process's. A command that gets no terminal runs on
+// selfie's own, so its question never reaches the handler. An immediate second
+// attempt succeeds, and a failure that lasts, such as running out of
+// pseudo-terminals, fails every attempt and is logged once.
+const OPEN_ATTEMPTS: usize = 5;
+
+/// Call `attempt` once, and again after each failure up to `attempts` calls in
+/// all, and return the last result.
+fn retrying<T, E>(attempts: usize, mut attempt: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+    for _ in 1..attempts {
+        if let ok @ Ok(_) = attempt() {
+            return ok;
+        }
+    }
+    attempt()
+}
+
 /// Open a pseudo-terminal for one command, or `None` when the system cannot
 /// provide one, in which case the command runs without a terminal. The `Pts`
 /// goes to the command.
@@ -206,7 +226,7 @@ pub(crate) fn open() -> Option<(Terminal, Pts)> {
     // writes to `/dev/tty` reaches the user behind whatever selfie is drawing.
     // Each way of ending up there is logged, because nothing else says so.
     const WITHOUT: &str = "a command runs without a terminal of its own";
-    let (pty, pts) = pty_process::open()
+    let (pty, pts) = retrying(OPEN_ATTEMPTS, pty_process::open)
         .inspect_err(|error| tracing::warn!(%error, "{WITHOUT}: no pseudo-terminal"))
         .ok()?;
     // Echo is off so that what selfie writes back, which may be a password, is
@@ -335,5 +355,31 @@ mod tests {
         );
         let expired = tokio::time::timeout(Duration::from_secs(2), budget.expired()).await;
         assert!(expired.is_ok());
+    }
+
+    #[test]
+    fn a_failure_that_clears_is_retried_until_it_succeeds() {
+        let mut calls = 0;
+
+        let result = retrying(5, || {
+            calls += 1;
+            if calls < 3 { Err("busy") } else { Ok(calls) }
+        });
+
+        assert_eq!(result, Ok(3));
+    }
+
+    #[test]
+    fn a_failure_that_lasts_is_reported_after_the_last_attempt() {
+        let mut calls = 0;
+
+        let result: Result<(), usize> = retrying(5, || {
+            calls += 1;
+            Err(calls)
+        });
+
+        // The error is the last attempt's, and no attempt is made beyond the limit.
+        assert_eq!(result, Err(5));
+        assert_eq!(calls, 5);
     }
 }
