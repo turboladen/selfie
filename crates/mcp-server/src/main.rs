@@ -97,21 +97,25 @@ async fn async_main() -> Result<()> {
         runner,
         GixGitStatusProvider::default(),
         config.clone(),
-        // A fresh token, deliberately: an MCP server has no signal handler and no
-        // interactive user to press Ctrl+C, so there is nothing to cancel with.
-        // `command_timeout` remains the bound on a command that blocks, except that an
-        // install command that keeps printing is bounded by nothing here.
-        // `server.rs` says the same about the dotfile service.
+        // Never canceled: each tool call runs on a copy of the service that
+        // carries that request's own token, and rmcp cancels that one when the
+        // client cancels the call or disconnects. `server.rs` does the same for the
+        // dotfile service.
         CancellationToken::new(),
     );
 
     let mcp_server =
         server::SelfieServer::new(service, config, ignored_keys, GixGitAdapter::default());
 
+    let in_flight = mcp_server.in_flight();
     let (stdin, stdout) = stdio();
     let service = mcp_server.serve((stdin, stdout)).await?;
 
-    service.waiting().await?;
+    let stopped = service.waiting().await;
+    // Waited on even when the server stopped with an error, because a call that
+    // was canceled is still ending its command.
+    server::wait_for_calls(&in_flight, server::SHUTDOWN_WAIT).await;
+    stopped?;
 
     Ok(())
 }

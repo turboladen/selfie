@@ -112,6 +112,19 @@ where
         }
     }
 
+    /// A copy of this service whose operations are canceled by
+    /// `cancellation_token` instead of the token it was built with.
+    #[must_use]
+    pub fn with_cancellation(&self, cancellation_token: CancellationToken) -> Self
+    where
+        Self: Clone,
+    {
+        Self {
+            cancellation_token,
+            ..self.clone()
+        }
+    }
+
     /// The refusal this run must report instead of writing anything, if any.
     ///
     /// Every caller evaluates this *before* building the event stream, so `P`

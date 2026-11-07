@@ -292,7 +292,7 @@ pub trait PackageService: Send + Sync {
 ///
 /// The implementation uses dependency injection through generic parameters to
 /// support different storage backends and command execution strategies.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PackageServiceImpl<R, CR, G> {
     /// Repository for loading and managing package definitions
     package_repository: R,
@@ -336,6 +336,16 @@ where
             git_provider,
             config,
             cancellation_token,
+        }
+    }
+
+    /// A copy of this service whose operations are canceled by
+    /// `cancellation_token` instead of the token it was built with.
+    #[must_use]
+    pub fn with_cancellation(&self, cancellation_token: CancellationToken) -> Self {
+        Self {
+            cancellation_token,
+            ..self.clone()
         }
     }
 
