@@ -3917,6 +3917,82 @@ async fn test_track_standalone_creates_spec_and_copies_file() {
     );
 }
 
+// A `.gitignore` copied as itself would be read by git as ignore rules for the
+// repository it sits in, hiding the sources it names. So the copy is stored as
+// `gitignore`, and the spec's source names that, while its target keeps the
+// real name.
+#[tokio::test]
+async fn a_tracked_gitignore_is_copied_under_a_name_git_does_not_read() {
+    let dirs = TestDirs::new();
+    let target_file = dirs.target_dir.join(".gitignore");
+    std::fs::write(&target_file, "*.log\n").unwrap();
+
+    let service = dirs.service_with_dotfiles();
+    let events = collect_events(
+        service
+            .track_standalone("fish", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Success(
+                OperationSuccess::DotfileTracked { .. }
+            ))
+        ),
+        "got: {events:?}"
+    );
+
+    let copy_dir = dirs.dotfiles_dir.join("fish");
+    assert_eq!(
+        std::fs::read_to_string(copy_dir.join("gitignore")).unwrap(),
+        "*.log\n"
+    );
+    assert!(!copy_dir.join(".gitignore").exists());
+
+    let spec = std::fs::read_to_string(dirs.dotfiles_dir.join("fish.yml")).unwrap();
+    assert!(spec.contains("source: fish/gitignore"), "spec: {spec}");
+    assert!(
+        spec.contains(".gitignore"),
+        "the target keeps its name: {spec}"
+    );
+}
+
+// A renamed copy can land on another entry's source: `.ignore` is stored as
+// `ignore`, which git's own `ignore` file already took. The refusal says the dot
+// was dropped instead of telling the user to remove the other entry's file.
+#[tokio::test]
+async fn a_renamed_copy_that_collides_says_why_its_name_differs() {
+    let dirs = TestDirs::new();
+    std::fs::create_dir_all(dirs.dotfiles_dir.join("git")).unwrap();
+    std::fs::write(dirs.dotfiles_dir.join("git").join("ignore"), "*.swp\n").unwrap();
+    let target_file = dirs.target_dir.join(".ignore");
+    std::fs::write(&target_file, "target/\n").unwrap();
+
+    let service = dirs.service_with_dotfiles();
+    let events = collect_events(
+        service
+            .track_standalone("git", target_file.to_str().unwrap())
+            .await,
+    )
+    .await;
+    let failure = match get_operation_result(&events) {
+        Some(OperationResult::Failure(failure)) => failure.to_string(),
+        other => panic!("expected a refusal, got: {other:?}"),
+    };
+    assert!(
+        failure.contains("without its leading dot"),
+        "got: {failure}"
+    );
+    assert!(!failure.contains("Remove it first"), "got: {failure}");
+    assert_eq!(
+        std::fs::read_to_string(dirs.dotfiles_dir.join("git").join("ignore")).unwrap(),
+        "*.swp\n",
+        "the other entry's source is untouched"
+    );
+}
+
 #[tokio::test]
 async fn test_track_standalone_fails_when_target_missing() {
     let dirs = TestDirs::new();
