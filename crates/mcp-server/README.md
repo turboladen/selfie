@@ -135,6 +135,14 @@ With these tools, an AI assistant can:
 - **Migration assistance** -- compare environments, identify gaps, update package files
 - **Package authoring** -- create and update package files from natural language descriptions
 
+## Canceling a call
+
+A client that cancels a tool call (`notifications/cancelled`), or disconnects during one, stops the
+commands that call started: install, check, audit and dotfile provider commands. MCP gives a
+canceled call no result, so the client receives none. `selfie_sync_push` and `selfie_sync_pull` stop
+their dotfile checks the same way, but not a git operation already under way. After a disconnect the
+server lets a running call finish for up to five seconds before it stops the call's commands.
+
 ## Protocol
 
 selfie-mcp uses stdio transport (stdin/stdout for the MCP JSON-RPC protocol). Diagnostic logs go to

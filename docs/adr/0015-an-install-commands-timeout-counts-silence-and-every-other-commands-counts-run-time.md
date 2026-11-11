@@ -54,9 +54,9 @@ name `command_timeout`.
   Homebrew without `--verbose`, can do that, and the remedy is a larger `command_timeout`.
 - An install command that keeps printing without making progress is never stopped by selfie. The
   user has to stop it with Ctrl+C.
-- The MCP server has no equivalent of Ctrl+C: it hands its services a token that nothing cancels, so
-  an install that keeps printing blocks the tool call until the process ends. Canceling a tool call
-  has to reach that token before an MCP client has a way to stop such an install.
+- The MCP server stops an install that keeps printing when its client cancels the tool call or
+  disconnects, because each call runs on services that carry that request's own token. A client with
+  no way to cancel a call has no way to stop such an install.
 - The key means two things depending on the command, so its documentation has to state both.
 - Output decides the limit, so output a command buffers internally and has not yet written does not
   count. A tool that flushes rarely can look silent while it works.

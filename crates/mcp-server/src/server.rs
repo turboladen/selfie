@@ -26,7 +26,7 @@ use selfie::{
     sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
 };
 use serde::Deserialize;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::event_collector;
 
@@ -51,6 +51,12 @@ pub struct SelfieServer {
     dotfile_service: Arc<ConcreteDotfileService>,
     sync_service: Arc<ConcreteSyncService>,
     config: SelfieConfig,
+    /// Builds the sync service for a request, whose dotfile service carries that
+    /// request's token.
+    git: GixGitAdapter,
+    /// Holds a token for as long as a tool call runs, so shutdown can wait for a
+    /// canceled call to stop its commands.
+    in_flight: TaskTracker,
     /// Keys the configuration file carried that selfie did not use.
     ///
     /// Reported through `selfie_config_get` rather than only logged: an
@@ -256,12 +262,9 @@ impl SelfieServer {
         // Login shell: a GUI-launched MCP server does not inherit terminal PATH,
         // and provider commands (`op`, `teller`) live on the user's PATH.
         let runner = ShellCommandRunner::login_shell(config.command_timeout());
-        // A fresh token, deliberately: an MCP server has no signal handler and no
-        // interactive user to press Ctrl+C, so there is nothing to cancel with.
-        // Stated here rather than defaulted inside the service, so this stays a
-        // visible property of *this* adapter — `main.rs` says the same about
-        // `PackageServiceImpl`. `command_timeout` remains the bound on a provider
-        // command that blocks.
+        // The token given below is never canceled. A tool call runs on a copy of
+        // the service that carries the request's own token (`for_request`), and
+        // `main.rs` does the same for `PackageServiceImpl`.
         // No `allowing_sudo` call, and no tool parameter that could reach one: an
         // AI assistant has no reason to be driving selfie under sudo, so the
         // refusal here is unconditional.
@@ -274,19 +277,50 @@ impl SelfieServer {
             CancellationToken::new(),
             SudoPolicy::new(RealPrivilege),
         );
-        let sync_service = SyncServiceImpl::new(
-            git,
-            dotfile_service.clone(),
-            config.clone(),
-            SudoPolicy::new(RealPrivilege),
-        );
+        let sync_service = Self::sync_service(&git, &dotfile_service, &config);
         Self {
             service: Arc::new(service),
             dotfile_service: Arc::new(dotfile_service),
             sync_service: Arc::new(sync_service),
             config,
+            git,
+            in_flight: TaskTracker::new(),
             ignored_config_keys,
         }
+    }
+
+    fn sync_service(
+        git: &GixGitAdapter,
+        dotfile_service: &ConcreteDotfileService,
+        config: &SelfieConfig,
+    ) -> ConcreteSyncService {
+        SyncServiceImpl::new(
+            git.clone(),
+            dotfile_service.clone(),
+            config.clone(),
+            SudoPolicy::new(RealPrivilege),
+        )
+    }
+
+    /// A copy of this server whose services run their commands under `ct`, the
+    /// token of one request.
+    fn for_request(&self, ct: CancellationToken) -> Self {
+        let dotfile_service = self.dotfile_service.with_cancellation(ct.clone());
+        let sync_service = Self::sync_service(&self.git, &dotfile_service, &self.config);
+        Self {
+            service: Arc::new(self.service.with_cancellation(ct)),
+            dotfile_service: Arc::new(dotfile_service),
+            sync_service: Arc::new(sync_service),
+            ..self.clone()
+        }
+    }
+
+    /// The tracker that holds a token for each tool call still running. After the
+    /// server stops, closing it and waiting on it returns once every call has
+    /// finished stopping its commands.
+    #[must_use]
+    pub fn in_flight(&self) -> TaskTracker {
+        self.in_flight.clone()
     }
 
     #[tool(
@@ -585,7 +619,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_package_install",
-        description = "Install a package using its configured method for the current environment. Its recommended packages install after it: one that fails is reported in a `recommend_failed` row and does not fail the call. Before anything installs, the package, each dependency and each recommend is judged installable here: one with an install command is; one whose install command is blank (empty, whitespace, or only a comment, such as the `# TODO` placeholder of a spec the CLI's `selfie spec create` wrote) is only if its check command says it is already installed, and that check runs first; one with neither, or with no entry for this environment, is refused with an ERROR result naming it and the package that requires it, and nothing installs. If the install command succeeds but the check still says not installed, the call fails with `kind` \"not_installed_after_install\" and nothing after it installs. If the check gives no answer (it timed out, or its result could not be read), the install may have worked: `status` is \"found\" and `unanswered` lists `{package, kind, reason}`. A check that could not start, or could not enter its working directory, fails the call. This server has no terminal, so a command that asks for input there, such as the password `sudo` wants, is ended and fails the call with `kind` \"input_required\"; `run_in_terminal` then holds the command to give the user, who runs it where they can type. A recommend never changes the call's result: each of these is a `recommend_failed` row or a warning."
+        description = "Install a package using its configured method for the current environment. Its recommended packages install after it: one that fails is reported in a `recommend_failed` row and does not fail the call. Before anything installs, the package, each dependency and each recommend is judged installable here: one with an install command is; one whose install command is blank (empty, whitespace, or only a comment, such as the `# TODO` placeholder of a spec the CLI's `selfie spec create` wrote) is only if its check command says it is already installed, and that check runs first; one with neither, or with no entry for this environment, is refused with an ERROR result naming it and the package that requires it, and nothing installs. If the install command succeeds but the check still says not installed, the call fails with `kind` \"not_installed_after_install\" and nothing after it installs. If the check gives no answer (it timed out, or its result could not be read), the install may have worked: `status` is \"found\" and `unanswered` lists `{package, kind, reason}`. A check that could not start, or could not enter its working directory, fails the call. This server has no terminal, so a command that asks for input there, such as the password `sudo` wants, is ended and fails the call with `kind` \"input_required\"; `run_in_terminal` then holds the command to give the user, who runs it where they can type. A recommend never changes the call's result: each of these is a `recommend_failed` row or a warning. An install command is stopped after `command_timeout` seconds without output, so one that keeps printing has no time limit. Canceling the call, which a client does with `notifications/cancelled`, stops the command; MCP gives a canceled call no result, so the client receives none."
     )]
     async fn package_install(
         &self,
@@ -856,11 +890,45 @@ with all=true, when a key in any environment cannot be trusted or a package spec
 
 #[tool_handler]
 impl ServerHandler for SelfieServer {
+    // The one place every tool call passes through. The macro's own `call_tool`
+    // is what this repeats, with two additions: the call runs on a copy of the
+    // server whose services carry the request's token, which rmcp cancels when
+    // the client sends `notifications/cancelled` or disconnects, and the call
+    // holds a token on `in_flight` until it has finished.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, McpError> {
+        let _in_flight = self.in_flight.token();
+        let scoped = self.for_request(context.ct.clone());
+        let call = rmcp::handler::server::tool::ToolCallContext::new(&scoped, request, context);
+        Self::tool_router().call(call).await
+    }
+
     fn get_info(&self) -> ServerConfig {
         let mut capabilities = ServerCapabilities::default();
         capabilities.tools = Some(ToolsCapability::default());
         ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("selfie-mcp", env!("CARGO_PKG_VERSION")))
+    }
+}
+
+/// How long shutdown waits for canceled tool calls to stop their commands.
+pub const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wait up to `limit` for every tool call counted by `in_flight` to finish.
+///
+/// Call it after the server has stopped. A call that rmcp canceled is still
+/// ending its command, and a process that exits first leaves that command
+/// running.
+pub async fn wait_for_calls(in_flight: &TaskTracker, limit: std::time::Duration) {
+    in_flight.close();
+    if tokio::time::timeout(limit, in_flight.wait()).await.is_err() {
+        tracing::warn!(
+            calls = in_flight.len(),
+            "tool calls were still stopping their commands when the server exited"
+        );
     }
 }
 
@@ -952,6 +1020,9 @@ fn push_error_json(error: &selfie::sync_service::SyncError) -> serde_json::Value
     }
     data
 }
+
+#[cfg(test)]
+mod cancellation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1491,6 +1562,19 @@ mod tests {
         dotfiles: Option<&std::path::Path>,
         state: Option<&std::path::Path>,
     ) -> SelfieServer {
+        server_running(packages, dotfiles, state, |config| {
+            ShellCommandRunner::login_shell(config.command_timeout())
+        })
+    }
+
+    // As `server_with`, with the runner the package service runs commands on,
+    // built from the configuration.
+    pub(super) fn server_running(
+        packages: &std::path::Path,
+        dotfiles: Option<&std::path::Path>,
+        state: Option<&std::path::Path>,
+        runner: impl FnOnce(&SelfieConfig) -> ShellCommandRunner,
+    ) -> SelfieServer {
         let mut builder = selfie::config::SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(packages);
@@ -1509,7 +1593,7 @@ mod tests {
         let service = PackageServiceImpl::new(
             repo,
             dotfiles_repository(&config),
-            ShellCommandRunner::login_shell(config.command_timeout()),
+            runner(&config),
             test_common::isolated_git_adapter(),
             config.clone(),
             CancellationToken::new(),
@@ -2107,7 +2191,7 @@ mod tests {
     }
 
     // The JSON a tool returned.
-    fn tool_json(result: &CallToolResult) -> serde_json::Value {
+    pub(super) fn tool_json(result: &CallToolResult) -> serde_json::Value {
         let text = &result.content[0]
             .as_text()
             .expect("tool results are text")
