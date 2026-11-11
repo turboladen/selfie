@@ -1153,6 +1153,31 @@ impl Package {
                     source_loc,
                 ));
             }
+
+            // A warning, not an error: the file deploys correctly where it is, and
+            // only a clone of the repository loses what it names.
+            if let Some(name) = Path::new(source).file_name().and_then(|n| n.to_str())
+                && crate::dotfile_service::source_name::is_read_as_instructions(name)
+            {
+                issues.push(ValidationIssue::warning_at(
+                    ValidationErrorCategory::InvalidValue,
+                    &format!("{field}.source"),
+                    Message::from(
+                        Parts::new()
+                            .text("Dotfile source '")
+                            .path(Path::new(source))
+                            .text(
+                                "' has a name git or a search tool reads as instructions about \
+                                 the files beside it, so the repository does not hold it as data",
+                            ),
+                    ),
+                    Some(
+                        "Rename the source file without its leading dot and point 'source' at \
+                         the new name. The target keeps its own name.",
+                    ),
+                    source_loc,
+                ));
+            }
         }
 
         // The textual half of the rule `deploy_target` applies, reported here with
@@ -1646,6 +1671,44 @@ environments:
             "got: {}",
             messages(&issues)
         );
+    }
+
+    // A source named `.gitignore` is warned about, shared or scoped to an
+    // environment, at its own `source` field. The control, the same file renamed
+    // without its dot, is not.
+    #[test]
+    fn a_source_a_tool_reads_as_instructions_is_warned_about() {
+        let warned = |source: &str| -> Vec<String> {
+            package_from_yaml(&format!(
+                r"
+name: fish
+dotfiles:
+  - source: {source}
+    target: ~/.config/fish/.gitignore
+environments:
+  work:
+    install: echo
+    dotfiles:
+      - source: {source}
+        target: ~/.config/fish/.gitignore
+"
+            ))
+            .validate_dotfiles()
+            .into_iter()
+            .filter(|i| {
+                i.level() == ValidationLevel::Warning && i.message().contains("as instructions")
+            })
+            .map(|i| i.field().to_string())
+            .collect()
+        };
+        let mut fields = warned("fish/.gitignore");
+        fields.sort();
+        assert_eq!(fields.len(), 2, "got: {fields:?}");
+        assert!(
+            fields.iter().all(|f| f.ends_with(".source")),
+            "got: {fields:?}"
+        );
+        assert!(warned("fish/gitignore").is_empty());
     }
 
     // A pair that is one file only on the machine whose home makes them meet,

@@ -46,6 +46,7 @@ pub(crate) mod resolve;
 mod secret;
 pub mod semantic;
 pub mod service;
+pub(crate) mod source_name;
 pub mod state;
 pub(crate) mod state_file;
 

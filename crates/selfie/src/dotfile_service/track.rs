@@ -786,16 +786,28 @@ where
         );
     };
     let source_dir = base_dir.join(&spec.name);
-    let source_path = source_dir.join(&filename);
-    let relative_source = format!("{}/{filename}", spec.name);
+    // A copy named `.gitignore` would be read by git as ignore rules for the
+    // repository the copy sits in, so it is stored under a neutral name.
+    let copy_name = super::source_name::copy_name(&filename);
+    let source_path = source_dir.join(copy_name);
+    let relative_source = format!("{}/{copy_name}", spec.name);
 
+    let renamed = copy_name != filename;
     let already_exists = || {
-        track_failed(
-            Parts::new()
-                .text("Source file already exists at ")
-                .path(source_path.as_path())
-                .text(". Remove it first, or track a different file."),
-        )
+        let parts = Parts::new()
+            .text("Source file already exists at ")
+            .path(source_path.as_path());
+        // Renamed, the copy can land on another entry's source, which removing
+        // would break; so the refusal says why the name differs and points
+        // elsewhere.
+        track_failed(if renamed {
+            parts
+                .text(". A copy of '")
+                .name(filename.as_str())
+                .text("' is stored without its leading dot, so no tool reads it as instructions. Track it into a different spec.")
+        } else {
+            parts.text(". Remove it first, or track a different file.")
+        })
     };
     if filesystem.path_exists(&source_path) {
         return already_exists();

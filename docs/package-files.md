@@ -1604,6 +1604,15 @@ selfie package track-dotfile starship ~/.config/starship.toml
 The track commands copy the file into the repo, create or update the YAML spec with the
 source→target mapping, and record initial deploy state for drift detection.
 
+A few file names are instructions to the tools that walk a repository, about the files beside them:
+`.git`, `.gitignore` and `.gitattributes` for git, and `.ignore`, `.rgignore` and `.fdignore` for
+search tools, in any case. A copy under one of those names would stop being data: a copied
+`.gitignore` makes `git add` silently skip the sources it names, so a fresh clone is missing them.
+The track commands store such a copy without its leading dot, so `~/.config/fish/.gitignore` is
+copied as `fish/gitignore`, and the spec's `source` names that file while its `target` keeps the
+real name. `selfie spec validate` warns about any source under one of those names, so a spec written
+by hand that names one is flagged too.
+
 A file the package already deploys in the current environment is reported as already tracked, and
 nothing is copied or added. An entry under `environments.<name>.dotfiles` counts when `<name>` is
 the current environment; one scoped to another environment does not, so the track adds a shared
