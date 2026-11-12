@@ -19,7 +19,7 @@ just typos                                     # Spell-check the tree
 just fmt                                       # cargo fmt + dprint fmt (Markdown/YAML)
 just fmt-check                                 # Verify both without modifying
 cargo run -p selfie-cli -- <args>              # Run the CLI (from workspace root)
-cargo install --path crates/cli --locked      # --locked, or a fresh resolve fails on yanked bisync
+cargo install --path crates/cli --locked      # Install the CLI, built with the tested Cargo.lock
 just sandbox-run <args>                        # Run the CLI against a throwaway sandbox (see below)
 just percommit <base>                          # just clippy on every commit below the tip
 just mutate <spec.toml>                        # Mutation runner (crates/xtask/README.md)

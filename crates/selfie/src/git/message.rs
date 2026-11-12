@@ -44,7 +44,10 @@ impl GitMessage {
     /// here rather than deciding per site whether its input is trusted.
     #[must_use]
     pub fn new(message: impl std::fmt::Display) -> Self {
-        Self::clean(&message.to_string())
+        // The alternate form, because a gix error prints only its outermost
+        // context without it, dropping the cause beneath. Other types print the
+        // same either way.
+        Self::clean(&format!("{message:#}"))
     }
 
     /// Clean a process's raw stderr bytes.
@@ -302,6 +305,26 @@ mod tests {
     use super::*;
     use crate::commands::runner::MAX_BOUNDED_BYTES;
     use test_common::assert_secret_free;
+
+    // A type that prints its cause only in the alternate form, as a gix error
+    // does.
+    struct ChainedOnlyWhenAlternate;
+
+    impl std::fmt::Display for ChainedOnlyWhenAlternate {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if f.alternate() {
+                f.write_str("Failed to open repository: permission denied")
+            } else {
+                f.write_str("Failed to open repository")
+            }
+        }
+    }
+
+    #[test]
+    fn a_message_keeps_the_cause_an_error_prints_only_when_asked() {
+        let message = GitMessage::new(ChainedOnlyWhenAlternate).to_string();
+        assert!(message.contains("permission denied"), "{message}");
+    }
 
     // High-entropy, 24 characters, and shaped like nothing else in a fixture, so
     // it cannot read as a path, a package name or an environment name and match

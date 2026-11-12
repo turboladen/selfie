@@ -144,13 +144,13 @@ selfie had been verified on it.
 ```bash
 git clone https://github.com/turboladen/selfie.git
 cd selfie
-cargo install --path crates/cli
+cargo install --path crates/cli --locked
 ```
 
 ### MCP Server (for AI assistants)
 
 ```bash
-cargo install --path crates/mcp-server
+cargo install --path crates/mcp-server --locked
 ```
 
 See the [MCP server README](crates/mcp-server/README.md) for setup with Claude Desktop, Claude Code,

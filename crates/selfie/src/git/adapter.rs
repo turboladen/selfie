@@ -112,24 +112,36 @@ pub fn isolate_git_config(git: &mut Command) {
 /// Distinguishes "not a git repository" from real I/O or corruption errors,
 /// matching the error discrimination in `GitStatusProvider::status_for_directory`.
 fn open_repo(scope: ConfigScope, path: &Path) -> Result<gix::Repository, GitSyncError> {
-    discover(scope, path).map_err(|e| match e {
-        gix::discover::Error::Discover(_) => GitSyncError::NotARepo {
-            path: path.to_path_buf(),
-        },
-        other => GitSyncError::OperationFailed {
-            operation: "discover repository",
-            message: GitMessage::new(other),
-        },
+    discover(scope, path).map_err(|e| {
+        if is_no_repository(&e, path) {
+            GitSyncError::NotARepo {
+                path: path.to_path_buf(),
+            }
+        } else {
+            GitSyncError::OperationFailed {
+                operation: "discover repository",
+                message: GitMessage::new(e),
+            }
+        }
     })
+}
+
+// Whether a failed discovery means `path` is not in a repository selfie may
+// open, rather than that a repository's own files could not be read. Three
+// cases count: no repository above `path`; one gix found and does not trust,
+// which is reported as no repository; and a `path` that is missing or is not a
+// directory. gix raises the first two as its own error type, and the third only
+// as an untyped message, so that one is asked of the path itself.
+fn is_no_repository(error: &gix::Error, path: &Path) -> bool {
+    error
+        .downcast_any_ref::<gix::discover::upwards::Error>()
+        .is_some()
+        || !path.is_dir()
 }
 
 // `gix::discover`, reading only the repository's own configuration when
 // `scope` is isolated.
-#[expect(
-    clippy::result_large_err,
-    reason = "gix's own discover error, returned as gix::discover returns it"
-)]
-fn discover(scope: ConfigScope, path: &Path) -> Result<gix::Repository, gix::discover::Error> {
+fn discover(scope: ConfigScope, path: &Path) -> Result<gix::Repository, gix::Error> {
     match scope {
         ConfigScope::User => gix::discover(path),
         ConfigScope::Isolated => {
@@ -403,7 +415,7 @@ impl GitStatusProvider for GixGitAdapter {
     fn status_for_directory(&self, directory: &Path) -> Result<GitDirectoryStatus, GitStatusError> {
         let repo = match discover(self.scope, directory) {
             Ok(repo) => repo,
-            Err(gix::discover::Error::Discover(_)) => {
+            Err(error) if is_no_repository(&error, directory) => {
                 return Ok(GitDirectoryStatus {
                     in_repo: false,
                     files: HashMap::new(),
@@ -544,7 +556,8 @@ impl GitSyncProvider for GixGitAdapter {
 
         for file in files {
             let full_path = workdir.join(file);
-            let relative_bstring = gix::path::into_bstr(file);
+            let relative_bstring =
+                gix::path::into_bstr(file).map_err(|e| git_sync_err("stage", e))?;
             let relative_path: &gix::bstr::BStr = relative_bstring.as_ref();
 
             if full_path.exists() {
@@ -911,6 +924,34 @@ mod tests {
         let result = isolated().status_for_directory(temp.path()).unwrap();
         assert!(!result.in_repo);
         assert!(result.files.is_empty());
+    }
+
+    // Discovery outside any repository is answered as "not a repository", not
+    // as a failed operation.
+    #[test]
+    fn discovering_outside_a_repository_is_not_a_repo() {
+        let temp = tempfile::TempDir::new().unwrap();
+        match isolated().discover_repo(temp.path()) {
+            Err(GitSyncError::NotARepo { path }) => assert_eq!(path, temp.path()),
+            other => panic!("expected NotARepo, got {other:?}"),
+        }
+    }
+
+    // A path that is missing, or is a file, is not in a repository either.
+    #[test]
+    fn discovering_from_a_missing_path_or_a_file_is_not_a_repo() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+
+        for path in [temp.path().join("missing"), file] {
+            match isolated().discover_repo(&path) {
+                Err(GitSyncError::NotARepo { path: reported }) => assert_eq!(reported, path),
+                other => panic!("expected NotARepo for {path:?}, got {other:?}"),
+            }
+            let status = isolated().status_for_directory(&path).unwrap();
+            assert!(!status.in_repo, "{path:?}");
+        }
     }
 
     #[test]
