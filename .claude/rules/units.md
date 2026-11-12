@@ -49,9 +49,9 @@ what matters.
 
 ## Every phase ends with the maintainer running the binary
 
-The last step of a phase is `cargo install --path crates/cli`, a rebuild of `selfie-mcp` (both
-`cargo install --path crates/mcp-server` and `cargo build -p selfie-mcp`, since the local MCP
-registration runs `target/debug/selfie-mcp`), and a numbered list of real commands for the
+The last step of a phase is `cargo install --path crates/cli --locked`, a rebuild of `selfie-mcp`
+(both `cargo install --path crates/mcp-server --locked` and `cargo build -p selfie-mcp`, since the
+local MCP registration runs `target/debug/selfie-mcp`), and a numbered list of real commands for the
 maintainer to run against their real config, with the expected result beside each. What they find
 becomes `dogfood` beads.
 

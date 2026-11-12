@@ -10,7 +10,7 @@ creating your first packages.
 ```bash
 git clone https://github.com/turboladen/selfie.git
 cd selfie
-cargo install --path crates/cli
+cargo install --path crates/cli --locked
 ```
 
 ### Verify Installation
@@ -330,7 +330,7 @@ If `selfie` isn't found after installation:
 
 1. Ensure `~/.cargo/bin` is in your PATH
 2. Try restarting your shell
-3. Rebuild from source: `cargo install --path crates/cli`
+3. Rebuild from source: `cargo install --path crates/cli --locked`
 
 ### Permission Errors
 

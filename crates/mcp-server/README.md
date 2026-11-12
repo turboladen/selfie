@@ -8,7 +8,7 @@ AI assistants like Claude, Cursor, and other MCP-compatible clients.
 ### Build
 
 ```bash
-cargo install --path crates/mcp-server
+cargo install --path crates/mcp-server --locked
 ```
 
 Or from the workspace root:
