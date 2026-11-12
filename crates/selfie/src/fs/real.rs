@@ -270,10 +270,10 @@ fn write_by_rename_with(
     // complete new one, and a symlink at the final component is replaced rather
     // than followed.
     //
-    // `ReplaceIfHolding` looks after the flush, the slow part of the write, so
-    // the window between that look and the rename is as short as an ordinary
-    // rename can make it. A change landing inside it is still replaced; closing it
-    // needs a rename that swaps only an unchanged file (selfie-sq39).
+    // `ReplaceIfHolding` looks after the flush, the slow part of the write, and
+    // keeps an already changed target without touching it, so readers never see
+    // the new file over a target that had already changed. A change landing after
+    // that look is caught by the swap in `swap_if_holding`, which reads again.
     let placed = match if_present {
         IfPresent::Replace => tmp
             .persist(path)
@@ -283,9 +283,7 @@ fn write_by_rename_with(
             if !still_holds(path, &expected)? {
                 return Ok(Placed::Kept);
             }
-            tmp.persist(path)
-                .map(|_| Placed::Written)
-                .map_err(|e| rename_failure(path, e.error))?
+            swap_if_holding(tmp, path, &expected, exchange_names)?
         }
         IfPresent::Keep => {
             rename_keeping(tmp, path, |tmp, path| tmp.persist_noclobber(path).map(drop))?
@@ -309,6 +307,115 @@ fn write_by_rename_with(
     }
 
     Ok(Placed::Written)
+}
+
+/// Put `tmp` in place at `path` only if what it replaces holds exactly
+/// `expected`: [`Placed::Kept`], with what was there put back, when it does not.
+///
+/// # Errors
+///
+/// The rename's own failure, or a failure to read what was swapped out, both
+/// naming `path`. When what was swapped out cannot be put back, it is left at the
+/// temporary name, the target holds the new file, and the error names the file
+/// left.
+// `exchange` swaps two names atomically, and is called a second time to swap
+// back. A change landing at any moment before the swap is in the swapped-out
+// file, so it is compared and survives. What this cannot catch is a writer
+// holding the old file open and writing into it after the compare. A crash
+// between the two swaps leaves the new file at `path` and the old one at the
+// temporary name, where nothing sweeps it up.
+//
+// Dropping `tmp` unlinks its name, so it is dropped only while that name holds
+// what this write may delete: the old file it matched, or its own file.
+fn swap_if_holding(
+    tmp: tempfile::NamedTempFile,
+    path: &Path,
+    expected: &[u8],
+    exchange: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<Placed, FileSystemError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let identity = |metadata: fs::Metadata| FileIdentity::of(metadata.dev(), metadata.ino());
+    let ours = tmp
+        .as_file()
+        .metadata()
+        .map(identity)
+        .map_err(|e| FileSystemError::IoError(IoFailure::at(path, e)))?;
+    let names_ours = |name: &Path| fs::symlink_metadata(name).is_ok_and(|m| identity(m) == ours);
+    match exchange(tmp.path(), path) {
+        Ok(()) => {}
+        // The target is gone since the look, which is a change like any other.
+        // A temporary file that is gone is this write's own failure.
+        Err(e) if e.kind() == io::ErrorKind::NotFound && names_ours(tmp.path()) => {
+            return Ok(Placed::Kept);
+        }
+        Err(e) if swap_unsupported(&e) => {
+            tracing::debug!(
+                directory = %parent_dir(path).display(),
+                errno = ?e.raw_os_error(),
+                "no swapping rename here; renaming after the last look",
+            );
+            return tmp
+                .persist(path)
+                .map(|_| Placed::Written)
+                .map_err(|e| rename_failure(path, e.error));
+        }
+        Err(e) => return Err(rename_failure(path, e)),
+    }
+    // A failure to read names the temporary file, which the operator never
+    // chose; the bytes in it came from `path`.
+    let held = holds(tmp.path(), expected, Links::NotFollowed, read_target).map_err(|e| match e {
+        FileSystemError::IoError(e) => {
+            FileSystemError::IoError(IoFailure::at(path, e.into_error()))
+        }
+        e => e,
+    });
+    if matches!(held, Ok(true)) {
+        return Ok(Placed::Written);
+    }
+    // Another write that landed since the swap replaced this one's file, so the
+    // target is theirs and stays. What the swap took out is older than it.
+    if !names_ours(path) {
+        return held.map(|_| Placed::Kept);
+    }
+    let swapped_back = exchange(tmp.path(), path);
+    if swapped_back.is_err() || !names_ours(tmp.path()) {
+        // The temporary name holds another writer's bytes, which dropping it
+        // would delete.
+        let error = swapped_back.err().unwrap_or_else(|| {
+            io::Error::other("another write landed while selfie was putting the file back")
+        });
+        let left = tmp.into_temp_path();
+        let left_at = left.to_path_buf();
+        let _ = left.keep();
+        return Err(FileSystemError::IoError(IoFailure::at(&left_at, error)));
+    }
+    held.map(|_| Placed::Kept)
+}
+
+/// Swap the files at `a` and `b`, each name ending up on the other's file.
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
+fn exchange_names(a: &Path, b: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    renameat_with(CWD, a, CWD, b, RenameFlags::EXCHANGE).map_err(io::Error::from)
+}
+
+/// Swap the files at `a` and `b`: unsupported on this platform, which has no
+/// swapping rename.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
+fn exchange_names(_a: &Path, _b: &Path) -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(
+        nix::errno::Errno::ENOSYS as i32,
+    ))
+}
+
+/// Whether a swapping rename failed because the volume or sandbox cannot do one.
+// Linux answers `EINVAL` for a filesystem without `RENAME_EXCHANGE`; Apple answers
+// `ENOTSUP` for a volume without `RENAME_SWAP`. The rest are the exclusive
+// rename's own.
+fn swap_unsupported(error: &io::Error) -> bool {
+    exclusive_rename_unsupported(error)
+        || error.raw_os_error() == Some(nix::errno::Errno::EINVAL as i32)
 }
 
 /// Whether `path` is a regular file holding exactly `expected`.
@@ -4373,5 +4480,311 @@ mod remove_if_holding_tests {
             other => panic!("expected the read failure, got {other:?}"),
         }
         assert!(file.exists(), "the unreadable file was removed");
+    }
+}
+
+// The swap a rewrite that replaces only the bytes it read puts its file in place
+// with, through an `exchange` that lets a change land at the last instant.
+#[cfg(test)]
+mod swap_if_holding_tests {
+    use std::cell::Cell;
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+    use tempfile::{TempDir, tempdir};
+
+    // A directory holding `spec.yml` at "as loaded" and a flushed temporary file
+    // beside it holding "rewritten", as `write_by_rename` leaves them.
+    fn staged() -> (TempDir, PathBuf, tempfile::NamedTempFile) {
+        use std::io::Write as _;
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("spec.yml");
+        fs::write(&target, b"as loaded").unwrap();
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".selfie-")
+            .tempfile_in(dir.path())
+            .unwrap();
+        tmp.write_all(b"rewritten").unwrap();
+        (dir, target, tmp)
+    }
+
+    // This lists the names in `dir`, sorted.
+    fn names(dir: &TempDir) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    // Runs `change` on the first call only, then swaps for real.
+    fn changing_first(change: impl Fn(&Path)) -> impl Fn(&Path, &Path) -> io::Result<()> {
+        changing_around_first(change, |_| {})
+    }
+
+    // Runs `before` ahead of the first swap and `after` once that swap is done,
+    // then swaps for real on every later call.
+    fn changing_around_first(
+        before: impl Fn(&Path),
+        after: impl Fn(&Path),
+    ) -> impl Fn(&Path, &Path) -> io::Result<()> {
+        let called = Cell::new(false);
+        move |a, b| {
+            if called.replace(true) {
+                return exchange_names(a, b);
+            }
+            before(b);
+            exchange_names(a, b)?;
+            after(b);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_unchanged_file_is_replaced_and_nothing_is_left_beside_it() {
+        let (dir, target, tmp) = staged();
+
+        let placed = swap_if_holding(tmp, &target, b"as loaded", exchange_names).unwrap();
+
+        assert_eq!(placed, Placed::Written);
+        assert_eq!(fs::read(&target).unwrap(), b"rewritten");
+        assert_eq!(names(&dir), ["spec.yml"]);
+    }
+
+    #[test]
+    fn a_change_landing_at_the_rename_itself_is_kept() {
+        for (name, change) in [
+            (
+                "in place",
+                (|path: &Path| fs::write(path, b"theirs").unwrap()) as fn(&Path),
+            ),
+            ("by rename", |path: &Path| {
+                let theirs = path.with_file_name("theirs.tmp");
+                fs::write(&theirs, b"theirs").unwrap();
+                fs::rename(&theirs, path).unwrap();
+            }),
+        ] {
+            let (dir, target, tmp) = staged();
+
+            let placed =
+                swap_if_holding(tmp, &target, b"as loaded", changing_first(change)).unwrap();
+
+            assert_eq!(placed, Placed::Kept, "{name}");
+            assert_eq!(fs::read(&target).unwrap(), b"theirs", "{name}");
+            assert_eq!(names(&dir), ["spec.yml"], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_link_put_there_at_the_rename_is_put_back() {
+        let (dir, target, tmp) = staged();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::write(&elsewhere, b"as loaded").unwrap();
+
+        let placed = swap_if_holding(
+            tmp,
+            &target,
+            b"as loaded",
+            changing_first(|path| {
+                fs::remove_file(path).unwrap();
+                symlink("elsewhere", path).unwrap();
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(placed, Placed::Kept);
+        assert_eq!(fs::read_link(&target).unwrap(), Path::new("elsewhere"));
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"as loaded");
+    }
+
+    #[test]
+    fn a_file_removed_at_the_rename_is_not_recreated() {
+        let (dir, target, tmp) = staged();
+
+        let placed = swap_if_holding(
+            tmp,
+            &target,
+            b"as loaded",
+            changing_first(|path| fs::remove_file(path).unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(placed, Placed::Kept);
+        assert!(names(&dir).is_empty(), "{:?}", names(&dir));
+    }
+
+    #[test]
+    fn a_volume_that_cannot_swap_is_written_by_an_ordinary_rename() {
+        for errno in [nix::errno::Errno::EINVAL, nix::errno::Errno::ENOTSUP] {
+            let (dir, target, tmp) = staged();
+
+            let placed = swap_if_holding(tmp, &target, b"as loaded", |_, _| {
+                Err(io::Error::from_raw_os_error(errno as i32))
+            })
+            .unwrap();
+
+            assert_eq!(placed, Placed::Written, "{errno}");
+            assert_eq!(fs::read(&target).unwrap(), b"rewritten", "{errno}");
+            assert_eq!(names(&dir), ["spec.yml"], "{errno}");
+        }
+    }
+
+    #[test]
+    fn any_other_swap_failure_is_an_error_naming_the_target() {
+        let (_dir, target, tmp) = staged();
+
+        let error = swap_if_holding(tmp, &target, b"as loaded", |_, _| {
+            Err(io::Error::from_raw_os_error(nix::errno::Errno::EIO as i32))
+        })
+        .unwrap_err();
+
+        let FileSystemError::IoError(failure) = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(failure.path(), Some(target.as_path()));
+        assert_eq!(fs::read(&target).unwrap(), b"as loaded");
+    }
+
+    // The other writer's bytes are at the temporary name by then, so failing to
+    // swap them back must leave them there.
+    #[test]
+    fn bytes_that_cannot_be_put_back_are_left_beside_the_target() {
+        let (dir, target, tmp) = staged();
+        let calls = Cell::new(0);
+
+        let error = swap_if_holding(tmp, &target, b"as loaded", |a, b| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                fs::write(b, b"theirs").unwrap();
+                return exchange_names(a, b);
+            }
+            Err(io::Error::from_raw_os_error(nix::errno::Errno::EIO as i32))
+        })
+        .unwrap_err();
+
+        let FileSystemError::IoError(failure) = error else {
+            panic!("{error:?}");
+        };
+        let left = failure.path().unwrap().to_path_buf();
+        assert_ne!(left, target);
+        assert_eq!(fs::read(&left).unwrap(), b"theirs");
+        assert_eq!(fs::read(&target).unwrap(), b"rewritten");
+        assert_eq!(names(&dir).len(), 2, "{:?}", names(&dir));
+    }
+
+    // Puts `content` at `path` by rename, as an editor's save does.
+    fn saved_by_rename(path: &Path, content: &str) {
+        let staged = path.with_file_name("saved.tmp");
+        fs::write(&staged, content).unwrap();
+        fs::rename(&staged, path).unwrap();
+    }
+
+    // A save landing after the swap is newer than anything this write saw, so it
+    // stays at the target and this write is kept.
+    #[test]
+    fn a_save_landing_after_the_swap_stays() {
+        let (dir, target, tmp) = staged();
+
+        let placed = swap_if_holding(
+            tmp,
+            &target,
+            b"as loaded",
+            changing_around_first(
+                |path| fs::write(path, b"theirs").unwrap(),
+                |path| saved_by_rename(path, "newer"),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(placed, Placed::Kept);
+        assert_eq!(fs::read(&target).unwrap(), b"newer");
+        assert_eq!(names(&dir), ["spec.yml"]);
+    }
+
+    // A save landing just before the swap back would be swapped onto the
+    // temporary name; it is left there, never deleted, and the error names it.
+    #[test]
+    fn a_save_landing_before_the_swap_back_is_left_beside_the_target() {
+        let (_dir, target, tmp) = staged();
+        let calls = Cell::new(0);
+
+        let error = swap_if_holding(tmp, &target, b"as loaded", |a, b| {
+            calls.set(calls.get() + 1);
+            match calls.get() {
+                1 => fs::write(b, b"theirs").unwrap(),
+                _ => saved_by_rename(b, "newer"),
+            }
+            exchange_names(a, b)
+        })
+        .unwrap_err();
+
+        let FileSystemError::IoError(failure) = error else {
+            panic!("{error:?}");
+        };
+        let left = failure.path().unwrap().to_path_buf();
+        assert_ne!(left, target);
+        assert_eq!(fs::read(&left).unwrap(), b"newer");
+        assert_eq!(fs::read(&target).unwrap(), b"theirs");
+    }
+
+    // A temporary file that vanished is this write's failure, not a change at
+    // the target, which still holds what the caller read.
+    #[test]
+    fn a_vanished_temporary_file_is_an_error_not_a_change() {
+        let (_dir, target, tmp) = staged();
+
+        let error = swap_if_holding(tmp, &target, b"as loaded", |a, b| {
+            fs::remove_file(a).unwrap();
+            exchange_names(a, b)
+        })
+        .unwrap_err();
+
+        let FileSystemError::IoError(failure) = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(failure.path(), Some(target.as_path()));
+        assert_eq!(fs::read(&target).unwrap(), b"as loaded");
+    }
+
+    // The tests above swap for real, so they mean something only where the
+    // volume holding the temporary directory can swap. Say so when it cannot.
+    #[test]
+    fn this_volume_can_swap() {
+        let dir = tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+
+        exchange_names(&a, &b).expect("the temporary directory's volume cannot swap files");
+
+        assert_eq!(fs::read(&a).unwrap(), b"b");
+        assert_eq!(fs::read(&b).unwrap(), b"a");
+    }
+
+    // The real swap, through `write_by_rename_with`: an unchanged target is
+    // replaced on this volume, with no temporary file left beside it.
+    #[test]
+    fn both_writers_replace_an_unchanged_file_through_the_swap() {
+        for how in [
+            Replacement::OwnerOnly,
+            Replacement::KeepingMode(ExecuteBits::NONE),
+        ] {
+            let (dir, target, tmp) = staged();
+            drop(tmp);
+
+            let placed = write_by_rename_with(
+                &target,
+                b"rewritten",
+                how,
+                IfPresent::ReplaceIfHolding(Arc::from(&b"as loaded"[..])),
+                || {},
+            )
+            .unwrap();
+
+            assert_eq!(placed, Placed::Written);
+            assert_eq!(fs::read(&target).unwrap(), b"rewritten");
+            assert_eq!(names(&dir), ["spec.yml"]);
+        }
     }
 }

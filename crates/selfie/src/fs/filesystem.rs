@@ -278,8 +278,17 @@ pub enum IfPresent {
     /// expected file: the private writer keeps one, and the no-follow writer
     /// refuses it as it does under every variant.
     ///
-    /// A mitigation, not a guarantee: a change made at the same instant as the
-    /// write may still be replaced.
+    /// A guarantee against a change that replaces the file or rewrites it
+    /// before the write lands, where the volume supports a swapping rename.
+    /// For an instant the new file is at the target even when the old one is
+    /// then put back. A writer that already had the old file open and writes
+    /// into it after the write landed is not seen. Where the volume cannot swap
+    /// it is a mitigation: the target is looked at once more just before an
+    /// ordinary rename, and a change landing after that look is replaced.
+    ///
+    /// When a changed file cannot be put back, the write fails with an error
+    /// naming the file beside the target that holds it, and the target holds
+    /// the new content. That file is never deleted.
     ReplaceIfHolding(Arc<[u8]>),
     /// Leave it in place, write nothing, and answer [`Placed::Kept`]. For a
     /// target the caller last found absent, so that something appearing there
@@ -424,7 +433,8 @@ pub trait FileSystem: Send + Sync {
     /// over. Under [`IfPresent::ReplaceIfHolding`] such a node is not an error:
     /// it is kept, and the write answers [`Placed::Kept`].
     ///
-    /// Returns another [`FileSystemError`], naming the target path, if the
+    /// Returns another [`FileSystemError`], naming the target path except as
+    /// [`IfPresent::ReplaceIfHolding`] describes, if the
     /// parent directory cannot be created, the temporary file cannot be created
     /// or written, the target cannot be read back under
     /// [`IfPresent::ReplaceIfHolding`], the rename into place fails, or flushing
@@ -493,7 +503,8 @@ pub trait FileSystem: Send + Sync {
     /// fifo, socket or device node, except under [`IfPresent::ReplaceIfHolding`],
     /// which keeps such a node and answers [`Placed::Kept`].
     ///
-    /// Returns another [`FileSystemError`], naming the target, if the parent
+    /// Returns another [`FileSystemError`], naming the target except as
+    /// [`IfPresent::ReplaceIfHolding`] describes, if the parent
     /// directory cannot be created, the temporary file cannot be created,
     /// written or flushed, the target cannot be read back under
     /// [`IfPresent::ReplaceIfHolding`], or the rename fails. Replacing a file
