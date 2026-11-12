@@ -73,6 +73,8 @@ const STATE_VALUES: &[&str] = &[
     "The deploy state cannot be written: Cannot write deploy state '/s/deploy-state.yml': IO error: /s: permission denied. Free the space or lift the lock that stops it, or point state_directory elsewhere",
     "The deploy state cannot be written: Cannot write deploy state '/s/deploy-state.yml': IO error: /s/deploy-state.yml: permission denied. Free the space or lift the lock that stops it, or point state_directory elsewhere",
     "The deploy state cannot be written: Cannot write deploy state '/s/deploy-state.yml': /s/: permission denied. Free the space or lift the lock that stops it, or point state_directory elsewhere",
+    "The deploy state cannot be written: Another writer changed the deploy state after selfie read it, so selfie left it as it is: Deploy state '/s/deploy-state.yml' is empty. Delete it to start over, or restore it from a backup",
+    "The deploy state cannot be written: Deploy state '/s/deploy-state.yml' kept changing while selfie wrote it, so it was left as another writer put it. Run the command again once the other selfie run finishes",
     "Cannot read the deploy state: '/s/deploy-state.yml' is a named pipe (fifo). Remove it, or point state_directory elsewhere",
     "Cannot read deploy state '/s/deploy-state.yml': IO error: /s/deploy-state.yml: permission denied. Fix the file's permissions, or move it aside",
     "Deploy state '/s/deploy-state.yml' is empty. Delete it to start over, or restore it from a backup",

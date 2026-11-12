@@ -297,9 +297,9 @@ where
                             ))
                             .await;
                     }
-                    Ledger::Preview(Some(loaded))
+                    Ledger::Preview(Some(*loaded))
                 } else {
-                    Ledger::Record(Recorder::new(loaded))
+                    Ledger::Record(Recorder::new(*loaded))
                 }
             }
             StateLoad::Unusable(failure) if options.dry_run => {

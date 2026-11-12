@@ -40,7 +40,7 @@ pub struct DeployState {
 // `package` is optional because records written before it existed lack it, and
 // a required field would make every such state file fail to parse, which
 // refuses every apply. An apply fills it in for a target its package produces.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeployEntry {
     source: String,
     checksum: String,
@@ -137,6 +137,43 @@ impl DeployState {
     /// Drop the record for `target`. Returns whether there was one.
     pub fn remove(&mut self, target: &str) -> bool {
         self.deployed.remove(target).is_some()
+    }
+
+    /// Merge this state's changes since `baseline` with `fresh`'s, target by
+    /// target.
+    ///
+    /// A target changed on one side only takes that side's record, or its
+    /// removal. A target changed on both takes this state's record if this
+    /// state deployed it since `baseline`, and `fresh`'s otherwise.
+    pub(crate) fn rebase(&mut self, baseline: &Self, mut fresh: Self) {
+        // Only `record_deployment` sets a new `deployed_at`, so it tells a target
+        // this run wrote apart from bookkeeping on a record: an attribution, a
+        // corrected source, or dropping an orphan whose file was gone. The other
+        // run's record for a target it redeployed is newer than any of those,
+        // while one this run deployed describes the file this run just wrote.
+        let targets: std::collections::HashSet<String> = self
+            .deployed
+            .keys()
+            .chain(baseline.deployed.keys())
+            .cloned()
+            .collect();
+        for target in targets {
+            let base = baseline.deployed.get(&target);
+            let ours = self.deployed.get(&target);
+            if ours == base {
+                continue;
+            }
+            let theirs = fresh.deployed.get(&target);
+            let deployed_here = ours
+                .is_some_and(|ours| base.is_none_or(|base| ours.deployed_at != base.deployed_at));
+            if theirs == base || deployed_here {
+                match self.deployed.remove(&target) {
+                    Some(entry) => fresh.deployed.insert(target, entry),
+                    None => fresh.deployed.remove(&target),
+                };
+            }
+        }
+        *self = fresh;
     }
 
     /// How `target` and its source have moved since the recorded deploy, or `None`
@@ -522,5 +559,92 @@ mod tests {
 
         assert_eq!(source, DotfileSource::Recorded("myapp/rc".to_string()));
         assert_eq!(source.absolute(), None);
+    }
+
+    // A record carrying a deploy time of its own, as one an earlier run wrote.
+    fn record(state: &mut DeployState, target: &str, checksum: &str, at: &str) {
+        state.deployed.insert(
+            target.to_string(),
+            DeployEntry {
+                source: "s".to_string(),
+                checksum: checksum.to_string(),
+                deployed_at: at.to_string(),
+                package: None,
+                base: None,
+            },
+        );
+    }
+
+    // The kinds of target a rebase meets, each with a record that differs
+    // between the three states, so a rebase that answers any of them from the
+    // wrong side fails on content and not only on presence.
+    #[test]
+    fn a_rebase_keeps_this_runs_changes_and_the_other_runs_records() {
+        let mut baseline = DeployState::empty();
+        for target in ["/t/ours", "/t/dropped", "/t/untouched", "/t/both"] {
+            record(&mut baseline, target, "old", "then");
+        }
+        let mut ours = baseline.clone();
+        ours.record_deployment("/t/ours", "s", "ours", None, None);
+        ours.record_deployment("/t/both", "s", "ours", None, None);
+        ours.remove("/t/dropped");
+        ours.record_deployment("/t/added", "s", "ours", None, None);
+        let mut fresh = baseline.clone();
+        record(&mut fresh, "/t/untouched", "theirs", "later");
+        record(&mut fresh, "/t/both", "theirs", "later");
+        record(&mut fresh, "/t/theirs", "theirs", "later");
+
+        ours.rebase(&baseline, fresh);
+
+        let checksum = |target| ours.get(target).map(DeployEntry::checksum);
+        assert_eq!(checksum("/t/ours"), Some("ours"));
+        assert_eq!(checksum("/t/added"), Some("ours"));
+        assert_eq!(checksum("/t/both"), Some("ours"));
+        assert_eq!(checksum("/t/dropped"), None);
+        assert_eq!(checksum("/t/untouched"), Some("theirs"));
+        assert_eq!(checksum("/t/theirs"), Some("theirs"));
+        assert_eq!(ours.entries().len(), 5);
+    }
+
+    // Bookkeeping this run did on a record, without deploying its target, does
+    // not override the other run's redeploy of it, and dropping a record whose
+    // file was gone does not drop the record the other run made when it
+    // deployed the file again.
+    #[test]
+    fn a_rebase_lets_the_other_runs_deploy_win_over_bookkeeping() {
+        let mut baseline = DeployState::empty();
+        record(&mut baseline, "/t/attributed", "old", "then");
+        record(&mut baseline, "/t/placed", "old", "then");
+        record(&mut baseline, "/t/orphan", "old", "then");
+        let mut ours = baseline.clone();
+        assert!(ours.attribute("/t/attributed", "pkg"));
+        assert!(ours.place("/t/placed", "elsewhere", BaseKind::PackageDirectory, None));
+        assert!(ours.remove("/t/orphan"));
+        let mut fresh = baseline.clone();
+        for target in ["/t/attributed", "/t/placed", "/t/orphan"] {
+            record(&mut fresh, target, "theirs", "later");
+        }
+
+        ours.rebase(&baseline, fresh);
+
+        for target in ["/t/attributed", "/t/placed", "/t/orphan"] {
+            assert_eq!(
+                ours.get(target).map(DeployEntry::checksum),
+                Some("theirs"),
+                "{target}"
+            );
+        }
+    }
+
+    // A target the other run removed, and this one did not touch, stays removed.
+    #[test]
+    fn a_rebase_keeps_the_other_runs_removals() {
+        let mut baseline = DeployState::empty();
+        baseline.record_deployment("/t/gone", "g", "old", None, None);
+        let mut ours = baseline.clone();
+
+        ours.rebase(&baseline, DeployState::empty());
+
+        assert!(ours.get("/t/gone").is_none());
     }
 }
