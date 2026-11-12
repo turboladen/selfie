@@ -21,6 +21,9 @@ pub(super) enum During {
     /// It was put there while a conflict prompt about the target's earlier bytes
     /// was open.
     Prompt,
+    /// It replaced the bytes a rewrite of the target last read, and the rewrite
+    /// kept it.
+    Rewrite,
 }
 
 /// One entry's side of settling a target that appeared: how it reads the target
@@ -34,6 +37,9 @@ pub(super) trait Appeared {
 
     /// The target, as the sentences name it.
     fn target(&self) -> &TargetPath;
+
+    /// The window in which the target changed.
+    fn during(&self) -> During;
 
     fn sender(&self) -> &EventSender;
 
@@ -53,8 +59,8 @@ pub(super) trait Appeared {
 }
 
 /// Settle `entry`, whose write left in place something that appeared at its
-/// target: in sync when it holds the content, a conflict when it differs, and a
-/// failure when it is gone again. Never puts the conflict to a resolver or to
+/// target during [`Appeared::during`]: in sync when it holds the content, a conflict when it
+/// differs, and a failure when it is gone. Never puts the conflict to a resolver or to
 /// `--yes`, since nobody has seen what appeared.
 // What appeared is treated as untracked, whatever the deploy state says about the
 // target: the same bytes are in sync and anything else is a conflict, which is
@@ -66,28 +72,27 @@ pub(super) async fn settle<A: Appeared + Send>(entry: &mut A) -> A::Outcome {
     };
     match current {
         None => {
-            let failure = gone_again(entry.target());
+            let failure = gone_again(entry.target(), entry.during());
             entry.failed(failure).await
         }
-        Some(current) => settle_present(entry, &current, During::Write).await,
+        Some(current) => settle_present(entry, &current).await,
     }
 }
 
 /// Settle `entry`, whose target holds `current`, which nobody has seen and which
-/// got there `during` that window: in sync when it is the content, else a conflict
+/// got there during [`Appeared::during`]: in sync when it is the content, else a conflict
 /// that is reported, not resolved. Writes nothing over it, and never puts the
 /// conflict to a resolver or to `--yes`.
 pub(super) async fn settle_present<A: Appeared + Send>(
     entry: &mut A,
     current: &[u8],
-    during: During,
 ) -> A::Outcome {
     if current == entry.content() {
         return entry.in_sync().await;
     }
     let outcome = entry.conflict(current).await;
     // After the conflict, so it reads as a note on it.
-    let warning = warning(entry.target(), during);
+    let warning = warning(entry.target(), entry.during());
     entry.sender().send_composed_warning(warning).await;
     outcome
 }
@@ -104,24 +109,33 @@ pub(super) fn warning(target: &TargetPath, during: During) -> Message {
             .text("'")
             .path(target.path())
             .text("' changed while selfie was asking about it"),
+        During::Rewrite => Parts::new()
+            .text("'")
+            .path(target.path())
+            .text("' changed while selfie was writing it"),
     };
     what.text(", and was left in place. Run apply again to settle it.")
         .into()
 }
 
-/// The failure of an entry whose target something appeared at during the write
-/// and then left again.
-fn gone_again(target: &TargetPath) -> Failure {
+/// The failure of an entry whose target was gone when read again after
+/// `during`.
+fn gone_again(target: &TargetPath, during: During) -> Failure {
+    let cause = match during {
+        During::Write => {
+            "something appeared there while selfie was writing it, and is gone again; nothing \
+             was written"
+        }
+        During::Prompt => "it was removed while selfie was asking about it; nothing was written",
+        During::Rewrite => "it was removed while selfie was writing it; nothing was written",
+    };
     Failure::new(
         EntryOperation::Write,
         Parts::new()
             .text("Failed to write '")
             .path(target.path())
             .text("'"),
-        Parts::new().text(
-            "something appeared there while selfie was writing it, and is gone again; nothing \
-             was written",
-        ),
+        Parts::new().text(cause),
     )
     .with_remedy(Parts::new().text("Run apply again."))
 }
@@ -136,7 +150,7 @@ mod tests {
     // What appeared and left again fails the write in these words, whole.
     #[test]
     fn a_target_gone_again_is_worded_whole() {
-        let failure = gone_again(&repository_path(Path::new("/home/u/my rc")));
+        let failure = gone_again(&repository_path(Path::new("/home/u/my rc")), During::Write);
 
         assert_eq!(
             failure.message.to_string(),
@@ -150,7 +164,23 @@ mod tests {
         );
     }
 
-    // What appeared during either window is reported in these words, whole.
+    // A rewritten target that was removed before the rewrite landed fails it in
+    // these words, whole: nothing appeared there.
+    #[test]
+    fn a_rewritten_target_gone_is_worded_whole() {
+        let failure = gone_again(
+            &repository_path(Path::new("/home/u/my rc")),
+            During::Rewrite,
+        );
+
+        assert_eq!(
+            failure.message.to_string(),
+            "Failed to write '/home/u/my rc': it was removed while selfie was writing it; \
+             nothing was written. Run apply again."
+        );
+    }
+
+    // What appeared during each window is reported in these words, whole.
     #[test]
     fn a_target_that_appeared_is_worded_whole() {
         let target = repository_path(Path::new("/home/u/my rc"));
@@ -165,6 +195,11 @@ mod tests {
             "'/home/u/my rc' changed while selfie was asking about it, and was left in place. Run \
              apply again to settle it."
         );
+        assert_eq!(
+            warning(&target, During::Rewrite).to_string(),
+            "'/home/u/my rc' changed while selfie was writing it, and was left in place. Run apply \
+             again to settle it."
+        );
     }
 
     // The target is a path part in both windows.
@@ -172,7 +207,7 @@ mod tests {
     fn a_target_that_appeared_is_a_path_part() {
         let target = repository_path(Path::new("/h/r\u{200B}c"));
 
-        for during in [During::Write, During::Prompt] {
+        for during in [During::Write, During::Prompt, During::Rewrite] {
             assert_eq!(
                 crate::parts::values_of(&warning(&target, during)),
                 ["/h/r\u{200B}c"]

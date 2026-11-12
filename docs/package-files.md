@@ -1449,13 +1449,17 @@ Consequences worth knowing before you adopt this:
   itself a credential, and a plaintext copy of it on disk is worse than the checksum this section
   refuses. The prompt says so before you accept, and accepting is the only way past the conflict.
 - Accepting answers for the content the prompt described. selfie reads the target again after you
-  answer and overwrites it only if that read still finds those bytes. This narrows the window rather
-  than closing it: something written between that read and selfie's own write is still replaced. A
-  target that now holds the resolved content is in sync, and is tightened to owner-only as any
-  in-sync target is. Other changed content is left in place and reported as a conflict, which the
-  next apply asks about. A target that was removed is created, and anything that appears there first
-  is kept. One that became a symlink is replaced, as below. Anything listed below as refused before
-  a command runs is refused here too, such as a directory, a fifo, or a target selfie cannot read.
+  answer and overwrites it only if it still holds those bytes when the write lands: the write swaps
+  its file in, compares what it swapped out, and puts that back if it differs, in which case the
+  target is left as an unasked conflict. A program that already had the old file open and writes
+  into it after that is not seen, and on a volume that cannot swap files selfie only looks once more
+  just before an ordinary rename. Tightening an in-sync target's permissions rewrites it the same
+  way. A target that now holds the resolved content is in sync, and is tightened to owner-only as
+  any in-sync target is. Other changed content is left in place and reported as a conflict, which
+  the next apply asks about. A target that was removed is created, and anything that appears there
+  first is kept. One that became a symlink is replaced, as below. Anything listed below as refused
+  before a command runs is refused here too, such as a directory, a fifo, or a target selfie cannot
+  read.
 
 #### Deploy behavior and permissions
 

@@ -21369,6 +21369,86 @@ mod an_appearing_target_is_kept {
         assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
     }
 
+    // Runs apply with the provider's secret as the content, checking the rewrite
+    // planted by `fs` was reached.
+    async fn apply_rewritten(
+        dirs: &TestDirs,
+        fs: &PlantsBeforeWrite,
+        options: ApplyOptions,
+    ) -> Vec<PackageEvent> {
+        let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), runner)
+                .apply_all(options)
+                .await,
+        )
+        .await;
+        assert!(
+            fs.rewritten(),
+            "control: the write was reached and the rewrite made"
+        );
+        events
+    }
+
+    fn rewrite_warnings(events: &[PackageEvent], target: &Path) -> usize {
+        left_in_place_warnings(
+            events,
+            &format!("'{}' changed while selfie was writing it", target.display()),
+        )
+    }
+
+    // The accepted answer was about the bytes the prompt showed. Bytes written
+    // after the last read and before the write are nobody's answer, and a secret
+    // target keeps no copy of them.
+    #[tokio::test]
+    async fn a_secret_target_rewritten_after_an_accepted_conflict_is_kept() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, "SHOWN AT THE PROMPT\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs =
+            PlantsBeforeWrite::rewritten_before_write(&target, test_common::Rewrite::File(PLANTED));
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let events = apply_rewritten(&dirs, &fs, counting_resolver(&asked)).await;
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), PLANTED);
+        assert_eq!(asked.load(SeqCst), 1, "control: the conflict was accepted");
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+        assert_eq!(rewrite_warnings(&events, &target), 1, "{events:?}");
+        assert_no_event_mentions(&events, SECRET);
+        assert_no_event_mentions(&events, PLANTED);
+    }
+
+    // Tightening rewrites a file found in sync. Bytes that replaced it since are
+    // another writer's, compared as any target's are, and not rewritten.
+    #[tokio::test]
+    async fn a_secret_target_rewritten_before_its_permissions_are_tightened_is_kept() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("credentials");
+        std::fs::write(&target, SECRET).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+        let fs =
+            PlantsBeforeWrite::rewritten_before_write(&target, test_common::Rewrite::File(PLANTED));
+
+        let events = apply_rewritten(&dirs, &fs, ApplyOptions::default()).await;
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), PLANTED);
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                PackageEvent::DotfileSkipped { reason, .. } if *reason == SkipReason::PermissionsTightened
+            )),
+            "{events:?}"
+        );
+        assert_eq!(deploy_counts(&events), (0, 0, 1, 0), "{events:?}");
+        assert_eq!(rewrite_warnings(&events, &target), 1, "{events:?}");
+        assert_no_event_mentions(&events, SECRET);
+        assert_no_event_mentions(&events, PLANTED);
+    }
+
     // A link at a secret target is replaced whenever it is found, so one that
     // appears is too, with the same warning.
     #[tokio::test]
