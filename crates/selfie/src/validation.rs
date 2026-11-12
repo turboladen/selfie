@@ -484,6 +484,10 @@ pub enum ValidationErrorCategory {
     #[strum(to_string = "path format")]
     PathFormat,
 
+    /// A dependency or recommend install cannot resolve
+    #[strum(to_string = "dependency")]
+    Dependency,
+
     /// Something the user should know that is not a defect
     ///
     /// Pairs with [`ValidationLevel::Info`]. The other categories all name a

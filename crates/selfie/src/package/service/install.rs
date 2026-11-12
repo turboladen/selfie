@@ -211,13 +211,8 @@ async fn confirm_installable<CR: CommandRunner>(
     token: &CancellationToken,
 ) -> Result<HashMap<String, CheckResultData>, Box<OperationFailure>> {
     let verdict = |name: &String| graph.installability.get(name);
-    if let Some(Installability::Refused(failure)) = graph
-        .install_order
-        .iter()
-        .filter_map(verdict)
-        .find(|verdict| matches!(verdict, Installability::Refused(_)))
-    {
-        return Err(failure.clone());
+    if let Some((_, failure)) = graph.refusals().next() {
+        return Err(Box::new(failure.clone()));
     }
 
     // The check is the step the package's own turn would take first, taken

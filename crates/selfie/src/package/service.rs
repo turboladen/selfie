@@ -27,6 +27,7 @@ mod steps;
 mod update;
 mod validate;
 mod validate_all;
+mod validate_deps;
 
 use std::{future::Future, path::PathBuf};
 
