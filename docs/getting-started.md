@@ -246,6 +246,27 @@ selfie spec edit my-tool
 selfie spec remove my-tool
 ```
 
+### Dotfiles
+
+```bash
+# Track a dotfile; selfie asks whether it belongs to a package or stands alone
+selfie track ~/.gitconfig
+
+# Track a dotfile beside an existing package's spec
+selfie package track-dotfile ripgrep ~/.config/ripgrep/config
+
+# Track a dotfile with no package to install, as a standalone spec
+selfie dotfiles track aliases ~/.config/fish/conf.d/aliases.fish
+
+# Deploy every dotfile for the current environment
+selfie apply
+```
+
+A standalone spec goes in the dotfiles directory, `dotfiles` beside your package directory unless
+[`dotfiles_directory`](configuration.md#dotfiles_directory) names another, and
+`selfie dotfiles
+track` needs that directory to exist.
+
 ### Configuration
 
 ```bash
@@ -274,13 +295,15 @@ selfie --environment=ci package install ripgrep
 
 ## Package Repository Setup
 
-For better organization and backup, consider setting up a git repository for your packages:
+For better organization and backup, consider setting up a git repository for your packages. Make it
+the parent of the package directory, so the standalone dotfiles directory beside it is in the
+repository too:
 
 ### 1. Create a Repository
 
 ```bash
-mkdir ~/my-selfie-packages
-cd ~/my-selfie-packages
+mkdir -p ~/my-selfie/packages ~/my-selfie/dotfiles
+cd ~/my-selfie
 git init
 ```
 
@@ -290,7 +313,7 @@ Edit `~/.config/selfie/config.yml`:
 
 ```yaml
 environment: macos
-package_directory: ~/my-selfie-packages
+package_directory: ~/my-selfie/packages
 ```
 
 ### 3. Add Some Packages
@@ -298,7 +321,7 @@ package_directory: ~/my-selfie-packages
 Create a few essential packages for your workflow:
 
 ```bash
-cd ~/my-selfie-packages
+cd ~/my-selfie
 selfie spec create node
 selfie spec create docker
 selfie spec create kubectl
@@ -309,7 +332,7 @@ selfie spec create kubectl
 ```bash
 git add .
 git commit -m "Initial package definitions"
-git remote add origin https://github.com/your-username/my-selfie-packages.git
+git remote add origin https://github.com/your-username/my-selfie.git
 git push -u origin main
 ```
 
