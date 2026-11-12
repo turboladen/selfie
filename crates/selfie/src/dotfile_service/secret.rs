@@ -218,9 +218,9 @@ where
     ) -> Phase<SecretOutcome> {
         self.short_circuit_dry_run(target).await?;
 
-        let resolved = self.resolve(target).await?;
-        for warning in &resolved.warnings {
-            self.sender.send_warning(warning).await;
+        let mut resolved = self.resolve(target).await?;
+        for warning in std::mem::take(&mut resolved.warnings) {
+            self.sender.send_composed_warning(warning).await;
         }
 
         // Both questions again, immediately before the read, because the answers

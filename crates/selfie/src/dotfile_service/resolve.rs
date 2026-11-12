@@ -39,8 +39,9 @@ const MAX_CONTENT_BYTES: usize = MAX_CONTENT_MIB * 1024 * 1024;
 pub(crate) struct ResolvedContent {
     /// The file's content, exactly as produced.
     pub bytes: Vec<u8>,
-    /// Non-fatal advisories. Never contains a resolved value — only var names.
-    pub warnings: Vec<String>,
+    /// Non-fatal advisories. Never contains a resolved value — only commands
+    /// and var names.
+    pub warnings: Vec<Message>,
 }
 
 /// Prints the content's length, never the content. **Never derive this**: a
@@ -378,11 +379,7 @@ where
                 })?;
 
             let mut warnings = Vec::new();
-            capture_warnings(
-                &format!("dotfile command '{command}'"),
-                &captured,
-                &mut warnings,
-            );
+            capture_warnings(&command_parts(command), &captured, &mut warnings);
             let bytes = captured.bytes;
 
             // Zero length is an error regardless of exit code: writing an empty
@@ -437,7 +434,7 @@ where
                         }
                     })?;
 
-                capture_warnings(&format!("dotfile var '{name}'"), &captured, &mut warnings);
+                capture_warnings(&var_parts(name), &captured, &mut warnings);
                 let value = captured.bytes;
 
                 // A structurally valid file holding an empty credential is worse
@@ -451,10 +448,14 @@ where
                 // legitimate multi-line values such as private keys, so this warns
                 // and substitutes. The warning names the binding, never the value.
                 if value.contains(&b'\n') {
-                    warnings.push(format!(
-                        "dotfile var '{name}' contains a line break; it will be substituted \
-                         as-is and may add structure to the rendered file"
-                    ));
+                    warnings.push(
+                        var_parts(name)
+                            .text(
+                                " contains a line break; it will be substituted as-is and may \
+                                 add structure to the rendered file",
+                            )
+                            .into(),
+                    );
                 }
 
                 bindings.insert(name.clone(), value);
@@ -542,21 +543,34 @@ enum CaptureFailure {
 /// than becoming refusals: the content is the command's and deploying it is what
 /// the user asked for — what must not happen is deploying bytes selfie cannot
 /// account for while reporting a clean success.
-fn capture_warnings(origin: &str, captured: &Captured, into: &mut Vec<String>) {
+fn capture_warnings(origin: &Parts<'_>, captured: &Captured, into: &mut Vec<Message>) {
     if captured.discarded_before > 0 {
-        into.push(format!(
-            "{} bytes reached the content channel before {origin} produced output; \
-             they were discarded, but nothing should have been able to write there",
-            captured.discarded_before
-        ));
+        into.push(
+            Parts::new()
+                .text(format!(
+                    "{} bytes reached the content channel before ",
+                    captured.discarded_before
+                ))
+                .append(origin.clone())
+                .text(
+                    " produced output; they were discarded, but nothing should have been able \
+                     to write there",
+                )
+                .into(),
+        );
     }
 
     if !captured.tail_verified {
-        into.push(format!(
-            "selfie could not establish where the output of {origin} ended, so anything the \
-             shell wrote after it — an exit trap the command installed, for instance — is part \
-             of the deployed content"
-        ));
+        into.push(
+            Parts::new()
+                .text("selfie could not establish where the output of ")
+                .append(origin.clone())
+                .text(
+                    " ended, so anything the shell wrote after it — an exit trap the command \
+                     installed, for instance — is part of the deployed content",
+                )
+                .into(),
+        );
     }
 }
 
@@ -818,11 +832,13 @@ mod tests {
         assert_eq!(resolved.bytes, b"secret-tokenMYCLEANUP");
         assert_eq!(resolved.warnings.len(), 1, "{:?}", resolved.warnings);
         assert!(
-            resolved.warnings[0].contains("could not establish where the output"),
+            resolved.warnings[0]
+                .to_string()
+                .contains("could not establish where the output"),
             "{}",
             resolved.warnings[0]
         );
-        assert!(resolved.warnings[0].contains("op read x"));
+        assert!(resolved.warnings[0].to_string().contains("op read x"));
     }
 
     #[tokio::test]
@@ -835,7 +851,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(resolved.warnings.len(), 1, "{:?}", resolved.warnings);
-        assert!(resolved.warnings[0].contains("dotfile var 'token'"));
+        assert!(
+            resolved.warnings[0]
+                .to_string()
+                .contains("dotfile var 'token'")
+        );
+    }
+
+    // A warning names the command as a spec command part and the var as a name
+    // part. A var name cannot hold a U+200B, so its fixture shows only the kind.
+    #[tokio::test]
+    async fn a_capture_warning_names_its_command_and_var_as_parts() {
+        let command = "op read\u{200B}x";
+        let runner = FakeRunner::with_unverified_tail(command, b"tok");
+        let provided = resolve(&provider_entry(command, "~/.x"), &no_fs(), &runner)
+            .await
+            .unwrap();
+
+        let runner = FakeRunner::with_unverified_tail(command, b"tok\nmore");
+        let entry = template_entry("t.tpl", &[("token", command)], "~/.x");
+        let rendered = resolve(&entry, &fs_with_template("{{ token }}"), &runner)
+            .await
+            .unwrap();
+
+        let values = |warnings: &[Message]| {
+            warnings
+                .iter()
+                .map(crate::parts::values_of)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&provided.warnings), [[command]]);
+        assert_eq!(values(&rendered.warnings), [["token"], ["token"]]);
     }
 
     #[tokio::test]
@@ -848,7 +894,7 @@ mod tests {
         assert_eq!(resolved.bytes, b"secret-token");
         assert_eq!(resolved.warnings.len(), 1, "{:?}", resolved.warnings);
         assert!(
-            resolved.warnings[0].contains("12 bytes"),
+            resolved.warnings[0].to_string().contains("12 bytes"),
             "{}",
             resolved.warnings[0]
         );
@@ -868,7 +914,7 @@ mod tests {
         assert_eq!(resolved.bytes, secret);
         for warning in &resolved.warnings {
             assert!(
-                !warning.contains("Kp7-vault-Token"),
+                !warning.to_string().contains("Kp7-vault-Token"),
                 "a warning repeated the content: {warning}"
             );
         }
@@ -1050,8 +1096,18 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resolved.warnings.iter().any(|w| w.contains("api_key")));
-        assert!(resolved.warnings.iter().any(|w| w.contains("line break")));
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w.to_string().contains("api_key"))
+        );
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w.to_string().contains("line break"))
+        );
         assert!(String::from_utf8_lossy(&resolved.bytes).contains("evil: injected"));
     }
 
@@ -1065,7 +1121,10 @@ mod tests {
             .unwrap();
 
         for warning in &resolved.warnings {
-            assert!(!warning.contains("s3cr3t"), "leaked in: {warning}");
+            assert!(
+                !warning.to_string().contains("s3cr3t"),
+                "leaked in: {warning}"
+            );
         }
     }
 
