@@ -579,6 +579,8 @@ fn pre_command_refusal<F: FileSystem>(
 pub(super) struct RepoRead {
     /// The source file's content.
     pub(super) source_content: String,
+    /// The source file's execute bits. A target that apply creates gets them.
+    pub(super) source_execute: crate::fs::ExecuteBits,
     /// The target's bytes, or `None` for nothing there.
     pub(super) current: Option<Vec<u8>>,
 }
@@ -627,6 +629,7 @@ pub(super) fn read_repo_file<F: FileSystem>(
 
     Ok(RepoRead {
         source_content,
+        source_execute: filesystem.execute_bits(source_path),
         current,
     })
 }

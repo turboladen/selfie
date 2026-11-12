@@ -5,9 +5,9 @@ pub mod target;
 pub use self::filesystem::FileSystem;
 pub use self::filesystem::FileSystemError;
 pub use self::filesystem::{
-    AbsentReason, DirectoryState, FileIdentity, IfPresent, IoFailure, IrregularKind, OpenRefusal,
-    Placed, Removal, RepositoryRead, TargetRead, shell_operand, shell_operands, shell_quote,
-    shell_word,
+    AbsentReason, DirectoryState, ExecuteBits, FileIdentity, IfPresent, IoFailure, IrregularKind,
+    OpenRefusal, Placed, Removal, RepositoryRead, TargetRead, shell_operand, shell_operands,
+    shell_quote, shell_word,
 };
 pub use self::real::RealFileSystem;
 pub use self::target::{

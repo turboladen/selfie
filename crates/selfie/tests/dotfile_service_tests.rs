@@ -687,13 +687,18 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.write_file_private(path, data, if_present)
     }
 
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::ExecuteBits,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.0.write_file_no_follow(path, data, if_present)
+        self.0
+            .write_file_no_follow_executable(path, data, if_present, execute)
+    }
+    fn execute_bits(&self, path: &std::path::Path) -> selfie::fs::ExecuteBits {
+        self.0.execute_bits(path)
     }
 
     fn symlink_refusal(
@@ -985,14 +990,19 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         self.inner.write_file_private(path, data, if_present)
     }
 
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::ExecuteBits,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
         self.writes.lock().unwrap().push(path.path().to_path_buf());
-        self.inner.write_file_no_follow(path, data, if_present)
+        self.inner
+            .write_file_no_follow_executable(path, data, if_present, execute)
+    }
+    fn execute_bits(&self, path: &std::path::Path) -> selfie::fs::ExecuteBits {
+        self.inner.execute_bits(path)
     }
 
     fn symlink_refusal(
@@ -1157,13 +1167,18 @@ impl selfie::fs::FileSystem for HomeAt {
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
         self.0.write_file_private(path, data, if_present)
     }
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::ExecuteBits,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.0.write_file_no_follow(path, data, if_present)
+        self.0
+            .write_file_no_follow_executable(path, data, if_present, execute)
+    }
+    fn execute_bits(&self, path: &std::path::Path) -> selfie::fs::ExecuteBits {
+        self.0.execute_bits(path)
     }
     fn symlink_refusal(
         &self,
@@ -1283,13 +1298,18 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
         self.inner.write_file_private(path, data, if_present)
     }
 
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::ExecuteBits,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data, if_present)
+        self.inner
+            .write_file_no_follow_executable(path, data, if_present, execute)
+    }
+    fn execute_bits(&self, path: &std::path::Path) -> selfie::fs::ExecuteBits {
+        self.inner.execute_bits(path)
     }
 
     fn irregular_target_refusal(
@@ -1414,13 +1434,18 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
         self.inner.write_file_private(path, data, if_present)
     }
 
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::ExecuteBits,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data, if_present)
+        self.inner
+            .write_file_no_follow_executable(path, data, if_present, execute)
+    }
+    fn execute_bits(&self, path: &std::path::Path) -> selfie::fs::ExecuteBits {
+        self.inner.execute_bits(path)
     }
 
     fn irregular_target_refusal(
@@ -1556,13 +1581,18 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         self.inner.write_file_private(path, data, if_present)
     }
 
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::ExecuteBits,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data, if_present)
+        self.inner
+            .write_file_no_follow_executable(path, data, if_present, execute)
+    }
+    fn execute_bits(&self, path: &std::path::Path) -> selfie::fs::ExecuteBits {
+        self.inner.execute_bits(path)
     }
 
     fn irregular_target_refusal(
@@ -1697,13 +1727,18 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
     ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
         self.inner.read_file_no_follow(path)
     }
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::ExecuteBits,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.inner.write_file_no_follow(path, data, if_present)
+        self.inner
+            .write_file_no_follow_executable(path, data, if_present, execute)
+    }
+    fn execute_bits(&self, path: &std::path::Path) -> selfie::fs::ExecuteBits {
+        self.inner.execute_bits(path)
     }
     fn symlink_refusal(
         &self,
@@ -8457,14 +8492,19 @@ mod symlinked_targets {
             ) -> Result<selfie::fs::Placed, FileSystemError> {
                 self.0.write_file_private(path, data, if_present)
             }
-            fn write_file_no_follow(
+            fn write_file_no_follow_executable(
                 &self,
                 path: &TargetPath,
                 data: &[u8],
                 if_present: selfie::fs::IfPresent,
+                execute: selfie::fs::ExecuteBits,
             ) -> Result<selfie::fs::Placed, FileSystemError> {
                 self.1.fetch_add(1, Ordering::SeqCst);
-                self.0.write_file_no_follow(path, data, if_present)
+                self.0
+                    .write_file_no_follow_executable(path, data, if_present, execute)
+            }
+            fn execute_bits(&self, path: &std::path::Path) -> selfie::fs::ExecuteBits {
+                self.0.execute_bits(path)
             }
             fn is_owner_only(&self, path: &TargetPath) -> Result<bool, FileSystemError> {
                 self.0.is_owner_only(path)
@@ -23590,5 +23630,177 @@ mod warning_sentences {
             .collect();
         assert_eq!(pruned.len(), 1, "{events:?}");
         assert_eq!(pruned[0][0], planted.display().to_string(), "{events:?}");
+    }
+}
+
+// A deployed target takes its execute bits from the source when apply creates
+// it, and a tracked copy takes them from the target. An existing target keeps
+// whatever mode it already has.
+#[cfg(unix)]
+mod execute_bits_follow_the_file {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
+    fn mode_of(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    fn chmod(path: &Path, mode: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    // What a file created at `mode` comes back as under this process's umask.
+    fn created_at(mode: u32) -> u32 {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let control = dir.path().join(format!("control-{mode:o}"));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&control)
+            .unwrap();
+        mode_of(&control)
+    }
+
+    fn script_package(dirs: &TestDirs) -> (PathBuf, PathBuf) {
+        let source = dirs.package_dir.join("tools").join("hello.sh");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "#!/bin/sh\necho hello\n").unwrap();
+        let target = dirs.target_dir.join("hello.sh");
+        create_package_with_dotfiles(
+            &dirs.package_dir,
+            "tools",
+            &[("tools/hello.sh", target.to_str().unwrap())],
+        );
+        (source, target)
+    }
+
+    #[tokio::test]
+    async fn apply_creates_an_executable_source_as_executable() {
+        let dirs = TestDirs::new();
+        let (source, target) = script_package(&dirs);
+        // The setuid bit is set as well, to show it never reaches the target.
+        chmod(&source, 0o4755);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        let expected = created_at(0o777);
+        assert_ne!(
+            expected & 0o100,
+            0,
+            "the umask strips the owner's execute bit"
+        );
+        assert_eq!(mode_of(&target), expected);
+    }
+
+    // A repository source kept as a link deploys with the mode of the file its
+    // content is read from.
+    #[tokio::test]
+    async fn apply_takes_the_execute_bits_of_a_linked_sources_file() {
+        let dirs = TestDirs::new();
+        let (source, target) = script_package(&dirs);
+        let real = dirs.package_dir.join("tools").join("real-hello.sh");
+        std::fs::rename(&source, &real).unwrap();
+        chmod(&real, 0o755);
+        std::os::unix::fs::symlink("real-hello.sh", &source).unwrap();
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "#!/bin/sh\necho hello\n"
+        );
+        assert_eq!(mode_of(&target), created_at(0o777));
+    }
+
+    #[tokio::test]
+    async fn apply_creates_an_ordinary_source_without_execute_bits() {
+        let dirs = TestDirs::new();
+        let (source, target) = script_package(&dirs);
+        chmod(&source, 0o644);
+
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert_eq!(mode_of(&target), created_at(0o666));
+    }
+
+    #[tokio::test]
+    async fn apply_leaves_an_existing_targets_mode_alone() {
+        let dirs = TestDirs::new();
+        let (source, target) = script_package(&dirs);
+        chmod(&source, 0o644);
+        collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+        chmod(&target, 0o640);
+
+        std::fs::write(&source, "#!/bin/sh\necho changed\n").unwrap();
+        chmod(&source, 0o755);
+        let events = collect_events(dirs.service().apply_all(ApplyOptions::default()).await).await;
+
+        assert_eq!(refused_count(&events), 0, "{:?}", warning_messages(&events));
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "#!/bin/sh\necho changed\n",
+            "the second apply must have rewritten the target: {events:?}"
+        );
+        assert_eq!(mode_of(&target), 0o640);
+    }
+
+    #[tokio::test]
+    async fn track_copies_an_executable_target_as_executable() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("hello.sh");
+        std::fs::write(&target, "#!/bin/sh\necho hello\n").unwrap();
+        chmod(&target, 0o755);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("hello", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(
+                    OperationSuccess::DotfileTracked { .. }
+                ))
+            ),
+            "{events:?}"
+        );
+        let copy = dirs.dotfiles_dir.join("hello").join("hello.sh");
+        assert_eq!(mode_of(&copy), created_at(0o777));
+    }
+
+    #[tokio::test]
+    async fn track_copies_an_ordinary_target_without_execute_bits() {
+        let dirs = TestDirs::new();
+        let target = dirs.target_dir.join("config.toml");
+        std::fs::write(&target, "key = 1\n").unwrap();
+        chmod(&target, 0o644);
+
+        let events = collect_events(
+            dirs.service_with_dotfiles()
+                .track_standalone("config", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(
+                    OperationSuccess::DotfileTracked { .. }
+                ))
+            ),
+            "{events:?}"
+        );
+        let copy = dirs.dotfiles_dir.join("config").join("config.toml");
+        assert_eq!(mode_of(&copy), created_at(0o666));
     }
 }

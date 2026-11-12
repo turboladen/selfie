@@ -586,6 +586,7 @@ where
 
                 let RepoRead {
                     source_content,
+                    source_execute,
                     current,
                 } = match read_repo_file(filesystem, &repo) {
                     Ok(read) => read,
@@ -616,6 +617,7 @@ where
                     target_key: &target_key,
                     source_content: &source_content,
                     source_checksum: &source_checksum,
+                    source_execute,
                     source,
                     package: package_name.as_deref(),
                     package_name: package.name(),

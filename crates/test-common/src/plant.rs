@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use selfie::fs::{
-    DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent, OpenRefusal, Placed,
-    RealFileSystem, Removal, RepositoryRead, TargetPath, TargetRead,
+    DirectoryState, ExecuteBits, FileIdentity, FileSystem, FileSystemError, IfPresent, OpenRefusal,
+    Placed, RealFileSystem, Removal, RepositoryRead, TargetPath, TargetRead,
 };
 
 /// A high-entropy value standing in for another tool's own credential, written at
@@ -256,15 +256,19 @@ impl FileSystem for PlantsBeforeWrite {
         self.plant_if_first(path.path());
         RealFileSystem.write_file_private(path, data, if_present)
     }
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &TargetPath,
         data: &[u8],
         if_present: IfPresent,
+        execute: ExecuteBits,
     ) -> Result<Placed, FileSystemError> {
         self.rewrite_before_write(path.path());
         self.plant_if_first(path.path());
-        RealFileSystem.write_file_no_follow(path, data, if_present)
+        RealFileSystem.write_file_no_follow_executable(path, data, if_present, execute)
+    }
+    fn execute_bits(&self, path: &Path) -> ExecuteBits {
+        RealFileSystem.execute_bits(path)
     }
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
         RealFileSystem.symlink_refusal(path)

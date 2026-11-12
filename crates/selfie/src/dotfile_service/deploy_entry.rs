@@ -38,6 +38,8 @@ pub(super) struct DeployUnit<'a> {
     pub(super) target_key: &'a str,
     pub(super) source_content: &'a str,
     pub(super) source_checksum: &'a str,
+    /// The source file's execute bits. A target this unit creates gets them.
+    pub(super) source_execute: crate::fs::ExecuteBits,
     /// The entry's `source` as the spec names it, recorded beside the checksum.
     pub(super) source: &'a str,
     /// The spec name of the package the entry belongs to, recorded beside the
@@ -317,10 +319,13 @@ async fn perform_deploy<F: FileSystem>(
     // Refuses a symlinked target rather than writing through it: the content would
     // otherwise land wherever the link points, which may be a path chosen by
     // whoever planted it.
-    let written = filesystem.write_file_no_follow(
+    // A target created here takes the source's execute bits, so a script in the
+    // repository deploys runnable. An existing target keeps its own mode.
+    let written = filesystem.write_file_no_follow_executable(
         unit.target_path,
         unit.source_content.as_bytes(),
         if_present,
+        unit.source_execute,
     );
     if let Ok(Placed::Kept) = written {
         // The `None` this entry recorded says the run found nothing to keep at a
@@ -576,6 +581,7 @@ mod tests {
             target_key: KEY,
             source_content: "content",
             source_checksum: "checksum",
+            source_execute: crate::fs::ExecuteBits::NONE,
             source: "app.toml",
             package: None,
             package_name: "app",
@@ -601,10 +607,10 @@ mod tests {
     #[tokio::test]
     async fn a_target_already_settled_and_last_read_as_absent_keeps_what_is_there() {
         let mut fs = MockFileSystem::new();
-        fs.expect_write_file_no_follow()
-            .withf(|_, _, if_present| *if_present == IfPresent::Keep)
+        fs.expect_write_file_no_follow_executable()
+            .withf(|_, _, if_present, _| *if_present == IfPresent::Keep)
             .times(1)
-            .returning(|_, _, _| Ok(Placed::Written));
+            .returning(|_, _, _, _| Ok(Placed::Written));
         let mut backed_up = HashMap::from([(KEY.to_string(), None)]);
 
         let wrote = deploy_absent(&fs, &mut backed_up).await;
@@ -617,9 +623,9 @@ mod tests {
     #[tokio::test]
     async fn a_write_that_kept_what_appeared_leaves_the_target_unsettled() {
         let mut fs = MockFileSystem::new();
-        fs.expect_write_file_no_follow()
+        fs.expect_write_file_no_follow_executable()
             .times(1)
-            .returning(|_, _, _| Ok(Placed::Kept));
+            .returning(|_, _, _, _| Ok(Placed::Kept));
         let mut backed_up = HashMap::new();
 
         let wrote = deploy_absent(&fs, &mut backed_up).await;
@@ -633,9 +639,9 @@ mod tests {
     #[tokio::test]
     async fn a_write_that_kept_what_appeared_leaves_the_earlier_copy_recorded() {
         let mut fs = MockFileSystem::new();
-        fs.expect_write_file_no_follow()
+        fs.expect_write_file_no_follow_executable()
             .times(1)
-            .returning(|_, _, _| Ok(Placed::Kept));
+            .returning(|_, _, _, _| Ok(Placed::Kept));
         let copy = PathBuf::from("/state/backups/app.toml/copy");
         let mut backed_up = HashMap::from([(KEY.to_string(), Some(copy.clone()))]);
 

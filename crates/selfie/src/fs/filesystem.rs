@@ -243,6 +243,28 @@ fn clone_io_error(error: &io::Error) -> io::Error {
     io::Error::new(error.kind(), error.to_string())
 }
 
+/// The execute bits of a file's mode, and no others: never setuid, setgid or
+/// sticky, and no read or write bits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExecuteBits(u32);
+
+impl ExecuteBits {
+    /// No execute bits.
+    pub const NONE: Self = Self(0);
+
+    /// The execute bits of `mode`, for owner, group and other.
+    #[must_use]
+    pub fn of_mode(mode: u32) -> Self {
+        Self(mode & 0o111)
+    }
+
+    /// The bits, as a mode to combine with the ones a file is created with.
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+}
+
 /// What a write does with anything already at its target when the rename that
 /// puts the new file in place lands.
 #[derive(Clone, PartialEq, Eq)]
@@ -485,7 +507,36 @@ pub trait FileSystem: Send + Sync {
         path: &TargetPath,
         data: &[u8],
         if_present: IfPresent,
+    ) -> Result<Placed, FileSystemError> {
+        // Provided, so that a wrapper intercepting writes has one method to
+        // intercept and cannot miss the other.
+        self.write_file_no_follow_executable(path, data, if_present, ExecuteBits::NONE)
+    }
+
+    /// [`write_file_no_follow`](FileSystem::write_file_no_follow), except that a
+    /// file this creates also gets `execute`'s bits, through the umask. An
+    /// existing file keeps its own mode, as it does there.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_file_no_follow`](FileSystem::write_file_no_follow).
+    fn write_file_no_follow_executable(
+        &self,
+        path: &TargetPath,
+        data: &[u8],
+        if_present: IfPresent,
+        execute: ExecuteBits,
     ) -> Result<Placed, FileSystemError>;
+
+    /// The execute bits of the regular file `path` resolves to, following
+    /// symlinks.
+    ///
+    /// [`ExecuteBits::NONE`] for anything that does not resolve to a regular
+    /// file, or that cannot be stat'd, so a caller that only wants to carry a
+    /// mode along never fails over it. Do not use it to decide anything about a
+    /// target a link may have been planted at: it reports the link's
+    /// destination.
+    fn execute_bits(&self, path: &Path) -> ExecuteBits;
 
     /// The refusal [`write_file_no_follow`](FileSystem::write_file_no_follow) would
     /// give for `path`, if it would refuse
