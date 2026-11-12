@@ -154,8 +154,8 @@ There are multiple crates in the repo, all under the `crates/` subdirectory:
 4. `test-common` which are helper types and functions to use in tests (since setting up for testing
    often requires the same type of set up),
 5. `xtask`, the verification instruments behind `just percommit` and `just mutate`.
-6. `selfie-escape` (in `escape/`), the character sets and escaping loop behind the CLI's terminal text
-   and its verbose log.
+6. `selfie-escape` (in `escape/`), the character sets and escaping loop behind the CLI's terminal
+   text and both binaries' stderr logs.
 
 The CLI and MCP server are both "driving adapters" in hexagonal terms — they consume the same
 `PackageService` trait but present results differently (terminal output vs structured JSON). Keep

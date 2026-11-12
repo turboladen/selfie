@@ -18,6 +18,8 @@ Amended 2026-11-01: §9 covers why an apply with `stop_on_error` stopped.
 Amended 2026-11-01: §1.8 and §3.5 escape each verbose log record with the strict set, so a record is
 one line.
 
+Amended 2026-11-12: §1.8 covers the MCP server's stderr log, which escapes each record the same way.
+
 ## Context
 
 `selfie-cli` prints text from outside selfie: spec, package and environment names, paths, spec
@@ -117,15 +119,17 @@ Options considered:
 7. A list of names is shown by joining `Name` values with a `Literal` separator. No function escapes
    and joins in one step.
 8. The verbose log is the one writer whose input is not a `Shown`. tracing formats each event
-   itself, so `VerboseLog` holds the whole record and escapes it with the strict set, every escape
-   sequence, line break and tab included, keeping only the line break that ends it. Once tracing has
-   formatted a message, a value inside it cannot be told from the format string, so selfie's own
-   text in a record is escaped the same way. The log is never colored (§8), so no styling has to
-   survive, and nothing of an event that passes through the writer reaches the terminal raw,
-   whichever field it came from and whether tracing formatted it with `Display` or `Debug`. A value
-   can still hold text that reads as another field, such as `key=value`, inside its own record, and
-   a value holding a backslash and an `n` reads like one holding a line feed: the log is for
-   reading, not for recovering a value's bytes. The MCP server's own log is outside this decision.
+   itself, so `LogEvent`, the writer `VerboseLog` makes, holds the whole record and escapes it with
+   the strict set, every escape sequence, line break and tab included, keeping only the line break
+   that ends it. Once tracing has formatted a message, a value inside it cannot be told from the
+   format string, so selfie's own text in a record is escaped the same way. The log is never colored
+   (§8), so no styling has to survive, and nothing of an event that passes through the writer
+   reaches the terminal raw, whichever field it came from and whether tracing formatted it with
+   `Display` or `Debug`. A value can still hold text that reads as another field, such as
+   `key=value`, inside its own record, and a value holding a backslash and an `n` reads like one
+   holding a line feed: the log is for reading, not for recovering a value's bytes. The MCP server's
+   stderr log writes each of its records through `LogEvent` too, since a client may show that stream
+   on a terminal, and so do its panic hook and its report of a startup error.
 
 ### 2. The kind is decided where the CLI receives a value
 
@@ -458,9 +462,9 @@ Costs:
   worse than the sentence it builds. An error type among them writes `Display` and
   `std::error::Error` by hand instead of deriving them with thiserror.
 
-Out of scope: the MCP server, which writes JSON and no terminal; the library's `Display`
-implementations, which stay for logs and the MCP server; and non-UTF-8 paths, which `DisplayPath`
-shows lossily, so two of them can read alike.
+Out of scope: the MCP server, which writes JSON and no terminal apart from its stderr log (§1.8);
+the library's `Display` implementations, which stay for logs and the MCP server; and non-UTF-8
+paths, which `DisplayPath` shows lossily, so two of them can read alike.
 
 Reopen when selfie gains a second terminal renderer, such as a TUI, or when a part has to carry
 something other than what a value is, such as emphasis or a link.
