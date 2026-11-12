@@ -94,9 +94,7 @@ Test egress at the **boundary**, not by listing known paths:
   "a command failed", not which entry or which var, and the resolve variants carry that.
 - **Forward command stderr on failure only**, bounded. It is content selfie does not control; a
   provider run with a verbose flag can echo secret material there. Every failure's sentence names
-  the package file's own `command:` string only as a `SpecCommandText` part, which bounds it, except
-  one: `OperationFailure::NotInstalledAfterInstall` (`package/event.rs`) still formats its
-  `check_command` into its sentence whole, until selfie-2kwj makes `OperationFailure` Composed.
+  the package file's own `command:` string only as a `SpecCommandText` part, which bounds it.
   `BoundedText` in `commands/runner.rs` is the one bound. It is `pub` and re-exported as
   `selfie::commands::BoundedText`, so the CLI and the MCP server can construct one — this rule is
   followable from every crate it is scoped to. Call `BoundedText::bound` rather than deciding a

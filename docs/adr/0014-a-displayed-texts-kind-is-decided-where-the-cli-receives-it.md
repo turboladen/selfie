@@ -137,16 +137,11 @@ Options considered:
    over as parts (§9) and the CLI renders them. The CLI still composes these library sentences from
    the value's fields, with each path a `DisplayPath` and each name a `Name`, and they are not yet
    `Composed`:
-   - `OperationFailure::NotInstalledAfterInstall`'s sentence, which names the package requiring this
-     one in a string;
-   - `Uncreatable`'s refusal;
    - `ConfigLoadError`;
    - the warning that a run did not check collisions with sources it could not use;
    - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
    - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
-     or `OperationFailure` holding one, into a `String`;
-   - the `OperationFailure` kinds `message()` words as text: `InvalidSpec`'s package name and
-     `Generic`'s free text, which can hold a path.
+     or `OperationFailure` holding one, into a `String`.
 
    Each of these moves to §9 when it is next changed.
 3. A name inside a sentence the CLI composes is a `Name`, whatever the sentence around it is.
@@ -412,14 +407,16 @@ writer escapes every escape sequence (§1.8).
    fails with; a command's `TimedOut` and `UnusableDirectory`, and the `CommandFailure` an operation
    fails with when a command did; the `CommandError` a check's command fails with, the
    `CheckFailure` a check gives no answer with, with the `Message` its cause is, and the
-   `UnknownStatus` a dependency's status is when selfie could not answer for it; the `Message` an
-   audit gives for a package with nothing configured for the current environment; the `Message` that
-   words an unknown key, naming it as a `Name`; and a validation issue's message, `IssueMessage`,
-   which is its own text, a `Message` naming values as parts, the deploy state's notice or a
-   `DirectoryIssue`, and which the issue's event payload carries; the `Message` a refused spec's
-   reason is: a refused row, a `PackagesRefused` event, `spec info`'s refusals and the reason of the
-   failure for a spec selfie will not use; the `Message` the warning that a run skips a spec file
-   is; and the sentence of a not-found failure, which names its hint's `name:` value as a `Name`.
+   `UnknownStatus` a dependency's status is when selfie could not answer for it; the
+   `OperationFailure` an operation fails with, with `Uncreatable`'s refusal, and whose `Generic` arm
+   holds only selfie's own words; the `Message` an audit gives for a package with nothing configured
+   for the current environment; the `Message` that words an unknown key, naming it as a `Name`; and
+   a validation issue's message, `IssueMessage`, which is its own text, a `Message` naming values as
+   parts, the deploy state's notice or a `DirectoryIssue`, and which the issue's event payload
+   carries; the `Message` a refused spec's reason is: a refused row, a `PackagesRefused` event,
+   `spec info`'s refusals and the reason of the failure for a spec selfie will not use; the
+   `Message` the warning that a run skips a spec file is; and the sentence of a not-found failure,
+   which names its hint's `name:` value as a `Name`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as
