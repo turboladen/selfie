@@ -42,12 +42,12 @@ impl SpecCommandText {
     // `command`, keeping both its ends and eliding its middle when it is longer
     // than `BoundedText` keeps.
     fn of(command: &str) -> Self {
-        Self(crate::commands::BoundedText::bound(command.as_bytes()).into_string())
+        Self::within(command, crate::commands::runner::MAX_BOUNDED_BYTES)
     }
 
     // `command`, bounded to its `share` of a sentence's bound.
     fn within(command: &str, share: usize) -> Self {
-        Self(crate::commands::BoundedText::bound_within(command.as_bytes(), share).into_string())
+        Self(crate::commands::BoundedText::text_within(command, share).into_string())
     }
 
     /// `command`, bounded as selfie bounds a spec's command, for building
@@ -329,7 +329,7 @@ impl<'a> Parts<'a> {
 
     // `cause` is `cause_words`' text, measured for its share as it is.
     pub(crate) fn cause_within(self, cause: &str, share: usize) -> Self {
-        let bounded = crate::commands::BoundedText::bound_within(cause.as_bytes(), share);
+        let bounded = crate::commands::BoundedText::text_within(cause, share);
         self.text(bounded.into_string())
     }
 
@@ -594,6 +594,27 @@ mod tests {
         assert_eq!(shares([10, 5000, 20], 2000), [10, 1970, 20]);
         assert_eq!(shares([5000, 10, 5000], 2000), [995, 10, 995]);
         assert_eq!(shares([10, 20, 30], 2000), [10, 20, 30]);
+    }
+
+    // A command or a cause cut to its share is cut between two characters, so
+    // a character straddling the cut is dropped whole rather than shown as
+    // U+FFFD. The character sits across the head's cut in one value and across
+    // the tail's in the other.
+    #[test]
+    fn a_cut_value_keeps_whole_characters_at_both_ends() {
+        let straddling_head = format!("{}é{}", "a".repeat(9), "b".repeat(100));
+        let straddling_tail = format!("{}é{}", "a".repeat(100), "b".repeat(9));
+        for value in [&straddling_head, &straddling_tail] {
+            let parts = Parts::new()
+                .spec_command_within(value, 20)
+                .cause_within(value, 20);
+            let written = parts.to_string();
+
+            assert!(written.contains("bytes elided"), "{written}");
+            assert!(!written.contains('\u{FFFD}'), "{written}");
+        }
+        let whole = Parts::new().spec_command(&format!("{}é{}", "a".repeat(999), "b".repeat(3000)));
+        assert!(!whole.to_string().contains('\u{FFFD}'));
     }
 
     // Each part is written as it is, with nothing escaped and nothing between

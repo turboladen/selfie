@@ -795,9 +795,9 @@ impl BoundedText {
     ///
     /// An input barely over the bound is returned whole, since eliding it would
     /// spend more bytes on the marker than the elision saved.
-    // Cuts the bytes and then decodes, rather than slicing a `String`: a
-    // multi-byte character straddling either cut would panic on a string slice.
-    // The tail's cut is the one that can also land mid-character at the start of
+    // Valid UTF-8 is cut between characters, so no character becomes U+FFFD.
+    // Anything else is cut as bytes and then decoded, since it has no character
+    // boundaries to keep; the tail's cut can land mid-character at the start of
     // what it keeps.
     //
     // The whole-input comparison is against the decoded length, because for
@@ -808,16 +808,10 @@ impl BoundedText {
         Self::keeping_ends(bytes, BOUNDED_END_BYTES)
     }
 
-    // `bound` for one of several values a sentence names, which share the
-    // sentence's bound: it keeps `share / 2` bytes at each end, so at most
-    // `share` bytes of the input, and adds one marker when it cuts.
-    pub(crate) fn bound_within(bytes: &[u8], share: usize) -> Self {
-        Self::keeping_ends(bytes, share / 2)
-    }
-
-    // `bound_within` for text already decoded, such as a path decoded lossily.
-    // It cuts on character boundaries, so the text cannot grow when it is cut,
-    // and each end keeps at most `share / 2` of its bytes.
+    // `bound` for text, such as a spec's command or a path decoded lossily,
+    // that is one of the values a sentence's bound is shared among. It cuts on
+    // character boundaries, so no character is split into U+FFFD, and each end
+    // keeps at most `share / 2` of its bytes, plus one marker when it cuts.
     pub(crate) fn text_within(text: &str, share: usize) -> Self {
         let end = share / 2;
         if text.len() <= 2 * end {
@@ -839,8 +833,12 @@ impl BoundedText {
         )
     }
 
-    // Keeps `end` input bytes at each end, the same number at both.
+    // Keeps `end` input bytes at each end, the same number at both. Valid
+    // UTF-8 is cut between characters, as `text_within` cuts it.
     fn keeping_ends(bytes: &[u8], end: usize) -> Self {
+        if let Ok(text) = std::str::from_utf8(bytes) {
+            return Self::text_within(text, 2 * end);
+        }
         // Borrowed, not allocated, whenever the input is valid UTF-8.
         let whole = String::from_utf8_lossy(bytes);
 
@@ -918,6 +916,11 @@ mod tests {
         let bounded = BoundedText::bound(&input);
 
         assert!(bounded.as_str().contains("bytes elided"));
+        assert!(
+            !bounded.as_str().contains('\u{FFFD}'),
+            "{}",
+            bounded.as_str()
+        );
     }
 
     #[test]
@@ -932,6 +935,11 @@ mod tests {
         let bounded = BoundedText::bound(&input);
 
         assert!(bounded.as_str().contains("bytes elided"));
+        assert!(
+            !bounded.as_str().contains('\u{FFFD}'),
+            "{}",
+            bounded.as_str()
+        );
     }
 
     #[test]
