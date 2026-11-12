@@ -268,12 +268,6 @@ impl From<&ValidationIssue> for Issue {
     }
 }
 
-// This is the rule a spec's name follows, worded as the remedy a refusal ends
-// with.
-fn spec_name_rule() -> Prose {
-    Prose::new(selfie::package::SPEC_NAME_RULE)
-}
-
 /// Why a spec file did not load, without where in it.
 pub(crate) fn parse_reason(error: &PackageParseError) -> Shown {
     match error.kind() {
@@ -290,13 +284,7 @@ pub(crate) fn unknown_status(status: &UnknownStatus) -> Shown {
 /// An operation's failure, as the error line and the error summary both show
 /// it.
 pub(crate) fn failure(failure: &OperationFailure) -> Shown {
-    match failure {
-        OperationFailure::Uncreatable {
-            package_name,
-            reason,
-        } => uncreatable(package_name, reason),
-        other => composed(&other.message()),
-    }
+    composed(failure)
 }
 
 /// An operation's success, as its summary line shows it, with each name and
@@ -333,27 +321,7 @@ pub(crate) fn ambiguous_spec(row: &RefusedSpec) -> Shown {
 
 /// Why `spec create` will not create `package_name`.
 pub(crate) fn uncreatable(package_name: &str, reason: &Uncreatable) -> Shown {
-    let name = Name::new(package_name);
-    match reason {
-        Uncreatable::InvalidName => shown!(
-            "Refusing to create '{}': it is not a valid spec name. Rename it: {}.",
-            name,
-            spec_name_rule()
-        ),
-        Uncreatable::OutsidePackageDirectory { path, directory } => shown!(
-            "Refusing to create '{}': {} is not directly in the package directory {}, where \
-             every spec has to be.",
-            name,
-            DisplayPath::of(path),
-            DisplayPath::of(directory)
-        ),
-        Uncreatable::UnloadableFileName { path } => shown!(
-            "Refusing to create '{}': selfie would not load {} as a spec. Its name before the \
-             .yml or .yaml extension has to follow the rule for a package name.",
-            name,
-            DisplayPath::of(path)
-        ),
-    }
+    composed(&reason.refusal(package_name))
 }
 
 /// The refusal for `name` when it breaks the spec-name rule, or `None` when it
@@ -839,6 +807,35 @@ mod tests {
         );
     }
 
+    // An install whose check still says no names the package, the package that
+    // needs it and the check command, each escaped, and a refused spec write
+    // names its spec escaped.
+    #[test]
+    fn a_failure_naming_a_package_or_a_command_shows_each_escaped() {
+        let installed = OperationFailure::NotInstalledAfterInstall {
+            package_name: "p\u{200B}k".to_string(),
+            check_command: "ch\u{200B}eck\nnext".to_string(),
+            exit_code: Some(1),
+            required_by: Some("ap\u{200B}p".to_string()),
+        };
+        let invalid = OperationFailure::InvalidSpec {
+            action: selfie::package::event::SpecWrite::Update,
+            package_name: "p\u{200B}k".to_string(),
+            issues: Vec::new(),
+        };
+
+        assert_eq!(
+            failure(&installed).as_str(),
+            "The install command for 'p\\u{200b}k', which `ap\\u{200b}p` requires, succeeded, \
+             but its check command `ch\u{200B}eck\\nnext` still says it is not installed (exit \
+             1)\nEscaped: ch\\u{200b}eck\\nnext"
+        );
+        assert_eq!(
+            failure(&invalid).as_str(),
+            r"Refusing to update 'p\u{200b}k': the updated spec would not pass validation (0 errors), so nothing was written"
+        );
+    }
+
     // A spec write refused as unplaced names the spec and its path, each escaped.
     #[test]
     fn an_unplaced_spec_write_names_its_spec_and_path_escaped() {
@@ -928,7 +925,7 @@ mod tests {
         ] {
             assert_eq!(
                 uncreatable("tool", &reason).as_str(),
-                reason.refusal("tool")
+                reason.refusal("tool").to_string()
             );
         }
         let invalid = PackageParseError::new(

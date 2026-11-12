@@ -1200,7 +1200,7 @@ mod tests {
                     operation_info: info(),
                     recommend_name: "rec".to_string(),
                     error: Box::new(selfie::package::event::OperationFailure::Generic(
-                        "no such formula".to_string(),
+                        "no such formula",
                     )),
                 },
                 Channel::Stderr,
@@ -1272,7 +1272,7 @@ mod tests {
                 operation_info: make_operation_info("root"),
                 recommend_name: "r\u{200B}a\nb".to_string(),
                 error: Box::new(selfie::package::event::OperationFailure::Generic(
-                    "no such formula".to_string(),
+                    "no such formula",
                 )),
             },
             PackageEvent::SettledEarlier {
@@ -1375,7 +1375,7 @@ mod tests {
             .into_iter()
             .map(|name| PackageEvent::Completed {
                 operation_info: make_operation_info(name),
-                result: OperationResult::Failure(OperationFailure::Generic("failed".to_string())),
+                result: OperationResult::Failure(OperationFailure::Generic("failed")),
             })
             .collect();
         let display = DisplayManager::new(false);
@@ -1686,7 +1686,7 @@ mod tests {
 
         let failed = PackageEvent::Completed {
             operation_info: make_operation_info("bat"),
-            result: OperationResult::Failure(OperationFailure::Generic("broken".to_string())),
+            result: OperationResult::Failure(OperationFailure::Generic("broken")),
         };
         let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
         assert_eq!(printed, vec![(Channel::Stderr, "broken".to_string())]);
@@ -1784,9 +1784,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: op,
-                result: OperationResult::Failure(OperationFailure::Generic(
-                    "Package not found".to_string(),
-                )),
+                result: OperationResult::Failure(OperationFailure::Generic("Package not found")),
             },
         ];
 
@@ -1873,7 +1871,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: op,
-                result: OperationResult::Failure(OperationFailure::Generic("Failed".to_string())),
+                result: OperationResult::Failure(OperationFailure::Generic("Failed")),
             },
         ];
 
@@ -2075,9 +2073,7 @@ mod tests {
 
         let events: Vec<PackageEvent> = vec![PackageEvent::Completed {
             operation_info: op,
-            result: OperationResult::Failure(OperationFailure::Generic(
-                "something went wrong".to_string(),
-            )),
+            result: OperationResult::Failure(OperationFailure::Generic("something went wrong")),
         }];
 
         let display = DisplayManager::new(false);

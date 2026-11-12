@@ -1285,7 +1285,7 @@ fn unloadable_parts<'a>(
 }
 
 // This words the package that needs this one, when one does, with it as a name.
-fn required_by_parts(required_by: Option<&str>) -> Parts<'_> {
+pub(crate) fn required_by_parts(required_by: Option<&str>) -> Parts<'_> {
     required_by.map_or_else(Parts::new, |by| {
         Parts::new().text(", which `").name(by).text("` requires")
     })
@@ -1336,10 +1336,6 @@ impl PackageError {
             },
         }
     }
-}
-
-pub(crate) fn required_by_clause(required_by: Option<&str>) -> String {
-    required_by_parts(required_by).to_string()
 }
 
 /// Output from listing packages in the repository

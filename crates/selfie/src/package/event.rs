@@ -1574,8 +1574,51 @@ pub enum OperationFailure {
     /// failure: it was canceled, could not start, or its result could not be
     /// read, or selfie failed running it.
     Check(CheckFailure),
-    /// Generic failure with a freeform message
-    Generic(String),
+    /// A spec update named an environment the spec does not have, or added
+    /// one it already has. Nothing was written.
+    SpecUpdate(SpecUpdateRefusal),
+    /// A failure selfie words without naming any value.
+    // `&'static str`, so a sentence built from a value cannot reach it: a value
+    // needs an arm of its own, whose sentence names it as a part.
+    Generic(&'static str),
+}
+
+/// Why a spec update refuses the environment it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecUpdateRefusal {
+    /// The update edits or removes an environment the spec does not have.
+    EnvironmentNotFound {
+        environment: String,
+        package: String,
+    },
+    /// The update adds an environment the spec already has.
+    EnvironmentExists {
+        environment: String,
+        package: String,
+    },
+}
+
+crate::parts::display_from_parts!(SpecUpdateRefusal);
+
+impl Composed for SpecUpdateRefusal {
+    fn parts(&self) -> Parts<'_> {
+        let (environment, package, verdict) = match self {
+            Self::EnvironmentNotFound {
+                environment,
+                package,
+            } => (environment, package, "' not found in package '"),
+            Self::EnvironmentExists {
+                environment,
+                package,
+            } => (environment, package, "' already exists in package '"),
+        };
+        Parts::new()
+            .text("Environment '")
+            .name(environment)
+            .text(verdict)
+            .name(package)
+            .text("'")
+    }
 }
 
 /// Why `spec create` refuses a spec by its name or its path.
@@ -1604,24 +1647,31 @@ impl Uncreatable {
 
     /// The sentence refusing to create `package_name` for this reason.
     #[must_use]
-    pub fn refusal(&self, package_name: &str) -> String {
+    pub fn refusal(&self, package_name: &str) -> Message {
+        self.refusal_parts(package_name).into()
+    }
+
+    fn refusal_parts<'a>(&'a self, package_name: &'a str) -> Parts<'a> {
+        let refusing = Parts::new()
+            .text("Refusing to create '")
+            .name(package_name)
+            .text("': ");
         match self {
-            Self::InvalidName => format!(
-                "Refusing to create '{package_name}': it is not a valid spec name. Rename it: {}.",
-                crate::package::SPEC_NAME_RULE
-            ),
-            Self::OutsidePackageDirectory { path, directory } => format!(
-                "Refusing to create '{package_name}': {} is not directly in the package \
-                 directory {}, where every spec has to be.",
-                path.display(),
-                directory.display()
-            ),
-            Self::UnloadableFileName { path } => format!(
-                "Refusing to create '{package_name}': selfie would not load {} as a spec. Its \
-                 name before the .yml or .yaml extension has to follow the rule for a package \
-                 name.",
-                path.display()
-            ),
+            Self::InvalidName => refusing
+                .text("it is not a valid spec name. Rename it: ")
+                .text(crate::package::SPEC_NAME_RULE)
+                .text("."),
+            Self::OutsidePackageDirectory { path, directory } => refusing
+                .path(path)
+                .text(" is not directly in the package directory ")
+                .path(directory)
+                .text(", where every spec has to be."),
+            Self::UnloadableFileName { path } => {
+                refusing.text("selfie would not load ").path(path).text(
+                    " as a spec. Its name before the .yml or .yaml extension has to follow the \
+                     rule for a package name.",
+                )
+            }
         }
     }
 }
@@ -1716,100 +1766,112 @@ pub enum DependencyFailure {
     },
 }
 
-impl std::fmt::Display for OperationFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+crate::parts::display_from_parts!(OperationFailure);
+
+impl Composed for OperationFailure {
+    fn parts(&self) -> Parts<'_> {
         match self {
-            OperationFailure::Package(e) => write!(f, "{e}"),
+            OperationFailure::Package(error) => error.parts(),
             // The sentence alone, as a failure that is not a command's own reads:
             // the directory, not the command, is what failed.
             OperationFailure::CommandError(
                 unusable @ CommandFailure::WorkingDirectoryUnusable(_),
-            ) => {
-                write!(f, "{unusable}")
+            ) => unusable.parts(),
+            OperationFailure::CommandError(failure) => {
+                Parts::new().text("Command error: ").append(failure.parts())
             }
-            OperationFailure::CommandError(cmd_err) => write!(f, "Command error: {cmd_err}"),
-            OperationFailure::DependencyError(dep_err) => write!(f, "{dep_err}"),
-            OperationFailure::PackageList(list_err) => write!(f, "{list_err}"),
-            OperationFailure::Repository(error) => write!(f, "{error}"),
+            OperationFailure::DependencyError(failure) => failure.parts(),
+            OperationFailure::PackageList(error) => error.parts(),
+            OperationFailure::Repository(error) => error.parts(),
             // Both halves, because this is the one-string rendering an adapter
             // falls back to when it has nowhere separate to put a suggestion.
-            OperationFailure::Privilege(refusal) => {
-                write!(f, "{}. {}", refusal.message(), refusal.suggestion())
-            }
+            OperationFailure::Privilege(refusal) => Parts::new()
+                .text(refusal.message())
+                .text(". ")
+                .text(refusal.suggestion()),
             OperationFailure::UnreadableSpec {
                 package_name,
                 reason,
-            } => write!(f, "Cannot use package `{package_name}`: {reason}"),
+            } => Parts::new()
+                .text("Cannot use package `")
+                .name(package_name)
+                .text("`: ")
+                .append(reason.parts()),
             OperationFailure::InvalidSpec {
                 action,
                 package_name,
                 issues,
-            } => {
-                let errors = issues
-                    .iter()
-                    .filter(|issue| issue.level == crate::validation::ValidationLevel::Error)
-                    .count();
-                let errors = format!("{errors} {}", crate::pluralize(errors, "error", "errors"));
-                // A create validates the whole spec, as `spec validate` does. An
-                // update writes the whole spec, so required fields, URLs and
-                // environment contents are checked across all of it, and an error
-                // can sit in a field the update never touched. Only command syntax
-                // is narrowed, to the environments the update changed, so the count
-                // can be lower than `spec validate`'s.
-                match action {
-                    SpecWrite::Create => write!(
-                        f,
-                        "Refusing to create '{package_name}': it would not pass spec validate \
-                         ({errors}), so nothing was written"
-                    ),
-                    SpecWrite::Update => write!(
-                        f,
-                        "Refusing to update '{package_name}': the updated spec would not pass \
-                         validation ({errors}), so nothing was written"
-                    ),
-                }
-            }
-            OperationFailure::UnplacedSpec(write) => write!(f, "{write}"),
+            } => invalid_spec_parts(*action, package_name, issues),
+            OperationFailure::UnplacedSpec(write) => write.parts(),
             OperationFailure::Uncreatable {
                 package_name,
                 reason,
-            } => f.write_str(&reason.refusal(package_name)),
+            } => reason.refusal_parts(package_name),
             OperationFailure::NoSuchPackage {
                 name,
                 reason,
                 declared_by,
-            } => write!(f, "{}", no_such_package_parts(name, reason, declared_by)),
+            } => no_such_package_parts(name, reason, declared_by),
             OperationFailure::NotInstalledAfterInstall {
                 package_name,
                 check_command,
                 exit_code,
                 required_by,
             } => {
+                let by = crate::package::port::required_by_parts(required_by.as_deref());
                 // The clause is a parenthetical, so it closes with a comma.
-                let by = crate::package::port::required_by_clause(required_by.as_deref());
-                let close = if by.is_empty() { "" } else { "," };
-                write!(
-                    f,
-                    "The install command for '{package_name}'{by}{close} succeeded, but its check \
-                     command `{check_command}` still says it is not installed"
-                )?;
-                match exit_code {
-                    Some(code) => write!(f, " (exit {code})"),
-                    None => Ok(()),
-                }
+                let close = if required_by.is_some() { "," } else { "" };
+                Parts::new()
+                    .text("The install command for '")
+                    .name(package_name)
+                    .text("'")
+                    .append(by)
+                    .text(close)
+                    .text(" succeeded, but its check command `")
+                    .spec_command(check_command)
+                    .text("` still says it is not installed")
+                    .text(exit_code.map_or_else(String::new, |code| format!(" (exit {code})")))
             }
-            OperationFailure::DeployState(failure) => write!(f, "{failure}"),
-            OperationFailure::UnusableDotfilesDirectory(refusal) => write!(f, "{refusal}"),
-            OperationFailure::Stopped(stop) => write!(f, "{stop}"),
-            OperationFailure::Track(message) => write!(f, "{message}"),
-            OperationFailure::Git(failure) => write!(f, "{failure}"),
-            OperationFailure::Check(failure) => write!(f, "{failure}"),
-            OperationFailure::PushDisabled => {
-                write!(f, "{}", crate::git::sync_provider::commit_disabled())
-            }
-            OperationFailure::Generic(msg) => write!(f, "{msg}"),
+            OperationFailure::DeployState(failure) => failure.parts(),
+            OperationFailure::UnusableDotfilesDirectory(refusal) => refusal.parts(),
+            OperationFailure::Stopped(stop) => stop.parts(),
+            OperationFailure::Track(message) => message.parts(),
+            OperationFailure::Git(failure) => failure.parts(),
+            OperationFailure::Check(failure) => failure.parts(),
+            OperationFailure::PushDisabled => crate::git::sync_provider::commit_disabled(),
+            OperationFailure::SpecUpdate(refusal) => refusal.parts(),
+            OperationFailure::Generic(words) => Parts::new().text(*words),
         }
     }
+}
+
+// The sentence refusing a spec write that validation refused, counting the
+// errors among `issues`.
+fn invalid_spec_parts<'a>(
+    action: SpecWrite,
+    package_name: &'a str,
+    issues: &[ValidationIssueData],
+) -> Parts<'a> {
+    let errors = issues
+        .iter()
+        .filter(|issue| issue.level == crate::validation::ValidationLevel::Error)
+        .count();
+    let errors = format!("{errors} {}", crate::pluralize(errors, "error", "errors"));
+    // A create validates the whole spec, as `spec validate` does. An update
+    // writes the whole spec, so required fields, URLs and environment contents
+    // are checked across all of it, and an error can sit in a field the update
+    // never touched. Only command syntax is narrowed, to the environments the
+    // update changed, so the count can be lower than `spec validate`'s.
+    let (verb, verdict) = match action {
+        SpecWrite::Create => ("create", "': it would not pass spec validate ("),
+        SpecWrite::Update => ("update", "': the updated spec would not pass validation ("),
+    };
+    Parts::new()
+        .text(format!("Refusing to {verb} '"))
+        .name(package_name)
+        .text(verdict)
+        .text(errors)
+        .text("), so nothing was written")
 }
 
 crate::parts::display_from_parts!(CommandFailure);
@@ -1922,16 +1984,10 @@ fn no_such_package_parts<'a>(
     }
 }
 
-// Convenience: allow creating OperationFailure from strings
-impl From<String> for OperationFailure {
-    fn from(msg: String) -> Self {
+// A literal is a generic failure; a sentence naming a value is not one.
+impl From<&'static str> for OperationFailure {
+    fn from(msg: &'static str) -> Self {
         OperationFailure::Generic(msg)
-    }
-}
-
-impl From<&str> for OperationFailure {
-    fn from(msg: &str) -> Self {
-        OperationFailure::Generic(msg.to_string())
     }
 }
 
@@ -3130,46 +3186,7 @@ impl OperationFailure {
     /// parts every value its kind names as parts.
     #[must_use]
     pub fn message(&self) -> Message {
-        // The arms not named here word their values as text until each kind is
-        // Composed (selfie-2kwj).
-        match self {
-            Self::Package(error) => Message::of(error),
-            Self::DependencyError(failure) => Message::of(failure),
-            Self::PackageList(error) => Message::of(error),
-            Self::Repository(error) => Message::of(error),
-            Self::UnplacedSpec(write) => Message::of(write),
-            Self::DeployState(failure) => Message::of(failure),
-            Self::UnusableDotfilesDirectory(refusal) => Message::of(refusal),
-            Self::Stopped(stop) => Message::of(stop),
-            Self::Track(message) => message.clone(),
-            // The sentence alone, as `Display` words it: the directory, not the
-            // command, is what failed.
-            Self::CommandError(unusable @ CommandFailure::WorkingDirectoryUnusable(_)) => {
-                Message::of(unusable)
-            }
-            Self::CommandError(failure) => Parts::new()
-                .text("Command error: ")
-                .append(failure.parts())
-                .into(),
-            Self::Git(failure) => Message::of(failure),
-            Self::PushDisabled => crate::git::sync_provider::commit_disabled().into(),
-            Self::Check(failure) => Message::of(failure),
-            Self::UnreadableSpec {
-                package_name,
-                reason,
-            } => Parts::new()
-                .text("Cannot use package `")
-                .name(package_name)
-                .text("`: ")
-                .append(reason.parts())
-                .into(),
-            Self::NoSuchPackage {
-                name,
-                reason,
-                declared_by,
-            } => no_such_package_parts(name, reason, declared_by).into(),
-            other => Parts::new().text(other.to_string()).into(),
-        }
+        Message::of(self)
     }
 
     /// The label for this failure, such as `"not_installed_after_install"`.
@@ -5447,6 +5464,111 @@ mod tests {
         );
     }
 
+    // Each operation failure that words its own fields, whole, so a change to
+    // how it is built cannot change its words.
+    #[test]
+    fn an_operation_failures_own_words_are_pinned() {
+        use std::path::PathBuf;
+
+        let installed =
+            |required_by: Option<&str>, exit_code| OperationFailure::NotInstalledAfterInstall {
+                package_name: "p".to_string(),
+                check_command: "c".to_string(),
+                exit_code,
+                required_by: required_by.map(str::to_string),
+            };
+        let missing = |reason| OperationFailure::NoSuchPackage {
+            name: "p".to_string(),
+            reason,
+            declared_by: Vec::new(),
+        };
+        let uncreatable = |reason| OperationFailure::Uncreatable {
+            package_name: "p".to_string(),
+            reason,
+        };
+        let invalid = |action| OperationFailure::InvalidSpec {
+            action,
+            package_name: "p".to_string(),
+            issues: Vec::new(),
+        };
+        let invalid_name = format!(
+            "Refusing to create 'p': it is not a valid spec name. Rename it: {}.",
+            crate::package::SPEC_NAME_RULE
+        );
+        let cases: Vec<(OperationFailure, &str)> = vec![
+            (
+                OperationFailure::UnreadableSpec {
+                    package_name: "p".to_string(),
+                    reason: Parts::new().text("r").into(),
+                },
+                "Cannot use package `p`: r",
+            ),
+            (
+                invalid(SpecWrite::Create),
+                "Refusing to create 'p': it would not pass spec validate (0 errors), so nothing \
+                 was written",
+            ),
+            (
+                invalid(SpecWrite::Update),
+                "Refusing to update 'p': the updated spec would not pass validation (0 errors), \
+                 so nothing was written",
+            ),
+            (uncreatable(Uncreatable::InvalidName), &invalid_name),
+            (
+                uncreatable(Uncreatable::OutsidePackageDirectory {
+                    path: PathBuf::from("/a/p.yml"),
+                    directory: PathBuf::from("/b"),
+                }),
+                "Refusing to create 'p': /a/p.yml is not directly in the package directory /b, \
+                 where every spec has to be.",
+            ),
+            (
+                uncreatable(Uncreatable::UnloadableFileName {
+                    path: PathBuf::from("/b/p.txt"),
+                }),
+                "Refusing to create 'p': selfie would not load /b/p.txt as a spec. Its name \
+                 before the .yml or .yaml extension has to follow the rule for a package name.",
+            ),
+            (
+                installed(None, None),
+                "The install command for 'p' succeeded, but its check command `c` still says it \
+                 is not installed",
+            ),
+            (
+                installed(Some("q"), Some(1)),
+                "The install command for 'p', which `q` requires, succeeded, but its check \
+                 command `c` still says it is not installed (exit 1)",
+            ),
+            (
+                missing(NoSuchPackageReason::NotFound),
+                "No package named 'p' was found",
+            ),
+            (
+                missing(NoSuchPackageReason::MaybeInUnlistableDirectory),
+                "No package named 'p' was found. A dotfiles directory could not be listed, so it \
+                 may be there.",
+            ),
+            (
+                missing(NoSuchPackageReason::MaybeInUncheckableDirectory),
+                "No package named 'p' was found. A dotfiles directory could not be checked, so \
+                 whether it is there is unknown.",
+            ),
+            (
+                missing(NoSuchPackageReason::NotLoaded),
+                "Package 'p' could not be loaded, so nothing was applied",
+            ),
+            (
+                OperationFailure::PushDisabled,
+                "sync push is disabled: its commit can record every tracked file as deleted. \
+                 Commit and push the repository with git until this is fixed",
+            ),
+            (OperationFailure::Generic("g"), "g"),
+        ];
+        for (failure, words) in &cases {
+            assert_eq!(failure.to_string(), *words, "{failure:?}");
+        }
+    }
+
     // Each status selfie could not answer for, whole, in the words a status
     // cell and a gap's summary build on.
     #[test]
@@ -6065,7 +6187,7 @@ mod tests {
                 package_name: "x y".to_string(),
                 reason: reason.clone(),
             };
-            assert_eq!(failure.to_string(), reason.refusal("x y"), "{reason:?}");
+            assert_eq!(failure.message(), reason.refusal("x y"), "{reason:?}");
         }
         assert_eq!(
             crate::package::spec_name_refusal("x y").map(|reason| reason.refusal("x y")),
@@ -6074,6 +6196,7 @@ mod tests {
         assert!(
             Uncreatable::InvalidName
                 .refusal("x y")
+                .to_string()
                 .contains("it is not a valid spec name")
         );
     }
@@ -6811,7 +6934,7 @@ mod tests {
 
     #[test]
     fn every_failure_is_failed() {
-        let failure = OperationResult::Failure(OperationFailure::Generic("no".to_string()));
+        let failure = OperationResult::Failure(OperationFailure::Generic("no"));
         assert_eq!(failure.outcome(), Outcome::Failed);
     }
 
@@ -7028,10 +7151,7 @@ mod tests {
                 },
                 &["a\u{200B}b"],
             ),
-            (
-                OperationFailure::Generic("could not collect packages".to_string()),
-                &[],
-            ),
+            (OperationFailure::Generic("could not collect packages"), &[]),
         ];
         // A not-found failure, for each reason, with a hint naming a declaring
         // file and its `name:` value.
@@ -7071,9 +7191,80 @@ mod tests {
             .chain(not_found.iter().map(|(f, n)| (f, *n)))
         {
             let message = failure.message();
-            assert_eq!(message.to_string(), failure.to_string());
             assert_eq!(crate::parts::values_of(&message), named, "{failure}");
         }
+    }
+
+    // Each operation failure that words a value from its own fields names it as
+    // a part: a package, a requiring package, a spec's check command and a path.
+    // Each value holds U+200B, so one flattened into the text fails `values_of`.
+    #[test]
+    fn an_operation_failure_names_each_of_its_own_values_as_a_part() {
+        let installed = |required_by: Option<&str>| OperationFailure::NotInstalledAfterInstall {
+            package_name: "p\u{200B}k".to_string(),
+            check_command: "ch\u{200B}eck".to_string(),
+            exit_code: Some(1),
+            required_by: required_by.map(str::to_string),
+        };
+        let invalid = |action| OperationFailure::InvalidSpec {
+            action,
+            package_name: "p\u{200B}k".to_string(),
+            issues: Vec::new(),
+        };
+        let uncreatable = |reason| OperationFailure::Uncreatable {
+            package_name: "p\u{200B}k".to_string(),
+            reason,
+        };
+        let cases: [(OperationFailure, &[&str]); 7] = [
+            (installed(None), &["p\u{200B}k", "ch\u{200B}eck"]),
+            (
+                installed(Some("ap\u{200B}p")),
+                &["p\u{200B}k", "ap\u{200B}p", "ch\u{200B}eck"],
+            ),
+            (invalid(SpecWrite::Create), &["p\u{200B}k"]),
+            (invalid(SpecWrite::Update), &["p\u{200B}k"]),
+            (uncreatable(Uncreatable::InvalidName), &["p\u{200B}k"]),
+            (
+                uncreatable(Uncreatable::OutsidePackageDirectory {
+                    path: "/o\u{200B}t/p.yml".into(),
+                    directory: "/p\u{200B}d".into(),
+                }),
+                &["p\u{200B}k", "/o\u{200B}t/p.yml", "/p\u{200B}d"],
+            ),
+            (
+                uncreatable(Uncreatable::UnloadableFileName {
+                    path: "/p\u{200B}d/.p.yml".into(),
+                }),
+                &["p\u{200B}k", "/p\u{200B}d/.p.yml"],
+            ),
+        ];
+        for (failure, named) in cases {
+            let message = failure.message();
+            assert_eq!(crate::parts::values_of(&message), named, "{failure}");
+        }
+    }
+
+    // A check command named by an install that did not take is bounded as
+    // every spec command a sentence names is, so a long one cannot fill the
+    // terminal or an MCP reply.
+    #[test]
+    fn a_check_command_after_an_install_is_bounded() {
+        let long = "x".repeat(crate::commands::runner::MAX_BOUNDED_BYTES * 3);
+        let failure = OperationFailure::NotInstalledAfterInstall {
+            package_name: "pk".to_string(),
+            check_command: long.clone(),
+            exit_code: None,
+            required_by: None,
+        };
+
+        let words = failure.to_string();
+
+        assert!(words.contains("bytes elided"), "{words}");
+        assert!(
+            words.len() < crate::commands::runner::MAX_BOUNDED_BYTES + 200,
+            "{}",
+            words.len()
+        );
     }
 
     // A spec write refused as unplaced, whole for each action, so a change to how

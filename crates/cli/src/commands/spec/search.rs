@@ -176,7 +176,7 @@ mod tests {
         let events = vec![PackageEvent::Completed {
             operation_info: test_op_info(),
             result: OperationResult::Failure(selfie::package::event::OperationFailure::Generic(
-                "package directory not found".to_string(),
+                "package directory not found",
             )),
         }];
 
