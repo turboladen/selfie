@@ -49,6 +49,10 @@ impl StateValue {
         let save = |error: &StateSaveError| match error {
             StateSaveError::Serialize(_) => 0,
             StateSaveError::Write { cause, .. } => 1 + cause_shape(cause),
+            // One shape each: a changed file's cause is a load failure, whose
+            // own shapes the load and file blocks already cover.
+            StateSaveError::Changed(_) => 1 + CAUSE_SHAPES,
+            StateSaveError::Contended { .. } => 2 + CAUSE_SHAPES,
         };
         let load = |k| shape_in("load", LOAD, LOAD_SHAPES, k);
         let file = |k| shape_in("file", FILE, FILE_SHAPES, k);
@@ -145,7 +149,7 @@ fn shape_in(block: &str, start: usize, size: usize, k: usize) -> usize {
 
 // Each block's size, and where it starts: right after the block before it.
 const CAUSE_SHAPES: usize = 9;
-const SAVE_SHAPES: usize = 1 + CAUSE_SHAPES;
+const SAVE_SHAPES: usize = 3 + CAUSE_SHAPES;
 const LOAD_SHAPES: usize = 11;
 const FILE_SHAPES: usize = 4;
 const WARNING_SHAPES: usize = 7;
@@ -223,6 +227,14 @@ pub fn every_state_value(root: &str) -> Vec<StateValue> {
             selfie::yaml::SerializeFailure::Value,
         ))
         .chain(every_cause(&at).into_iter().map(write))
+        .chain([
+            StateSaveError::Changed(Box::new(StateLoadFailure::Empty {
+                path: at("deploy-state.yml"),
+            })),
+            StateSaveError::Contended {
+                path: at("deploy-state.yml"),
+            },
+        ])
     };
     let unusable = || StateLoadFailure::Empty {
         path: at("deploy-state.yml"),

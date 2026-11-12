@@ -114,7 +114,7 @@ fn every_value_a_deploy_state_sentence_names_is_its_kind() {
     // offers the one command.
     assert_eq!(
         (kinds.names, kinds.paths, kinds.commands),
-        (0, 88, 1),
+        (0, 90, 1),
         "names, paths and commands"
     );
 }

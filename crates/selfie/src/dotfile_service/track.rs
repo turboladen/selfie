@@ -732,7 +732,7 @@ where
                 if let Some(warning) = loaded.directory_warning() {
                     sender.send_composed_warning(warning.clone()).await;
                 }
-                Recorder::new(loaded)
+                Recorder::new(*loaded)
             }
             StateLoad::Unusable(failure) => {
                 return OperationResult::Failure(OperationFailure::DeployState(
@@ -892,7 +892,7 @@ where
     // `track_for_package` answers "already tracking" having recorded nothing, and
     // a second standalone track is refused by the spec-collision guard, so naming
     // either is wrong at the other entry point.
-    if let Err(error) = save_deploy_state(filesystem, &loaded) {
+    if let Err(error) = save_deploy_state(filesystem, &mut loaded) {
         return OperationResult::Failure(OperationFailure::DeployState(
             DeployStateFailure::TrackUnrecorded {
                 error,

@@ -8,13 +8,16 @@
 //! [`Recorder`] hands out, after it has written the state back once. Holding one
 //! means the state file could be written.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::{
     dotfile_service::state::DeployState,
     fs::{
         AbsentReason, DirectoryState,
-        filesystem::{FileSystem, FileSystemError, IfPresent},
+        filesystem::{FileSystem, FileSystemError, IfPresent, Placed},
         target::{StatePathError, TargetPath, state_file_path},
     },
     parts::{Composed, Parts, SuggestedCommand},
@@ -33,6 +36,11 @@ const BACKUPS_DIRNAME: &str = "backups";
 pub(crate) struct LoadedState {
     path: TargetPath,
     state: DeployState,
+    // What the file held when selfie last read or wrote it, and the state it
+    // parsed to. A save replaces only that file, and carries the changes made
+    // since `baseline` onto whatever another run wrote in its place.
+    on_disk: OnDisk,
+    baseline: DeployState,
     directory_warning: Option<DeployStateWarning>,
     // Why the state directory would refuse the first write, judged once at load
     // by its permissions.
@@ -86,6 +94,13 @@ impl LoadedState {
     }
 }
 
+// What was at the state file's path when selfie last read or wrote it.
+#[derive(Clone)]
+enum OnDisk {
+    Absent,
+    Holding(Arc<[u8]>),
+}
+
 /// The deploy state of a command that records what it writes.
 ///
 /// Writes the state back once, the first time [`writable`](Self::writable) is
@@ -125,7 +140,7 @@ impl Recorder {
         filesystem: &F,
     ) -> Result<WritableState<'_>, StateLoadFailure> {
         if !self.written {
-            write_state(filesystem, &self.loaded).map_err(|source| {
+            write_state(filesystem, &mut self.loaded).map_err(|source| {
                 // The permissions name the directory to fix and the typo to check
                 // for; the write's own error is the fallback when they allow it.
                 match creation_failure(filesystem, &self.loaded) {
@@ -144,7 +159,7 @@ impl Recorder {
     ///
     /// [`StateSaveError`] if the state cannot be serialized or written.
     pub(crate) fn save<F: FileSystem>(&mut self, filesystem: &F) -> Result<(), StateSaveError> {
-        write_state(filesystem, &self.loaded)?;
+        write_state(filesystem, &mut self.loaded)?;
         self.written = true;
         Ok(())
     }
@@ -189,10 +204,12 @@ struct Located {
 }
 
 impl Located {
-    fn holding(self, state: DeployState) -> LoadedState {
+    fn holding(self, on_disk: OnDisk, state: DeployState) -> LoadedState {
         LoadedState {
             path: self.path,
+            baseline: state.clone(),
             state,
+            on_disk,
             directory_warning: self.directory_warning,
             creation_refusal: self.creation_refusal,
             configured: self.configured,
@@ -227,7 +244,7 @@ fn state_directory_of(path: &TargetPath) -> &Path {
 /// What loading the deploy state produced.
 pub(crate) enum StateLoad {
     /// A state that may be read and written back.
-    Usable(LoadedState),
+    Usable(Box<LoadedState>),
     /// A file selfie could not use, or no location to look for one.
     Unusable(StateLoadFailure),
 }
@@ -300,13 +317,20 @@ impl Composed for StateLoadFailure {
                 cause,
                 configured,
             } => not_writable_parts(directory, blocked, cause, *configured),
-            Self::StateNotWritable(error) => parts
-                .text("The deploy state cannot be written: ")
-                .append(error.parts())
-                .text(
-                    ". Free the space or lift the lock that stops it, or point state_directory \
-                     elsewhere",
-                ),
+            Self::StateNotWritable(error) => {
+                let parts = parts
+                    .text("The deploy state cannot be written: ")
+                    .append(error.parts());
+                // A file another run keeps changing, or changed into one selfie
+                // cannot read, has its own remedy, which its parts already name.
+                match error {
+                    StateSaveError::Serialize(_) | StateSaveError::Write { .. } => parts.text(
+                        ". Free the space or lift the lock that stops it, or point \
+                         state_directory elsewhere",
+                    ),
+                    StateSaveError::Changed(_) | StateSaveError::Contended { .. } => parts,
+                }
+            }
             Self::Irregular { path, kind } => parts
                 .text("Cannot read the deploy state: '")
                 .path(path)
@@ -378,6 +402,12 @@ pub enum StateSaveError {
         path: PathBuf,
         cause: FileSystemError,
     },
+    /// Another writer changed the file since selfie read it, into something
+    /// selfie cannot read. Nothing was written over it.
+    Changed(Box<StateLoadFailure>),
+    /// Another writer changed the file before every one of selfie's attempts
+    /// to write it. Nothing was written over it.
+    Contended { path: PathBuf },
 }
 
 crate::parts::display_from_parts!(error StateSaveError);
@@ -393,6 +423,14 @@ impl Composed for StateSaveError {
                 .path(path)
                 .text("': ")
                 .append(cause.parts()),
+            // The cause names the file.
+            Self::Changed(cause) => Parts::new()
+                .text("Another writer changed the deploy state after selfie read it, so selfie left it as it is: ")
+                .append(cause.parts()),
+            Self::Contended { path } => Parts::new().text("Deploy state '").path(path).text(
+                "' kept changing while selfie wrote it, so it was left as another writer \
+                     put it. Run the command again once the other selfie run finishes",
+            ),
         }
     }
 }
@@ -677,7 +715,18 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         Ok(located) => located,
         Err(failure) => return StateLoad::Unusable(failure),
     };
-    let path = &located.path;
+    match read_state(filesystem, &located.path) {
+        Ok((on_disk, state)) => StateLoad::Usable(Box::new(located.holding(on_disk, state))),
+        Err(failure) => StateLoad::Unusable(failure),
+    }
+}
+
+// The state file at `path`: what it holds and what that parses to, or why it
+// cannot be used.
+fn read_state<F: FileSystem>(
+    filesystem: &F,
+    path: &TargetPath,
+) -> Result<(OnDisk, DeployState), StateLoadFailure> {
     // Ahead of the read: `read_file` opens the path, and opening a fifo blocks
     // until a writer arrives, which hangs every dotfile command before it does
     // any work. A missing path answers `None` here, so an absent file goes on
@@ -688,10 +737,10 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
     // parent as absent and let a run deploy what it could never record.
     match filesystem.irregular_target_refusal(path) {
         Some(FileSystemError::IrregularTarget { path, kind }) => {
-            return StateLoad::Unusable(StateLoadFailure::Irregular { path, kind });
+            return Err(StateLoadFailure::Irregular { path, kind });
         }
         Some(source) => {
-            return StateLoad::Unusable(StateLoadFailure::Read {
+            return Err(StateLoadFailure::Read {
                 path: path.path().to_path_buf(),
                 cause: source,
             });
@@ -704,10 +753,10 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
         // condition is absence; a permission failure on the file or any parent
         // is a file selfie cannot read.
         Err(FileSystemError::IoError(e)) if e.error().kind() == std::io::ErrorKind::NotFound => {
-            return StateLoad::Usable(located.holding(DeployState::empty()));
+            return Ok((OnDisk::Absent, DeployState::empty()));
         }
         Err(source) => {
-            return StateLoad::Unusable(StateLoadFailure::Read {
+            return Err(StateLoadFailure::Read {
                 path: path.path().to_path_buf(),
                 cause: source,
             });
@@ -718,7 +767,7 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
     // checked before the parse because the parser's sentence for it describes a
     // shape problem, while the remedy is to delete or restore the file.
     if content.trim().is_empty() {
-        return StateLoad::Unusable(StateLoadFailure::Empty {
+        return Err(StateLoadFailure::Empty {
             path: path.path().to_path_buf(),
         });
     }
@@ -734,8 +783,8 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
     // character a scanner failure stopped on still get through; the reasoning for
     // accepting those is on `ParseFailure`.
     match crate::yaml::parse(&content) {
-        Ok(state) => StateLoad::Usable(located.holding(state)),
-        Err(source) => StateLoad::Unusable(StateLoadFailure::Parse {
+        Ok(state) => Ok((OnDisk::Holding(Arc::from(content.into_bytes())), state)),
+        Err(source) => Err(StateLoadFailure::Parse {
             path: path.path().to_path_buf(),
             cause: source,
         }),
@@ -750,30 +799,78 @@ pub(crate) fn load_deploy_state<F: FileSystem>(
 /// manages here, with checksums: no credentials, but a reconnaissance aid on a
 /// shared host.
 ///
+/// When another writer changed the file since this run last read or wrote it,
+/// the two sets of changes are merged target by target, as
+/// [`DeployState::rebase`] describes, rather than this run's replacing the
+/// other's. A mitigation, not a guarantee: a change landing between the write's
+/// last look at the file and the rename is still replaced, and a state file
+/// that is a symlink is replaced by a regular file without that last look.
+///
 /// # Errors
 ///
-/// [`StateSaveError`] if the state cannot be serialized or the write fails.
+/// [`StateSaveError`] if the state cannot be serialized or the write fails, or
+/// if another writer changed the file into one selfie cannot read or kept
+/// changing it. In those last two cases the file is left as that writer put it.
 pub(super) fn save_deploy_state<F: FileSystem>(
     filesystem: &F,
-    loaded: &WritableState,
+    loaded: &mut WritableState<'_>,
 ) -> Result<(), StateSaveError> {
-    write_state(filesystem, loaded)
+    write_state(filesystem, loaded.0)
 }
 
-fn write_state<F: FileSystem>(filesystem: &F, loaded: &LoadedState) -> Result<(), StateSaveError> {
+// How many times a save writes before it gives up on a file another writer keeps
+// changing. Each retry follows a change that writer made, so this bounds how long
+// two runs race, not how often one fails.
+const SAVE_ATTEMPTS: usize = 4;
+
+fn write_state<F: FileSystem>(
+    filesystem: &F,
+    loaded: &mut LoadedState,
+) -> Result<(), StateSaveError> {
     // A record only lies when it outlives the write it describes. Both writers
     // flush the file, and try to flush its parent, before returning, and a target
     // is written before its record, so the state is no more durable than the
     // writes it records unless a target's parent cannot be opened for the flush.
     // Keep that order (selfie-aub).
-    let yaml = crate::yaml::serialize(&loaded.state).map_err(StateSaveError::Serialize)?;
-    filesystem
-        .write_file_private(&loaded.path, yaml.as_bytes(), IfPresent::Replace)
-        .map(drop)
-        .map_err(|source| StateSaveError::Write {
-            path: loaded.path.path().to_path_buf(),
-            cause: source,
-        })
+    let path = loaded.path.path().to_path_buf();
+    // Two selfie runs each load the file, change it and save it. A blind replace
+    // drops whatever the other saved in between, so the write replaces only the
+    // bytes this run last saw, and on finding others re-reads them and carries
+    // this run's changes across. The window between the writer's last look and
+    // its rename stays open (selfie-sq39).
+    let mut linked = false;
+    for _ in 0..SAVE_ATTEMPTS {
+        let yaml = crate::yaml::serialize(&loaded.state).map_err(StateSaveError::Serialize)?;
+        // A link at the path is replaced outright. The private writer keeps a
+        // link under `ReplaceIfHolding`, since it is not the file that was read,
+        // so a linked state file would otherwise never save.
+        let if_present = match (&loaded.on_disk, linked) {
+            (_, true) => IfPresent::Replace,
+            (OnDisk::Absent, false) => IfPresent::Keep,
+            (OnDisk::Holding(bytes), false) => IfPresent::ReplaceIfHolding(Arc::clone(bytes)),
+        };
+        let placed = filesystem
+            .write_file_private(&loaded.path, yaml.as_bytes(), if_present)
+            .map_err(|source| StateSaveError::Write {
+                path: path.clone(),
+                cause: source,
+            })?;
+        if placed == Placed::Written {
+            loaded.on_disk = OnDisk::Holding(Arc::from(yaml.into_bytes()));
+            loaded.baseline = loaded.state.clone();
+            return Ok(());
+        }
+        linked = matches!(
+            filesystem.symlink_refusal(&loaded.path),
+            Some(FileSystemError::SymlinkedTarget { .. })
+        );
+        let (on_disk, fresh) = read_state(filesystem, &loaded.path)
+            .map_err(|cause| StateSaveError::Changed(Box::new(cause)))?;
+        let baseline = std::mem::replace(&mut loaded.baseline, fresh.clone());
+        loaded.state.rebase(&baseline, fresh);
+        loaded.on_disk = on_disk;
+    }
+    Err(StateSaveError::Contended { path })
 }
 
 // What `load_deploy_state` reports, and what it stays quiet about.
@@ -1651,7 +1748,7 @@ mod tests {
             StateLoad::Unusable(failure) => panic!("an absent file must be usable: {failure}"),
         };
 
-        let error = save_deploy_state(&fs, &WritableState(&mut loaded))
+        let error = save_deploy_state(&fs, &mut WritableState(&mut loaded))
             .expect_err("the write was made to fail");
 
         assert!(matches!(error, StateSaveError::Write { .. }));
@@ -1661,5 +1758,204 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("disk full"), "{message}");
+    }
+
+    // A state file holding one record for each target named.
+    fn holding_records(targets: &[&str]) -> String {
+        let mut yaml = String::from("deployed:\n");
+        for target in targets {
+            yaml.push_str(&format!(
+                "  {target}:\n    source: s\n    checksum: c\n    deployed_at: d\n"
+            ));
+        }
+        yaml
+    }
+
+    // Each private write the save made: how it treated the target, and the
+    // content it carried.
+    type Writes = std::sync::Arc<std::sync::Mutex<Vec<(IfPresent, String)>>>;
+
+    // A state file that reads as each of `reads` in turn, the last one for good,
+    // and whose private writes answer each of `placed` in turn, the last one for
+    // good. A link is at the path when `linked`.
+    fn racing_filesystem(
+        reads: Vec<Option<String>>,
+        placed: Vec<Placed>,
+        linked: bool,
+    ) -> (MockFileSystem, Writes) {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let mut fs = under_a_state_directory();
+        fs.mock_no_irregular_files();
+        let read = AtomicUsize::new(0);
+        fs.expect_read_file().returning(move |_| {
+            let at = read.fetch_add(1, SeqCst).min(reads.len() - 1);
+            reads[at].clone().ok_or_else(|| {
+                FileSystemError::IoError(
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "No such file").into(),
+                )
+            })
+        });
+        fs.expect_symlink_refusal().returning(move |path| {
+            linked.then(|| FileSystemError::SymlinkedTarget {
+                path: path.path().to_path_buf(),
+                points_to: None,
+            })
+        });
+        let writes = Writes::default();
+        let log = writes.clone();
+        fs.expect_write_file_private()
+            .returning(move |_, data, if_present| {
+                let mut log = log.lock().unwrap();
+                log.push((if_present, String::from_utf8(data.to_vec()).unwrap()));
+                Ok(placed[(log.len() - 1).min(placed.len() - 1)])
+            });
+        (fs, writes)
+    }
+
+    fn loaded_from(fs: &MockFileSystem) -> LoadedState {
+        match load_deploy_state(fs, Some(Path::new(STATE_DIR))) {
+            StateLoad::Usable(loaded) => *loaded,
+            StateLoad::Unusable(failure) => panic!("the load failed: {failure}"),
+        }
+    }
+
+    fn holding(text: &str) -> IfPresent {
+        IfPresent::ReplaceIfHolding(Arc::from(text.as_bytes()))
+    }
+
+    // Another run saved between this run's load and its save: the save keeps
+    // that run's record and writes over only the file it re-read.
+    #[test]
+    fn a_save_over_a_file_another_run_changed_keeps_both_runs_records() {
+        let first = holding_records(&["/t/loaded"]);
+        let theirs = holding_records(&["/t/loaded", "/t/theirs"]);
+        let (fs, writes) = racing_filesystem(
+            vec![Some(first.clone()), Some(theirs.clone())],
+            vec![Placed::Kept, Placed::Written],
+            false,
+        );
+        let mut loaded = loaded_from(&fs);
+        loaded
+            .state_mut()
+            .record_deployment("/t/ours", "o", "c", None, None);
+
+        save_deploy_state(&fs, &mut WritableState(&mut loaded)).expect("the save must succeed");
+
+        let log = writes.lock().unwrap().clone();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!(log[0].0, holding(&first));
+        assert_eq!(log[1].0, holding(&theirs));
+        for target in ["/t/loaded", "/t/theirs", "/t/ours"] {
+            assert!(log[1].1.contains(target), "{target} was lost: {}", log[1].1);
+        }
+        // The next save compares against what this one wrote.
+        save_deploy_state(&fs, &mut WritableState(&mut loaded)).expect("the save must succeed");
+        assert_eq!(writes.lock().unwrap()[2].0, holding(&log[1].1));
+    }
+
+    // Nothing was there at the load, so nothing that appears since is replaced
+    // unseen.
+    #[test]
+    fn a_save_over_an_absent_file_keeps_one_that_appeared() {
+        let theirs = holding_records(&["/t/theirs"]);
+        let (fs, writes) = racing_filesystem(
+            vec![None, Some(theirs.clone())],
+            vec![Placed::Kept, Placed::Written],
+            false,
+        );
+        let mut loaded = loaded_from(&fs);
+        loaded
+            .state_mut()
+            .record_deployment("/t/ours", "o", "c", None, None);
+
+        save_deploy_state(&fs, &mut WritableState(&mut loaded)).expect("the save must succeed");
+
+        let log = writes.lock().unwrap().clone();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!(log[0].0, IfPresent::Keep);
+        assert_eq!(log[1].0, holding(&theirs));
+        assert!(
+            log[1].1.contains("/t/theirs") && log[1].1.contains("/t/ours"),
+            "{}",
+            log[1].1
+        );
+    }
+
+    // The private writer keeps a link rather than replace it under
+    // `ReplaceIfHolding`, so a linked state file is replaced outright, with the
+    // records read through the link carried across.
+    #[test]
+    fn a_save_over_a_linked_file_replaces_the_link() {
+        let first = holding_records(&["/t/loaded"]);
+        let (fs, writes) = racing_filesystem(
+            vec![Some(first.clone())],
+            vec![Placed::Kept, Placed::Written],
+            true,
+        );
+        let mut loaded = loaded_from(&fs);
+        loaded
+            .state_mut()
+            .record_deployment("/t/ours", "o", "c", None, None);
+
+        save_deploy_state(&fs, &mut WritableState(&mut loaded)).expect("the save must succeed");
+
+        let log = writes.lock().unwrap().clone();
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert_eq!(log[0].0, holding(&first));
+        assert_eq!(log[1].0, IfPresent::Replace);
+        assert!(
+            log[1].1.contains("/t/loaded") && log[1].1.contains("/t/ours"),
+            "{}",
+            log[1].1
+        );
+    }
+
+    // A file another writer left unreadable is not written over: there is no
+    // state in it to carry this run's changes onto.
+    #[test]
+    fn a_save_over_a_file_changed_into_garbage_writes_nothing_more() {
+        let (fs, writes) = racing_filesystem(
+            vec![Some(holding_records(&["/t/loaded"])), Some(String::new())],
+            vec![Placed::Kept, Placed::Written],
+            false,
+        );
+        let mut loaded = loaded_from(&fs);
+
+        let error = save_deploy_state(&fs, &mut WritableState(&mut loaded))
+            .expect_err("the file is unreadable");
+
+        assert!(
+            matches!(&error, StateSaveError::Changed(cause) if matches!(**cause, StateLoadFailure::Empty { .. })),
+            "{error}"
+        );
+        assert_eq!(writes.lock().unwrap().len(), 1);
+        let message = error.to_string();
+        assert!(
+            message.contains(STATE_FILE) && message.contains("Another writer changed"),
+            "{message}"
+        );
+    }
+
+    // A file that changes before every attempt is given up on, and left as the
+    // other writer put it.
+    #[test]
+    fn a_save_over_a_file_that_keeps_changing_gives_up() {
+        let (fs, writes) = racing_filesystem(
+            vec![Some(holding_records(&["/t/loaded"]))],
+            vec![Placed::Kept],
+            false,
+        );
+        let mut loaded = loaded_from(&fs);
+
+        let error = save_deploy_state(&fs, &mut WritableState(&mut loaded))
+            .expect_err("the file never stopped changing");
+
+        assert!(matches!(error, StateSaveError::Contended { .. }), "{error}");
+        assert_eq!(writes.lock().unwrap().len(), SAVE_ATTEMPTS);
+        let message = error.to_string();
+        assert!(
+            message.contains(STATE_FILE) && message.contains("Run the command again"),
+            "{message}"
+        );
     }
 }

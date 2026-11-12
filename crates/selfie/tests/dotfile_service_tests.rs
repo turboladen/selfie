@@ -1873,6 +1873,124 @@ async fn state_is_recorded_after_each_deploy_not_after_the_run() {
     );
 }
 
+// The deploy state as one record, and as that record beside a second one that
+// another selfie run saved after this run loaded the state. The run's first save
+// of the state meets the second, as two overlapping runs would. Both targets
+// exist, so an apply keeps their records as orphans rather than dropping them.
+struct Overlap {
+    state_file: PathBuf,
+    seeded: String,
+    other: String,
+    fs: test_common::PlantsBeforeWrite,
+}
+
+fn overlapping_runs(dirs: &TestDirs) -> Overlap {
+    let record = |target: &std::path::Path| {
+        format!(
+            "  {}:\n    source: s\n    checksum: c\n    deployed_at: d\n",
+            target.display()
+        )
+    };
+    let seeded = dirs.target_dir.join("seeded.conf");
+    let other = dirs.target_dir.join("other-run.conf");
+    std::fs::create_dir_all(&dirs.target_dir).unwrap();
+    std::fs::write(&seeded, "seeded").unwrap();
+    std::fs::write(&other, "other").unwrap();
+    let state_file = dirs.state_dir.join("deploy-state.yml");
+    std::fs::create_dir_all(&dirs.state_dir).unwrap();
+    std::fs::write(&state_file, format!("deployed:\n{}", record(&seeded))).unwrap();
+    // `Rewrite::File` takes static text; one leaked string per test.
+    let theirs: &'static str = format!("deployed:\n{}{}", record(&seeded), record(&other)).leak();
+    Overlap {
+        fs: test_common::PlantsBeforeWrite::rewritten_before_write(
+            &state_file,
+            test_common::Rewrite::File(theirs),
+        ),
+        state_file,
+        seeded: seeded.to_str().unwrap().to_string(),
+        other: other.to_str().unwrap().to_string(),
+    }
+}
+
+#[track_caller]
+fn assert_state_holds(state_file: &std::path::Path, targets: &[&str]) {
+    let written = std::fs::read_to_string(state_file).unwrap();
+    let state: DeployState = selfie::yaml::parse(&written).expect("state file parses");
+    for target in targets {
+        assert!(state.get(target).is_some(), "{target} was lost: {written}");
+    }
+    assert_eq!(state.entries().len(), targets.len(), "{written}");
+}
+
+// An apply whose state file another run saved to since it was loaded keeps that
+// run's record beside its own.
+#[tokio::test]
+async fn apply_keeps_a_record_another_run_saved_since_the_load() {
+    let dirs = TestDirs::new();
+    let source_dir = dirs.package_dir.join("myapp");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("a.toml"), "a = 1").unwrap();
+    let a = dirs.target_dir.join("a.toml");
+    create_package_with_dotfiles(
+        &dirs.package_dir,
+        "myapp",
+        &[("myapp/a.toml", a.to_str().unwrap())],
+    );
+    let overlap = overlapping_runs(&dirs);
+    let service = dirs.service_with_fs(overlap.fs.clone(), FakeCommandRunner::new());
+
+    let events = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+    assert!(
+        overlap.fs.rewritten(),
+        "the other run's save never happened"
+    );
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Success(_))
+        ),
+        "{events:?}"
+    );
+    assert_state_holds(
+        &overlap.state_file,
+        &[&overlap.seeded, &overlap.other, a.to_str().unwrap()],
+    );
+}
+
+// Track does the same for the record it adds.
+#[tokio::test]
+async fn track_keeps_a_record_another_run_saved_since_the_load() {
+    let dirs = TestDirs::new();
+    let target = dirs.target_dir.join("config.toml");
+    std::fs::write(&target, "x = 1").unwrap();
+    let overlap = overlapping_runs(&dirs);
+    let service = dirs.service_with_fs(overlap.fs.clone(), FakeCommandRunner::new());
+
+    let events = collect_events(
+        service
+            .track_standalone("myapp", target.to_str().unwrap())
+            .await,
+    )
+    .await;
+
+    assert!(
+        overlap.fs.rewritten(),
+        "the other run's save never happened"
+    );
+    assert!(
+        matches!(
+            get_operation_result(&events),
+            Some(OperationResult::Success(_))
+        ),
+        "{events:?}"
+    );
+    assert_state_holds(
+        &overlap.state_file,
+        &[&overlap.seeded, &overlap.other, target.to_str().unwrap()],
+    );
+}
+
 #[tokio::test]
 async fn test_apply_all_deploys_new_dotfile() {
     let dirs = TestDirs::new();
