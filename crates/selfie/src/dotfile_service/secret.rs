@@ -480,8 +480,9 @@ where
             Err(_) if canceled => Err(SecretOutcome::Canceled),
             Err(e) => {
                 // Safe to surface: `ResolveError`'s Display names commands, var
-                // names, and — on failure only — truncated stderr. It never
-                // carries resolved content.
+                // names, and — on failure only — bounded stderr or the runner's
+                // error, which can name a directory, a shell and an I/O cause.
+                // It never carries resolved content.
                 let failure = Failure::new(
                     EntryOperation::Resolve,
                     Parts::new()

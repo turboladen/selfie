@@ -23470,9 +23470,13 @@ mod entry_sentences {
         else {
             panic!("two failures: {events:?}");
         };
+        // The failed command is a part as well, in the sentence and its error.
         assert_eq!(
             (resolved_message, resolved_error),
-            (&vec![resolved], &vec![])
+            (
+                &vec![resolved, "op read a".to_string()],
+                &vec!["op read a".to_string()]
+            )
         );
         for values in [written_message, written_error] {
             assert_eq!(values.len(), 2, "{values:?}");

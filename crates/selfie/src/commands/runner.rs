@@ -754,13 +754,13 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 /// stderr, so the paths that forward such text bound it here rather than each
 /// deciding a limit. It is named for the text and not for stderr because the
 /// inputs differ: a command's stderr bytes at one site, at another a rendered
-/// [`CommandError`].
+/// error.
 ///
 /// The private field makes [`BoundedText::bound`] the only way to build one, so
-/// `CommandFailure::ExecutionFailed`'s `stderr` cannot be given unbounded text.
-/// **That is the only compiler-enforced site.** Callers that need a `String`
-/// (`AuditResult::Error`, `ResolveError`'s `stderr` fields) build one and unwrap
-/// it, and there the bound is a convention someone has to remember.
+/// a field of this type, such as `CommandFailure::ExecutionFailed`'s `stderr`,
+/// cannot be given unbounded text. A caller whose field is a `String`
+/// (`AuditResult::Error`) builds one and renders it into its sentence, and
+/// there the bound is a convention someone has to remember.
 ///
 /// Bounding a rendered message is not the same as bounding the command:
 /// `ExecutionFailed`'s `command` field is a plain `String` and stays unbounded.

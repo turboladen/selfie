@@ -99,14 +99,14 @@ Test egress at the **boundary**, not by listing known paths:
   `selfie::commands::BoundedText`, so the CLI and the MCP server can construct one — this rule is
   followable from every crate it is scoped to. Call `BoundedText::bound` rather than deciding a
   limit per site. What it _enforces_ is uneven, and the difference is the part worth knowing:
-  - **`CommandFailure::ExecutionFailed`'s `stderr` is the only compiler-enforced site.** Its type is
-    `BoundedText`, whose field is private, so no struct-variant literal — library, adapter, or test
-    — can put unbounded text there. This is the one place the bound is not a convention.
-  - **`AuditResult::Error` and `ResolveError`'s `stderr` fields are `String`.** They build a
-    `BoundedText` at the construction site and unwrap it. Each is a rendered sentence rather than a
-    stderr field, so typing them would claim the whole message is untrusted when only its tail is.
-    The bound there is still something a person has to remember; these are the sites to check when
-    adding a failure exit, and `audit.rs` is the one that was already missing it.
+  - **`CommandFailure::ExecutionFailed`'s `stderr` and the resolve path's `RunFailure::Exited` are
+    compiler-enforced.** Their type is `BoundedText`, whose field is private, so no struct-variant
+    literal — library, adapter, or test — can put unbounded text there. A runner error on the
+    resolve path stays a `CommandError`, whose parts bound each value it names.
+  - **`AuditResult::Error` is a `String`.** It builds a `BoundedText` at the construction site and
+    renders it into its sentence, because it is a rendered sentence rather than a stderr field. The
+    bound there is still something a person has to remember; it is the site to check when adding a
+    failure exit.
   - **The bound counts input bytes, not the length of the string it returns.** Invalid UTF-8 decodes
     lossily and each bad byte becomes a 3-byte `U+FFFD`, so 2000 bytes of binary stderr yield about
     6000 bytes of text. It bounds how much of the command's output survives, not `as_str().len()`.

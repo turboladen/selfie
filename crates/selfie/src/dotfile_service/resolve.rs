@@ -59,55 +59,67 @@ impl std::fmt::Debug for ResolvedContent {
 ///
 /// Names the command, var, template or target involved, drawn from the
 /// package file — except `TooLarge`, which names nothing. `CommandFailed`
-/// and `BindingFailed` carry the command's stderr when it exited non-zero,
-/// and otherwise the runner's error message when no completed exit is
-/// available, for example a timeout or a failure to start. None includes
-/// resolved content.
+/// and `BindingFailed` carry the [`RunFailure`] that stopped the command.
+/// None includes resolved content.
 #[derive(Debug)]
 pub(crate) enum ResolveError {
-    CommandFailed { command: String, stderr: String },
-    BindingFailed { name: String, stderr: String },
-    EmptyOutput { command: String },
-    EmptyBinding { name: String },
-    UnseparableOutput { command: String },
-    UnseparableBinding { name: String },
+    CommandFailed {
+        command: String,
+        failure: RunFailure,
+    },
+    BindingFailed {
+        name: String,
+        failure: RunFailure,
+    },
+    EmptyOutput {
+        command: String,
+    },
+    EmptyBinding {
+        name: String,
+    },
+    UnseparableOutput {
+        command: String,
+    },
+    UnseparableBinding {
+        name: String,
+    },
     TooLarge,
     TemplateUnreadable(UnreadableTemplate),
-    NotSecretBearing { target: PathBuf },
-    TemplateEscapesPackage { template: PathBuf },
+    NotSecretBearing {
+        target: PathBuf,
+    },
+    TemplateEscapesPackage {
+        template: PathBuf,
+    },
 }
 
 crate::parts::display_from_parts!(error ResolveError);
 
-// A command and stderr are text the package file or the command wrote, so each
-// enters as text; a var name is a name, and a target or a template is a path.
+// A command is the package file's own, so it is a spec command part, which
+// bounds it; a var name is a name, and a target or a template is a path.
 impl Composed for ResolveError {
     fn parts(&self) -> Parts<'_> {
         let parts = Parts::new();
         match self {
-            Self::CommandFailed { command, stderr } => {
-                parts.text(format!("dotfile command '{command}' failed: {stderr}"))
+            // The runner's error names the command itself, so the sentence
+            // names it once, and within one bound.
+            Self::CommandFailed {
+                failure: RunFailure::Errored(error),
+                ..
+            } => parts.text("dotfile command failed: ").append(error.parts()),
+            Self::CommandFailed { command, failure } => command_parts(command)
+                .text(" failed: ")
+                .append(failure.parts()),
+            Self::BindingFailed { name, failure } => var_parts(name)
+                .text(" command failed: ")
+                .append(failure.parts()),
+            Self::EmptyOutput { command } => command_parts(command).text(" produced no output"),
+            Self::EmptyBinding { name } => var_parts(name).text(" produced no output"),
+            Self::UnseparableOutput { command } => command_parts(command)
+                .text(" produced output selfie could not tell from the shell's"),
+            Self::UnseparableBinding { name } => {
+                var_parts(name).text(" produced output selfie could not tell from the shell's")
             }
-            Self::BindingFailed { name, stderr } => parts
-                .text("dotfile var '")
-                .name(name.as_str())
-                .text("' command failed: ")
-                .text(stderr.as_str()),
-            Self::EmptyOutput { command } => {
-                parts.text(format!("dotfile command '{command}' produced no output"))
-            }
-            Self::EmptyBinding { name } => parts
-                .text("dotfile var '")
-                .name(name.as_str())
-                .text("' produced no output"),
-            Self::UnseparableOutput { command } => parts.text(format!(
-                "dotfile command '{command}' produced output selfie could not tell from the \
-                 shell's"
-            )),
-            Self::UnseparableBinding { name } => parts
-                .text("dotfile var '")
-                .name(name.as_str())
-                .text("' produced output selfie could not tell from the shell's"),
             Self::TooLarge => parts.text(format!("dotfile content exceeds {MAX_CONTENT_MIB} MiB")),
             Self::TemplateUnreadable(unreadable) => unreadable.parts(),
             Self::NotSecretBearing { target } => parts
@@ -115,6 +127,46 @@ impl Composed for ResolveError {
                 .path(target)
                 .text("' has no content to resolve"),
             Self::TemplateEscapesPackage { template } => escapes_parts(template),
+        }
+    }
+}
+
+// A provider's command, as a sentence names it.
+fn command_parts(command: &str) -> Parts<'_> {
+    Parts::new()
+        .text("dotfile command '")
+        .spec_command(command)
+        .text("'")
+}
+
+// A template binding, as a sentence names it.
+fn var_parts(name: &str) -> Parts<'_> {
+    Parts::new().text("dotfile var '").name(name).text("'")
+}
+
+/// Why a command that ran, or was to run, produced no content.
+// `Debug` is derived, so `{:?}` on a `ResolveError` prints a `CommandError`'s
+// fields: the command, its directory and an I/O cause. That is safe only
+// because `CommandError` carries no command output by construction.
+#[derive(Debug)]
+pub(crate) enum RunFailure {
+    /// The command exited non-zero, with its stderr bounded.
+    Exited { stderr: BoundedText },
+    /// The runner could not complete the run, for example on a timeout or a
+    /// failure to start.
+    Errored(CommandError),
+}
+
+crate::parts::display_from_parts!(RunFailure);
+
+// stderr is the command's own sentence, so it enters as text. A runner error
+// keeps its own parts, each of which bounds the value it names, and carries no
+// command output by construction.
+impl Composed for RunFailure {
+    fn parts(&self) -> Parts<'_> {
+        match self {
+            Self::Exited { stderr } => Parts::new().text(stderr.as_str()),
+            Self::Errored(error) => error.parts(),
         }
     }
 }
@@ -316,9 +368,9 @@ where
             let captured = run_capture(command, base_dir, runner, timeout, token)
                 .await
                 .map_err(|failure| match failure {
-                    CaptureFailure::Failed(stderr) => ResolveError::CommandFailed {
+                    CaptureFailure::Failed(failure) => ResolveError::CommandFailed {
                         command: command.to_string(),
-                        stderr,
+                        failure,
                     },
                     CaptureFailure::Unseparable => ResolveError::UnseparableOutput {
                         command: command.to_string(),
@@ -376,9 +428,9 @@ where
                 let captured = run_capture(command, base_dir, runner, timeout, token)
                     .await
                     .map_err(|failure| match failure {
-                        CaptureFailure::Failed(stderr) => ResolveError::BindingFailed {
+                        CaptureFailure::Failed(failure) => ResolveError::BindingFailed {
                             name: name.clone(),
-                            stderr,
+                            failure,
                         },
                         CaptureFailure::Unseparable => {
                             ResolveError::UnseparableBinding { name: name.clone() }
@@ -419,17 +471,12 @@ where
 }
 
 /// Run a command in `base_dir`, returning its stdout on success. On failure,
-/// returns the command's own stderr when it exited non-zero, and otherwise
-/// the runner's error message when no completed exit is available, for
+/// returns the command's own stderr, bounded, when it exited non-zero, and
+/// otherwise the runner's error when no completed exit is available, for
 /// example a timeout or a failure to start.
 ///
 /// **stderr only on failure**: a command run with a verbose flag can echo secret
-/// material there, and on the success path it has no purpose. Render a
-/// `CommandError` with `Display`, never `Debug`, which prints whatever fields a
-/// future variant adds.
-///
-/// **Every exit from here must call [`BoundedText::bound`]**; [`ResolveError`]'s
-/// fields are `String`, so nothing enforces it.
+/// material there, and on the success path it has no purpose.
 ///
 /// A command whose output could not be read to the end fails here too, and must:
 /// a truncated credential is still non-empty and still under `MAX_CONTENT_BYTES`,
@@ -446,7 +493,7 @@ async fn run_capture<CR: CommandRunner>(
         .await
         .map_err(|e| match e {
             CommandError::ContentMarkersAbsent { .. } => CaptureFailure::Unseparable,
-            other => CaptureFailure::Failed(BoundedText::of(&other).into_string()),
+            other => CaptureFailure::Failed(RunFailure::Errored(other)),
         })?;
 
     // **This check is what keeps a failed run's bytes out of a file.** Nothing
@@ -465,9 +512,11 @@ async fn run_capture<CR: CommandRunner>(
             tail_verified,
         })
     } else {
-        Err(CaptureFailure::Failed(
-            BoundedText::bound(output.stderr()).into_string(),
-        ))
+        // `BoundedText` is built only by bounding, so stderr cannot reach a
+        // `RunFailure` unbounded.
+        Err(CaptureFailure::Failed(RunFailure::Exited {
+            stderr: BoundedText::bound(output.stderr()),
+        }))
     }
 }
 
@@ -483,8 +532,7 @@ struct Captured {
 // errors: a failed command has stderr worth forwarding, one whose output could
 // not be told from the shell's has nothing beyond that fact.
 enum CaptureFailure {
-    /// Bounded stderr, or a bounded rendering of the runner's error.
-    Failed(String),
+    Failed(RunFailure),
     Unseparable,
 }
 
@@ -1123,6 +1171,41 @@ mod tests {
         assert!(matches!(err, ResolveError::CommandFailed { .. }), "{err}");
     }
 
+    // The runner's error keeps its own parts, so the command it names is a part
+    // rather than text flattened into the sentence, and is named once.
+    #[tokio::test]
+    async fn a_runner_error_keeps_its_parts_in_a_failed_resolve() {
+        let runner = FakeRunner::read_failing("op read\u{200B}x");
+        let entry = provider_entry("op read\u{200B}x", "~/.x");
+
+        let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
+
+        assert_eq!(
+            crate::parts::values_of(&err.parts().into()),
+            ["op read\u{200B}x"]
+        );
+    }
+
+    // The command and the runner's cause share one bound. 'Z' appears nowhere
+    // else.
+    #[tokio::test]
+    async fn a_long_command_in_a_failed_resolve_is_bounded() {
+        use crate::commands::runner::MAX_BOUNDED_BYTES;
+
+        let command = "Z".repeat(MAX_BOUNDED_BYTES * 3);
+        let runner = FakeRunner::read_failing(&command);
+        let entry = provider_entry(&command, "~/.x");
+
+        let rendered = resolve(&entry, &no_fs(), &runner)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        let kept = rendered.chars().filter(|c| *c == 'Z').count();
+        assert!(kept <= MAX_BOUNDED_BYTES, "{kept} bytes kept");
+        assert!(kept > 0, "the command is still named: {rendered}");
+    }
+
     #[tokio::test]
     async fn a_binding_whose_output_could_not_be_read_is_an_error() {
         // The second call site of `run_capture`, and the less guarded one: a
@@ -1191,17 +1274,36 @@ mod tests {
         );
     }
 
-    // A var name is a name part and a target or template a path part, so a
-    // U+200B in one shows escaped; a command and stderr stay the text their
-    // author and the command wrote.
+    // A command is a spec command part, a var name a name part, and a target
+    // or template a path part, so a U+200B in one shows escaped; stderr stays
+    // the text the command wrote.
     #[test]
-    fn a_resolve_error_names_its_names_and_paths_as_parts() {
+    fn a_resolve_error_names_its_commands_names_and_paths_as_parts() {
         let name = || "v\u{200B}ar".to_string();
+        let command = || "op read\u{200B}x".to_string();
+        let exited = || RunFailure::Exited {
+            stderr: BoundedText::bound(b"locked"),
+        };
         let cases = [
+            (
+                ResolveError::CommandFailed {
+                    command: command(),
+                    failure: exited(),
+                },
+                vec!["op read\u{200B}x"],
+            ),
+            (
+                ResolveError::EmptyOutput { command: command() },
+                vec!["op read\u{200B}x"],
+            ),
+            (
+                ResolveError::UnseparableOutput { command: command() },
+                vec!["op read\u{200B}x"],
+            ),
             (
                 ResolveError::BindingFailed {
                     name: name(),
-                    stderr: "locked".to_string(),
+                    failure: exited(),
                 },
                 vec!["v\u{200B}ar"],
             ),
