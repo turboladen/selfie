@@ -989,6 +989,7 @@ pub(crate) fn validation_category_label(category: ValidationErrorCategory) -> &'
         ValidationErrorCategory::CommandSyntax => "command_syntax",
         ValidationErrorCategory::UrlFormat => "url_format",
         ValidationErrorCategory::PathFormat => "path_format",
+        ValidationErrorCategory::Dependency => "dependency",
         ValidationErrorCategory::Advisory => "advisory",
     }
 }
@@ -1925,6 +1926,7 @@ mod tests {
             (ValidationErrorCategory::CommandSyntax, "command_syntax"),
             (ValidationErrorCategory::UrlFormat, "url_format"),
             (ValidationErrorCategory::PathFormat, "path_format"),
+            (ValidationErrorCategory::Dependency, "dependency"),
             (ValidationErrorCategory::Advisory, "advisory"),
         ];
         for (category, label) in validation {

@@ -588,6 +588,21 @@ Pressing Ctrl+C while recommends install ends the run as canceled, and selfie na
 it did not try: one it had not started, or one stopped before installing the next of its packages. A
 recommend whose own command the Ctrl+C interrupted is reported as failed.
 
+### Checking the dependency graph
+
+`selfie spec validate` resolves a package spec as `selfie package install` would, in every
+environment the spec declares, not only the current one; `--all` resolves every package spec it
+validates. It reports these as errors, because install refuses each one:
+
+- a circular dependency, including one that runs through `recommends`, such as `fish` recommending
+  `fish-fisher` while `fish-fisher` depends on `fish`;
+- a dependency with no spec in the package directory;
+- a dependency, direct or indirect, that cannot be installed in that environment, such as one with
+  no entry for it.
+
+A recommend that install would skip is a warning: one with no spec, or one that cannot be installed
+in that environment. Each issue names its environment and has the category `dependency`.
+
 ## Command Execution
 
 ### Working Directory

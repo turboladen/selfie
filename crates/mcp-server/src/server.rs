@@ -325,7 +325,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate validates it, before it is written, including the check against the other specs for a shared target; a spec this tool creates has no dotfile entry, so that check finds nothing for it: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\")."
+        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate validates it, before it is written, except that its dependency graph is not resolved, including the check against the other specs for a shared target; a spec this tool creates has no dotfile entry, so that check finds nothing for it: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\")."
     )]
     async fn spec_create(
         &self,
@@ -548,7 +548,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate",
-        description = "Validate a single spec file for correctness. The package directory is searched first, then the dotfiles directory for a standalone dotfile spec. Returns validation issues at three levels: errors, warnings, and informational notices. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\"; branch on it. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. Each `validation_result` row carries the spec's own `outcome`: \"clean\", \"found\" (warnings) or \"failed\" (errors). A spec with warnings is a successful call with status 'found'; a notice alone leaves it 'success'. A spec with errors is an error result with status 'failed', whose message counts its errors and warnings; its issues are still in the data rows. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"canceled\" for a canceled call. The spec is also checked against the other specs, as selfie_spec_validate_all checks them: two specs that deploy one target in an environment are an error on each, naming both, and the call reports the named spec's own entries only. A spec that could not be read takes no part. When the named spec has a dotfile entry in any environment it declares, the call names each place it could not check as a warning row, saying why, and reports a warning about the dotfiles directory, such as one that is not there, as selfie_spec_validate_all does; a spec with no dotfile entry cannot collide and hears neither. None of that changes the named spec's result."
+        description = "Validate a single spec file for correctness. The package directory is searched first, then the dotfiles directory for a standalone dotfile spec. Returns validation issues at three levels: errors, warnings, and informational notices. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\", \"dependency\" or \"advisory\"; branch on it. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for this package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. Each `validation_result` row carries the spec's own `outcome`: \"clean\", \"found\" (warnings) or \"failed\" (errors). A spec with warnings is a successful call with status 'found'; a notice alone leaves it 'success'. A spec with errors is an error result with status 'failed', whose message counts its errors and warnings; its issues are still in the data rows. Every result carries `outcome`: \"clean\", \"found\" or \"failed\", or \"canceled\" for a canceled call. The spec is also checked against the other specs, as selfie_spec_validate_all checks them: two specs that deploy one target in an environment are an error on each, naming both, and the call reports the named spec's own entries only. A spec that could not be read takes no part. When the named spec has a dotfile entry in any environment it declares, the call names each place it could not check as a warning row, saying why, and reports a warning about the dotfiles directory, such as one that is not there, as selfie_spec_validate_all does; a spec with no dotfile entry cannot collide and hears neither. None of that changes the named spec's result. A package spec is also resolved as 'selfie package install' resolves it, in every environment it declares: a dependency cycle, including one through recommends, a missing dependency, or a dependency with no entry for that environment is an error, and a recommend install would skip is a warning, each with category \"dependency\"."
     )]
     async fn spec_validate(
         &self,
@@ -571,7 +571,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_validate_all",
-        description = "Validate all spec files for correctness: the package specs and the standalone dotfile specs in the dotfiles directory, read as 'selfie apply' reads them. A name several files claim fails the run and is reported as a `package_refused` row with `package`, `paths` (every file claiming the name), `kind` \"ambiguous_name\" and `reason`. A dotfiles directory that cannot be listed fails the run with a warning naming it. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\"; branch on it. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. Each `validation_result` row carries the spec's own `outcome`: \"clean\", \"found\" (warnings) or \"failed\" (errors). A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A run whose specs have warnings but no errors is a successful call with status 'found'. A run with a spec that has errors, a spec file that could not be loaded, or a name several files claim is an error result with status 'failed', whose message counts each. Fast — no commands executed."
+        description = "Validate all spec files for correctness: the package specs and the standalone dotfile specs in the dotfiles directory, read as 'selfie apply' reads them. A name several files claim fails the run and is reported as a `package_refused` row with `package`, `paths` (every file claiming the name), `kind` \"ambiguous_name\" and `reason`. A dotfiles directory that cannot be listed fails the run with a warning naming it. Returns per-spec validation issues at three levels: errors, warnings, and informational notices. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\", \"dependency\" or \"advisory\"; branch on it. Each issue carries a `level` field — do not filter on the word 'error' or 'warning' alone, or you will drop the notice reporting that 'selfie apply' executes commands for a package's dotfiles. An issue's place in the file is `line` and `column`, both null when it has none. Each `validation_result` row carries the spec's own `outcome`: \"clean\", \"found\" (warnings) or \"failed\" (errors). A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A run whose specs have warnings but no errors is a successful call with status 'found'. A run with a spec that has errors, a spec file that could not be loaded, or a name several files claim is an error result with status 'failed', whose message counts each. Each package spec the run validates is also resolved as 'selfie package install' resolves it, in every environment it declares: a dependency cycle, including one through recommends, a missing dependency, or a dependency with no entry for that environment is an error, and a recommend install would skip is a warning, each with category \"dependency\". Fast — no commands executed."
     )]
     async fn spec_validate_all(&self) -> Result<CallToolResult, McpError> {
         let stream = SpecService::validate_all(&*self.service).await;
@@ -1300,6 +1300,7 @@ mod tests {
             Category::CommandSyntax,
             Category::UrlFormat,
             Category::PathFormat,
+            Category::Dependency,
             Category::Advisory,
         ];
         // Exhaustive, so a category added later fails the build until it is
@@ -1312,6 +1313,7 @@ mod tests {
                 | Category::CommandSyntax
                 | Category::UrlFormat
                 | Category::PathFormat
+                | Category::Dependency
                 | Category::Advisory => {}
             }
         }
@@ -1320,15 +1322,23 @@ mod tests {
             .map(|c| event_collector::validation_category_label(c).to_string())
             .collect();
 
-        for tool in [
-            SelfieServer::spec_validate_tool_attr(),
-            SelfieServer::spec_validate_all_tool_attr(),
-            SelfieServer::spec_create_tool_attr(),
+        // Create does not resolve the dependency graph, so its list leaves that
+        // category out.
+        let dependency = event_collector::validation_category_label(Category::Dependency);
+        let without_dependency: Vec<String> = emitted
+            .iter()
+            .filter(|label| *label != dependency)
+            .cloned()
+            .collect();
+        for (tool, expected) in [
+            (SelfieServer::spec_validate_tool_attr(), &emitted),
+            (SelfieServer::spec_validate_all_tool_attr(), &emitted),
+            (SelfieServer::spec_create_tool_attr(), &without_dependency),
         ] {
             let description = tool.description.unwrap_or_default();
             assert_eq!(
-                labels_after(&description, "An issue's `category` is"),
-                emitted,
+                &labels_after(&description, "An issue's `category` is"),
+                expected,
                 "{}",
                 tool.name
             );

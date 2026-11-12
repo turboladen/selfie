@@ -26,6 +26,19 @@ pub(crate) struct DependencyGraph {
     pub required_by: HashMap<String, String>,
 }
 
+impl DependencyGraph {
+    /// Each package in `install_order` that cannot be installed here, with
+    /// why, in install order.
+    pub(crate) fn refusals(&self) -> impl Iterator<Item = (&str, &OperationFailure)> {
+        self.install_order
+            .iter()
+            .filter_map(|name| match self.installability.get(name) {
+                Some(Installability::Refused(failure)) => Some((name.as_str(), &**failure)),
+                _ => None,
+            })
+    }
+}
+
 /// Whether a package can be installed in the current environment, as its spec
 /// alone answers it.
 #[derive(Debug, Clone)]

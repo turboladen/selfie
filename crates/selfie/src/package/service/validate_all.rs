@@ -96,6 +96,15 @@ where
     // file, so they are asked of every collected spec and reported on each member
     // this run validates.
     let mut across = crate::package::validate::cross_spec_issues(&packages, environment);
+    // Asked of every spec this run validates, in every environment it declares,
+    // so a dependency that cannot install on another machine is found on this
+    // one. A spec the run leaves out is not resolved, since nothing would report
+    // what it found.
+    for (path, found) in
+        super::validate_deps::dependency_issues(repo, &valid_packages, sender).await
+    {
+        across.entry(path).or_default().extend(found);
+    }
 
     for package in &valid_packages {
         // A spec is read through the repository that loaded it, which is the one

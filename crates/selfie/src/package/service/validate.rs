@@ -345,6 +345,13 @@ where
     .await
     .unwrap_or_default();
     issues.extend(across.issues.into_iter().map(|(issue, _)| issue));
+    // Resolved as install resolves it, as `--all` resolves every spec.
+    issues.extend(
+        super::validate_deps::dependency_issues(repo, &[&package_blob.package], sender)
+            .await
+            .into_values()
+            .flatten(),
+    );
     let issues = &issues;
 
     // Step 3: Process validation results
