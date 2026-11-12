@@ -186,6 +186,25 @@ dotfiles_directory: ~/.config/selfie/dotfiles
 # dotfiles_directory defaults to ~/.selfie/dotfiles
 ```
 
+A dotfile lives either beside a package or in this directory:
+
+- `selfie package track-dotfile <package> <file>` copies the file beside an existing package's spec
+  in `package_directory` and adds an entry to that spec. Choose this when the dotfile configures
+  something a package installs, such as `~/.gitconfig` for `git`.
+- `selfie dotfiles track <name> <file>` writes a standalone spec, which has no install command, and
+  the copy beside it, in this directory. Choose this when there is no package to install.
+
+`selfie track <file>` asks which of the two you want. You need the directory only for standalone
+specs, and the default works as well as a path you set. Two things matter when you do use it:
+
+- `selfie dotfiles track` refuses when the directory does not exist, so create it first.
+- Git carries the directory to another machine only when it is inside the repository that holds
+  `package_directory`. With the default, that means making the repository the parent of both: a
+  repository at `~/selfie` with `package_directory: ~/selfie/packages` holds `~/selfie/dotfiles`
+  too.
+
+See [Package Files Reference](package-files.md#dotfile-deployment) for how each kind deploys.
+
 You may point this at the same directory as `package_directory`, directly or through a symlink.
 selfie then reads that directory once, so no entry is listed twice and no name collides with itself.
 Every spec in it is read as a package spec, which must declare at least one environment: a spec
@@ -218,10 +237,6 @@ decides a refusal: a directory selfie cannot read is refused whether or not you 
 
 `dotfiles track` is the exception. It copies the file _into_ that directory, so it refuses rather
 than warning.
-
-Standalone dotfiles live here with their source files colocated alongside their YAML definitions.
-Package dotfiles live alongside their package YAML in `package_directory` instead. See
-[Package Files Reference](package-files.md#dotfile-deployment) for details.
 
 #### `state_directory`
 
