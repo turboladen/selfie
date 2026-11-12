@@ -263,13 +263,17 @@ Test egress at the **boundary**, not by listing known paths:
   refuses what the looks refuse, as every look does. Of what the read then finds, the write replaces
   only the bytes the prompt showed, and creates with `IfPresent::Keep` when nothing is there. The
   resolved content goes through `settle_in_sync` like any in-sync target, and other bytes are left
-  in place as an unasked conflict. The read narrows the race and does not close it: a write landing
-  between it and the rename is still replaced. The read itself is `read_file_no_follow`, which opens
-  with `O_NOFOLLOW` and `O_NONBLOCK` and checks the descriptor's type, so a link or fifo planted
-  after the last check is refused by the read rather than followed or waited on; a link it finds is
-  replaced like one a check found. The checks stay: opening a device node can have side effects, and
-  they word the refusal. The warning naming the link and its destination is sent **after** the write
-  succeeds, worded as what happened, so it can never precede a refusal or a failed write. ADR-0005
-  decision 3 records all of it. Track's refusal sits ahead of every write it performs, so nothing is
-  copied, written or recorded for a link: accepting one would copy the link's destination into the
-  dotfiles repository, where `sync push` commits it. Do not relax that ordering.
+  in place as an unasked conflict. The write is `IfPresent::ReplaceIfHolding` with the bytes read,
+  as is the in-sync tightening rewrite, so a change landing before the rename is kept: the writer
+  swaps its file in, compares what it swapped out and swaps back on a mismatch. A kept rewrite
+  settles through `appeared::settle` as `During::Rewrite`. What stays open is a writer that already
+  holds the old file and writes into it after the compare, and a volume that cannot swap. The read
+  itself is `read_file_no_follow`, which opens with `O_NOFOLLOW` and `O_NONBLOCK` and checks the
+  descriptor's type, so a link or fifo planted after the last check is refused by the read rather
+  than followed or waited on; a link it finds is replaced like one a check found. The checks stay:
+  opening a device node can have side effects, and they word the refusal. The warning naming the
+  link and its destination is sent **after** the write succeeds, worded as what happened, so it can
+  never precede a refusal or a failed write. ADR-0005 decision 3 records all of it. Track's refusal
+  sits ahead of every write it performs, so nothing is copied, written or recorded for a link:
+  accepting one would copy the link's destination into the dotfiles repository, where `sync push`
+  commits it. Do not relax that ordering.

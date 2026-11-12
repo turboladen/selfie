@@ -2635,6 +2635,7 @@ dependencies = [
  "mockall",
  "nix",
  "pty-process",
+ "rustix",
  "serde",
  "serde-saphyr",
  "serde_ignored",

@@ -191,6 +191,12 @@ impl<F: FileSystem> appeared::Appeared for RepoAppeared<'_, '_, F> {
         self.unit.target_path
     }
 
+    // A repository-file write only ever keeps what appeared at a target it last
+    // found absent.
+    fn during(&self) -> appeared::During {
+        appeared::During::Write
+    }
+
     fn sender(&self) -> &EventSender {
         self.sender
     }

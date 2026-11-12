@@ -802,9 +802,8 @@ fn read_state<F: FileSystem>(
 /// When another writer changed the file since this run last read or wrote it,
 /// the two sets of changes are merged target by target, as
 /// [`DeployState::rebase`] describes, rather than this run's replacing the
-/// other's. A mitigation, not a guarantee: a change landing between the write's
-/// last look at the file and the rename is still replaced, and a state file
-/// that is a symlink is replaced by a regular file without that last look.
+/// other's, as far as [`IfPresent::ReplaceIfHolding`] guarantees. A state file
+/// that is a symlink is replaced by a regular file without that check.
 ///
 /// # Errors
 ///
@@ -836,8 +835,7 @@ fn write_state<F: FileSystem>(
     // Two selfie runs each load the file, change it and save it. A blind replace
     // drops whatever the other saved in between, so the write replaces only the
     // bytes this run last saw, and on finding others re-reads them and carries
-    // this run's changes across. The window between the writer's last look and
-    // its rename stays open (selfie-sq39).
+    // this run's changes across.
     let mut linked = false;
     for _ in 0..SAVE_ATTEMPTS {
         let yaml = crate::yaml::serialize(&loaded.state).map_err(StateSaveError::Serialize)?;

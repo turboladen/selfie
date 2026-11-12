@@ -250,8 +250,10 @@ where
             .settle_conflict(target, &resolved, current, before_write)
             .await?;
 
-        if if_present == IfPresent::Replace {
-            return Ok(self.write(target, &resolved, overwrite).await);
+        if if_present != IfPresent::Keep {
+            return Ok(self
+                .rewrite(target, &resolved, if_present, before_write, overwrite)
+                .await);
         }
         // Nothing was there, so the write replaces nothing: a file that appeared
         // since is kept rather than overwritten unseen.
@@ -263,6 +265,7 @@ where
                 resolved: &resolved,
                 before_write,
                 overwrite,
+                during: appeared::During::Write,
             })
             .await),
         }
@@ -568,20 +571,31 @@ where
             Ok(false) => {}
         }
 
-        // Same content, written the one way that establishes the mode atomically.
+        // Same content, written the one way that establishes the mode atomically,
+        // and only over the bytes just read: whatever replaced them since is not
+        // this file's to rewrite.
         before_write().map_err(SecretOutcome::StateNotWritable)?;
-        if let Err(e) =
-            self.filesystem
-                .write_file_private(&target.path, &resolved.bytes, IfPresent::Replace)
-        {
-            // The error already names the target; naming it in the head too
-            // would print the path twice.
-            let failure = Failure::new(
-                EntryOperation::PermissionFix,
-                Parts::new().text("Failed to tighten permissions"),
-                e.parts(),
-            );
-            return Err(self.write_failed(target, &e, failure).await);
+        match self.filesystem.write_file_private(
+            &target.path,
+            &resolved.bytes,
+            IfPresent::ReplaceIfHolding(bytes.into()),
+        ) {
+            Ok(Placed::Written) => {}
+            Ok(Placed::Kept) => {
+                return Err(self
+                    .settle_changed(target, resolved, before_write, overwrite)
+                    .await);
+            }
+            Err(e) => {
+                // The error already names the target; naming it in the head too
+                // would print the path twice.
+                let failure = Failure::new(
+                    EntryOperation::PermissionFix,
+                    Parts::new().text("Failed to tighten permissions"),
+                    e.parts(),
+                );
+                return Err(self.write_failed(target, &e, failure).await);
+            }
         }
 
         self.sender
@@ -646,8 +660,8 @@ where
     }
 
     /// Read the target again once a resolver has accepted a conflict about
-    /// `shown`, and say how the write treats what is there: `Replace` when it still
-    /// holds `shown`, and `Keep` when nothing is there, so the write creates and
+    /// `shown`, and say how the write treats what is there: replaced only while it
+    /// still holds `shown`, and kept when nothing is there, so the write creates and
     /// keeps whatever appears. Anything else ends the entry here, already reported:
     /// a link is replaced, a target the looks or the read refuse is refused, the
     /// resolved content is settled as in sync, and other bytes are left in place as
@@ -666,7 +680,7 @@ where
             .await?
         {
             None => return Ok(IfPresent::Keep),
-            Some(now) if now == shown => return Ok(IfPresent::Replace),
+            Some(now) if now == shown => return Ok(IfPresent::ReplaceIfHolding(now.into())),
             Some(now) => now,
         };
         // The same settlement as a target found in sync before the prompt, so a laxer
@@ -685,8 +699,9 @@ where
             resolved,
             before_write,
             overwrite: Overwrite::Accepted,
+            during: appeared::During::Prompt,
         };
-        Err(appeared::settle_present(&mut entry, &now, appeared::During::Prompt).await)
+        Err(appeared::settle_present(&mut entry, &now).await)
     }
 
     /// Put the conflict to the injected resolver, if there is one, and say what
@@ -750,6 +765,49 @@ where
         self.report_write(target, written, overwrite).await
     }
 
+    /// Write the resolved content over the bytes `if_present` holds, and report it.
+    /// A target that no longer holds them is left in place and settled as one that
+    /// changed during the write.
+    async fn rewrite(
+        &self,
+        target: &SecretEntry<'_>,
+        resolved: &ResolvedContent,
+        if_present: IfPresent,
+        before_write: &mut BeforeWrite<'_>,
+        overwrite: Overwrite,
+    ) -> SecretOutcome {
+        match self
+            .filesystem
+            .write_file_private(&target.path, &resolved.bytes, if_present)
+        {
+            Ok(Placed::Kept) => {
+                self.settle_changed(target, resolved, before_write, overwrite)
+                    .await
+            }
+            written => self.report_write(target, written, overwrite).await,
+        }
+    }
+
+    /// Settle a target whose rewrite found it changed and left it in place: read
+    /// again, in sync when it holds the content, a conflict when it differs.
+    async fn settle_changed(
+        &self,
+        target: &SecretEntry<'_>,
+        resolved: &ResolvedContent,
+        before_write: &mut BeforeWrite<'_>,
+        overwrite: Overwrite,
+    ) -> SecretOutcome {
+        appeared::settle(&mut SecretAppeared {
+            apply: self,
+            target,
+            resolved,
+            before_write,
+            overwrite,
+            during: appeared::During::Rewrite,
+        })
+        .await
+    }
+
     /// Write the resolved content to a target last read as absent, and report it:
     /// `None`, with nothing reported, when something is there by the time the write
     /// lands, which is left in place.
@@ -778,7 +836,7 @@ where
         match written {
             Ok(Placed::Written) => {}
             // Nothing was written, so nothing is reported as deployed. Only `create`
-            // keeps what it finds, and it settles that before reporting.
+            // and `rewrite` keep what they find, and they settle it before reporting.
             Ok(Placed::Kept) => return SecretOutcome::Skipped,
             Err(e) => return self.write_failed(target, &e, write_failure(&e)).await,
         }
@@ -812,6 +870,8 @@ struct SecretAppeared<'a, 'b, 'g, F, CR> {
     // Whether the resolver accepted a conflict on this entry, which a link
     // replaced from here reports.
     overwrite: Overwrite,
+    // The window in which the target changed, which a warning names.
+    during: appeared::During,
 }
 
 impl<F, CR> appeared::Appeared for SecretAppeared<'_, '_, '_, F, CR>
@@ -831,6 +891,10 @@ where
 
     fn sender(&self) -> &EventSender {
         self.apply.sender
+    }
+
+    fn during(&self) -> appeared::During {
+        self.during
     }
 
     // A link is replaced whenever it is found, as for any secret target, so one
@@ -870,10 +934,7 @@ where
         } else {
             self.apply
                 .sender
-                .send_composed_warning(appeared::warning(
-                    &self.target.path,
-                    appeared::During::Write,
-                ))
+                .send_composed_warning(appeared::warning(&self.target.path, self.during))
                 .await;
         }
         SecretOutcome::Skipped
