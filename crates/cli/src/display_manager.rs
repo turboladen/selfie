@@ -17,9 +17,9 @@ use crate::event_processor::Exit;
 use crate::source_paths::relative_text;
 pub(crate) use crate::terminal_text::DisplayPath;
 use crate::terminal_text::{
-    Command, Content, ESCAPED, Literal, Name, Output, Paint, Prose, Shown, guard, lit, log_record,
-    shown,
+    Command, Content, ESCAPED, Literal, Name, Output, Paint, Prose, Shown, guard, lit, shown,
 };
+use selfie_escape::LogEvent;
 
 /// A path as the terminal shows it: the home directory replaced with `~`, and
 /// its text escaped as [`DisplayPath`] escapes it.
@@ -854,52 +854,6 @@ impl tracing_subscriber::fmt::MakeWriter<'_> for VerboseLog {
 
     fn make_writer(&self) -> Self::Writer {
         LogEvent::new(std::io::stderr())
-    }
-}
-
-/// One event of the verbose log. Nothing written to it reaches its stream
-/// until it is dropped. Then the whole event is escaped and written at once,
-/// on one line.
-pub(crate) struct LogEvent<W: std::io::Write> {
-    sink: W,
-    text: Vec<u8>,
-}
-
-impl<W: std::io::Write> LogEvent<W> {
-    fn new(sink: W) -> Self {
-        Self {
-            sink,
-            text: Vec::new(),
-        }
-    }
-
-    // tracing-subscriber writes each event with one `write_all` today. The
-    // buffer keeps the event whole if a writer splits it, since a split inside
-    // an escape sequence or a character would have each half escaped alone.
-    fn emit(&mut self) {
-        let text = std::mem::take(&mut self.text);
-        let text = String::from_utf8_lossy(&text);
-        // This runs in `drop`, so a failed write has nowhere to be reported.
-        let shown = log_record(&text);
-        let _ = self.sink.write_all(shown.as_bytes());
-    }
-}
-
-impl<W: std::io::Write> std::io::Write for LogEvent<W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.text.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    // Nothing is written before the event ends, so there is nothing to flush.
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<W: std::io::Write> Drop for LogEvent<W> {
-    fn drop(&mut self) {
-        self.emit();
     }
 }
 
@@ -2285,38 +2239,6 @@ mod wakeup {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // What a log event written in `pieces` leaves on its sink.
-    fn logged(pieces: &[&[u8]]) -> String {
-        let mut sink = Vec::new();
-        {
-            let mut event = LogEvent::new(&mut sink);
-            for piece in pieces {
-                std::io::Write::write_all(&mut event, piece).unwrap();
-            }
-        }
-        String::from_utf8(sink).unwrap()
-    }
-
-    // An escape sequence in a log event shows as text, even one in selfie's own
-    // palette, and an event split inside it, inside a character and at a line
-    // break is written as it is when written whole, on one line.
-    #[test]
-    fn a_log_event_is_escaped_whole_however_it_is_written() {
-        let event = "DEBUG \u{1b}[31ma\u{202e}b\nnext\n".as_bytes();
-        let sgr = 8;
-        let character = event.iter().position(|&b| b == 0xe2).unwrap() + 1;
-        let line_break = event.iter().position(|&b| b == b'\n').unwrap();
-        let pieces = [
-            &event[..sgr],
-            &event[sgr..character],
-            &event[character..line_break],
-            &event[line_break..],
-        ];
-        let whole = logged(&[event]);
-        assert_eq!(whole, "DEBUG \\u{1b}[31ma\\u{202e}b\\nnext\n");
-        assert_eq!(logged(&pieces), whole);
-    }
 
     // What each writer the subscriber made received, one entry per writer.
     #[derive(Clone, Default)]

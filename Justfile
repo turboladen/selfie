@@ -56,10 +56,10 @@ test *args:
 test-lib *args:
     {{ use_test_dir }}; cargo test -p selfie "$@"
 
-# Test CLI only
+# Test the CLI and the escaping it shares
 [positional-arguments]
 test-cli *args:
-    {{ use_test_dir }}; cargo test -p selfie-cli "$@"
+    {{ use_test_dir }}; cargo test -p selfie-cli -p selfie-escape "$@"
 
 # Test MCP server only
 [positional-arguments]

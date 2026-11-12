@@ -22,10 +22,8 @@ futures.workspace = true
 # the run.
 nix = { workspace = true, features = ["pthread", "signal"] }
 human-panic = "2"
-# The general category and Default_Ignorable_Code_Point of a character, for
-# escaping what reaches the terminal.
-icu_properties = "2.2"
 selfie = { path = "../selfie/" }
+selfie-escape = { path = "../escape/" }
 serde.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync"] }
 tokio-util.workspace = true
@@ -33,6 +31,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# The terminal escape tests pin the escapes against the Unicode data directly.
+icu_properties.workspace = true
 assert_cmd = "2.0"
 uuid.workspace = true
 mockall.workspace = true

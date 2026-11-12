@@ -20,51 +20,7 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use icu_properties::props::{DefaultIgnorableCodePoint, GeneralCategory};
-use icu_properties::{CodePointMapData, CodePointSetData};
-
-// The guard set: what can act on the terminal or reorder the text around it.
-// Controls other than a newline and a tab, the line and paragraph separators,
-// the bidi controls and the tag characters. Joiners, variation selectors and
-// soft hyphens are left to render, so an emoji sequence or a Persian word reads
-// as written. Each policy decides for itself whether a newline and a tab show.
-fn in_guard_set(c: char) -> bool {
-    (c.is_control() && c != '\n' && c != '\t')
-        || matches!(
-            CodePointMapData::<GeneralCategory>::new().get(c),
-            GeneralCategory::LineSeparator | GeneralCategory::ParagraphSeparator
-        )
-        || matches!(
-            c,
-            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-        )
-        || ('\u{E0000}'..='\u{E007F}').contains(&c)
-}
-
-// The base set: a control character (Cc), a format character (Cf), a line or
-// paragraph separator (Zl, Zp), or a default-ignorable code point, which
-// renders as nothing. Combining marks are none of these, so an accented name
-// stored decomposed, as macOS often stores it, shows as written.
-fn in_base_set(c: char) -> bool {
-    matches!(
-        CodePointMapData::<GeneralCategory>::new().get(c),
-        GeneralCategory::Control
-            | GeneralCategory::Format
-            | GeneralCategory::LineSeparator
-            | GeneralCategory::ParagraphSeparator
-    ) || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
-}
-
-// The strict set, for names and paths, where two values that read alike are
-// two different things: the base set, every space separator other than U+0020,
-// and U+2800, the braille blank. Those blanks are not added to the base set
-// because in file content U+00A0 and U+3000 are ordinary French and CJK text.
-fn in_strict_set(c: char) -> bool {
-    in_base_set(c)
-        || c == '\u{2800}'
-        || (c != ' '
-            && CodePointMapData::<GeneralCategory>::new().get(c) == GeneralCategory::SpaceSeparator)
-}
+use selfie_escape::{Sgr, escape_with, in_base_set, in_guard_set, in_strict_set};
 
 // One variant per distinct escape. `Name` and `DisplayPath` share `Strict`.
 #[derive(Clone, Copy)]
@@ -90,7 +46,7 @@ enum Policy {
 }
 
 // The one escaping function. Its callers are the kind constructors,
-// `Name::is_plain`, `Command::note`, `guard` and `log_record`.
+// `Name::is_plain`, `Command::note` and `guard`.
 fn escape(text: &str, policy: Policy) -> Cow<'_, str> {
     match policy {
         Policy::Strict => escape_with(text, in_strict_set, Sgr::Escape),
@@ -139,53 +95,6 @@ pub(crate) fn guard(block: &str, colors: bool) -> Cow<'_, str> {
         block,
         Policy::Guard(if colors { Sgr::Keep } else { Sgr::Strip }),
     )
-}
-
-/// Returns `record`, one record of a log, with the strict set escaped, every
-/// escape sequence, line break and tab included, so it shows uncolored on one
-/// line. A final newline, which ends the record, is kept.
-pub(crate) fn log_record(record: &str) -> Cow<'_, str> {
-    match record.strip_suffix('\n') {
-        Some(line) => {
-            let mut shown = escape(line, Policy::Strict).into_owned();
-            shown.push('\n');
-            Cow::Owned(shown)
-        }
-        None => escape(record, Policy::Strict),
-    }
-}
-
-// What the escaping loop does with an SGR sequence selfie's own styling writes.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Sgr {
-    Escape,
-    Keep,
-    Strip,
-}
-
-// Provenance is the guard: text from outside selfie is escaped before it is
-// styled or joined into a line, so a block reaching a printer holds only the
-// sequences selfie's styling wrote. This check stands behind that one.
-//
-// It keeps what `console` writes for the styles selfie uses, one parameter per
-// sequence: reset, bold, dim, italic, underline, and red through cyan. Black,
-// white and the bright colors could hide text on one background or another, so
-// they are escaped. Dim is selfie's own too, so only provenance stops a
-// repository's.
-fn is_own_sgr_parameter(parameter: u16) -> bool {
-    matches!(parameter, 0..=4 | 31..=36)
-}
-
-// The length of the SGR sequence `text` starts with, `ESC [ n m`, when its one
-// parameter is one of selfie's own.
-fn own_sgr_length(text: &str) -> Option<usize> {
-    let body = text.strip_prefix("\u{1b}[")?;
-    let end = body.find(|c: char| !c.is_ascii_digit())?;
-    if body.as_bytes()[end] != b'm' {
-        return None;
-    }
-    let own = body[..end].parse().is_ok_and(is_own_sgr_parameter);
-    own.then_some(2 + end + 1)
 }
 
 /// How a caller styles text: a color, a weight, or both.
@@ -714,49 +623,6 @@ pub(crate) fn noted(text: Shown, command: &Command) -> Shown {
     }
 }
 
-// The one escaping loop. A character `escaped` names is written as an escape;
-// an SGR sequence selfie's own styling writes is kept, removed or escaped as
-// `sgr` says.
-fn escape_with(text: &str, escaped: impl Fn(char) -> bool, sgr: Sgr) -> Cow<'_, str> {
-    if !text.chars().any(&escaped) {
-        return Cow::Borrowed(text);
-    }
-    let mut shown = String::with_capacity(text.len() + 8);
-    let mut rest = text;
-    while let Some(c) = rest.chars().next() {
-        if sgr != Sgr::Escape
-            && c == '\u{1b}'
-            && let Some(length) = own_sgr_length(rest)
-        {
-            if sgr == Sgr::Keep {
-                shown.push_str(&rest[..length]);
-            }
-            rest = &rest[length..];
-            continue;
-        }
-        if escaped(c) {
-            push_escaped(&mut shown, c);
-        } else {
-            shown.push(c);
-        }
-        rest = &rest[c.len_utf8()..];
-    }
-    Cow::Owned(shown)
-}
-
-// A control character as its Rust escape, which names the common ones (`\t`,
-// `\n`, `\r`); anything else as its code point. A backslash is left as it is,
-// so a name holding the six characters `\u{1b}` reads like one holding ESC.
-// Escaping it too would double every backslash in a command source, and leaving
-// it is what makes escaping twice the same as escaping once.
-fn push_escaped(shown: &mut String, c: char) {
-    if c.is_control() {
-        shown.extend(c.escape_debug());
-    } else {
-        shown.extend(c.escape_unicode());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,95 +645,6 @@ mod tests {
         for shown in ["a", " a ", "\u{3164}a", "-"] {
             assert!(!Name::is_blank(shown), "{shown:?} is not blank");
         }
-    }
-
-    // Each set's members, one row per class: (character, guard, base, strict).
-    // The rows sit on the edges of each hand-written range, so a range one code
-    // point too wide or too narrow fails here.
-    #[test]
-    fn the_sets_are_pinned() {
-        let rows = [
-            ('\0', true, true, true),
-            ('\t', false, true, true),
-            ('\n', false, true, true),
-            ('\r', true, true, true),
-            ('\u{1b}', true, true, true),
-            ('\u{7f}', true, true, true),
-            ('\u{85}', true, true, true),
-            ('\u{9b}', true, true, true),
-            ('\u{61B}', false, false, false),
-            ('\u{61C}', true, true, true),
-            ('\u{61D}', false, false, false),
-            ('\u{200E}', true, true, true),
-            ('\u{200F}', true, true, true),
-            ('\u{2010}', false, false, false),
-            ('\u{2029}', true, true, true),
-            ('\u{2028}', true, true, true),
-            ('\u{202A}', true, true, true),
-            ('\u{202E}', true, true, true),
-            ('\u{2060}', false, true, true),
-            ('\u{2065}', false, true, true),
-            ('\u{2066}', true, true, true),
-            ('\u{2069}', true, true, true),
-            ('\u{206A}', false, true, true),
-            ('\u{DFFFF}', false, false, false),
-            ('\u{E0000}', true, true, true),
-            ('\u{E0041}', true, true, true),
-            ('\u{E007F}', true, true, true),
-            ('\u{E0080}', false, true, true),
-            ('\u{E0100}', false, true, true),
-            ('\u{200B}', false, true, true),
-            ('\u{200C}', false, true, true),
-            ('\u{200D}', false, true, true),
-            ('\u{FEFF}', false, true, true),
-            ('\u{AD}', false, true, true),
-            ('\u{180E}', false, true, true),
-            ('\u{FE0F}', false, true, true),
-            ('\u{34F}', false, true, true),
-            ('\u{3164}', false, true, true),
-            ('\u{FFF9}', false, true, true),
-            ('\u{600}', false, true, true),
-            ('\u{A0}', false, false, true),
-            ('\u{1680}', false, false, true),
-            ('\u{2000}', false, false, true),
-            ('\u{200A}', false, false, true),
-            ('\u{202F}', false, false, true),
-            ('\u{205F}', false, false, true),
-            ('\u{3000}', false, false, true),
-            ('\u{2800}', false, false, true),
-            (' ', false, false, false),
-            ('a', false, false, false),
-            ('\u{301}', false, false, false),
-            ('日', false, false, false),
-            ('\u{1F980}', false, false, false),
-        ];
-        for (c, guard, base, strict) in rows {
-            assert_eq!(
-                (in_guard_set(c), in_base_set(c), in_strict_set(c)),
-                (guard, base, strict),
-                "{c:?}"
-            );
-        }
-    }
-
-    // Each set holds the one before it: what can act on the terminal is also
-    // what a name or a line of content escapes. The strict set adds exactly
-    // the 16 space separators other than U+0020, and U+2800.
-    #[test]
-    fn the_sets_nest() {
-        let mut blanks = Vec::new();
-        for c in (0..=u32::from(char::MAX)).filter_map(char::from_u32) {
-            assert!(!in_guard_set(c) || in_base_set(c), "{c:?}");
-            assert!(!in_base_set(c) || in_strict_set(c), "{c:?}");
-            if in_strict_set(c) && !in_base_set(c) {
-                blanks.push(c);
-            }
-        }
-        assert_eq!(blanks.len(), 17, "{blanks:?}");
-        assert!(
-            blanks.contains(&'\u{2800}') && !blanks.contains(&' '),
-            "{blanks:?}"
-        );
     }
 
     // Each kind against each class of character, as (text, name, prose,
