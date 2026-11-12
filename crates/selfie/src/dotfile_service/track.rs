@@ -826,11 +826,15 @@ where
     };
 
     // Replaces nothing: a file that appeared since the check above is the user's,
-    // and is refused as one the check found.
-    match filesystem.write_file_no_follow(
+    // and is refused as one the check found. The copy takes the target's execute
+    // bits, so a tracked script is committed runnable and deploys runnable. The
+    // stat follows a link, which is safe only because a linked target was refused
+    // before its content was read.
+    match filesystem.write_file_no_follow_executable(
         &repository_path(&source_path),
         content.as_bytes(),
         IfPresent::Keep,
+        filesystem.execute_bits(expanded_target.path()),
     ) {
         Ok(Placed::Written) => {}
         Ok(Placed::Kept) => return already_exists(),

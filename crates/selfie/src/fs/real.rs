@@ -10,8 +10,9 @@ use std::{
 use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
 use super::filesystem::{
-    AbsentReason, DirectoryState, FileIdentity, FileSystem, FileSystemError, IfPresent, IoFailure,
-    IrregularKind, OpenRefusal, Placed, Removal, RepositoryRead, TargetRead, parent_dir,
+    AbsentReason, DirectoryState, ExecuteBits, FileIdentity, FileSystem, FileSystemError,
+    IfPresent, IoFailure, IrregularKind, OpenRefusal, Placed, Removal, RepositoryRead, TargetRead,
+    parent_dir,
 };
 use super::target::TargetPath;
 
@@ -103,8 +104,8 @@ enum Replacement {
     // the overwrite destroys the only remaining copy.
     OwnerOnly,
     /// Refuse a symlink; keep an existing regular file's mode, else create at
-    /// `0o666 & !umask`.
-    KeepingMode,
+    /// `(0o666 | execute) & !umask`.
+    KeepingMode(ExecuteBits),
 }
 
 /// Write `data` to a temporary file beside `path` and rename it into place.
@@ -178,7 +179,7 @@ fn write_by_rename_with(
     // naming the wrong problem and suggesting the wrong fix. The irregular
     // check follows links, so a private write refuses a link to a fifo too:
     // renaming over a fifo, or over a link to one, would silently destroy it.
-    let keep_mode = matches!(how, Replacement::KeepingMode);
+    let keep_mode = matches!(how, Replacement::KeepingMode(_));
     if keep_mode && let Some(refusal) = symlink_refusal(path) {
         return Err(refusal);
     }
@@ -224,13 +225,15 @@ fn write_by_rename_with(
         }
         // What an ordinary `open(O_CREAT)` gives: the umask is applied by the
         // kernel, so this is exactly what `fs::write` would have created.
-        (Replacement::KeepingMode, None) => {
-            builder.permissions(fs::Permissions::from_mode(0o666));
+        // The execute bits go through the umask too, so a source at 0o755
+        // creates 0o755 under the usual umask of 0o022.
+        (Replacement::KeepingMode(execute), None) => {
+            builder.permissions(fs::Permissions::from_mode(0o666 | execute.bits()));
         }
         // Created at tempfile's default of 0o600 and widened by the `fchmod`
         // below. Passing the mode here instead would put it through the umask,
         // stripping group and other bits the user had set.
-        (Replacement::KeepingMode, Some(_)) => {}
+        (Replacement::KeepingMode(_), Some(_)) => {}
     }
 
     // tempfile's create and write errors also name the temporary file, which
@@ -843,13 +846,30 @@ impl FileSystem for RealFileSystem {
     // content is flushed and immediately before the rename, without following a
     // link and opening only a regular file. A fifo, socket or device node there
     // when the write starts is kept, as a change; a symlink is refused as always.
-    fn write_file_no_follow(
+    fn write_file_no_follow_executable(
         &self,
         path: &TargetPath,
         data: &[u8],
         if_present: IfPresent,
+        execute: ExecuteBits,
     ) -> Result<Placed, FileSystemError> {
-        write_by_rename(path.path(), data, Replacement::KeepingMode, if_present)
+        write_by_rename(
+            path.path(),
+            data,
+            Replacement::KeepingMode(execute),
+            if_present,
+        )
+    }
+
+    // A following stat, because a dotfiles repository may hold a source as a
+    // link and its content is read through that link too.
+    fn execute_bits(&self, path: &Path) -> ExecuteBits {
+        fs::metadata(path)
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map_or(ExecuteBits::NONE, |metadata| {
+                ExecuteBits::of_mode(metadata.permissions().mode())
+            })
     }
 
     fn symlink_refusal(&self, path: &TargetPath) -> Option<FileSystemError> {
@@ -1793,6 +1813,103 @@ mod private_write_tests {
 mod no_follow_write_tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn execute_bits_reads_only_the_execute_bits_of_a_regular_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("script");
+        fs::write(&file, b"x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o4751)).unwrap();
+
+        assert_eq!(RealFileSystem.execute_bits(&file).bits(), 0o111 & 0o751);
+    }
+
+    // A directory, a missing path and a dangling link carry no execute bits, so
+    // nothing selfie copies or creates from one becomes executable.
+    #[test]
+    fn execute_bits_is_none_for_anything_but_a_regular_file() {
+        let dir = tempdir().unwrap();
+        let dangling = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &dangling).unwrap();
+
+        for path in [
+            dir.path().to_path_buf(),
+            dir.path().join("missing"),
+            dangling,
+        ] {
+            assert_eq!(
+                RealFileSystem.execute_bits(&path),
+                ExecuteBits::NONE,
+                "{path:?}"
+            );
+        }
+    }
+
+    // A source kept in the repository as a link is read through it, so its mode
+    // comes from the same file its content does.
+    #[test]
+    fn execute_bits_follows_a_link_to_the_file() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("script");
+        fs::write(&file, b"x").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o751)).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+
+        assert_eq!(RealFileSystem.execute_bits(&link).bits(), 0o111 & 0o751);
+    }
+
+    #[test]
+    fn the_executable_writer_creates_a_new_file_with_the_execute_bits_given() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let dir = tempdir().unwrap();
+        let control = dir.path().join("control");
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o666 | 0o101)
+            .open(&control)
+            .unwrap();
+
+        let target = dir.path().join("script");
+        assert_eq!(
+            RealFileSystem
+                .write_file_no_follow_executable(
+                    &tp(&target),
+                    b"new",
+                    IfPresent::Replace,
+                    ExecuteBits::of_mode(0o101)
+                )
+                .unwrap(),
+            Placed::Written
+        );
+
+        assert_eq!(mode_of(&target), mode_of(&control));
+    }
+
+    #[test]
+    fn the_executable_writer_leaves_an_existing_files_mode_alone() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("script");
+        fs::write(&target, b"old").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+
+        assert_eq!(
+            RealFileSystem
+                .write_file_no_follow_executable(
+                    &tp(&target),
+                    b"new",
+                    IfPresent::Replace,
+                    ExecuteBits::of_mode(0o755),
+                )
+                .unwrap(),
+            Placed::Written
+        );
+
+        assert_eq!(mode_of(&target), 0o640);
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
 
     #[test]
     fn writes_content_to_a_new_file() {
@@ -3536,7 +3653,7 @@ mod keep_write_tests {
     fn writers() -> [(&'static str, Replacement); 2] {
         [
             ("private", Replacement::OwnerOnly),
-            ("no-follow", Replacement::KeepingMode),
+            ("no-follow", Replacement::KeepingMode(ExecuteBits::NONE)),
         ]
     }
 
@@ -3730,7 +3847,7 @@ mod replace_if_holding_tests {
     fn writers() -> [(&'static str, Replacement); 2] {
         [
             ("private", Replacement::OwnerOnly),
-            ("no-follow", Replacement::KeepingMode),
+            ("no-follow", Replacement::KeepingMode(ExecuteBits::NONE)),
         ]
     }
 
@@ -3841,7 +3958,7 @@ mod replace_if_holding_tests {
         let result = write_by_rename(
             &target,
             b"rewritten",
-            Replacement::KeepingMode,
+            Replacement::KeepingMode(ExecuteBits::NONE),
             holding(b"as loaded"),
         );
 
@@ -3973,7 +4090,7 @@ mod replace_if_holding_tests {
         let result = write_by_rename(
             &target,
             b"rewritten",
-            Replacement::KeepingMode,
+            Replacement::KeepingMode(ExecuteBits::NONE),
             holding(b"as loaded"),
         );
 

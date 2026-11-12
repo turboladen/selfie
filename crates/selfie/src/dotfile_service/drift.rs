@@ -190,9 +190,11 @@ where
                     continue;
                 }
             };
+            // Drift compares content only, so it ignores the source's execute bits.
             let RepoRead {
                 source_content,
                 current,
+                ..
             } = match read_repo_file(filesystem, &repo) {
                 Ok(read) => read,
                 Err(refusal) => {
