@@ -9,14 +9,14 @@ error[E0277]: `OperationSuccess` is not one of the library's values, so sentence
    = help: the trait `Sentence` is not implemented for `OperationSuccess`
    = help: the following other types implement trait `Sentence`:
              &T
-             ConfigLoadError
              NamespaceConflict
              OperationType
              ParseFailure
              SerializeFailure
              SkipReason
              SpecStatus
-           and $N others
+             UncheckedSource
+             std::io::Error
 note: required for `&OperationSuccess` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs
    |

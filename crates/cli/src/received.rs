@@ -3,10 +3,10 @@
 //!
 //! The library hands the CLI plain strings. Each view here maps the fields a
 //! command shows to their kinds, so a handler reads a [`Name`], a [`Prose`] or
-//! a [`DisplayPath`] and never formats the raw field. A library value's own
-//! sentence, its `Display`, is [`sentence`]. An event's fields follow the same
-//! rules where the event is handled: a name is a `Name`, a path a
-//! `DisplayPath`, and a sentence [`sentence`].
+//! a [`DisplayPath`](crate::terminal_text::DisplayPath) and never formats the
+//! raw field. A library value's own sentence, its `Display`, is [`sentence`].
+//! An event's fields follow the same rules where the event is handled: a name
+//! is a `Name`, a path a `DisplayPath`, and a sentence [`sentence`].
 
 use std::fmt::Display;
 
@@ -23,7 +23,7 @@ use selfie::validation::{ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
 
 use crate::display_manager::Suggestion;
-use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
+use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, shown};
 
 pub(crate) use crate::sentence::{composed, message, noted_suggestion, sentence, suggested};
 
@@ -344,36 +344,10 @@ pub(crate) fn spec_name_suggestion(name: &str) -> Suggestion {
     }
 }
 
-/// `error`'s sentence, each path in it a [`DisplayPath`].
+/// `error`'s sentence, each path in it a
+/// [`DisplayPath`](crate::terminal_text::DisplayPath).
 pub(crate) fn config_load_error(error: &ConfigLoadError) -> Shown {
-    match error {
-        ConfigLoadError::Parse { path, failure } => shown!(
-            "Cannot parse the configuration file {}: {}",
-            DisplayPath::of(path),
-            sentence(failure)
-        ),
-        ConfigLoadError::IrregularFile { path, kind } => shown!(
-            "{}: the configuration file is a {}, not a regular file. Replace it with a regular \
-             file or remove it.",
-            DisplayPath::of(path),
-            Prose::new(kind.label())
-        ),
-        ConfigLoadError::UnresolvableFile { path } => shown!(
-            "{}: the configuration file is a symbolic link that does not resolve. Restore or \
-             check out its target, or remove the link.",
-            DisplayPath::of(path)
-        ),
-        ConfigLoadError::NotFound { searched } => shown!(
-            "No configuration file found in locations: {}",
-            DisplayPath::of(searched)
-        ),
-        ConfigLoadError::MultipleFound(paths) => shown!(
-            "Multiple configuration files found: {}",
-            Shown::join(paths.iter().map(|path| DisplayPath::new(path)), lit!(", "))
-        ),
-        // Its sentence is the filesystem error's own.
-        ConfigLoadError::FileSystemError(error) => composed(error),
-    }
+    composed(error)
 }
 
 /// What a step of a run is doing, on one line, as a spinner, a progress line
@@ -609,7 +583,7 @@ mod tests {
             ConfigLoadError::NotFound {
                 searched: "/c".into(),
             },
-            ConfigLoadError::MultipleFound(vec!["/c/a.yaml".to_string(), "/c/b.yaml".to_string()]),
+            ConfigLoadError::MultipleFound(vec!["/c/a.yaml".into(), "/c/b.yaml".into()]),
             ConfigLoadError::FileSystemError(FileSystemError::IoError(selfie::fs::IoFailure::at(
                 std::path::Path::new("/c/config.yaml"),
                 std::io::Error::from(std::io::ErrorKind::PermissionDenied),

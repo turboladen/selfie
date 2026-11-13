@@ -59,12 +59,7 @@ impl<F: FileSystem> ConfigLoader for YamlLoader<'_, F> {
         };
 
         if config_paths.len() > 1 {
-            return Err(ConfigLoadError::MultipleFound(
-                config_paths
-                    .into_iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>(),
-            ));
+            return Err(ConfigLoadError::MultipleFound(config_paths));
         }
 
         // This should never happen now since find_config_file_paths
@@ -1046,10 +1041,8 @@ mod tests {
             assert!(not_found_error.to_string().contains("/searched/paths"));
 
             // Test MultipleFound error
-            let multiple_error = ConfigLoadError::MultipleFound(vec![
-                "config1.yaml".to_string(),
-                "config2.yml".to_string(),
-            ]);
+            let multiple_error =
+                ConfigLoadError::MultipleFound(vec!["config1.yaml".into(), "config2.yml".into()]);
             assert!(
                 multiple_error
                     .to_string()

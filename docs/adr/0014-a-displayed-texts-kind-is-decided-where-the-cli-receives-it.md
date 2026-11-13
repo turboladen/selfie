@@ -141,7 +141,6 @@ Options considered:
    over as parts (§9) and the CLI renders them. The CLI still composes these library sentences from
    the value's fields, with each path a `DisplayPath` and each name a `Name`, and they are not yet
    `Composed`:
-   - `ConfigLoadError`;
    - the warning that a run did not check collisions with sources it could not use;
    - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
    - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
@@ -421,7 +420,7 @@ writer escapes every escape sequence (§1.8).
    refused spec's reason is: a refused row, a `PackagesRefused` event, `spec info`'s refusals and
    the reason of the failure for a spec selfie will not use; the `Message` the warning that a run
    skips a spec file is; and the sentence of a not-found failure, which names its hint's `name:`
-   value as a `Name`.
+   value as a `Name`; and the `ConfigLoadError` loading the configuration gives.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as
