@@ -286,16 +286,14 @@ pub(crate) const DIFF_NAME_STATUS: &str = "git diff --name-status";
 // Whether `git push --porcelain` refused to send `current_ref`, the branch being
 // pushed, because the remote has commits it lacks. The current branch is named
 // by its full ref, or as `HEAD` when a `HEAD` or `HEAD:<ref>` refspec pushed it.
-// Each ref's line is
-// `<flag>\t<from>:<to>\t<summary> (<reason>)`. A flag of `!` with the summary
-// and reason `[rejected] (fetch first)` or `[rejected] (non-fast-forward)` on
-// the current branch's own line is that refusal. git's transport.c prints these
-// strings untranslated, so they hold under any locale.
-//
-// Other lines do not count: `[remote rejected]` (a server hook or a protected
-// branch) and `[remote failure]` are not fixed by pulling, nor is a tag or
-// another branch rejected beside the current one.
+// Each ref's line is `<flag>\t<from>:<to>\t<summary> (<reason>)`, and the refusal
+// is a `!` flag with `[rejected] (fetch first)` or `[rejected] (non-fast-forward)`
+// on the current branch's own line. git's transport.c prints these strings
+// untranslated, so they hold under any locale.
 fn push_was_rejected(porcelain_stdout: &str, current_ref: &str) -> bool {
+    // Other lines do not count: `[remote rejected]` (a server hook or a protected
+    // branch) and `[remote failure]` are not fixed by pulling, nor is a tag or
+    // another branch rejected beside the current one.
     porcelain_stdout.lines().any(|line| {
         let mut fields = line.split('\t');
         let (flag, refs, status) = (fields.next(), fields.next(), fields.next());
