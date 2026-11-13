@@ -264,7 +264,7 @@ where
 
             sender
                 .send_completed(OperationResult::Success(OperationSuccess::Generic(
-                    "Sync status complete".to_string(),
+                    "Sync status complete",
                 )))
                 .await;
         })

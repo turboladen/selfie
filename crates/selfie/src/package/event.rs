@@ -1473,8 +1473,11 @@ pub enum OperationSuccess {
     SyncPullUpToDate { steps_completed: StepCount },
     /// Sync push found no changes to commit
     SyncNothingToPush { steps_completed: StepCount },
-    /// Generic success with a freeform message
-    Generic(String),
+    /// A success selfie words without naming any value.
+    // `&'static str`, so a `format!` String does not compile into it. A leaked
+    // String still would, so a sentence naming a value needs an arm of its
+    // own, whose sentence names it as a part.
+    Generic(&'static str),
 }
 
 /// Typed failure information for operations
@@ -1578,8 +1581,9 @@ pub enum OperationFailure {
     /// one it already has. Nothing was written.
     SpecUpdate(SpecUpdateRefusal),
     /// A failure selfie words without naming any value.
-    // `&'static str`, so a sentence built from a value cannot reach it: a value
-    // needs an arm of its own, whose sentence names it as a part.
+    // `&'static str`, so a `format!` String does not compile into it. A leaked
+    // String still would, so a sentence naming a value needs an arm of its
+    // own, whose sentence names it as a part.
     Generic(&'static str),
 }
 
@@ -2428,7 +2432,7 @@ impl Composed for OperationSuccess {
             } => Parts::new()
                 .text(format!("Listed dotfiles across {package_count} package(s)"))
                 .append(gap_clauses(gaps)),
-            OperationSuccess::Generic(msg) => Parts::new().text(msg.as_str()),
+            OperationSuccess::Generic(words) => Parts::new().text(*words),
         }
     }
 }
@@ -2445,19 +2449,6 @@ fn in_environment(environment: &str) -> Parts<'_> {
         .text(" in environment '")
         .name(environment)
         .text("'")
-}
-
-// Convenience: allow creating OperationSuccess from strings
-impl From<String> for OperationSuccess {
-    fn from(msg: String) -> Self {
-        OperationSuccess::Generic(msg)
-    }
-}
-
-impl From<&str> for OperationSuccess {
-    fn from(msg: &str) -> Self {
-        OperationSuccess::Generic(msg.to_string())
-    }
 }
 
 // Conversions from existing error types to typed failures
@@ -6916,11 +6907,7 @@ mod tests {
                 ),
                 Outcome::Found,
             ),
-            (
-                "generic",
-                OperationSuccess::Generic("done".to_string()),
-                Outcome::Clean,
-            ),
+            ("generic", OperationSuccess::Generic("done"), Outcome::Clean),
         ];
         for (name, success, expected) in cases {
             assert_eq!(success.outcome(), expected, "{name}");

@@ -192,7 +192,7 @@ pub fn every_success(environment: &str, package: &str, path: &str) -> Vec<Operat
         OperationSuccess::SyncNothingToPush {
             steps_completed: steps(),
         },
-        OperationSuccess::Generic("done".to_string()),
+        OperationSuccess::Generic("done"),
     ];
     let covered: HashSet<usize> = all.iter().map(variant).collect();
     assert_eq!(

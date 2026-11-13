@@ -2,7 +2,8 @@
 // outside selfie formatted by `shown!` unescaped, a placeholder other than `{}`,
 // a foreign type marked Trusted, a `Literal` from anything but a literal, a kind
 // built around unescaped text, a String handed to the printers' bound (which
-// source_rules.rs holds every printer to), and a string passed to `sentence`.
+// source_rules.rs holds every printer to), a string passed to `sentence`, and a
+// formatted String held as the library's generic success.
 // Each case includes the modules by path, as selfie-cli has no library target.
 //
 // The `.stderr` files hold rustc's wording; after `rustup update stable`, or a

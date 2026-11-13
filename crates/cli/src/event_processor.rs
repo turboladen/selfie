@@ -921,7 +921,7 @@ mod tests {
 
         let events = vec![PackageEvent::Completed {
             operation_info: make_operation_info("claimed"),
-            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            result: OperationResult::Success(OperationSuccess::Generic("done")),
         }];
 
         let processor = EventProcessor::new(DisplayManager::new(false));
@@ -2272,7 +2272,7 @@ mod tests {
         );
         send.unbounded_send(PackageEvent::Completed {
             operation_info: make_operation_info("p"),
-            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            result: OperationResult::Success(OperationSuccess::Generic("done")),
         })
         .unwrap();
         drop(send);

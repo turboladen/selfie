@@ -389,38 +389,39 @@ writer escapes every escape sequence (§1.8).
    constructor refuses. The program is a closed enum, and the CLI's match over it has no catch-all.
 6. The MCP server writes each value's `Display`, which is its parts written raw. It therefore shows
    the same words as the CLI, without the CLI's escapes.
-7. These types are `Composed`: `OperationSuccess`; the deploy state's `StateLoadFailure`,
-   `StateSaveError`, `DeployStateWarning`, `DeployStateFailure` and `DeployStateNotice`; the
-   `FileSystemError`, `IoFailure`, `AbsentReason` and `StatePathError` values those hold; a
-   directory listing's `PackageListError` and the `DirectoryState` it holds; the name check's
-   `NamespaceValidationError`; the `UnreadableDotfilesDirectory` a collection refuses; the
-   `DotfilesDirectoryWarning` a command reading standalone dotfiles sends; the
-   `TrackDirectoryRefusal` a standalone track gives over a directory it could not use; the
-   `ApplyStop` an apply with `stop_on_error` gives for a stop other than the deploy state's; the
-   `Message` a dotfile entry's `Refusal` carries as its sentence and its `Failure` as its sentence
-   and its error, and the `Message` a track's `OperationFailure::Track` carries; the
-   `ComposedWarning` a `PackageEvent::ComposedWarning` carries; a package's `PackageError`; a
-   repository's `PackageRepoError`, with the `UnwritableReason` it carries, and the `LookupFailure`
-   that holds one; a `DependencyFailure`, with the `Message` an unreadable dependency's reason is; a
-   spec file's read failure, `PackageParseError`, and the `PackageParseKind` it holds, with the
-   `RefusedSpecFile`, `UnreadableSpecFile` and `SymlinkReason` that kind carries; the `Message` a
-   not-found failure appends to name a spec file declaring the name; the `CollectionRefusal` a
-   collection gives; the `UnplacedWrite` a spec write refused as unplaced carries; the `SyncError` a
-   sync gives, with the `NotARepository` it refuses a directory outside any git repository with; a
-   git sync's `GitSyncError`, a git status's `GitStatusError`, and the `GitFailure` a sync step
-   fails with; a command's `TimedOut` and `UnusableDirectory`, and the `CommandFailure` an operation
-   fails with when a command did; the `CommandError` a check's command fails with, the
-   `CheckFailure` a check gives no answer with, with the `Message` its cause is, and the
-   `UnknownStatus` a dependency's status is when selfie could not answer for it; the
-   `OperationFailure` an operation fails with, with `Uncreatable`'s refusal, and whose `Generic` arm
-   holds only selfie's own words; the `Message` an audit gives for a package with nothing configured
-   for the current environment; the `Message` that words an unknown key, naming it as a `Name`; and
-   a validation issue's message, `IssueMessage`, which is its own text, a `Message` naming values as
-   parts, the deploy state's notice or a `DirectoryIssue`, and which the issue's event payload
-   carries; the `Message` a refused spec's reason is: a refused row, a `PackagesRefused` event,
-   `spec info`'s refusals and the reason of the failure for a spec selfie will not use; the
-   `Message` the warning that a run skips a spec file is; and the sentence of a not-found failure,
-   which names its hint's `name:` value as a `Name`.
+7. These types are `Composed`: `OperationSuccess`, whose `Generic` arm holds only selfie's own
+   words; the deploy state's `StateLoadFailure`, `StateSaveError`, `DeployStateWarning`,
+   `DeployStateFailure` and `DeployStateNotice`; the `FileSystemError`, `IoFailure`, `AbsentReason`
+   and `StatePathError` values those hold; a directory listing's `PackageListError` and the
+   `DirectoryState` it holds; the name check's `NamespaceValidationError`; the
+   `UnreadableDotfilesDirectory` a collection refuses; the `DotfilesDirectoryWarning` a command
+   reading standalone dotfiles sends; the `TrackDirectoryRefusal` a standalone track gives over a
+   directory it could not use; the `ApplyStop` an apply with `stop_on_error` gives for a stop other
+   than the deploy state's; the `Message` a dotfile entry's `Refusal` carries as its sentence and
+   its `Failure` as its sentence and its error, and the `Message` a track's
+   `OperationFailure::Track` carries; the `ComposedWarning` a `PackageEvent::ComposedWarning`
+   carries; a package's `PackageError`; a repository's `PackageRepoError`, with the
+   `UnwritableReason` it carries, and the `LookupFailure` that holds one; a `DependencyFailure`,
+   with the `Message` an unreadable dependency's reason is; a spec file's read failure,
+   `PackageParseError`, and the `PackageParseKind` it holds, with the `RefusedSpecFile`,
+   `UnreadableSpecFile` and `SymlinkReason` that kind carries; the `Message` a not-found failure
+   appends to name a spec file declaring the name; the `CollectionRefusal` a collection gives; the
+   `UnplacedWrite` a spec write refused as unplaced carries; the `SyncError` a sync gives, with the
+   `NotARepository` it refuses a directory outside any git repository with; a git sync's
+   `GitSyncError`, a git status's `GitStatusError`, and the `GitFailure` a sync step fails with; a
+   command's `TimedOut` and `UnusableDirectory`, and the `CommandFailure` an operation fails with
+   when a command did; the `CommandError` a check's command fails with, the `CheckFailure` a check
+   gives no answer with, with the `Message` its cause is, and the `UnknownStatus` a dependency's
+   status is when selfie could not answer for it; the `OperationFailure` an operation fails with,
+   with `Uncreatable`'s refusal, and whose `Generic` arm holds only selfie's own words; the
+   `Message` an audit gives for a package with nothing configured for the current environment; the
+   `Message` that words an unknown key, naming it as a `Name`; and a validation issue's message,
+   `IssueMessage`, which is its own text, a `Message` naming values as parts, the deploy state's
+   notice or a `DirectoryIssue`, and which the issue's event payload carries; the `Message` a
+   refused spec's reason is: a refused row, a `PackagesRefused` event, `spec info`'s refusals and
+   the reason of the failure for a spec selfie will not use; the `Message` the warning that a run
+   skips a spec file is; and the sentence of a not-found failure, which names its hint's `name:`
+   value as a `Name`.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as

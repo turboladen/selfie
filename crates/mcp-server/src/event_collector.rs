@@ -1272,7 +1272,7 @@ mod tests {
 
         let events = vec![PackageEvent::Completed {
             operation_info: test_op_info(),
-            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            result: OperationResult::Success(OperationSuccess::Generic("done")),
         }];
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
@@ -1517,7 +1517,7 @@ mod tests {
 
         let completed = || PackageEvent::Completed {
             operation_info: test_op_info(),
-            result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+            result: OperationResult::Success(OperationSuccess::Generic("done")),
         };
         let announced = PackageEvent::DotfileEntriesPlanned {
             operation_info: test_op_info(),
@@ -1554,7 +1554,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+                result: OperationResult::Success(OperationSuccess::Generic("done")),
             },
         ];
 
@@ -2321,7 +2321,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+                result: OperationResult::Success(OperationSuccess::Generic("done")),
             },
         ];
 
@@ -2373,7 +2373,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+                result: OperationResult::Success(OperationSuccess::Generic("done")),
             },
         ];
 
@@ -3575,7 +3575,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+                result: OperationResult::Success(OperationSuccess::Generic("done")),
             },
         ];
 
@@ -3617,7 +3617,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("listed".to_string())),
+                result: OperationResult::Success(OperationSuccess::Generic("listed")),
             },
         ];
 
@@ -3696,7 +3696,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("removed".to_string())),
+                result: OperationResult::Success(OperationSuccess::Generic("removed")),
             },
         ];
 
@@ -3882,7 +3882,7 @@ mod tests {
             },
             PackageEvent::Completed {
                 operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("done".to_string())),
+                result: OperationResult::Success(OperationSuccess::Generic("done")),
             },
         ];
 
