@@ -113,15 +113,6 @@ impl InProgressOperation {
     }
 }
 
-/// The sentence saying sync push will not commit, since committing is
-/// disabled. Both the error and the operation's refusal word it with this.
-pub(crate) fn commit_disabled() -> Parts<'static> {
-    Parts::new().text(
-        "sync push is disabled: its commit can record every tracked file as deleted. \
-         Commit and push the repository with git until this is fixed",
-    )
-}
-
 /// The sentence saying no git repository holds `path`, with the path a part
 /// of its own.
 pub(crate) fn not_a_repository(path: &Path) -> Parts<'_> {

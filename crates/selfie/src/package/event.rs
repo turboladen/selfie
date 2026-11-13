@@ -1575,9 +1575,6 @@ pub enum OperationFailure {
     Track(crate::parts::Message),
     /// A sync command's git step failed.
     Git(crate::sync_service::port::GitFailure),
-    /// `sync push` refused to commit, since committing is disabled. Nothing
-    /// was staged or committed.
-    PushDisabled,
     /// A check gave no answer, for a reason that is not the command's own
     /// failure: it was canceled, could not start, or its result could not be
     /// read, or selfie failed running it.
@@ -1847,7 +1844,6 @@ impl Composed for OperationFailure {
             OperationFailure::Track(message) => message.parts(),
             OperationFailure::Git(failure) => failure.parts(),
             OperationFailure::Check(failure) => failure.parts(),
-            OperationFailure::PushDisabled => crate::git::sync_provider::commit_disabled(),
             OperationFailure::SpecUpdate(refusal) => refusal.parts(),
             OperationFailure::Generic(words) => Parts::new().text(*words),
         }
@@ -5576,11 +5572,6 @@ mod tests {
             (
                 missing(NoSuchPackageReason::NotLoaded),
                 "Package 'p' could not be loaded, so nothing was applied",
-            ),
-            (
-                OperationFailure::PushDisabled,
-                "sync push is disabled: its commit can record every tracked file as deleted. \
-                 Commit and push the repository with git until this is fixed",
             ),
             (OperationFailure::Generic("g"), "g"),
         ];

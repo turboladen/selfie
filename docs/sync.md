@@ -3,10 +3,6 @@
 Selfie can sync your package specs and dotfiles across machines using git. The `selfie sync`
 commands are thin wrappers around git that generate useful per-package commits automatically.
 
-> **`selfie sync push` is disabled.** Its commit could record every tracked file as deleted, so it
-> refuses before staging anything. Commit and push the repository with `git` until this is fixed.
-> `sync status` and `sync pull` are unaffected.
-
 ## Prerequisites
 
 Your package directory must be inside a git repository with a configured remote. Selfie discovers
@@ -67,10 +63,6 @@ entry is unverifiable by design, so it does not keep the line from reading as cl
 
 ### `selfie sync push`
 
-**Disabled** (see the note at the top of this page): with changes to commit, it refuses before
-staging anything. With nothing new to commit, it still pushes commits that already exist. What
-follows describes the command once it is re-enabled.
-
 Groups changed files by package and generates conventional commit messages:
 
 ```bash
@@ -106,6 +98,26 @@ only when it is inside the repository, since push carries nothing outside it. A 
 checked as a standalone dotfile spec, which declares no environments, unless a package spec has its
 name: `selfie apply` does not use it then, so push neither checks it nor scans its name for
 collisions.
+
+**What a commit records.** Each commit records exactly the files in its group, staged from disk as
+`git add` stages them, so your `.gitattributes` filters (git-crypt, LFS) and line-ending settings
+apply, and a symlink is committed as a link. Nothing else goes in: anything you had already staged
+that selfie did not group stays staged and out of selfie's commits. A file in a group is committed
+as it is on disk, so a partial `git add -p` of it is replaced by the whole file.
+
+Push stops at the first group it cannot stage or commit, and pushes nothing. Before anything of that
+group is staged, it stops while git has a merge, rebase, cherry-pick, revert, bisect or `git am` in
+progress, or when a file in the group has unresolved conflicts. It also stops when `git add` refuses
+a path, such as one beyond a symlink, and leaves the index as it was. A commit that fails after
+staging, for example on a signing error, leaves that group's files staged. The groups before it stay
+committed locally, and the next `sync push` pushes them. A package whose files match the last commit
+once staged, as an edit you staged and then reverted leaves them, gets no commit and a warning
+naming it, and the push goes on with the rest.
+
+**Signing and hooks.** A commit is signed when your git configuration sets `commit.gpgSign`, using
+the same `gpg.format`, `gpg.ssh.program` and `user.signingKey` settings `git commit` reads. If
+signing fails, for example because your SSH agent is locked, no commit is made and the branch does
+not move. Git hooks such as `pre-commit` and `commit-msg` do **not** run for selfie's commits.
 
 When prompting, each prompt starts with the generated message filled in: press Enter to accept it,
 or edit it. A message holding a character the terminal would not show as written is shown escaped
@@ -147,9 +159,9 @@ If dotfile source files changed, suggests redeploying:
 ## Typical Workflow
 
 ```bash
-# On machine A: make changes, commit and push with git while `sync push` is disabled
+# On machine A: make changes, then commit and push them
 selfie sync status        # See what changed
-git add -A && git commit -m "update specs" && git push
+selfie sync push          # Per-package commits, pushed to the remote
 
 # On machine B: pull and apply
 selfie sync pull          # Get latest specs
