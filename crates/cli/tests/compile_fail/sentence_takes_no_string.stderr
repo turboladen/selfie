@@ -15,7 +15,6 @@ error[E0277]: `String` is not one of the library's values, so sentence() cannot 
              SerializeFailure
              SkipReason
              SpecStatus
-             UncheckedSource
              std::io::Error
 note: required for `&String` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs
@@ -47,7 +46,6 @@ error[E0277]: `str` is not one of the library's values, so sentence() cannot tak
              SerializeFailure
              SkipReason
              SpecStatus
-             UncheckedSource
              std::io::Error
 note: required for `&str` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs

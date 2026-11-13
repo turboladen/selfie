@@ -675,7 +675,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         // A warning row like any other, so a caller reading warnings reads it.
         PackageEvent::CollisionsUnchecked { sources, .. } => Some(serde_json::json!({
             "type": "warning",
-            "message": selfie::package::service::collisions_unchecked_warning(sources),
+            "message": selfie::package::service::collisions_unchecked_warning(sources).to_string(),
         })),
         // `spec_target` and `condition` rather than `target` and `kind`, which mean
         // the expanded path and the source kind on every other dotfile row.

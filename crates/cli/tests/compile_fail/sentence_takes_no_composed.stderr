@@ -15,7 +15,6 @@ error[E0277]: `OperationSuccess` is not one of the library's values, so sentence
              SerializeFailure
              SkipReason
              SpecStatus
-             UncheckedSource
              std::io::Error
 note: required for `&OperationSuccess` to implement `Sentence`
   --> tests/compile_fail/../../src/sentence.rs

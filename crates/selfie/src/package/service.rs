@@ -92,12 +92,17 @@ fn skipping<'a>(
 /// The warning for a run that could not compare its entries' targets with
 /// `sources`, naming each, so every command words it the same way.
 #[must_use]
-pub fn collisions_unchecked_warning(sources: &[super::event::UncheckedSource]) -> String {
-    let named: Vec<String> = sources.iter().map(ToString::to_string).collect();
-    format!(
-        "Collisions with these were not checked, since selfie could not use them: {}",
-        named.join(", ")
-    )
+pub fn collisions_unchecked_warning(
+    sources: &[super::event::UncheckedSource],
+) -> crate::parts::Message {
+    crate::parts::Parts::new()
+        .text("Collisions with these were not checked, since selfie could not use them: ")
+        .append(crate::parts::Parts::joined(
+            sources,
+            ", ",
+            crate::parts::Composed::parts,
+        ))
+        .into()
 }
 
 /// The warning for a spec file a listing leaves out because several files claim
@@ -792,8 +797,36 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::skipped_spec_warning;
+    use super::{collisions_unchecked_warning, skipped_spec_warning};
     use crate::package::port::{PackageParseError, PackageParseKind};
+
+    // Each spec file the warning names is a path part, never words of its
+    // sentence: the fixture's file name holds U+200B, which `values_of` refuses
+    // in a text part. The dotfiles directory is selfie's own words.
+    #[test]
+    fn the_collisions_warning_names_each_spec_file_as_a_path() {
+        use crate::package::event::{BaseKind, UncheckedSource};
+        let warning = collisions_unchecked_warning(&[
+            UncheckedSource::SpecFile {
+                base: BaseKind::PackageDirectory,
+                file: "t\u{200b}ool.yml".to_string(),
+            },
+            UncheckedSource::DotfilesDirectory,
+            UncheckedSource::SpecFile {
+                base: BaseKind::DotfilesDirectory,
+                file: "rc\u{200b}.yml".to_string(),
+            },
+        ]);
+        assert_eq!(
+            crate::parts::values_of(&warning),
+            ["packages/t\u{200b}ool.yml", "dotfiles/rc\u{200b}.yml"]
+        );
+        assert_eq!(
+            warning.to_string(),
+            "Collisions with these were not checked, since selfie could not use them: \
+             packages/t\u{200b}ool.yml, the dotfiles directory, dotfiles/rc\u{200b}.yml"
+        );
+    }
 
     // Every kind, not just the one an end-to-end test happens to reach.
     //

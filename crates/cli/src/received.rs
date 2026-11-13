@@ -296,16 +296,9 @@ pub(crate) fn success(success: &OperationSuccess) -> Shown {
 /// The warning for a run that could not check its targets against `sources`,
 /// with each spec file shown as a path.
 pub(crate) fn collisions_unchecked(sources: &[UncheckedSource]) -> Shown {
-    let named = crate::formatters::comma_joined(sources.iter().map(|source| -> Shown {
-        match source {
-            UncheckedSource::SpecFile { .. } => DisplayPath::new(&source.to_string()).into(),
-            UncheckedSource::DotfilesDirectory => sentence(source).into(),
-        }
-    }));
-    shown!(
-        "Collisions with these were not checked, since selfie could not use them: {}",
-        named
-    )
+    composed(&selfie::package::service::collisions_unchecked_warning(
+        sources,
+    ))
 }
 
 /// The warning for a spec file a run skips because it does not parse.
@@ -672,7 +665,7 @@ mod tests {
         ];
         assert_eq!(
             collisions_unchecked(&sources).as_str(),
-            selfie::package::service::collisions_unchecked_warning(&sources)
+            selfie::package::service::collisions_unchecked_warning(&sources).to_string()
         );
     }
 

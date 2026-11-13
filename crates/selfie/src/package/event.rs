@@ -108,14 +108,19 @@ impl UncheckedSource {
     }
 }
 
-impl fmt::Display for UncheckedSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Composed for UncheckedSource {
+    fn parts(&self) -> Parts<'_> {
         match self {
-            Self::SpecFile { base, file } => write!(f, "{}/{file}", base.directory_name()),
-            Self::DotfilesDirectory => f.write_str("the dotfiles directory"),
+            Self::SpecFile { base, file } => Parts::new().path(std::path::PathBuf::from(format!(
+                "{}/{file}",
+                base.directory_name()
+            ))),
+            Self::DotfilesDirectory => Parts::new().text("the dotfiles directory"),
         }
     }
 }
+
+crate::parts::display_from_parts!(UncheckedSource);
 
 /// Which configured directory a dotfile's source is read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
