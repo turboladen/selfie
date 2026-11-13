@@ -202,7 +202,15 @@ pub trait GitSyncProvider: Send + Sync {
     /// Get the working tree status for the repository.
     fn repo_status(&self, repo_root: &Path) -> Result<RepoStatus, GitSyncError>;
 
-    /// Stage specific files in the index.
+    /// Stage `files`, relative to the repository root, as `git add` stages
+    /// them: the repository's attributes and filters apply, a symlink is
+    /// staged as a link, and a path gone from the working tree is staged as
+    /// removed. No other index entry changes.
+    ///
+    /// # Errors
+    ///
+    /// [`GitSyncError::OperationFailed`] when git refuses a path, such as one
+    /// beyond a symlink, in which case the index is left as it was.
     fn stage_files(&self, repo_root: &Path, files: &[PathBuf]) -> Result<(), GitSyncError>;
 
     /// Create a commit with the given message.

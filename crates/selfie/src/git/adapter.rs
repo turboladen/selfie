@@ -155,14 +155,6 @@ fn discover(scope: ConfigScope, path: &Path) -> Result<gix::Repository, gix::Err
     }
 }
 
-/// Check if a file has the executable bit set.
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
 /// Shorthand for creating a [`GitSyncError::OperationFailed`] from any error.
 fn git_sync_err(operation: &'static str, e: impl std::fmt::Display) -> GitSyncError {
     GitSyncError::OperationFailed {
@@ -275,6 +267,10 @@ const SYMBOLIC_REF: GitRun = GitRun::new(
     &["symbolic-ref", "--quiet", "HEAD"],
 );
 pub(crate) const FETCH: GitRun = GitRun::new("git fetch", &["fetch"]);
+// The paths follow a `--`. Literal pathspecs keep a name such as `*.yml` from
+// matching other files, and `--all` records a named path that is gone as
+// removed.
+const ADD: GitRun = GitRun::new("git add", &["--literal-pathspecs", "add", "--all"]);
 const REV_PARSE_HEAD: GitRun = GitRun::new("git rev-parse HEAD", &["rev-parse", "HEAD"]);
 const MERGE_FF: GitRun = GitRun::new("git merge --ff-only @{u}", &["merge", "--ff-only", "@{u}"]);
 const AHEAD_BEHIND: GitRun = GitRun::new(
@@ -542,73 +538,18 @@ impl GitSyncProvider for GixGitAdapter {
             return Ok(());
         }
 
-        let repo = open_repo(self.scope, repo_root)?;
-        let mut index = repo
-            .open_index()
-            .map_err(|e| git_sync_err("open index", e))?;
-
-        let workdir = repo
-            .workdir()
-            .ok_or_else(|| GitSyncError::OperationFailed {
-                operation: "stage",
-                message: GitMessage::new("bare repository"),
-            })?;
-
-        for file in files {
-            let full_path = workdir.join(file);
-            let relative_bstring =
-                gix::path::into_bstr(file).map_err(|e| git_sync_err("stage", e))?;
-            let relative_path: &gix::bstr::BStr = relative_bstring.as_ref();
-
-            if full_path.exists() {
-                // File exists → hash it as a blob and upsert into the index.
-                let data = std::fs::read(&full_path).map_err(|e| git_sync_err("read file", e))?;
-                let blob_id = repo
-                    .write_blob(&data)
-                    .map_err(|e| git_sync_err("write blob", e))?;
-
-                let entry_mode = if is_executable(&full_path) {
-                    gix::index::entry::Mode::FILE_EXECUTABLE
-                } else {
-                    gix::index::entry::Mode::FILE
-                };
-
-                match index.entry_index_by_path_and_stage(
-                    relative_path,
-                    gix::index::entry::Stage::Unconflicted,
-                ) {
-                    Some(pos) => {
-                        // Update existing entry in place.
-                        let entry = &mut index.entries_mut()[pos];
-                        entry.id = blob_id.detach();
-                        entry.mode = entry_mode;
-                        entry.flags.remove(
-                            gix::index::entry::Flags::ASSUME_VALID
-                                | gix::index::entry::Flags::UPDATE,
-                        );
-                    }
-                    None => {
-                        // New file — push and re-sort.
-                        index.dangerously_push_entry(
-                            Default::default(),
-                            blob_id.detach(),
-                            gix::index::entry::Flags::empty(),
-                            entry_mode,
-                            relative_path,
-                        );
-                        index.sort_entries();
-                    }
-                }
-            } else {
-                // File deleted → remove from index.
-                let relative_owned = relative_path.to_owned();
-                index.remove_entries(|_, path, _| path == relative_owned);
-            }
+        // git decides each path's blob, mode and entry, applying the
+        // repository's attributes and clean filters, which a git-crypt or LFS
+        // repository depends on to keep plaintext and large files out of
+        // history. Only the named paths are given to it.
+        let output = git_command(self.scope, repo_root, ADD.args)
+            .arg("--")
+            .args(files)
+            .output()
+            .map_err(|e| git_sync_err(ADD.label, e))?;
+        if !output.status.success() {
+            return Err(failure(ADD.label, &output, ""));
         }
-
-        index
-            .write(Default::default())
-            .map_err(|e| git_sync_err("write index", e))?;
         Ok(())
     }
 
@@ -1008,6 +949,163 @@ mod tests {
         assert_eq!(status.untracked.len(), 1);
     }
 
+    // `git ls-files --deleted` reports a tracked file once its directory is
+    // replaced by a link, here to a directory holding a key. Staging it would
+    // read through the link, so git refuses, and the index keeps what it had.
+    #[test]
+    fn a_path_beyond_a_symlink_is_refused_and_nothing_is_staged() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::create_dir_all(path.join("ssh")).unwrap();
+        fs::write(path.join("ssh/config"), "Host a\n").unwrap();
+        git(&path, &["add", "ssh/config"]).unwrap();
+        git(&path, &["commit", "-m", "add ssh config"]).unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(outside.path().join("config"), "k7Qz-private-ssh-config\n").unwrap();
+        fs::remove_dir_all(path.join("ssh")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), path.join("ssh")).unwrap();
+
+        let result = isolated().stage_files(&path, &[PathBuf::from("ssh/config")]);
+
+        assert!(
+            matches!(
+                &result,
+                Err(GitSyncError::OperationFailed {
+                    operation: "git add",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            git(&path, &["cat-file", "-p", ":ssh/config"]).unwrap(),
+            "Host a"
+        );
+    }
+
+    // The new content is a different size from the old, because git trusts a
+    // size mismatch without rehashing: a stale stat then reads as a change.
+    #[test]
+    fn a_staged_file_does_not_read_as_modified() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("foo.yml"), "name: foo\n").unwrap();
+        git(&path, &["add", "foo.yml"]).unwrap();
+        git(&path, &["commit", "-m", "add foo"]).unwrap();
+        fs::write(path.join("foo.yml"), "name: foo\n# a longer body\n").unwrap();
+        fs::write(path.join("new.yml"), "name: new\n").unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("foo.yml"), PathBuf::from("new.yml")])
+            .unwrap();
+
+        // Unstaged changes only: anything here means the index disagrees with a
+        // working tree that matches it.
+        assert_eq!(git(&path, &["diff-files", "--name-only"]).unwrap(), "");
+        assert_eq!(
+            git(&path, &["status", "--porcelain"]).unwrap(),
+            "M  foo.yml\nA  new.yml"
+        );
+    }
+
+    // The link points outside the repository at bytes that must never reach a
+    // blob, as a link to a private key would.
+    #[test]
+    fn a_symlink_is_staged_as_a_link_not_as_what_it_names() {
+        let (_temp, path) = init_repo_for_commits();
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("id_key");
+        fs::write(&secret, "k7Qz-private-key-bytes\n").unwrap();
+        std::os::unix::fs::symlink(&secret, path.join("link")).unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("link")])
+            .unwrap();
+
+        let entry = git(&path, &["ls-files", "-s", "link"]).unwrap();
+        assert!(entry.starts_with("120000 "), "staged as {entry:?}");
+        let blob = git(&path, &["cat-file", "-p", ":link"]).unwrap();
+        assert_eq!(blob, secret.to_str().unwrap());
+    }
+
+    // A dangling link is still a link: reading through it finds nothing, and a
+    // stage that followed it would remove a tracked link from the index.
+    #[test]
+    fn a_dangling_symlink_stays_staged() {
+        let (_temp, path) = init_repo_for_commits();
+        std::os::unix::fs::symlink(path.join("nowhere"), path.join("dangling")).unwrap();
+        git(&path, &["add", "dangling"]).unwrap();
+        git(&path, &["commit", "-m", "add link"]).unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("dangling")])
+            .unwrap();
+
+        let entry = git(&path, &["ls-files", "-s", "dangling"]).unwrap();
+        assert!(entry.starts_with("120000 "), "staged as {entry:?}");
+        assert_eq!(git(&path, &["status", "--porcelain"]).unwrap(), "");
+    }
+
+    // A fifo has no blob, and git leaves one out rather than wait on it. The
+    // regular file beside it is still staged.
+    #[test]
+    fn a_fifo_is_left_unstaged() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("a.yml"), "name: a\n").unwrap();
+        nix::unistd::mkfifo(&path.join("pipe"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("a.yml"), PathBuf::from("pipe")])
+            .unwrap();
+
+        assert_eq!(git(&path, &["ls-files"]).unwrap(), "a.yml");
+    }
+
+    // A clean filter is how a git-crypt repository keeps plaintext out of
+    // history. This one upper-cases, so the blob shows whether it ran.
+    #[test]
+    fn a_clean_filter_decides_the_staged_blob() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join(".gitattributes"), "*.secret filter=shout\n").unwrap();
+        git(&path, &["config", "filter.shout.clean", "tr a-z A-Z"]).unwrap();
+        git(&path, &["config", "filter.shout.smudge", "cat"]).unwrap();
+        fs::write(path.join("token.secret"), "plaintext\n").unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("token.secret")])
+            .unwrap();
+
+        assert_eq!(
+            git(&path, &["cat-file", "-p", ":token.secret"]).unwrap(),
+            "PLAINTEXT"
+        );
+    }
+
+    // `x*.yml` is a file name, not a pattern: `xa.yml` beside it must stay
+    // untracked.
+    #[test]
+    fn a_name_with_a_glob_character_stages_only_itself() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("x*.yml"), "s\n").unwrap();
+        fs::write(path.join("xa.yml"), "t\n").unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("x*.yml")])
+            .unwrap();
+
+        assert_eq!(git(&path, &["ls-files"]).unwrap(), "x*.yml");
+    }
+
+    // `git add --all` with no paths stages the whole tree, so an empty list
+    // must never reach git.
+    #[test]
+    fn staging_no_paths_changes_nothing() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("a.yml"), "name: a\n").unwrap();
+
+        isolated().stage_files(&path, &[]).unwrap();
+
+        assert_eq!(git(&path, &["ls-files"]).unwrap(), "");
+    }
+
     #[test]
     fn stage_files_works() {
         let (_temp, path) = init_repo_for_commits();
@@ -1018,7 +1116,8 @@ mod tests {
             .unwrap();
 
         let status = isolated().repo_status(&path).unwrap();
-        assert!(!status.staged.is_empty() || status.untracked.is_empty());
+        assert_eq!(status.staged, [PathBuf::from("test.yml")]);
+        assert!(status.untracked.is_empty(), "{:?}", status.untracked);
     }
 
     #[test]
