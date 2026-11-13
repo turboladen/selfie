@@ -3,18 +3,18 @@
 //!
 //! The library hands the CLI plain strings. Each view here maps the fields a
 //! command shows to their kinds, so a handler reads a [`Name`], a [`Prose`] or
-//! a [`DisplayPath`] and never formats the raw field. A library value's own
-//! sentence, its `Display`, is [`sentence`]. An event's fields follow the same
-//! rules where the event is handled: a name is a `Name`, a path a
-//! `DisplayPath`, and a sentence [`sentence`].
+//! a [`DisplayPath`](crate::terminal_text::DisplayPath) and never formats the
+//! raw field. A library value's own sentence, its `Display`, is [`sentence`].
+//! An event's fields follow the same rules where the event is handled: a name
+//! is a `Name`, a path a `DisplayPath`, and a sentence [`sentence`].
 
 use std::fmt::Display;
 
 use selfie::config::ConfigLoadError;
 use selfie::package::event::{
     AuditResult, AuditResultData, CheckResult, CheckResultData, DependencyStatus,
-    EnvironmentStatus, EnvironmentStatusData, LinkAtTarget, OperationInfo, PackageInfoData,
-    RefusedSpec, SkipReason, SpecListItem, Uncreatable, ValidationIssueData, ValidationResultData,
+    EnvironmentStatus, EnvironmentStatusData, OperationInfo, PackageInfoData, RefusedSpec,
+    SkipReason, SpecListItem, Uncreatable, ValidationIssueData, ValidationResultData,
 };
 use selfie::package::event::{OperationFailure, OperationSuccess, UncheckedSource, UnknownStatus};
 use selfie::package::port::{PackageParseError, PackageParseKind};
@@ -23,7 +23,7 @@ use selfie::validation::{ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
 
 use crate::display_manager::Suggestion;
-use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit, shown};
+use crate::terminal_text::{Command, Name, Output, Prose, Shown};
 
 pub(crate) use crate::sentence::{composed, message, noted_suggestion, sentence, suggested};
 
@@ -296,16 +296,9 @@ pub(crate) fn success(success: &OperationSuccess) -> Shown {
 /// The warning for a run that could not check its targets against `sources`,
 /// with each spec file shown as a path.
 pub(crate) fn collisions_unchecked(sources: &[UncheckedSource]) -> Shown {
-    let named = crate::formatters::comma_joined(sources.iter().map(|source| -> Shown {
-        match source {
-            UncheckedSource::SpecFile { .. } => DisplayPath::new(&source.to_string()).into(),
-            UncheckedSource::DotfilesDirectory => sentence(source).into(),
-        }
-    }));
-    shown!(
-        "Collisions with these were not checked, since selfie could not use them: {}",
-        named
-    )
+    composed(&selfie::package::service::collisions_unchecked_warning(
+        sources,
+    ))
 }
 
 /// The warning for a spec file a run skips because it does not parse.
@@ -344,36 +337,10 @@ pub(crate) fn spec_name_suggestion(name: &str) -> Suggestion {
     }
 }
 
-/// `error`'s sentence, each path in it a [`DisplayPath`].
+/// `error`'s sentence, each path in it a
+/// [`DisplayPath`](crate::terminal_text::DisplayPath).
 pub(crate) fn config_load_error(error: &ConfigLoadError) -> Shown {
-    match error {
-        ConfigLoadError::Parse { path, failure } => shown!(
-            "Cannot parse the configuration file {}: {}",
-            DisplayPath::of(path),
-            sentence(failure)
-        ),
-        ConfigLoadError::IrregularFile { path, kind } => shown!(
-            "{}: the configuration file is a {}, not a regular file. Replace it with a regular \
-             file or remove it.",
-            DisplayPath::of(path),
-            Prose::new(kind.label())
-        ),
-        ConfigLoadError::UnresolvableFile { path } => shown!(
-            "{}: the configuration file is a symbolic link that does not resolve. Restore or \
-             check out its target, or remove the link.",
-            DisplayPath::of(path)
-        ),
-        ConfigLoadError::NotFound { searched } => shown!(
-            "No configuration file found in locations: {}",
-            DisplayPath::of(searched)
-        ),
-        ConfigLoadError::MultipleFound(paths) => shown!(
-            "Multiple configuration files found: {}",
-            Shown::join(paths.iter().map(|path| DisplayPath::new(path)), lit!(", "))
-        ),
-        // Its sentence is the filesystem error's own.
-        ConfigLoadError::FileSystemError(error) => composed(error),
-    }
+    composed(error)
 }
 
 /// What a step of a run is doing, on one line, as a spinner, a progress line
@@ -391,28 +358,7 @@ pub(crate) fn step(message: &str) -> Name {
 /// Why an entry was skipped, as an entry row's detail shows it. A secret dry
 /// run names the link it would replace as a path.
 pub(crate) fn skip_reason(reason: &SkipReason) -> Shown {
-    // No wildcard, so a reason or a link that carries a path chooses here how
-    // it is shown.
-    match reason {
-        SkipReason::SecretDryRun { commands, link } => {
-            let destination = match link {
-                LinkAtTarget::NoLink => return sentence(reason).into(),
-                LinkAtTarget::To(path) => shown!(" to '{}'", DisplayPath::of(path)),
-                LinkAtTarget::DestinationUnknown => Shown::default(),
-            };
-            shown!(
-                "dry run: would run {} command(s), then replace the symlink{} with a regular \
-                 file readable only by you",
-                *commands,
-                destination
-            )
-        }
-        SkipReason::UpToDate
-        | SkipReason::InSync
-        | SkipReason::PermissionsTightened
-        | SkipReason::DryRun
-        | SkipReason::Unverifiable => sentence(reason).into(),
-    }
+    composed(reason)
 }
 
 /// A spec's information, as `spec info` shows it.
@@ -493,7 +439,8 @@ impl From<&SpecListItem> for SpecItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::package::event::{RefusalKind, UnknownStatus};
+    use crate::terminal_text::{DisplayPath, shown};
+    use selfie::package::event::{LinkAtTarget, RefusalKind, UnknownStatus};
     use selfie::package::port::{PackageError, PackageRepoError};
 
     // A name that shows as written is pre-filled; one the prompt can only show
@@ -609,7 +556,7 @@ mod tests {
             ConfigLoadError::NotFound {
                 searched: "/c".into(),
             },
-            ConfigLoadError::MultipleFound(vec!["/c/a.yaml".to_string(), "/c/b.yaml".to_string()]),
+            ConfigLoadError::MultipleFound(vec!["/c/a.yaml".into(), "/c/b.yaml".into()]),
             ConfigLoadError::FileSystemError(FileSystemError::IoError(selfie::fs::IoFailure::at(
                 std::path::Path::new("/c/config.yaml"),
                 std::io::Error::from(std::io::ErrorKind::PermissionDenied),
@@ -698,7 +645,7 @@ mod tests {
         ];
         assert_eq!(
             collisions_unchecked(&sources).as_str(),
-            selfie::package::service::collisions_unchecked_warning(&sources)
+            selfie::package::service::collisions_unchecked_warning(&sources).to_string()
         );
     }
 

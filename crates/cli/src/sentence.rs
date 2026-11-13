@@ -5,9 +5,8 @@
 use std::borrow::Cow;
 use std::fmt::Display;
 
-use selfie::config::ConfigLoadError;
 use selfie::namespace::NamespaceConflict;
-use selfie::package::event::{OperationType, SkipReason, SpecStatus, UncheckedSource};
+use selfie::package::event::{OperationType, SpecStatus};
 use selfie::parts::{Composed, Part, Parts, Program, Subcommand, SuggestedCommand};
 use selfie::yaml::ParseFailure;
 
@@ -40,13 +39,10 @@ macro_rules! sentences {
 }
 
 sentences!(
-    ConfigLoadError,
     NamespaceConflict,
     OperationType,
     ParseFailure,
-    SkipReason,
     SpecStatus,
-    UncheckedSource,
     selfie::yaml::SerializeFailure,
     std::io::Error,
 );

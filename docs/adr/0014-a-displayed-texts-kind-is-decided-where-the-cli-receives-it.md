@@ -20,6 +20,9 @@ one line.
 
 Amended 2026-11-12: §1.8 covers the MCP server's stderr log, which escapes each record the same way.
 
+Amended 2026-11-12: §2.2 lists no sentence the CLI composes from a library value's fields; each is
+`Composed` (§9.7).
+
 ## Context
 
 `selfie-cli` prints text from outside selfie: spec, package and environment names, paths, spec
@@ -138,16 +141,9 @@ Options considered:
    dependency names to `Name`, its `install_command` and `CheckResultData::check_command` to
    `Command`. Command handlers read the mapped values and never format the raw field.
 2. A library value's `Display` is `Prose`. Where that sentence names a value, the library hands it
-   over as parts (§9) and the CLI renders them. The CLI still composes these library sentences from
-   the value's fields, with each path a `DisplayPath` and each name a `Name`, and they are not yet
-   `Composed`:
-   - `ConfigLoadError`;
-   - the warning that a run did not check collisions with sources it could not use;
-   - `SkipReason::SecretDryRun`'s `LinkAtTarget::To` destination;
-   - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
-     or `OperationFailure` holding one, into a `String`.
-
-   Each of these moves to §9 when it is next changed.
+   over as parts (§9) and the CLI renders them. The CLI composes no library sentence from a value's
+   fields, and a library sentence that names a `PackageListError`, or an error holding one, appends
+   its parts rather than formatting it into text.
 3. A name inside a sentence the CLI composes is a `Name`, whatever the sentence around it is.
 
 ### 3. Only the layout indents
@@ -420,8 +416,10 @@ writer escapes every escape sequence (§1.8).
    notice or a `DirectoryIssue`, and which the issue's event payload carries; the `Message` a
    refused spec's reason is: a refused row, a `PackagesRefused` event, `spec info`'s refusals and
    the reason of the failure for a spec selfie will not use; the `Message` the warning that a run
-   skips a spec file is; and the sentence of a not-found failure, which names its hint's `name:`
-   value as a `Name`.
+   skips a spec file is; the sentence of a not-found failure, which names its hint's `name:` value
+   as a `Name`; the `ConfigLoadError` loading the configuration gives; the `Message` that warns a
+   run did not check collisions with sources it could not use, naming each `UncheckedSource`; and
+   the `SkipReason` an entry row gives, naming a secret dry run's link destination as a path.
 8. A new library sentence that names a value the CLI shows elsewhere as a `Name` or a `DisplayPath`
    is `Composed`. The CLI does not compose a new one from the value's fields. A refusal, a failure
    or a warning an event carries is a `Message`, not a `String`. An event that still carries one as

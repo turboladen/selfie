@@ -152,12 +152,10 @@ where
     }
 }
 
+// Every failure's own parts, so a path or a name in it stays a part of its
+// own rather than words of the issue's sentence.
 fn failure_message(failure: &OperationFailure) -> crate::parts::Message {
-    match failure {
-        OperationFailure::Package(error) => crate::parts::Message::of(error),
-        OperationFailure::DependencyError(error) => crate::parts::Message::of(error),
-        other => crate::parts::Parts::new().cause(other).into(),
-    }
+    crate::parts::Message::of(failure)
 }
 
 // Every environment a spec declares is checked, not only the current one, so the
@@ -189,6 +187,21 @@ mod tests {
         },
         validation::{ValidationErrorCategory, ValidationLevel},
     };
+
+    // A failure that names a path, such as a package directory that could not
+    // be listed, names it as a part: the fixture path holds U+200B, which
+    // `values_of` refuses in a text part.
+    #[test]
+    fn a_recommends_failure_names_its_path_as_a_part() {
+        let listing = crate::package::port::PackageListError::new(
+            "/p/pack\u{200b}ages".into(),
+            crate::fs::filesystem::DirectoryState::Unlistable(std::sync::Arc::new(
+                std::io::Error::other("denied"),
+            )),
+        );
+        let message = super::failure_message(&super::OperationFailure::PackageList(listing));
+        assert_eq!(crate::parts::values_of(&message), ["/p/pack\u{200b}ages"]);
+    }
 
     // Each `(file stem, spec)` written to a package directory, then every
     // dependency issue `spec validate --all` reports, run in `environment`, as
