@@ -2681,6 +2681,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "selfie",
+ "selfie-escape",
  "serde",
  "syn 3.0.9",
  "tempfile",
@@ -2695,6 +2696,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "selfie-escape"
+version = "0.1.0"
+dependencies = [
+ "icu_properties",
+]
+
+[[package]]
 name = "selfie-mcp"
 version = "0.1.0"
 dependencies = [
@@ -2704,6 +2712,7 @@ dependencies = [
  "rmcp",
  "schemars",
  "selfie",
+ "selfie-escape",
  "serde",
  "serde_json",
  "strum",

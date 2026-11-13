@@ -2,7 +2,7 @@
 //! tests ran.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -135,13 +135,14 @@ pub fn test_results(log: &str) -> HashMap<String, TestStatus> {
 }
 
 /// Every source file rustc recorded in the dep-info files under
-/// `target_dir`'s `debug/deps`, or `<triple>/debug/deps` when a build target
-/// is set, as rustc wrote each path: relative to the workspace root for a
-/// workspace member, absolute otherwise.
+/// `target_dir`'s `debug`, or `<triple>/debug` when a build target is set, as
+/// rustc wrote each path: relative to the workspace root for a workspace
+/// member, absolute otherwise. Both of cargo's layouts are read: `deps`, and
+/// each unit's `build/<package>/<hash>/out`.
 ///
 /// # Errors
 ///
-/// Fails when no such directory exists or one cannot be read.
+/// Fails when neither layout's directory exists or one cannot be read.
 pub fn compiled_sources(target_dir: &Path) -> Result<HashSet<String>> {
     // `build.target` in the tree's own cargo config sets a triple that
     // scrubbing the environment cannot remove, so both layouts are searched.
@@ -153,7 +154,7 @@ pub fn compiled_sources(target_dir: &Path) -> Result<HashSet<String>> {
     }
     let mut sources = HashSet::new();
     let mut searched = false;
-    for deps in dirs.iter().map(|d| d.join("deps")).filter(|d| d.is_dir()) {
+    for deps in dep_info_dirs(&dirs)? {
         searched = true;
         for entry in std::fs::read_dir(&deps)
             .with_context(|| format!("could not read {}", deps.display()))?
@@ -169,9 +170,38 @@ pub fn compiled_sources(target_dir: &Path) -> Result<HashSet<String>> {
         }
     }
     if !searched {
-        bail!("no debug/deps directory under {}", target_dir.display());
+        bail!("no dep-info directory under {}", target_dir.display());
     }
     Ok(sources)
+}
+
+// The directories under each of `profiles` that hold dep-info: `deps` in
+// cargo's older layout, and each unit's `build/<package>/<hash>/out` in the
+// layout cargo 1.100 builds with.
+fn dep_info_dirs(profiles: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    for profile in profiles {
+        found.push(profile.join("deps"));
+        let build = profile.join("build");
+        if !build.is_dir() {
+            continue;
+        }
+        for package in std::fs::read_dir(&build)
+            .with_context(|| format!("could not read {}", build.display()))?
+        {
+            let package = package?.path();
+            if !package.is_dir() {
+                continue;
+            }
+            for unit in std::fs::read_dir(&package)
+                .with_context(|| format!("could not read {}", package.display()))?
+            {
+                found.push(unit?.path().join("out"));
+            }
+        }
+    }
+    found.retain(|dir| dir.is_dir());
+    Ok(found)
 }
 
 /// Points `cmd`'s cargo at `dir` for both its final and its intermediate
@@ -271,6 +301,22 @@ mod tests {
         let sources = compiled_sources(target.path()).unwrap();
         assert!(sources.contains("crates/selfie/src/a.rs"));
         assert!(sources.contains("src/b.rs"));
+    }
+
+    #[test]
+    fn dep_info_is_found_in_each_units_out_directory() {
+        let target = tempfile::tempdir().unwrap();
+        let unit = target
+            .path()
+            .join("debug/build/selfie-mcp/89fc79957ce28087/out");
+        dep_info(&unit, "/t/x-1: crates/mcp-server/src/main.rs\n");
+        let triple = target
+            .path()
+            .join("aarch64-apple-darwin/debug/build/selfie/0a1b/out");
+        dep_info(&triple, "/t/x-1: crates/selfie/src/lib.rs\n");
+        let sources = compiled_sources(target.path()).unwrap();
+        assert!(sources.contains("crates/mcp-server/src/main.rs"));
+        assert!(sources.contains("crates/selfie/src/lib.rs"));
     }
 
     #[test]
