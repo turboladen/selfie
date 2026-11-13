@@ -330,9 +330,12 @@ struct RawStatus {
 /// Iterate gix status items and classify them into worktree modifications,
 /// index (staged) modifications, and untracked files.
 fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
+    // File by file, not gix's default of one entry per new directory: a
+    // commit records index paths, and a directory is never one.
     let platform = repo
         .status(gix::progress::Discard)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .untracked_files(gix::status::UntrackedFiles::Files);
 
     let iter = platform
         .into_iter(std::iter::empty::<gix::bstr::BString>())
@@ -1072,6 +1075,27 @@ mod tests {
 
         assert!(status.is_dirty());
         assert_eq!(status.untracked.len(), 1);
+    }
+
+    // A new directory of dotfile sources is reported file by file, since a
+    // commit records index paths and a directory is never one.
+    #[test]
+    fn a_new_directory_reports_each_file_untracked() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::create_dir_all(path.join("packages/nvim/lua")).unwrap();
+        fs::write(path.join("packages/nvim/lua/init.lua"), "-- a\n").unwrap();
+        fs::write(path.join("packages/nvim/lua/keys.lua"), "-- b\n").unwrap();
+
+        let mut untracked = isolated().repo_status(&path).unwrap().untracked;
+        untracked.sort();
+
+        assert_eq!(
+            untracked,
+            [
+                PathBuf::from("packages/nvim/lua/init.lua"),
+                PathBuf::from("packages/nvim/lua/keys.lua"),
+            ]
+        );
     }
 
     // `git ls-files --deleted` reports a tracked file once its directory is
