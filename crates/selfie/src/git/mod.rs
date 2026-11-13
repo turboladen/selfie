@@ -19,8 +19,8 @@ pub use self::status_provider::{
     GitDirectoryStatus, GitFileStatus, GitStatusError, GitStatusProvider,
 };
 pub use self::sync_provider::{
-    ChangeType, ChangedFile, CommitId, FastForwardResult, GitSyncError, GitSyncProvider, RepoInfo,
-    RepoStatus,
+    ChangeType, ChangedFile, CommitId, FastForwardResult, GitSyncError, GitSyncProvider,
+    InProgressOperation, RepoInfo, RepoStatus,
 };
 
 #[cfg(any(test, feature = "with_mocks"))]

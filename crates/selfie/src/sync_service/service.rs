@@ -435,10 +435,13 @@ where
                     )
                     .await;
 
-                // Stage files — move `files` directly to avoid cloning Vec<PathBuf>
+                // The commit is handed the same paths it staged, so it records
+                // those and nothing else the index holds.
+                let files = std::sync::Arc::<[PathBuf]>::from(files);
                 if let Err(e) = blocking_git("stage", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
+                    let files = files.clone();
                     move || git.stage_files(&root, &files)
                 })
                 .await
@@ -456,7 +459,7 @@ where
                 match blocking_git("commit", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
-                    move || git.commit(&root, &msg)
+                    move || git.commit(&root, &files, &msg)
                 })
                 .await
                 {
@@ -470,17 +473,6 @@ where
                             })
                             .await;
                         commits_created += 1;
-                    }
-                    // The adapter refuses every commit while committing is
-                    // disabled, the refusal the check above already gives, so
-                    // it keeps that one kind and wording.
-                    Err(GitSyncError::CommitDisabled) => {
-                        sender
-                            .send_completed(OperationResult::Failure(
-                                OperationFailure::PushDisabled,
-                            ))
-                            .await;
-                        return;
                     }
                     Err(e) => {
                         sender
@@ -2684,7 +2676,12 @@ mod tests {
             unreachable!("status() does not stage files")
         }
 
-        fn commit(&self, _: &Path, _: &str) -> Result<crate::git::CommitId, GitSyncError> {
+        fn commit(
+            &self,
+            _: &Path,
+            _: &[PathBuf],
+            _: &str,
+        ) -> Result<crate::git::CommitId, GitSyncError> {
             unreachable!("status() does not commit")
         }
 
@@ -3593,7 +3590,7 @@ mod credential_egress_tests {
             Ok(())
         }
 
-        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+        fn commit(&self, _: &Path, _: &[PathBuf], _: &str) -> Result<CommitId, GitSyncError> {
             Ok(CommitId("abc1234def".to_string()))
         }
 
@@ -3903,7 +3900,7 @@ mod credential_egress_tests {
             fn stage_files(&self, _: &Path, _: &[PathBuf]) -> Result<(), GitSyncError> {
                 unreachable!("{NEVER}")
             }
-            fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+            fn commit(&self, _: &Path, _: &[PathBuf], _: &str) -> Result<CommitId, GitSyncError> {
                 unreachable!("{NEVER}")
             }
             fn push(&self, _: &Path) -> Result<(), GitSyncError> {
@@ -4094,7 +4091,7 @@ mod name_collision_tests {
             unreachable!("preparing a push stages nothing")
         }
 
-        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+        fn commit(&self, _: &Path, _: &[PathBuf], _: &str) -> Result<CommitId, GitSyncError> {
             unreachable!("preparing a push commits nothing")
         }
 
@@ -5445,7 +5442,7 @@ mod git_failure_words {
             Ok(())
         }
 
-        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+        fn commit(&self, _: &Path, _: &[PathBuf], _: &str) -> Result<CommitId, GitSyncError> {
             Ok(CommitId("abc1234def".to_string()))
         }
 
