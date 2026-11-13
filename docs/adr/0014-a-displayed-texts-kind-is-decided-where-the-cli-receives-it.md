@@ -20,6 +20,9 @@ one line.
 
 Amended 2026-11-12: §1.8 covers the MCP server's stderr log, which escapes each record the same way.
 
+Amended 2026-11-12: §2.2 lists no sentence the CLI composes from a library value's fields; each is
+`Composed` (§9.7).
+
 ## Context
 
 `selfie-cli` prints text from outside selfie: spec, package and environment names, paths, spec
@@ -138,13 +141,9 @@ Options considered:
    dependency names to `Name`, its `install_command` and `CheckResultData::check_command` to
    `Command`. Command handlers read the mapped values and never format the raw field.
 2. A library value's `Display` is `Prose`. Where that sentence names a value, the library hands it
-   over as parts (§9) and the CLI renders them. The CLI still composes these library sentences from
-   the value's fields, with each path a `DisplayPath` and each name a `Name`, and they are not yet
-   `Composed`:
-   - a library sentence that formats a `PackageListError`, or a `PackageRepoError`, `LookupFailure`
-     or `OperationFailure` holding one, into a `String`.
-
-   Each of these moves to §9 when it is next changed.
+   over as parts (§9) and the CLI renders them. The CLI composes no library sentence from a value's
+   fields, and a library sentence that names a `PackageListError`, or an error holding one, appends
+   its parts rather than formatting it into text.
 3. A name inside a sentence the CLI composes is a `Name`, whatever the sentence around it is.
 
 ### 3. Only the layout indents
