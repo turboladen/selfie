@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::fmt::Display;
 
 use selfie::namespace::NamespaceConflict;
-use selfie::package::event::{OperationType, SkipReason, SpecStatus};
+use selfie::package::event::{OperationType, SpecStatus};
 use selfie::parts::{Composed, Part, Parts, Program, Subcommand, SuggestedCommand};
 use selfie::yaml::ParseFailure;
 
@@ -42,7 +42,6 @@ sentences!(
     NamespaceConflict,
     OperationType,
     ParseFailure,
-    SkipReason,
     SpecStatus,
     selfie::yaml::SerializeFailure,
     std::io::Error,

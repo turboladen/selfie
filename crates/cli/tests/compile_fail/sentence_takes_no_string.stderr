@@ -13,7 +13,6 @@ error[E0277]: `String` is not one of the library's values, so sentence() cannot 
              OperationType
              ParseFailure
              SerializeFailure
-             SkipReason
              SpecStatus
              std::io::Error
 note: required for `&String` to implement `Sentence`
@@ -44,7 +43,6 @@ error[E0277]: `str` is not one of the library's values, so sentence() cannot tak
              OperationType
              ParseFailure
              SerializeFailure
-             SkipReason
              SpecStatus
              std::io::Error
 note: required for `&str` to implement `Sentence`

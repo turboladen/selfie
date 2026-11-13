@@ -13,8 +13,8 @@ use std::fmt::Display;
 use selfie::config::ConfigLoadError;
 use selfie::package::event::{
     AuditResult, AuditResultData, CheckResult, CheckResultData, DependencyStatus,
-    EnvironmentStatus, EnvironmentStatusData, LinkAtTarget, OperationInfo, PackageInfoData,
-    RefusedSpec, SkipReason, SpecListItem, Uncreatable, ValidationIssueData, ValidationResultData,
+    EnvironmentStatus, EnvironmentStatusData, OperationInfo, PackageInfoData, RefusedSpec,
+    SkipReason, SpecListItem, Uncreatable, ValidationIssueData, ValidationResultData,
 };
 use selfie::package::event::{OperationFailure, OperationSuccess, UncheckedSource, UnknownStatus};
 use selfie::package::port::{PackageParseError, PackageParseKind};
@@ -23,7 +23,7 @@ use selfie::validation::{ValidationIssue, ValidationLevel};
 use selfie::yaml::SourceLocation;
 
 use crate::display_manager::Suggestion;
-use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, shown};
+use crate::terminal_text::{Command, Name, Output, Prose, Shown};
 
 pub(crate) use crate::sentence::{composed, message, noted_suggestion, sentence, suggested};
 
@@ -358,28 +358,7 @@ pub(crate) fn step(message: &str) -> Name {
 /// Why an entry was skipped, as an entry row's detail shows it. A secret dry
 /// run names the link it would replace as a path.
 pub(crate) fn skip_reason(reason: &SkipReason) -> Shown {
-    // No wildcard, so a reason or a link that carries a path chooses here how
-    // it is shown.
-    match reason {
-        SkipReason::SecretDryRun { commands, link } => {
-            let destination = match link {
-                LinkAtTarget::NoLink => return sentence(reason).into(),
-                LinkAtTarget::To(path) => shown!(" to '{}'", DisplayPath::of(path)),
-                LinkAtTarget::DestinationUnknown => Shown::default(),
-            };
-            shown!(
-                "dry run: would run {} command(s), then replace the symlink{} with a regular \
-                 file readable only by you",
-                *commands,
-                destination
-            )
-        }
-        SkipReason::UpToDate
-        | SkipReason::InSync
-        | SkipReason::PermissionsTightened
-        | SkipReason::DryRun
-        | SkipReason::Unverifiable => sentence(reason).into(),
-    }
+    composed(reason)
 }
 
 /// A spec's information, as `spec info` shows it.
@@ -460,7 +439,8 @@ impl From<&SpecListItem> for SpecItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use selfie::package::event::{RefusalKind, UnknownStatus};
+    use crate::terminal_text::{DisplayPath, shown};
+    use selfie::package::event::{LinkAtTarget, RefusalKind, UnknownStatus};
     use selfie::package::port::{PackageError, PackageRepoError};
 
     // A name that shows as written is pre-filled; one the prompt can only show

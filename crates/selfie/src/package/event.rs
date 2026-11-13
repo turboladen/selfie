@@ -4677,40 +4677,44 @@ pub enum LinkAtTarget {
     DestinationUnknown,
 }
 
-impl fmt::Display for SkipReason {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Composed for SkipReason {
+    fn parts(&self) -> Parts<'_> {
         match self {
-            Self::UpToDate => f.write_str("already up to date"),
-            Self::InSync => f.write_str("already in sync"),
+            Self::UpToDate => Parts::new().text("already up to date"),
+            Self::InSync => Parts::new().text("already in sync"),
             Self::PermissionsTightened => {
-                f.write_str("already in sync (permissions tightened to owner-only)")
+                Parts::new().text("already in sync (permissions tightened to owner-only)")
             }
-            Self::DryRun => f.write_str("dry run"),
+            Self::DryRun => Parts::new().text("dry run"),
             Self::SecretDryRun {
                 commands,
                 link: LinkAtTarget::NoLink,
-            } => write!(
-                f,
+            } => Parts::new().text(format!(
                 "dry run: would run {commands} command(s); content not resolved, so no comparison \
                  is possible"
-            ),
+            )),
             Self::SecretDryRun { commands, link } => {
                 let destination = match link {
-                    LinkAtTarget::To(path) => format!(" to '{}'", path.display()),
-                    LinkAtTarget::NoLink | LinkAtTarget::DestinationUnknown => String::new(),
+                    LinkAtTarget::To(path) => {
+                        Parts::new().text(" to '").path(path.as_path()).text("'")
+                    }
+                    LinkAtTarget::NoLink | LinkAtTarget::DestinationUnknown => Parts::new(),
                 };
-                write!(
-                    f,
-                    "dry run: would run {commands} command(s), then replace the symlink{destination} \
-                     with a regular file readable only by you"
-                )
+                Parts::new()
+                    .text(format!(
+                        "dry run: would run {commands} command(s), then replace the symlink"
+                    ))
+                    .append(destination)
+                    .text(" with a regular file readable only by you")
             }
             Self::Unverifiable => {
-                f.write_str("provider-sourced (not verifiable without resolving)")
+                Parts::new().text("provider-sourced (not verifiable without resolving)")
             }
         }
     }
 }
+
+crate::parts::display_from_parts!(SkipReason);
 
 /// Carries one package refused whole, before refusals are grouped by reason.
 pub(crate) struct PackageRefusal {
@@ -5132,6 +5136,26 @@ pub(crate) fn every_check_failure() -> [CheckFailure; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A secret dry run names the link it would replace as a path part, never
+    // as words of its sentence: the fixture destination holds U+200B, which
+    // `values_of` refuses in a text part. The words around it stay the same.
+    #[test]
+    fn a_secret_dry_run_names_its_link_destination_as_a_path() {
+        let reason = SkipReason::SecretDryRun {
+            commands: 2,
+            link: LinkAtTarget::To("/x/de\u{200b}st".into()),
+        };
+        assert_eq!(
+            crate::parts::values_of(&Message::of(&reason)),
+            ["/x/de\u{200b}st"]
+        );
+        assert_eq!(
+            reason.to_string(),
+            "dry run: would run 2 command(s), then replace the symlink to '/x/de\u{200b}st' \
+             with a regular file readable only by you"
+        );
+    }
 
     // A dotfiles directory that could not be listed does not hide a `name:`
     // field the packages already answer with.
