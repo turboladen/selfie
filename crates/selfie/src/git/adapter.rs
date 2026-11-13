@@ -324,6 +324,8 @@ fn failed_ref_lines(porcelain_stdout: &str) -> String {
 struct RawStatus {
     worktree_mods: HashSet<String>,
     index_mods: HashSet<String>,
+    // The subset of `index_mods` the index no longer has, as `git rm` leaves.
+    index_deletions: HashSet<String>,
     untracked: Vec<String>,
 }
 
@@ -331,11 +333,15 @@ struct RawStatus {
 /// index (staged) modifications, and untracked files.
 fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
     // File by file, not gix's default of one entry per new directory: a
-    // commit records index paths, and a directory is never one.
+    // commit records index paths, and a directory is never one. Renames are
+    // not tracked for the same reason: a staged rename is the removal of one
+    // path and the addition of another, and its new path alone leaves the old
+    // one in the tree.
     let platform = repo
         .status(gix::progress::Discard)
         .map_err(|e| e.to_string())?
-        .untracked_files(gix::status::UntrackedFiles::Files);
+        .untracked_files(gix::status::UntrackedFiles::Files)
+        .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled);
 
     let iter = platform
         .into_iter(std::iter::empty::<gix::bstr::BString>())
@@ -343,6 +349,7 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
 
     let mut worktree_mods = HashSet::new();
     let mut index_mods = HashSet::new();
+    let mut index_deletions = HashSet::new();
     let mut untracked = Vec::new();
 
     for item in iter {
@@ -365,6 +372,9 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
             }
             gix::status::Item::TreeIndex(change) => {
                 let location = change.location().to_string();
+                if matches!(change, gix::diff::index::Change::Deletion { .. }) {
+                    index_deletions.insert(location.clone());
+                }
                 index_mods.insert(location);
             }
         }
@@ -373,6 +383,7 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
     Ok(RawStatus {
         worktree_mods,
         index_mods,
+        index_deletions,
         untracked,
     })
 }
@@ -584,7 +595,13 @@ impl GitSyncProvider for GixGitAdapter {
         })?;
 
         let modified = raw.worktree_mods.iter().map(PathBuf::from).collect();
-        let staged = raw.index_mods.iter().map(PathBuf::from).collect();
+        // A staged deletion is reported as deleted, not as staged, so sync
+        // groups it as a removal rather than read a spec that is gone.
+        let staged = raw
+            .index_mods
+            .difference(&raw.index_deletions)
+            .map(PathBuf::from)
+            .collect();
         let untracked = raw.untracked.iter().map(PathBuf::from).collect();
 
         // Detect deleted files via git CLI (gix status doesn't surface deletions cleanly)
@@ -599,6 +616,7 @@ impl GitSyncProvider for GixGitAdapter {
                 deleted.push(PathBuf::from(line));
             }
         }
+        deleted.extend(raw.index_deletions.iter().map(PathBuf::from));
 
         // Ahead/behind via git CLI (simpler than gix for remote tracking)
         let (ahead, behind) = self.ahead_behind_counts(repo_root);
@@ -1420,6 +1438,32 @@ mod tests {
             head_changes(&path),
             "D\tpackages/bar.yml\nM\tpackages/foo/rc"
         );
+    }
+
+    // A commit names paths, so a staged rename has to be reported as both of
+    // them: grouped by its new path alone, the old one stays in the tree.
+    #[test]
+    fn a_staged_rename_reports_both_paths() {
+        let (_temp, path) = nested_repo();
+        git(&path, &["mv", "packages/bar.yml", "packages/baz.yml"]).unwrap();
+
+        let status = isolated().repo_status(&path).unwrap();
+
+        assert_eq!(status.staged, [PathBuf::from("packages/baz.yml")]);
+        assert_eq!(status.deleted, [PathBuf::from("packages/bar.yml")]);
+    }
+
+    // `git rm` leaves the path in neither the index nor the working tree. It is
+    // reported as deleted, not staged, so sync does not try to read it.
+    #[test]
+    fn a_path_removed_with_git_rm_reports_as_deleted() {
+        let (_temp, path) = nested_repo();
+        git(&path, &["rm", "-q", "packages/bar.yml"]).unwrap();
+
+        let status = isolated().repo_status(&path).unwrap();
+
+        assert!(status.staged.is_empty(), "{:?}", status.staged);
+        assert_eq!(status.deleted, [PathBuf::from("packages/bar.yml")]);
     }
 
     // Deleting a package's only file leaves no path for git add, which must
