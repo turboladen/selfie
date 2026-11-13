@@ -722,9 +722,9 @@ mod tests {
     #[test]
     fn a_success_summary_of_plain_values_reads_as_the_library_words_it() {
         let mut successes = test_common::every_success("env", "tool", "/p/tool.yml");
-        successes.push(OperationSuccess::Generic("two\nlines".to_string()));
-        successes.push(OperationSuccess::Generic("ends\n".to_string()));
-        successes.push(OperationSuccess::Generic("ends\r\n".to_string()));
+        successes.push(OperationSuccess::Generic("two\nlines"));
+        successes.push(OperationSuccess::Generic("ends\n"));
+        successes.push(OperationSuccess::Generic("ends\r\n"));
 
         assert_renders_as_its_display(&successes);
     }

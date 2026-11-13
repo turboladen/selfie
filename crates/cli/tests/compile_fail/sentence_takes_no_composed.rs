@@ -10,6 +10,6 @@ mod sentence;
 // A success summary is built from parts, so it is shown through composed(),
 // which escapes each name in it as a name, and never as one prose sentence.
 fn main() {
-    let done = selfie::package::event::OperationSuccess::Generic("done".to_string());
+    let done = selfie::package::event::OperationSuccess::Generic("done");
     let _ = sentence::sentence(&done);
 }
