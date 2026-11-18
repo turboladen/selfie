@@ -23,6 +23,8 @@ cargo install --path crates/cli --locked      # Install the CLI, built with the 
 just sandbox-run <args>                        # Run the CLI against a throwaway sandbox (see below)
 just percommit <base>                          # just clippy on every commit below the tip
 just mutate <spec.toml>                        # Mutation runner (crates/xtask/README.md)
+just clean-scratch [days]                      # Delete scratch idle for that many days (default 3)
+just install-scratch-cleaner                   # Run clean-scratch daily through launchd (macOS)
 ```
 
 CI runs these same recipes (`.github/workflows/ci.yml`), so `Justfile` is the one place a gate's
@@ -50,9 +52,12 @@ catch:
 - **Any cargo command in this repo waits on `target/`'s lock.** A `cargo-watch` the maintainer is
   running, or another agent's build, holds it — and `just check` then stalls silently rather than
   failing, so a ten-minute wait is indistinguishable from a slow compile. Point `CARGO_TARGET_DIR`
-  at a path outside the repo to take a lock of your own, and reuse it for every run in that
-  worktree: a fresh directory is a cold build each time. Only a `git archive` copy needs a fresh
-  one, for the reason `.claude/rules/commits.md` gives.
+  at a directory under `~/.cache/selfie-scratch/` to take a lock of your own, and reuse it for every
+  run in that worktree: a fresh directory is a cold build each time. Only a `git archive` copy needs
+  a fresh one, for the reason `.claude/rules/commits.md` gives. Every other scratch directory goes
+  there too: archives, binary-diff builds, `--work-dir`s. `just clean-scratch` deletes anything
+  there idle for three days, and `just mutate` and `just percommit` run it first. A directory a run
+  creates anywhere else is never cleaned up.
 
   That trades one hazard for another, and the second one lies. A target directory reused across runs
   makes `cargo doc` exit 101 complaining that it could not remove `doc/selfie` because the directory
@@ -71,7 +76,7 @@ so does the deploy-state fallback whenever no `state_directory` is configured an
 this machine, so fixtures must use inert commands such as `true` or `echo`.
 
 `just sandbox-run` mints a **new** `HOME` per invocation and never reuses one, and leaves it behind
-under `TMPDIR` for inspection — the accumulation is deliberate, not a leak to report. Nothing
+under `TMPDIR` for inspection, where `just clean-scratch` deletes it after three idle days. Nothing
 carries over between calls: `just sandbox-run apply` followed by `just sandbox-run dotfiles drift`
 reads an empty deploy state, because the second run is a different machine as far as selfie is
 concerned. One invocation runs exactly one selfie command, arguments passed through verbatim, so to

@@ -7,8 +7,9 @@ never measured. Cargo's build directory is pinned to the same place, so a `build
 cargo config cannot share intermediate artifacts between builds.
 
 The work directory defaults to a new directory under `TMPDIR` and is kept, so its logs can be read
-afterwards. `--work-dir` overrides it with a new or empty directory. Either must be absolute and
-outside every checkout of the repository, linked worktrees included.
+afterwards, until `just clean-scratch` deletes it after three idle days. `--work-dir` overrides it
+with a new or empty directory. Either must be absolute and outside every checkout of the repository,
+linked worktrees included.
 
 Every build, test and toolchain probe runs in its own process group under a deadline. The group is
 killed when the child exits, when the deadline passes, and when xtask receives Ctrl-C, SIGTERM or
