@@ -28,8 +28,16 @@ pub enum GitSyncError {
     /// The remote has commits the local branch lacks, so the push was refused.
     PushRejected,
 
-    /// Committing is disabled, so no commit was created.
-    CommitDisabled,
+    /// git has an operation in progress, so nothing was staged or committed.
+    OperationInProgress { operation: InProgressOperation },
+
+    /// A path to stage or commit has unresolved conflicts, so the index holds
+    /// no single entry to record for it. `path` is relative to the repository
+    /// root.
+    Conflicted { path: PathBuf },
+
+    /// The commit would record the same tree as its parent, so none was made.
+    NothingToCommit,
 
     /// A git operation failed. `operation` names it in selfie's own words, and
     /// `message` is git's text, redacted and bounded by its [`GitMessage`] type.
@@ -63,7 +71,13 @@ impl Composed for GitSyncError {
             Self::PushRejected => {
                 Parts::new().text("the remote has new commits. Run 'selfie sync pull' first")
             }
-            Self::CommitDisabled => commit_disabled(),
+            Self::OperationInProgress { operation } => Parts::new()
+                .text(operation.described())
+                .text(" is in progress. Finish or abort it with git first"),
+            Self::Conflicted { path } => Parts::new().path(path).text(" has unresolved conflicts"),
+            Self::NothingToCommit => {
+                Parts::new().text("nothing to commit: the staged files match the last commit")
+            }
             Self::OperationFailed { operation, message } => {
                 Parts::new().text(*operation).text(": ").git(message)
             }
@@ -71,13 +85,32 @@ impl Composed for GitSyncError {
     }
 }
 
-/// The sentence saying sync push will not commit, since committing is
-/// disabled. Both the error and the operation's refusal word it with this.
-pub(crate) fn commit_disabled() -> Parts<'static> {
-    Parts::new().text(
-        "sync push is disabled: its commit can record every tracked file as deleted. \
-         Commit and push the repository with git until this is fixed",
-    )
+/// An operation git can leave in progress, which owns the index until it is
+/// finished or aborted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InProgressOperation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Bisect,
+    /// `git am`, applying patches from a mailbox.
+    ApplyMailbox,
+}
+
+impl InProgressOperation {
+    /// The operation as the subject of a sentence, such as "a merge".
+    #[must_use]
+    pub const fn described(self) -> &'static str {
+        match self {
+            Self::Merge => "a merge",
+            Self::Rebase => "a rebase",
+            Self::CherryPick => "a cherry-pick",
+            Self::Revert => "a revert",
+            Self::Bisect => "a bisect",
+            Self::ApplyMailbox => "a git am",
+        }
+    }
 }
 
 /// The sentence saying no git repository holds `path`, with the path a part
@@ -202,13 +235,44 @@ pub trait GitSyncProvider: Send + Sync {
     /// Get the working tree status for the repository.
     fn repo_status(&self, repo_root: &Path) -> Result<RepoStatus, GitSyncError>;
 
-    /// Stage specific files in the index.
+    /// Stage `files`, relative to the repository root, as `git add` stages
+    /// them: the repository's attributes and filters apply, a symlink is
+    /// staged as a link, and a path gone from the working tree is staged as
+    /// removed. A path already gone from the index too is left as it is. No
+    /// other index entry changes.
+    ///
+    /// # Errors
+    ///
+    /// [`GitSyncError::OperationInProgress`] and [`GitSyncError::Conflicted`]
+    /// as [`commit`](Self::commit) gives them, before anything is written, and
+    /// [`GitSyncError::OperationFailed`] when git refuses a path, such as one
+    /// beyond a symlink, in which case the index is left as it was.
     fn stage_files(&self, repo_root: &Path, files: &[PathBuf]) -> Result<(), GitSyncError>;
 
-    /// Create a commit with the given message.
+    /// Commit `files`, relative to the repository root, as the index holds them.
     ///
-    /// Only staged files are committed. Returns the new commit's ID.
-    fn commit(&self, repo_root: &Path, message: &str) -> Result<CommitId, GitSyncError>;
+    /// The new commit's tree is its parent's with only `files` changed: each one
+    /// recorded as staged, or removed when the index has no entry for it. Every
+    /// other staged change stays staged and uncommitted. The commit is signed
+    /// when the repository's git configuration says to, and no hook runs.
+    /// Returns the new commit's ID.
+    ///
+    /// # Errors
+    ///
+    /// [`GitSyncError::OperationInProgress`] while git has a merge, rebase or
+    /// similar operation unfinished, [`GitSyncError::Conflicted`] for a path with
+    /// unresolved conflicts, and [`GitSyncError::NothingToCommit`] when the tree
+    /// would not change. A path with no index entry that is a directory in the
+    /// parent's tree gives [`GitSyncError::OperationFailed`]: it is refused
+    /// rather than removed with everything below it. None of these writes
+    /// anything, and neither does a signing failure: the branch moves only after
+    /// the commit is complete, and only if it still points at the parent.
+    fn commit(
+        &self,
+        repo_root: &Path,
+        files: &[PathBuf],
+        message: &str,
+    ) -> Result<CommitId, GitSyncError>;
 
     /// Push commits to the remote tracking branch.
     fn push(&self, repo_root: &Path) -> Result<(), GitSyncError>;
@@ -263,9 +327,20 @@ mod tests {
                 "the remote has new commits. Run 'selfie sync pull' first",
             ),
             (
-                GitSyncError::CommitDisabled,
-                "sync push is disabled: its commit can record every tracked file as deleted. \
-                 Commit and push the repository with git until this is fixed",
+                GitSyncError::OperationInProgress {
+                    operation: InProgressOperation::CherryPick,
+                },
+                "a cherry-pick is in progress. Finish or abort it with git first",
+            ),
+            (
+                GitSyncError::Conflicted {
+                    path: PathBuf::from("c/f\u{200B}o"),
+                },
+                "c/f\u{200B}o has unresolved conflicts",
+            ),
+            (
+                GitSyncError::NothingToCommit,
+                "nothing to commit: the staged files match the last commit",
             ),
             (
                 GitSyncError::OperationFailed {

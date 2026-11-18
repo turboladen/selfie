@@ -391,17 +391,6 @@ where
                 return;
             }
 
-            // Ahead of the staging below, which writes the index and blob objects:
-            // refused at the commit alone, a failed push would still leave its first
-            // group staged for a manual `git commit` to pick up. Pushing commits that
-            // already exist makes none, so an empty list still goes through.
-            if !commits.is_empty() {
-                sender
-                    .send_completed(OperationResult::Failure(OperationFailure::PushDisabled))
-                    .await;
-                return;
-            }
-
             let repo_info = match blocking_git("discover repository", {
                 let git = git.clone();
                 let dir = config.package_directory().to_path_buf();
@@ -435,10 +424,13 @@ where
                     )
                     .await;
 
-                // Stage files — move `files` directly to avoid cloning Vec<PathBuf>
+                // The commit is handed the same paths it staged, so it records
+                // those and nothing else the index holds.
+                let files = std::sync::Arc::<[PathBuf]>::from(files);
                 if let Err(e) = blocking_git("stage", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
+                    let files = files.clone();
                     move || git.stage_files(&root, &files)
                 })
                 .await
@@ -456,12 +448,14 @@ where
                 match blocking_git("commit", {
                     let git = git.clone();
                     let root = repo_info.root.clone();
-                    move || git.commit(&root, &msg)
+                    move || git.commit(&root, &files, &msg)
                 })
                 .await
                 {
                     Ok(commit_id) => {
-                        let package_name = extract_package_name_from_message(&message);
+                        let package_name = extract_package_name_from_message(&message)
+                            .unwrap_or(&message)
+                            .to_string();
                         sender
                             .send(PackageEvent::SyncCommitCreated {
                                 operation_info: sender.operation_info(),
@@ -471,16 +465,22 @@ where
                             .await;
                         commits_created += 1;
                     }
-                    // The adapter refuses every commit while committing is
-                    // disabled, the refusal the check above already gives, so
-                    // it keeps that one kind and wording.
-                    Err(GitSyncError::CommitDisabled) => {
-                        sender
-                            .send_completed(OperationResult::Failure(
-                                OperationFailure::PushDisabled,
-                            ))
-                            .await;
-                        return;
+                    // Staged from disk, the group's files match the last commit:
+                    // an edit the user staged and then reverted, say. Nothing
+                    // is committed for it, and the rest of the push goes on.
+                    Err(GitSyncError::NothingToCommit) => {
+                        let warning = match extract_package_name_from_message(&message) {
+                            Some(package_name) => Parts::new()
+                                .text("Nothing to commit for '")
+                                .name(package_name)
+                                .text("': its files match the last commit, so it was skipped"),
+                            // A batch or custom message names no package.
+                            None => Parts::new().text(
+                                "Nothing to commit: the files match the last commit, \
+                                 so no commit was made",
+                            ),
+                        };
+                        sender.send_composed_warning(Message::from(warning)).await;
                     }
                     Err(e) => {
                         sender
@@ -1383,16 +1383,12 @@ fn spec_named(spec_names: &BTreeSet<String>, name: &str) -> Option<String> {
 
 /// Extract the package name from a conventional commit message.
 ///
-/// Parses `"feat(name): ..."` or `"chore(name): ..."` → `"name"`.
-/// Falls back to the full message if parsing fails.
-fn extract_package_name_from_message(message: &str) -> String {
-    if let Some(start) = message.find('(')
-        && let Some(end) = message.find(')')
-        && end > start
-    {
-        return message[start + 1..end].to_string();
-    }
-    message.to_string()
+/// Parses `"feat(name): ..."` or `"chore(name): ..."` → `"name"`, and
+/// returns `None` for a message with no parenthesized scope.
+fn extract_package_name_from_message(message: &str) -> Option<&str> {
+    let start = message.find('(')?;
+    let end = message.find(')')?;
+    (end > start).then(|| &message[start + 1..end])
 }
 
 // How a waiting step that ran a git network call ended. Sync is not
@@ -1938,20 +1934,17 @@ mod tests {
     fn extract_name_from_conventional_commit() {
         assert_eq!(
             extract_package_name_from_message("feat(starship): add package spec"),
-            "starship"
+            Some("starship")
         );
         assert_eq!(
             extract_package_name_from_message("chore(fnm): update dotfile"),
-            "fnm"
+            Some("fnm")
         );
     }
 
     #[test]
     fn extract_name_fallback() {
-        assert_eq!(
-            extract_package_name_from_message("update stuff"),
-            "update stuff"
-        );
+        assert_eq!(extract_package_name_from_message("update stuff"), None);
     }
 
     // ─── categorize_pull_changes tests ───────────────────────────────────────
@@ -2684,7 +2677,12 @@ mod tests {
             unreachable!("status() does not stage files")
         }
 
-        fn commit(&self, _: &Path, _: &str) -> Result<crate::git::CommitId, GitSyncError> {
+        fn commit(
+            &self,
+            _: &Path,
+            _: &[PathBuf],
+            _: &str,
+        ) -> Result<crate::git::CommitId, GitSyncError> {
             unreachable!("status() does not commit")
         }
 
@@ -3593,7 +3591,7 @@ mod credential_egress_tests {
             Ok(())
         }
 
-        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+        fn commit(&self, _: &Path, _: &[PathBuf], _: &str) -> Result<CommitId, GitSyncError> {
             Ok(CommitId("abc1234def".to_string()))
         }
 
@@ -3834,43 +3832,219 @@ mod credential_egress_tests {
         assert_eq!(endings(&events), vec![StepEnding::Failed], "{events:?}");
     }
 
-    // Committing is disabled, so a push that would create commits is refused before
-    // git is reached: the fake panics on any call, including the staging a later
-    // refusal would leave behind.
-    mod commits_disabled {
-        use super::running_under_sudo::GitThatMustNotRun;
+    mod commits {
         use super::*;
+        use std::sync::{Arc, Mutex};
 
-        #[tokio::test]
-        async fn a_push_that_would_commit_is_refused_before_anything_is_staged() {
-            let service = SyncServiceImpl::new(
-                GitThatMustNotRun,
+        // Records what each stage and commit was handed, so a test can see
+        // which paths a commit was told to record.
+        #[derive(Clone, Default)]
+        struct RecordingGit {
+            calls: Arc<Mutex<Vec<String>>>,
+            // A commit of exactly this file finds nothing to commit.
+            unchanged: Option<&'static str>,
+        }
+
+        impl RecordingGit {
+            fn record(&self, call: &str, files: &[PathBuf]) {
+                let files: Vec<_> = files.iter().map(|f| f.display().to_string()).collect();
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{call} {}", files.join(" ")));
+            }
+        }
+
+        impl GitSyncProvider for RecordingGit {
+            fn discover_repo(&self, path: &Path) -> Result<RepoInfo, GitSyncError> {
+                Ok(RepoInfo {
+                    root: path.to_path_buf(),
+                    branch: Some("main".to_string()),
+                    remote_name: Some("origin".to_string()),
+                })
+            }
+
+            fn repo_status(&self, _: &Path) -> Result<RepoStatus, GitSyncError> {
+                Ok(RepoStatus::default())
+            }
+
+            fn stage_files(&self, _: &Path, files: &[PathBuf]) -> Result<(), GitSyncError> {
+                self.record("stage", files);
+                Ok(())
+            }
+
+            fn commit(
+                &self,
+                _: &Path,
+                files: &[PathBuf],
+                _: &str,
+            ) -> Result<CommitId, GitSyncError> {
+                self.record("commit", files);
+                if let Some(unchanged) = self.unchanged
+                    && files == [PathBuf::from(unchanged)]
+                {
+                    return Err(GitSyncError::NothingToCommit);
+                }
+                Ok(CommitId("abc1234def".to_string()))
+            }
+
+            fn push(&self, _: &Path) -> Result<(), GitSyncError> {
+                Ok(())
+            }
+
+            fn fetch(&self, _: &Path) -> Result<(), GitSyncError> {
+                Ok(())
+            }
+
+            fn fast_forward(&self, _: &Path) -> Result<FastForwardResult, GitSyncError> {
+                Ok(FastForwardResult::AlreadyUpToDate)
+            }
+
+            fn diff_commits(
+                &self,
+                _: &Path,
+                _: &CommitId,
+                _: &CommitId,
+            ) -> Result<Vec<crate::git::ChangedFile>, GitSyncError> {
+                Ok(Vec::new())
+            }
+        }
+
+        fn service(git: &RecordingGit) -> impl SyncService {
+            SyncServiceImpl::new(
+                git.clone(),
                 UnusedDotfileService,
                 crate::config::SelfieConfigBuilder::default()
                     .environment("test-env")
                     .package_directory("/tmp/selfie-packages")
                     .build(),
                 SudoPolicy::new(RunningAs(Elevation::Unprivileged)),
-            );
+            )
+        }
 
-            let events: Vec<PackageEvent> = service
-                .execute_push(vec![ConfirmedCommit {
-                    files: vec![PathBuf::from("starship.yml")],
-                    message: "chore(starship): update package spec".to_string(),
-                }])
-                .await
+        fn group(file: &str, package: &str) -> ConfirmedCommit {
+            ConfirmedCommit {
+                files: vec![PathBuf::from(file)],
+                message: format!("chore({package}): update package spec"),
+            }
+        }
+
+        async fn push(git: &RecordingGit, commits: Vec<ConfirmedCommit>) -> Vec<PackageEvent> {
+            service(git).execute_push(commits).await.collect().await
+        }
+
+        fn warnings(events: &[PackageEvent]) -> Vec<String> {
+            events
+                .iter()
+                .filter_map(crate::package::event::warning_text)
                 .collect()
-                .await;
+        }
 
-            assert!(
-                events.iter().any(|e| matches!(
+        fn succeeded(events: &[PackageEvent]) -> bool {
+            events.iter().any(|e| {
+                matches!(
                     e,
                     PackageEvent::Completed {
-                        result: OperationResult::Failure(OperationFailure::PushDisabled),
+                        result: OperationResult::Success(_),
                         ..
                     }
-                )),
-                "expected the disabled refusal: {events:?}"
+                )
+            })
+        }
+
+        // The empty group sits between two others, so a skip that stops the
+        // loop, or one that drops a neighbor, is told apart from one that
+        // carries on.
+        #[tokio::test]
+        async fn a_group_with_nothing_to_commit_is_skipped_by_name() {
+            let git = RecordingGit {
+                unchanged: Some("bar.yml"),
+                ..RecordingGit::default()
+            };
+
+            let events = push(
+                &git,
+                vec![
+                    group("foo.yml", "foo"),
+                    group("bar.yml", "bar"),
+                    group("baz.yml", "baz"),
+                ],
+            )
+            .await;
+
+            assert_eq!(
+                warnings(&events),
+                ["Nothing to commit for 'bar': its files match the last commit, so it was skipped"]
+            );
+            let committed = events
+                .iter()
+                .filter(|e| matches!(e, PackageEvent::SyncCommitCreated { .. }))
+                .count();
+            assert_eq!(committed, 2);
+            assert!(
+                succeeded(&events),
+                "expected the push to succeed: {events:?}"
+            );
+        }
+
+        // A batch or custom message names no package, so the warning names
+        // none either.
+        #[tokio::test]
+        async fn a_batch_with_nothing_to_commit_is_skipped_without_a_name() {
+            let git = RecordingGit {
+                unchanged: Some("all.yml"),
+                ..RecordingGit::default()
+            };
+
+            let events = push(
+                &git,
+                vec![ConfirmedCommit {
+                    files: vec![PathBuf::from("all.yml")],
+                    message: "update all specs".to_string(),
+                }],
+            )
+            .await;
+
+            assert_eq!(
+                warnings(&events),
+                ["Nothing to commit: the files match the last commit, so no commit was made"]
+            );
+            assert!(
+                succeeded(&events),
+                "expected the push to succeed: {events:?}"
+            );
+        }
+
+        // Two groups with different files, so a commit handed every file, or
+        // the first group's, is told apart from one handed its own.
+        #[tokio::test]
+        async fn each_commit_is_handed_exactly_the_files_it_staged() {
+            let git = RecordingGit::default();
+
+            let events = push(
+                &git,
+                vec![
+                    group("starship.yml", "starship"),
+                    ConfirmedCommit {
+                        files: vec![PathBuf::from("foo/rc"), PathBuf::from("foo.yml")],
+                        message: "chore(foo): update dotfile".to_string(),
+                    },
+                ],
+            )
+            .await;
+
+            assert!(
+                succeeded(&events),
+                "expected the push to succeed: {events:?}"
+            );
+            assert_eq!(
+                *git.calls.lock().unwrap(),
+                [
+                    "stage starship.yml",
+                    "commit starship.yml",
+                    "stage foo/rc foo.yml",
+                    "commit foo/rc foo.yml",
+                ]
             );
         }
     }
@@ -3889,7 +4063,7 @@ mod credential_egress_tests {
         // result. Asserting on the returned error alone would not: a gate placed
         // after the git work returns the same error.
         #[derive(Clone)]
-        pub(super) struct GitThatMustNotRun;
+        struct GitThatMustNotRun;
 
         const NEVER: &str = "git must not be reached when the run is refused";
 
@@ -3903,7 +4077,7 @@ mod credential_egress_tests {
             fn stage_files(&self, _: &Path, _: &[PathBuf]) -> Result<(), GitSyncError> {
                 unreachable!("{NEVER}")
             }
-            fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+            fn commit(&self, _: &Path, _: &[PathBuf], _: &str) -> Result<CommitId, GitSyncError> {
                 unreachable!("{NEVER}")
             }
             fn push(&self, _: &Path) -> Result<(), GitSyncError> {
@@ -4094,7 +4268,7 @@ mod name_collision_tests {
             unreachable!("preparing a push stages nothing")
         }
 
-        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+        fn commit(&self, _: &Path, _: &[PathBuf], _: &str) -> Result<CommitId, GitSyncError> {
             unreachable!("preparing a push commits nothing")
         }
 
@@ -5445,7 +5619,7 @@ mod git_failure_words {
             Ok(())
         }
 
-        fn commit(&self, _: &Path, _: &str) -> Result<CommitId, GitSyncError> {
+        fn commit(&self, _: &Path, _: &[PathBuf], _: &str) -> Result<CommitId, GitSyncError> {
             Ok(CommitId("abc1234def".to_string()))
         }
 
@@ -5600,26 +5774,6 @@ mod git_failure_words {
             let events: Vec<PackageEvent> = stream.collect().await;
             assert_eq!(failure_of(&events), expected, "{command}");
         }
-    }
-
-    // Push refuses to commit before git runs, in words that are its own.
-    #[tokio::test]
-    async fn a_push_with_commits_is_refused_in_its_own_words() {
-        let commit = crate::sync_service::port::ConfirmedCommit {
-            files: vec![PathBuf::from("a.yml")],
-            message: "m".to_string(),
-        };
-        let events: Vec<PackageEvent> = service(Step::Push)
-            .execute_push(vec![commit])
-            .await
-            .collect()
-            .await;
-
-        assert_eq!(
-            failure_of(&events),
-            "sync push is disabled: its commit can record every tracked file as deleted. Commit \
-             and push the repository with git until this is fixed"
-        );
     }
 
     // A diff that fails after a fast-forward warns, and the pull still succeeds.

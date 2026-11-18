@@ -21,8 +21,8 @@ use super::status_provider::{
     GitDirectoryStatus, GitFileStatus, GitStatusError, GitStatusProvider,
 };
 use super::sync_provider::{
-    ChangeType, ChangedFile, CommitId, FastForwardResult, GitSyncError, GitSyncProvider, RepoInfo,
-    RepoStatus,
+    ChangeType, ChangedFile, CommitId, FastForwardResult, GitSyncError, GitSyncProvider,
+    InProgressOperation, RepoInfo, RepoStatus,
 };
 
 /// Git adapter backed by the `gix` crate (local ops) and `git` CLI (network ops).
@@ -155,14 +155,6 @@ fn discover(scope: ConfigScope, path: &Path) -> Result<gix::Repository, gix::Err
     }
 }
 
-/// Check if a file has the executable bit set.
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
 /// Shorthand for creating a [`GitSyncError::OperationFailed`] from any error.
 fn git_sync_err(operation: &'static str, e: impl std::fmt::Display) -> GitSyncError {
     GitSyncError::OperationFailed {
@@ -275,6 +267,10 @@ const SYMBOLIC_REF: GitRun = GitRun::new(
     &["symbolic-ref", "--quiet", "HEAD"],
 );
 pub(crate) const FETCH: GitRun = GitRun::new("git fetch", &["fetch"]);
+// The paths follow a `--`. Literal pathspecs keep a name such as `*.yml` from
+// matching other files, and `--all` records a named path that is gone as
+// removed.
+const ADD: GitRun = GitRun::new("git add", &["--literal-pathspecs", "add", "--all"]);
 const REV_PARSE_HEAD: GitRun = GitRun::new("git rev-parse HEAD", &["rev-parse", "HEAD"]);
 const MERGE_FF: GitRun = GitRun::new("git merge --ff-only @{u}", &["merge", "--ff-only", "@{u}"]);
 const AHEAD_BEHIND: GitRun = GitRun::new(
@@ -290,16 +286,14 @@ pub(crate) const DIFF_NAME_STATUS: &str = "git diff --name-status";
 // Whether `git push --porcelain` refused to send `current_ref`, the branch being
 // pushed, because the remote has commits it lacks. The current branch is named
 // by its full ref, or as `HEAD` when a `HEAD` or `HEAD:<ref>` refspec pushed it.
-// Each ref's line is
-// `<flag>\t<from>:<to>\t<summary> (<reason>)`. A flag of `!` with the summary
-// and reason `[rejected] (fetch first)` or `[rejected] (non-fast-forward)` on
-// the current branch's own line is that refusal. git's transport.c prints these
-// strings untranslated, so they hold under any locale.
-//
-// Other lines do not count: `[remote rejected]` (a server hook or a protected
-// branch) and `[remote failure]` are not fixed by pulling, nor is a tag or
-// another branch rejected beside the current one.
+// Each ref's line is `<flag>\t<from>:<to>\t<summary> (<reason>)`, and the refusal
+// is a `!` flag with `[rejected] (fetch first)` or `[rejected] (non-fast-forward)`
+// on the current branch's own line. git's transport.c prints these strings
+// untranslated, so they hold under any locale.
 fn push_was_rejected(porcelain_stdout: &str, current_ref: &str) -> bool {
+    // Other lines do not count: `[remote rejected]` (a server hook or a protected
+    // branch) and `[remote failure]` are not fixed by pulling, nor is a tag or
+    // another branch rejected beside the current one.
     porcelain_stdout.lines().any(|line| {
         let mut fields = line.split('\t');
         let (flag, refs, status) = (fields.next(), fields.next(), fields.next());
@@ -330,15 +324,24 @@ fn failed_ref_lines(porcelain_stdout: &str) -> String {
 struct RawStatus {
     worktree_mods: HashSet<String>,
     index_mods: HashSet<String>,
+    // The subset of `index_mods` the index no longer has, as `git rm` leaves.
+    index_deletions: HashSet<String>,
     untracked: Vec<String>,
 }
 
 /// Iterate gix status items and classify them into worktree modifications,
 /// index (staged) modifications, and untracked files.
 fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
+    // File by file, not gix's default of one entry per new directory: a
+    // commit records index paths, and a directory is never one. Renames are
+    // not tracked for the same reason: a staged rename is the removal of one
+    // path and the addition of another, and its new path alone leaves the old
+    // one in the tree.
     let platform = repo
         .status(gix::progress::Discard)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .untracked_files(gix::status::UntrackedFiles::Files)
+        .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled);
 
     let iter = platform
         .into_iter(std::iter::empty::<gix::bstr::BString>())
@@ -346,6 +349,7 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
 
     let mut worktree_mods = HashSet::new();
     let mut index_mods = HashSet::new();
+    let mut index_deletions = HashSet::new();
     let mut untracked = Vec::new();
 
     for item in iter {
@@ -368,6 +372,9 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
             }
             gix::status::Item::TreeIndex(change) => {
                 let location = change.location().to_string();
+                if matches!(change, gix::diff::index::Change::Deletion { .. }) {
+                    index_deletions.insert(location.clone());
+                }
                 index_mods.insert(location);
             }
         }
@@ -376,6 +383,7 @@ fn collect_raw_status(repo: &gix::Repository) -> Result<RawStatus, String> {
     Ok(RawStatus {
         worktree_mods,
         index_mods,
+        index_deletions,
         untracked,
     })
 }
@@ -407,6 +415,85 @@ fn parse_diff_line(line: &str) -> Option<ChangedFile> {
         path: PathBuf::from(path),
         change_type,
     })
+}
+
+// The author or committer git configuration names, owned.
+fn identity<E: std::fmt::Display>(
+    configured: Option<Result<gix::actor::SignatureRef<'_>, E>>,
+    role: &str,
+) -> Result<gix::actor::Signature, GitSyncError> {
+    configured
+        .ok_or_else(|| git_sync_err("commit", format!("no {role} identity is configured")))?
+        .map(Into::into)
+        .map_err(|e| git_sync_err("commit", e))
+}
+
+// Refuses what neither staging nor committing may write over: an operation
+// git has in progress, which owns the index and its own state files, and a
+// path with conflict stages, which has no single entry to record. Asked by both
+// before anything is written, so a refusal leaves the repository as it was.
+fn refuse_unsafe_state(
+    repo: &gix::Repository,
+    index: &gix::index::File,
+    files: &[PathBuf],
+) -> Result<(), GitSyncError> {
+    if let Some(state) = repo.state() {
+        return Err(GitSyncError::OperationInProgress {
+            operation: in_progress_operation(state),
+        });
+    }
+    for file in files {
+        let path = gix::path::into_bstr(file).map_err(|e| git_sync_err("read path", e))?;
+        // Every stage of the path: a conflict deleted on one side has no
+        // stage 2, so probing for "ours" alone would miss it.
+        let conflicted = index.entry_range(path.as_ref()).is_some_and(|range| {
+            index.entries()[range]
+                .iter()
+                .any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+        });
+        if conflicted {
+            return Err(GitSyncError::Conflicted { path: file.clone() });
+        }
+    }
+    Ok(())
+}
+
+// Whether `file` has no index entry, no entries below it and nothing on disk,
+// as `git rm` leaves a path, so that `git add` would find nothing to match.
+fn is_gone(index: &gix::index::File, repo_root: &Path, file: &Path) -> Result<bool, GitSyncError> {
+    let path = gix::path::into_bstr(file).map_err(|e| git_sync_err("stage", e))?;
+    let mut below = path.clone().into_owned();
+    below.push(b'/');
+    if index.entry_range(path.as_ref()).is_some()
+        || index.prefixed_entries_range(below.as_ref()).is_some()
+    {
+        return Ok(false);
+    }
+    // Only an answer that the path is absent counts. Any other failure to stat
+    // it leaves it to git, which reports what is wrong.
+    Ok(
+        std::fs::symlink_metadata(repo_root.join(file)).is_err_and(|e| {
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            )
+        }),
+    )
+}
+
+// gix's name for the operation, in the port's terms.
+fn in_progress_operation(state: gix::state::InProgress) -> InProgressOperation {
+    use gix::state::InProgress;
+    match state {
+        InProgress::Merge => InProgressOperation::Merge,
+        InProgress::Rebase | InProgress::RebaseInteractive => InProgressOperation::Rebase,
+        InProgress::CherryPick | InProgress::CherryPickSequence => InProgressOperation::CherryPick,
+        InProgress::Revert | InProgress::RevertSequence => InProgressOperation::Revert,
+        InProgress::Bisect => InProgressOperation::Bisect,
+        InProgress::ApplyMailbox | InProgress::ApplyMailboxRebase => {
+            InProgressOperation::ApplyMailbox
+        }
+    }
 }
 
 // ─── GitStatusProvider (read-only, existing) ─────────────────────────────────
@@ -508,7 +595,13 @@ impl GitSyncProvider for GixGitAdapter {
         })?;
 
         let modified = raw.worktree_mods.iter().map(PathBuf::from).collect();
-        let staged = raw.index_mods.iter().map(PathBuf::from).collect();
+        // A staged deletion is reported as deleted, not as staged, so sync
+        // groups it as a removal rather than read a spec that is gone.
+        let staged = raw
+            .index_mods
+            .difference(&raw.index_deletions)
+            .map(PathBuf::from)
+            .collect();
         let untracked = raw.untracked.iter().map(PathBuf::from).collect();
 
         // Detect deleted files via git CLI (gix status doesn't surface deletions cleanly)
@@ -523,6 +616,7 @@ impl GitSyncProvider for GixGitAdapter {
                 deleted.push(PathBuf::from(line));
             }
         }
+        deleted.extend(raw.index_deletions.iter().map(PathBuf::from));
 
         // Ahead/behind via git CLI (simpler than gix for remote tracking)
         let (ahead, behind) = self.ahead_behind_counts(repo_root);
@@ -538,84 +632,164 @@ impl GitSyncProvider for GixGitAdapter {
     }
 
     fn stage_files(&self, repo_root: &Path, files: &[PathBuf]) -> Result<(), GitSyncError> {
-        if files.is_empty() {
+        let repo = open_repo(self.scope, repo_root)?;
+        let index = repo
+            .index_or_empty()
+            .map_err(|e| git_sync_err("open index", e))?;
+        refuse_unsafe_state(&repo, &index, files)?;
+
+        // A gone path has nothing left to stage, and git refuses a pathspec
+        // that matches nothing. The commit records its removal all the same,
+        // because the index has no entry for it.
+        let mut paths = Vec::with_capacity(files.len());
+        for file in files {
+            if !is_gone(&index, repo_root, file)? {
+                paths.push(file);
+            }
+        }
+        // `git add --all` with no paths stages the whole tree.
+        if paths.is_empty() {
             return Ok(());
         }
 
-        let repo = open_repo(self.scope, repo_root)?;
-        let mut index = repo
-            .open_index()
-            .map_err(|e| git_sync_err("open index", e))?;
-
-        let workdir = repo
-            .workdir()
-            .ok_or_else(|| GitSyncError::OperationFailed {
-                operation: "stage",
-                message: GitMessage::new("bare repository"),
-            })?;
-
-        for file in files {
-            let full_path = workdir.join(file);
-            let relative_bstring =
-                gix::path::into_bstr(file).map_err(|e| git_sync_err("stage", e))?;
-            let relative_path: &gix::bstr::BStr = relative_bstring.as_ref();
-
-            if full_path.exists() {
-                // File exists → hash it as a blob and upsert into the index.
-                let data = std::fs::read(&full_path).map_err(|e| git_sync_err("read file", e))?;
-                let blob_id = repo
-                    .write_blob(&data)
-                    .map_err(|e| git_sync_err("write blob", e))?;
-
-                let entry_mode = if is_executable(&full_path) {
-                    gix::index::entry::Mode::FILE_EXECUTABLE
-                } else {
-                    gix::index::entry::Mode::FILE
-                };
-
-                match index.entry_index_by_path_and_stage(
-                    relative_path,
-                    gix::index::entry::Stage::Unconflicted,
-                ) {
-                    Some(pos) => {
-                        // Update existing entry in place.
-                        let entry = &mut index.entries_mut()[pos];
-                        entry.id = blob_id.detach();
-                        entry.mode = entry_mode;
-                        entry.flags.remove(
-                            gix::index::entry::Flags::ASSUME_VALID
-                                | gix::index::entry::Flags::UPDATE,
-                        );
-                    }
-                    None => {
-                        // New file — push and re-sort.
-                        index.dangerously_push_entry(
-                            Default::default(),
-                            blob_id.detach(),
-                            gix::index::entry::Flags::empty(),
-                            entry_mode,
-                            relative_path,
-                        );
-                        index.sort_entries();
-                    }
-                }
-            } else {
-                // File deleted → remove from index.
-                let relative_owned = relative_path.to_owned();
-                index.remove_entries(|_, path, _| path == relative_owned);
-            }
+        // git decides each path's blob, mode and entry, applying the
+        // repository's attributes and clean filters, which a git-crypt or LFS
+        // repository depends on to keep plaintext and large files out of
+        // history. Only the named paths are given to it.
+        let output = git_command(self.scope, repo_root, ADD.args)
+            .arg("--")
+            .args(paths)
+            .output()
+            .map_err(|e| git_sync_err(ADD.label, e))?;
+        if !output.status.success() {
+            return Err(failure(ADD.label, &output, ""));
         }
-
-        index
-            .write(Default::default())
-            .map_err(|e| git_sync_err("write index", e))?;
         Ok(())
     }
 
-    fn commit(&self, _repo_root: &Path, _message: &str) -> Result<CommitId, GitSyncError> {
-        // commit_tree can build a tree that deletes every tracked file (seen on
-        // a nested path, selfie-ugf9.6). Refused until that is fixed and tested.
-        Err(GitSyncError::CommitDisabled)
+    fn commit(
+        &self,
+        repo_root: &Path,
+        files: &[PathBuf],
+        message: &str,
+    ) -> Result<CommitId, GitSyncError> {
+        let repo = open_repo(self.scope, repo_root)?;
+        let index = repo
+            .index_or_empty()
+            .map_err(|e| git_sync_err("open index", e))?;
+        refuse_unsafe_state(&repo, &index, files)?;
+
+        // Only the named paths are edited. Nothing walks HEAD's tree to infer
+        // deletions from what the index lacks: a walk reports directories too,
+        // a directory is never an index path, and inferring would remove every
+        // file below one. A path the index has no entry for is removed because
+        // selfie named it, never because it is missing.
+        //
+        // HEAD is read once, and both the tree to edit and the parent come from
+        // that read. Two reads let another writer move the branch in between,
+        // and the commit would then undo that writer's change under a parent
+        // the reference check accepts.
+        let parent = repo
+            .head()
+            .map_err(|e| git_sync_err("read HEAD", e))?
+            .id()
+            .map(gix::Id::detach);
+        let head_tree_id = match parent {
+            Some(id) => repo
+                .find_commit(id)
+                .and_then(|commit| commit.tree_id())
+                .map_err(|e| git_sync_err("head tree", e))?
+                .detach(),
+            None => gix::ObjectId::empty_tree(repo.object_hash()),
+        };
+        let mut editor = repo
+            .edit_tree(head_tree_id)
+            .map_err(|e| git_sync_err("edit tree", e))?;
+        // Removals go first, so a file replaced by a directory of the same name
+        // is removed before the files below it are added, in whatever order
+        // `files` names them. A removal refuses a tree: a named directory has no
+        // index entry, and removing it would take every file below it along.
+        let mut upserts = Vec::with_capacity(files.len());
+        for file in files {
+            let path = gix::path::into_bstr(file).map_err(|e| git_sync_err("commit", e))?;
+            match index
+                .entry_by_path_and_stage(path.as_ref(), gix::index::entry::Stage::Unconflicted)
+            {
+                Some(entry) => upserts.push((path, entry)),
+                None => {
+                    editor
+                        .remove_leaf(path.as_ref())
+                        .map_err(|e| git_sync_err("remove tree entry", e))?;
+                }
+            }
+        }
+        for (path, entry) in upserts {
+            let kind = entry
+                .mode
+                .to_tree_entry_mode()
+                .map(gix::object::tree::EntryKind::from)
+                .ok_or_else(|| git_sync_err("commit", "an index entry has no tree mode"))?;
+            editor
+                .upsert(path.as_ref(), kind, entry.id)
+                .map_err(|e| git_sync_err("upsert tree entry", e))?;
+        }
+        let tree_id = editor
+            .write()
+            .map_err(|e| git_sync_err("write tree", e))?
+            .detach();
+        if tree_id == head_tree_id {
+            return Err(GitSyncError::NothingToCommit);
+        }
+
+        let mut object = gix::objs::Commit {
+            message: message.into(),
+            tree: tree_id,
+            author: identity(repo.author(), "author")?,
+            committer: identity(repo.committer(), "committer")?,
+            encoding: None,
+            parents: parent.into_iter().collect(),
+            extra_headers: Vec::new(),
+        };
+        // Signed before the object is written, let alone before any reference
+        // moves, so a signing failure, such as an SSH agent that is locked,
+        // leaves the branch where it was. The options are resolved once, since
+        // `gpg.ssh.defaultKeyCommand` runs a program to find the key.
+        if let Some(options) = repo
+            .commit_signing_options_if_enabled()
+            .map_err(|e| git_sync_err("read signing configuration", e))?
+        {
+            object = object
+                .sign(options)
+                .map_err(|e| git_sync_err("sign commit", e))?;
+        }
+        let commit_id = repo
+            .write_object(&object)
+            .map_err(|e| git_sync_err("write commit", e))?
+            .detach();
+
+        // As gix's own `commit` does: the branch moves only if it still points
+        // at the parent the tree was built on.
+        let expected = match parent {
+            Some(parent) => gix::refs::transaction::PreviousValue::MustExistAndMatch(
+                gix::refs::Target::Object(parent),
+            ),
+            None => gix::refs::transaction::PreviousValue::MustNotExist,
+        };
+        let head: gix::refs::FullName = "HEAD"
+            .try_into()
+            .map_err(|e| git_sync_err("update HEAD", e))?;
+        let reflog = gix::reference::log::message(
+            "commit",
+            message.as_bytes().into(),
+            usize::from(parent.is_some()),
+        );
+        repo.edit_reference(
+            gix::refs::transaction::RefEdit::update(head, commit_id, expected, reflog)
+                .with_deref(true),
+        )
+        .map_err(|e| git_sync_err("update HEAD", e))?;
+
+        Ok(CommitId(commit_id.to_string()))
     }
 
     fn push(&self, repo_root: &Path) -> Result<(), GitSyncError> {
@@ -733,93 +907,6 @@ impl GixGitAdapter {
     }
 }
 
-// The commit implementation sync push used before it was disabled. It can
-// build a tree that deletes every tracked file; kept, with its test, for the
-// fix to start from.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "commit is disabled until the tree bug is fixed")
-)]
-fn commit_tree(
-    scope: ConfigScope,
-    repo_root: &Path,
-    message: &str,
-) -> Result<CommitId, GitSyncError> {
-    let repo = open_repo(scope, repo_root)?;
-    let index = repo
-        .open_index()
-        .map_err(|e| git_sync_err("open index", e))?;
-
-    // Build a tree from the current index by starting from HEAD's tree
-    // (or the empty tree for the first commit) and upserting every entry.
-    let head_tree_id = repo
-        .head_tree_id_or_empty()
-        .map_err(|e| git_sync_err("head tree", e))?;
-    let mut editor = repo
-        .edit_tree(head_tree_id)
-        .map_err(|e| git_sync_err("edit tree", e))?;
-
-    // Collect HEAD tree entries so we can detect deletions.
-    let head_entries: HashSet<String> = repo
-        .find_tree(head_tree_id)
-        .ok()
-        .map(|tree| {
-            tree.traverse()
-                .breadthfirst
-                .files()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| r.filepath.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Upsert all index entries into the tree.
-    let index_paths: HashSet<String> = index
-        .entries()
-        .iter()
-        .map(|e| e.path(&index).to_string())
-        .collect();
-
-    for entry in index.entries() {
-        let path = entry.path(&index);
-        let kind = match entry.mode {
-            gix::index::entry::Mode::FILE_EXECUTABLE => {
-                gix::object::tree::EntryKind::BlobExecutable
-            }
-            gix::index::entry::Mode::SYMLINK => gix::object::tree::EntryKind::Link,
-            _ => gix::object::tree::EntryKind::Blob,
-        };
-        editor
-            .upsert(path.to_owned(), kind, entry.id)
-            .map_err(|e| git_sync_err("upsert tree entry", e))?;
-    }
-
-    // Remove entries that were in HEAD but are no longer in the index.
-    for path in &head_entries {
-        if !index_paths.contains(path) {
-            let bpath: &gix::bstr::BStr = path.as_str().into();
-            editor
-                .remove(bpath.to_owned())
-                .map_err(|e| git_sync_err("remove tree entry", e))?;
-        }
-    }
-
-    let tree_id = editor.write().map_err(|e| git_sync_err("write tree", e))?;
-
-    // Determine parent(s).
-    let parents: Vec<gix::ObjectId> = repo
-        .head_id()
-        .map(|id| vec![id.detach()])
-        .unwrap_or_default();
-
-    let commit_id = repo
-        .commit("HEAD", message, tree_id, parents)
-        .map_err(|e| git_sync_err("commit", e))?;
-
-    Ok(CommitId(commit_id.to_string()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,13 +946,13 @@ mod tests {
         (temp, path)
     }
 
-    // Create a temporary git repo with an initial commit (so the index exists).
+    // Create a temporary git repo with an empty initial commit, so a commit
+    // made in it has a parent.
     fn init_repo_for_commits() -> (tempfile::TempDir, PathBuf) {
         let (temp, path) = init_repo();
         // gix, opened isolated, reads no identity from the environment, so the
-        // repository carries one for `commit_tree`.
+        // repository carries one for the adapter's commits.
         configure_identity(&path);
-        // Create an initial commit so the index file exists on disk.
         git(&path, &["commit", "--allow-empty", "-m", "initial"]).unwrap();
         (temp, path)
     }
@@ -1008,6 +1095,218 @@ mod tests {
         assert_eq!(status.untracked.len(), 1);
     }
 
+    // A new directory of dotfile sources is reported file by file, since a
+    // commit records index paths and a directory is never one.
+    #[test]
+    fn a_new_directory_reports_each_file_untracked() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::create_dir_all(path.join("packages/nvim/lua")).unwrap();
+        fs::write(path.join("packages/nvim/lua/init.lua"), "-- a\n").unwrap();
+        fs::write(path.join("packages/nvim/lua/keys.lua"), "-- b\n").unwrap();
+
+        let mut untracked = isolated().repo_status(&path).unwrap().untracked;
+        untracked.sort();
+
+        assert_eq!(
+            untracked,
+            [
+                PathBuf::from("packages/nvim/lua/init.lua"),
+                PathBuf::from("packages/nvim/lua/keys.lua"),
+            ]
+        );
+    }
+
+    // `git ls-files --deleted` reports a tracked file once its directory is
+    // replaced by a link, here to a directory holding a key. Staging it would
+    // read through the link, so git refuses, and the index keeps what it had.
+    #[test]
+    fn a_path_beyond_a_symlink_is_refused_and_nothing_is_staged() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::create_dir_all(path.join("ssh")).unwrap();
+        fs::write(path.join("ssh/config"), "Host a\n").unwrap();
+        git(&path, &["add", "ssh/config"]).unwrap();
+        git(&path, &["commit", "-m", "add ssh config"]).unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::write(outside.path().join("config"), "k7Qz-private-ssh-config\n").unwrap();
+        fs::remove_dir_all(path.join("ssh")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), path.join("ssh")).unwrap();
+
+        let result = isolated().stage_files(&path, &[PathBuf::from("ssh/config")]);
+
+        assert!(
+            matches!(
+                &result,
+                Err(GitSyncError::OperationFailed {
+                    operation: "git add",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            git(&path, &["cat-file", "-p", ":ssh/config"]).unwrap(),
+            "Host a"
+        );
+    }
+
+    // git reuses an index's cached subtree ids when it writes a tree, so an
+    // index whose entries changed under a still-valid cache makes the user's
+    // next `git commit` record the old subtree, silently reverting selfie's
+    // commit. The fixture's own `git commit` populates that cache.
+    #[test]
+    fn a_later_git_commit_keeps_what_selfie_committed() {
+        let (_temp, path) = nested_repo();
+        fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
+        stage_and_commit(&path, &["packages/foo/rc"]).unwrap();
+
+        fs::write(path.join("notes.txt"), "note\n").unwrap();
+        git(&path, &["add", "notes.txt"]).unwrap();
+        git(&path, &["commit", "-m", "the user's own commit"]).unwrap();
+
+        assert_eq!(head_changes(&path), "A\tnotes.txt");
+        assert_eq!(git(&path, &["show", "HEAD:packages/foo/rc"]).unwrap(), "b");
+    }
+
+    // An intent-to-add entry left in place makes git leave the path out of the
+    // next tree it writes, so the user's next commit would delete it.
+    #[test]
+    fn an_intent_to_add_path_survives_the_users_next_commit() {
+        let (_temp, path) = nested_repo();
+        fs::write(path.join("packages/foo/new"), "n\n").unwrap();
+        git(&path, &["add", "-N", "packages/foo/new"]).unwrap();
+        stage_and_commit(&path, &["packages/foo/new"]).unwrap();
+
+        fs::write(path.join("notes.txt"), "note\n").unwrap();
+        git(&path, &["add", "notes.txt"]).unwrap();
+        git(&path, &["commit", "-m", "the user's own commit"]).unwrap();
+
+        assert_eq!(head_changes(&path), "A\tnotes.txt");
+    }
+
+    // The new content is a different size from the old, because git trusts a
+    // size mismatch without rehashing: a stale stat then reads as a change.
+    #[test]
+    fn a_staged_file_does_not_read_as_modified() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("foo.yml"), "name: foo\n").unwrap();
+        git(&path, &["add", "foo.yml"]).unwrap();
+        git(&path, &["commit", "-m", "add foo"]).unwrap();
+        fs::write(path.join("foo.yml"), "name: foo\n# a longer body\n").unwrap();
+        fs::write(path.join("new.yml"), "name: new\n").unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("foo.yml"), PathBuf::from("new.yml")])
+            .unwrap();
+
+        // Unstaged changes only: anything here means the index disagrees with a
+        // working tree that matches it.
+        assert_eq!(git(&path, &["diff-files", "--name-only"]).unwrap(), "");
+        assert_eq!(
+            git(&path, &["status", "--porcelain"]).unwrap(),
+            "M  foo.yml\nA  new.yml"
+        );
+    }
+
+    // The link points outside the repository at bytes that must never reach a
+    // blob, as a link to a private key would.
+    #[test]
+    fn a_symlink_is_staged_as_a_link_not_as_what_it_names() {
+        let (_temp, path) = init_repo_for_commits();
+        let outside = tempfile::TempDir::new().unwrap();
+        let secret = outside.path().join("id_key");
+        fs::write(&secret, "k7Qz-private-key-bytes\n").unwrap();
+        std::os::unix::fs::symlink(&secret, path.join("link")).unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("link")])
+            .unwrap();
+
+        let entry = git(&path, &["ls-files", "-s", "link"]).unwrap();
+        assert!(entry.starts_with("120000 "), "staged as {entry:?}");
+        let blob = git(&path, &["cat-file", "-p", ":link"]).unwrap();
+        assert_eq!(blob, secret.to_str().unwrap());
+    }
+
+    // A dangling link is still a link: reading through it finds nothing, and a
+    // stage that followed it would remove a tracked link from the index.
+    #[test]
+    fn a_dangling_symlink_stays_staged() {
+        let (_temp, path) = init_repo_for_commits();
+        std::os::unix::fs::symlink(path.join("nowhere"), path.join("dangling")).unwrap();
+        git(&path, &["add", "dangling"]).unwrap();
+        git(&path, &["commit", "-m", "add link"]).unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("dangling")])
+            .unwrap();
+
+        let entry = git(&path, &["ls-files", "-s", "dangling"]).unwrap();
+        assert!(entry.starts_with("120000 "), "staged as {entry:?}");
+        assert_eq!(git(&path, &["status", "--porcelain"]).unwrap(), "");
+    }
+
+    // A fifo has no blob, and git leaves one out rather than wait on it. The
+    // regular file beside it is still staged.
+    #[test]
+    fn a_fifo_is_left_unstaged() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("a.yml"), "name: a\n").unwrap();
+        nix::unistd::mkfifo(&path.join("pipe"), nix::sys::stat::Mode::S_IRWXU).unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("a.yml"), PathBuf::from("pipe")])
+            .unwrap();
+
+        assert_eq!(git(&path, &["ls-files"]).unwrap(), "a.yml");
+    }
+
+    // A clean filter is how a git-crypt repository keeps plaintext out of
+    // history. This one upper-cases, so the blob shows whether it ran.
+    #[test]
+    fn a_clean_filter_decides_the_staged_blob() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join(".gitattributes"), "*.secret filter=shout\n").unwrap();
+        git(&path, &["config", "filter.shout.clean", "tr a-z A-Z"]).unwrap();
+        git(&path, &["config", "filter.shout.smudge", "cat"]).unwrap();
+        fs::write(path.join("token.secret"), "plaintext\n").unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("token.secret")])
+            .unwrap();
+
+        assert_eq!(
+            git(&path, &["cat-file", "-p", ":token.secret"]).unwrap(),
+            "PLAINTEXT"
+        );
+    }
+
+    // `x*.yml` is a file name, not a pattern: `xa.yml` beside it must stay
+    // untracked.
+    #[test]
+    fn a_name_with_a_glob_character_stages_only_itself() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("x*.yml"), "s\n").unwrap();
+        fs::write(path.join("xa.yml"), "t\n").unwrap();
+
+        isolated()
+            .stage_files(&path, &[PathBuf::from("x*.yml")])
+            .unwrap();
+
+        assert_eq!(git(&path, &["ls-files"]).unwrap(), "x*.yml");
+    }
+
+    // `git add --all` with no paths stages the whole tree, so an empty list
+    // must never reach git.
+    #[test]
+    fn staging_no_paths_changes_nothing() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("a.yml"), "name: a\n").unwrap();
+
+        isolated().stage_files(&path, &[]).unwrap();
+
+        assert_eq!(git(&path, &["ls-files"]).unwrap(), "");
+    }
+
     #[test]
     fn stage_files_works() {
         let (_temp, path) = init_repo_for_commits();
@@ -1018,45 +1317,357 @@ mod tests {
             .unwrap();
 
         let status = isolated().repo_status(&path).unwrap();
-        assert!(!status.staged.is_empty() || status.untracked.is_empty());
+        assert_eq!(status.staged, [PathBuf::from("test.yml")]);
+        assert!(status.untracked.is_empty(), "{:?}", status.untracked);
     }
 
-    #[test]
-    fn commit_creates_commit() {
-        let (_temp, path) = init_repo_for_commits();
-        fs::write(path.join("test.yml"), "name: test\n").unwrap();
-
-        isolated()
-            .stage_files(&path, &[PathBuf::from("test.yml")])
-            .unwrap();
-
-        let result = commit_tree(ConfigScope::Isolated, &path, "test commit");
-        assert!(result.is_ok(), "commit should succeed: {result:?}");
-    }
-
-    // A tree that deletes every tracked file was recorded on a nested path, so
-    // committing is refused, and nothing is written, until that is fixed.
-    #[test]
-    fn commit_is_refused_and_writes_nothing() {
-        let (_temp, path) = init_repo_for_commits();
+    // A packages repository in the nested layout, committed once, as sync
+    // push finds it.
+    fn nested_repo() -> (tempfile::TempDir, PathBuf) {
+        let (temp, path) = init_repo_for_commits();
         fs::create_dir_all(path.join("packages/foo")).unwrap();
         fs::write(path.join("packages/foo.yml"), "name: foo\n").unwrap();
         fs::write(path.join("packages/foo/rc"), "a\n").unwrap();
+        fs::write(path.join("packages/foo/old"), "old\n").unwrap();
+        fs::write(path.join("packages/bar.yml"), "name: bar\n").unwrap();
         git(&path, &["add", "-A"]).unwrap();
         git(&path, &["commit", "-m", "init"]).unwrap();
-        let before = git(&path, &["rev-parse", "HEAD"]).unwrap();
-        fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
-        isolated()
-            .stage_files(&path, &[PathBuf::from("packages/foo/rc")])
-            .unwrap();
+        (temp, path)
+    }
 
-        let result = isolated().commit(&path, "chore(foo): update dotfile");
+    // Stages and commits `files` as sync push does, through the adapter alone.
+    fn stage_and_commit(path: &Path, files: &[&str]) -> Result<CommitId, GitSyncError> {
+        let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+        isolated().stage_files(path, &files)?;
+        isolated().commit(path, &files, "chore(foo): update dotfile")
+    }
+
+    fn head(path: &Path) -> String {
+        git(path, &["rev-parse", "HEAD"]).unwrap()
+    }
+
+    // What the commit at HEAD changed, as git reports it.
+    fn head_changes(path: &Path) -> String {
+        git(path, &["diff", "--name-status", "HEAD~1", "HEAD"]).unwrap()
+    }
+
+    // Every path and blob in a commit's tree, so a comparison sees any path
+    // that was dropped, not only the ones the diff names.
+    fn tree_listing(path: &Path, rev: &str) -> Vec<String> {
+        git(path, &["ls-tree", "-r", rev])
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    // The nested layout is where a commit built from the whole index deletes
+    // every file: the commit has to change the one path and leave every other
+    // entry, nested or not, exactly as the parent had it.
+    #[test]
+    fn commit_over_a_nested_path_changes_only_that_path() {
+        let (_temp, path) = nested_repo();
+        fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
+
+        stage_and_commit(&path, &["packages/foo/rc"]).unwrap();
+
+        assert_eq!(head_changes(&path), "M\tpackages/foo/rc");
+        let before = tree_listing(&path, "HEAD~1");
+        let after = tree_listing(&path, "HEAD");
+        let unchanged = |listing: &[String]| -> Vec<String> {
+            listing
+                .iter()
+                .filter(|line| !line.ends_with("\tpackages/foo/rc"))
+                .cloned()
+                .collect()
+        };
+        assert_eq!(after.len(), before.len());
+        assert_eq!(unchanged(&after), unchanged(&before));
+        assert_eq!(git(&path, &["status", "--porcelain"]).unwrap(), "");
+    }
+
+    // The user's own staged work, an addition and a deletion, both of paths
+    // selfie does not name. Neither may ride in selfie's commit, and both must
+    // still be staged afterwards.
+    #[test]
+    fn commit_leaves_what_the_user_staged_out() {
+        let (_temp, path) = nested_repo();
+        fs::write(path.join("notes.txt"), "note\n").unwrap();
+        git(&path, &["add", "notes.txt"]).unwrap();
+        git(&path, &["rm", "-q", "--cached", "packages/bar.yml"]).unwrap();
+        fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
+
+        stage_and_commit(&path, &["packages/foo/rc"]).unwrap();
+
+        assert_eq!(head_changes(&path), "M\tpackages/foo/rc");
+        let status = git(&path, &["status", "--porcelain"]).unwrap();
+        assert!(status.contains("A  notes.txt"), "status: {status}");
+        assert!(status.contains("D  packages/bar.yml"), "status: {status}");
+    }
+
+    // A path selfie names and deleted is removed; its sibling in the same
+    // directory is not. The group names the unchanged sibling too, as a
+    // package's group does, so the removal must come from the named path.
+    #[test]
+    fn commit_records_a_deletion_selfie_staged() {
+        let (_temp, path) = nested_repo();
+        fs::remove_file(path.join("packages/foo/old")).unwrap();
+
+        stage_and_commit(&path, &["packages/foo/old", "packages/foo/rc"]).unwrap();
+
+        assert_eq!(head_changes(&path), "D\tpackages/foo/old");
+        assert!(
+            tree_listing(&path, "HEAD")
+                .iter()
+                .any(|line| line.ends_with("\tpackages/foo/rc"))
+        );
+    }
+
+    // `git rm` takes a path out of the index and the working tree alike, so
+    // git has nothing to match it against. The group also names a modified
+    // file, which must still be staged and committed beside the removal.
+    #[test]
+    fn a_path_removed_with_git_rm_is_committed_as_removed() {
+        let (_temp, path) = nested_repo();
+        git(&path, &["rm", "-q", "packages/bar.yml"]).unwrap();
+        fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
+
+        stage_and_commit(&path, &["packages/bar.yml", "packages/foo/rc"]).unwrap();
+
+        assert_eq!(
+            head_changes(&path),
+            "D\tpackages/bar.yml\nM\tpackages/foo/rc"
+        );
+    }
+
+    // A commit names paths, so a staged rename has to be reported as both of
+    // them: grouped by its new path alone, the old one stays in the tree.
+    #[test]
+    fn a_staged_rename_reports_both_paths() {
+        let (_temp, path) = nested_repo();
+        git(&path, &["mv", "packages/bar.yml", "packages/baz.yml"]).unwrap();
+
+        let status = isolated().repo_status(&path).unwrap();
+
+        assert_eq!(status.staged, [PathBuf::from("packages/baz.yml")]);
+        assert_eq!(status.deleted, [PathBuf::from("packages/bar.yml")]);
+    }
+
+    // `git rm` leaves the path in neither the index nor the working tree. It is
+    // reported as deleted, not staged, so sync does not try to read it.
+    #[test]
+    fn a_path_removed_with_git_rm_reports_as_deleted() {
+        let (_temp, path) = nested_repo();
+        git(&path, &["rm", "-q", "packages/bar.yml"]).unwrap();
+
+        let status = isolated().repo_status(&path).unwrap();
+
+        assert!(status.staged.is_empty(), "{:?}", status.staged);
+        assert_eq!(status.deleted, [PathBuf::from("packages/bar.yml")]);
+    }
+
+    // Deleting a package's only file leaves no path for git add, which must
+    // then not run at all: with no paths it would stage the whole tree.
+    #[test]
+    fn a_group_of_only_removed_paths_stages_nothing_else() {
+        let (_temp, path) = nested_repo();
+        git(&path, &["rm", "-q", "packages/bar.yml"]).unwrap();
+        fs::write(path.join("notes.txt"), "note\n").unwrap();
+
+        stage_and_commit(&path, &["packages/bar.yml"]).unwrap();
+
+        assert_eq!(head_changes(&path), "D\tpackages/bar.yml");
+        assert_eq!(
+            git(&path, &["status", "--porcelain"]).unwrap(),
+            "?? notes.txt"
+        );
+    }
+
+    // A directory is never an index path, so a named one has no entry. The
+    // commit refuses it rather than remove every file below it.
+    #[test]
+    fn a_named_directory_is_refused_rather_than_removed() {
+        let (_temp, path) = nested_repo();
+        let before = head(&path);
+
+        let result = isolated().commit(&path, &[PathBuf::from("packages/foo")], "chore(foo): x");
 
         assert!(
-            matches!(result, Err(GitSyncError::CommitDisabled)),
-            "commit must be refused: {result:?}"
+            matches!(
+                &result,
+                Err(GitSyncError::OperationFailed {
+                    operation: "remove tree entry",
+                    ..
+                })
+            ),
+            "{result:?}"
         );
-        assert_eq!(git(&path, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!(head(&path), before);
+    }
+
+    // A tracked file replaced by a directory of the same name. The group names
+    // the new file first, so the old file's removal must not take it along.
+    #[test]
+    fn a_file_replaced_by_a_directory_commits_the_file_below_it() {
+        let (_temp, path) = init_repo_for_commits();
+        fs::write(path.join("x"), "file\n").unwrap();
+        git(&path, &["add", "x"]).unwrap();
+        git(&path, &["commit", "-q", "-m", "add x"]).unwrap();
+        fs::remove_file(path.join("x")).unwrap();
+        fs::create_dir(path.join("x")).unwrap();
+        fs::write(path.join("x/a"), "a\n").unwrap();
+
+        stage_and_commit(&path, &["x/a", "x"]).unwrap();
+
+        let listing = tree_listing(&path, "HEAD");
+        assert_eq!(listing.len(), 1, "{listing:?}");
+        assert!(listing[0].ends_with("\tx/a"), "{listing:?}");
+    }
+
+    #[test]
+    fn the_first_commit_has_no_parent() {
+        let (_temp, path) = init_repo();
+        configure_identity(&path);
+        fs::write(path.join("a.yml"), "name: a\n").unwrap();
+
+        let id = stage_and_commit(&path, &["a.yml"]).unwrap();
+
+        assert_eq!(head(&path), id.0);
+        assert_eq!(git(&path, &["rev-list", "--count", "HEAD"]).unwrap(), "1");
+        assert_eq!(tree_listing(&path, "HEAD").len(), 1);
+    }
+
+    // A real conflicting merge: git's state files mark it in progress, and
+    // the index holds the conflict. Neither staging nor committing may write.
+    #[test]
+    fn a_merge_in_progress_refuses_staging_and_committing() {
+        let (_temp, path) = nested_repo();
+        git(&path, &["switch", "-q", "-c", "other"]).unwrap();
+        fs::write(path.join("packages/foo/rc"), "theirs\n").unwrap();
+        git(&path, &["commit", "-q", "-am", "theirs"]).unwrap();
+        git(&path, &["switch", "-q", "-"]).unwrap();
+        fs::write(path.join("packages/foo/rc"), "ours\n").unwrap();
+        git(&path, &["commit", "-q", "-am", "ours"]).unwrap();
+        git(&path, &["merge", "other"]).unwrap_err();
+        let before = head(&path);
+        let index_before = git(&path, &["ls-files", "-s"]).unwrap();
+        fs::write(path.join("packages/foo.yml"), "name: foo\n# edited\n").unwrap();
+
+        let staged = isolated().stage_files(&path, &[PathBuf::from("packages/foo.yml")]);
+        let committed = isolated().commit(&path, &[PathBuf::from("packages/foo.yml")], "chore: x");
+
+        for result in [staged.map(|()| None), committed.map(Some)] {
+            assert!(
+                matches!(
+                    result,
+                    Err(GitSyncError::OperationInProgress {
+                        operation: InProgressOperation::Merge
+                    })
+                ),
+                "expected the merge refusal: {result:?}"
+            );
+        }
+        assert_eq!(head(&path), before);
+        assert_eq!(git(&path, &["ls-files", "-s"]).unwrap(), index_before);
+        assert!(path.join(".git/MERGE_HEAD").exists());
+    }
+
+    // A conflict with no operation in progress, as `git stash pop` leaves one.
+    #[test]
+    fn a_conflicted_path_is_refused() {
+        let (_temp, path) = nested_repo();
+        fs::write(path.join("packages/foo/rc"), "stashed\n").unwrap();
+        git(&path, &["stash", "-q"]).unwrap();
+        fs::write(path.join("packages/foo/rc"), "committed\n").unwrap();
+        git(&path, &["commit", "-q", "-am", "committed"]).unwrap();
+        git(&path, &["stash", "pop", "-q"]).unwrap_err();
+        let before = head(&path);
+
+        let result = stage_and_commit(&path, &["packages/foo/rc"]);
+
+        assert!(
+            matches!(&result, Err(GitSyncError::Conflicted { path }) if path == Path::new("packages/foo/rc")),
+            "expected the conflict refusal: {result:?}"
+        );
+        assert_eq!(head(&path), before);
+    }
+
+    #[test]
+    fn an_unchanged_tree_is_not_committed() {
+        let (_temp, path) = nested_repo();
+        let before = head(&path);
+
+        let result = stage_and_commit(&path, &["packages/foo/rc"]);
+
+        assert!(
+            matches!(result, Err(GitSyncError::NothingToCommit)),
+            "{result:?}"
+        );
+        assert_eq!(head(&path), before);
+    }
+
+    // A throwaway SSH key configured in the repository alone, as a user's
+    // own signing setup would be, with an allowed-signers file so git can
+    // verify the result.
+    fn configure_ssh_signing(path: &Path, keys: &Path) {
+        let key = keys.join("key");
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-C", "selfie-test", "-f"])
+            .arg(&key)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let public = fs::read_to_string(keys.join("key.pub")).unwrap();
+        let signers = keys.join("allowed_signers");
+        fs::write(&signers, format!("selfie-test@example.invalid {public}")).unwrap();
+        for (name, value) in [
+            ("gpg.format", "ssh"),
+            ("user.signingkey", key.to_str().unwrap()),
+            ("gpg.ssh.allowedSignersFile", signers.to_str().unwrap()),
+            ("commit.gpgsign", "true"),
+        ] {
+            git(path, &["config", name, value]).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_commit_is_signed_when_the_repository_says_to() {
+        let (_temp, path) = nested_repo();
+        let keys = tempfile::TempDir::new().unwrap();
+        configure_ssh_signing(&path, keys.path());
+        fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
+
+        stage_and_commit(&path, &["packages/foo/rc"]).unwrap();
+
+        // `verify-commit` exits non-zero on an unsigned or unverifiable commit.
+        git(&path, &["verify-commit", "HEAD"]).unwrap();
+        assert_eq!(head_changes(&path), "M\tpackages/foo/rc");
+    }
+
+    // A signer that fails, as `op-ssh-sign` does with its agent locked. The
+    // branch must not move to an unsigned commit.
+    #[test]
+    fn a_failed_signature_leaves_the_branch_where_it_was() {
+        let (_temp, path) = nested_repo();
+        let keys = tempfile::TempDir::new().unwrap();
+        configure_ssh_signing(&path, keys.path());
+        git(&path, &["config", "gpg.ssh.program", "false"]).unwrap();
+        fs::write(path.join("packages/foo/rc"), "b\n").unwrap();
+        let before = head(&path);
+
+        let result = stage_and_commit(&path, &["packages/foo/rc"]);
+
+        assert!(
+            matches!(
+                &result,
+                Err(GitSyncError::OperationFailed {
+                    operation: "sign commit",
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(head(&path), before);
     }
 
     #[test]
@@ -1067,13 +1678,13 @@ mod tests {
         fs::write(path.join("a.yml"), "name: a\n").unwrap();
         git(&path, &["add", "a.yml"]).unwrap();
         git(&path, &["commit", "-m", "first"]).unwrap();
-        let first = git(&path, &["rev-parse", "HEAD"]).unwrap();
+        let first = head(&path);
 
         // Second commit
         fs::write(path.join("b.yml"), "name: b\n").unwrap();
         git(&path, &["add", "b.yml"]).unwrap();
         git(&path, &["commit", "-m", "second"]).unwrap();
-        let second = git(&path, &["rev-parse", "HEAD"]).unwrap();
+        let second = head(&path);
 
         let changes = isolated()
             .diff_commits(&path, &CommitId(first), &CommitId(second))

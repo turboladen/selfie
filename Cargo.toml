@@ -19,7 +19,7 @@ indexmap = { version = "2", features = ["serde"] }
 # The general category and Default_Ignorable_Code_Point of a character, for
 # escaping what reaches a terminal or a log.
 icu_properties = "2.2"
-gix = { version = "0.90", default-features = false, features = ["sha1", "status", "index", "revision"] }
+gix = { version = "0.90", default-features = false, features = ["sha1", "status", "index", "revision", "command"] }
 indicatif = "0.18"
 mockall = "0.15.0"
 nix = "0.31"
