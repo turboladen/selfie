@@ -268,7 +268,12 @@ fn create_package_with_dotfiles(
     name: &str,
     dotfiles: &[(&str, &str)],
 ) -> PathBuf {
-    let mut dotfiles_yaml = String::from("dotfiles:\n");
+    // A bare `dotfiles:` is YAML null, which the parser refuses for a list.
+    let mut dotfiles_yaml = String::from(if dotfiles.is_empty() {
+        "dotfiles: []\n"
+    } else {
+        "dotfiles:\n"
+    });
     for (source, target) in dotfiles {
         dotfiles_yaml.push_str(&format!(
             "  - source: \"{source}\"\n    target: \"{target}\"\n"

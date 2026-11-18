@@ -682,7 +682,7 @@ mod tests {
             (
                 "unclosed quoted scalar",
                 "environments: \"oops\n",
-                "invalid indentation in multiline quoted scalar",
+                "unclosed quote",
             ),
             (
                 "tab in indentation",
