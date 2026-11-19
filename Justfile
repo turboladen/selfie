@@ -225,12 +225,14 @@ xtask_target := justfile_directory() / "target" / "xtask"
 # Run `just clippy` on every commit in BASE..HEAD below the tip: `just percommit main`
 [positional-arguments]
 percommit base *args:
+    -@just --justfile '{{ justfile() }}' clean-scratch
     CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask percommit "$@"
 
 # Run each mutation in a spec in its own archive: `just mutate spec.toml`
 [no-cd]
 [positional-arguments]
 mutate spec *args:
+    -@just --justfile '{{ justfile() }}' clean-scratch
     CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask mutate "$@"
 
 # Prove the mutation runner scores caught, survived and never-ran correctly
@@ -238,6 +240,110 @@ mutate spec *args:
 [positional-arguments]
 mutate-self-test *args:
     CARGO_TARGET_DIR='{{ xtask_target }}' cargo xtask mutate --self-test "$@"
+
+# Delete scratch idle for DAYS days: `just clean-scratch 3 --dry-run` lists without deleting
+[positional-arguments]
+clean-scratch days="3" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    days="$1"
+    dry=""
+    if [ "${2:-}" = "--dry-run" ]; then dry=1; elif [ -n "${2:-}" ]; then
+        echo "unknown argument '$2'; the only flag is --dry-run" >&2; exit 2
+    fi
+    # Zero days would count a build running right now as idle.
+    case "$days" in
+        '' | *[!0-9]* | 0) echo "DAYS must be a whole number of at least 1, got '$days'" >&2; exit 2 ;;
+    esac
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}"
+    # A launchd job may start without TMPDIR, and getconf names the same directory.
+    tmp="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp)}"
+    for base in "$cache" "$tmp"; do
+        case "$base" in
+            /*) ;;
+            *) echo "refusing to run: '$base' is not absolute" >&2; exit 1 ;;
+        esac
+    done
+    root="$cache/selfie-scratch"
+
+    # The `selfie-*` siblings of the root are where scratch went before the root
+    # existed, and where an agent that ignores it still puts scratch.
+    shopt -s nullglob
+    freed=0
+    failed=0
+    for dir in "$root"/* "$cache"/selfie-* "${tmp%/}"/xtask-* "${tmp%/}"/selfie-sandbox.*; do
+        [ "$dir" = "$root" ] && continue
+        [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+        # A cargo target directory reused across runs touches `debug/deps` on
+        # every build, so three levels are enough to see that it is in use.
+        if [ -n "$(find "$dir" -maxdepth 3 -mtime -"$days" -print -quit 2>/dev/null)" ]; then
+            continue
+        fi
+        # du exits non-zero on an unreadable subdirectory but still prints a total.
+        kb="$({ du -sk "$dir" 2>/dev/null || true; } | cut -f1)"
+        kb="${kb:-0}"
+        if [ -n "$dry" ]; then
+            echo "would remove $dir ($((kb / 1024)) MB)"
+        else
+            # Tests leave directories without read or execute permission, which
+            # rm cannot descend into. chmod does not follow symlinks under -R.
+            chmod -R u+rwx "$dir" 2>/dev/null || true
+            if rm -rf "$dir"; then
+                echo "removed $dir ($((kb / 1024)) MB)"
+            else
+                echo "could not remove $dir" >&2
+                failed=1
+                continue
+            fi
+        fi
+        freed=$((freed + kb))
+    done
+    verb="freed"; [ -n "$dry" ] && verb="would free"
+    awk -v kb="$freed" -v verb="$verb" -v days="$days" \
+        'BEGIN { printf "%s %.1f GB of scratch idle for %d days or more\n", verb, kb / 1048576, days }'
+    exit "$failed"
+
+# Run `just clean-scratch` every day at 04:00 through launchd (macOS). The job
+# runs this checkout's Justfile, so install it from a checkout that stays put.
+install-scratch-cleaner days="3":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ "$(uname)" != Darwin ]; then
+        echo "launchd is macOS only; schedule 'just clean-scratch' with cron instead" >&2
+        exit 1
+    fi
+    label=dev.selfie.clean-scratch
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    just_bin="$(command -v just)"
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+    cat > "$plist" <<EOF
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>Label</key><string>$label</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>$just_bin</string>
+            <string>--justfile</string>
+            <string>{{ justfile() }}</string>
+            <string>clean-scratch</string>
+            <string>{{ days }}</string>
+        </array>
+        <key>StartCalendarInterval</key>
+        <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
+        <key>StandardOutPath</key><string>$HOME/Library/Logs/selfie-clean-scratch.log</string>
+        <key>StandardErrorPath</key><string>$HOME/Library/Logs/selfie-clean-scratch.log</string>
+    </dict>
+    </plist>
+    EOF
+    plutil -lint "$plist" >/dev/null
+    # Bootstrapping a label that is already loaded fails, so a reinstall unloads it first.
+    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$plist"
+    echo "installed $plist; it logs to ~/Library/Logs/selfie-clean-scratch.log"
 
 # Generate and open documentation
 docs:
