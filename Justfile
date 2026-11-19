@@ -257,7 +257,7 @@ clean-scratch days="3" *args:
         '' | *[!0-9]* | 0) echo "DAYS must be a whole number of at least 1, got '$days'" >&2; exit 2 ;;
     esac
     cache="${XDG_CACHE_HOME:-$HOME/.cache}"
-    # A launchd job may start without TMPDIR, and getconf names the same directory.
+    # TMPDIR can be unset, and getconf names the same directory.
     tmp="${TMPDIR:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo /tmp)}"
     for base in "$cache" "$tmp"; do
         case "$base" in
@@ -303,47 +303,6 @@ clean-scratch days="3" *args:
     awk -v kb="$freed" -v verb="$verb" -v days="$days" \
         'BEGIN { printf "%s %.1f GB of scratch idle for %d days or more\n", verb, kb / 1048576, days }'
     exit "$failed"
-
-# Run `just clean-scratch` every day at 04:00 through launchd (macOS). The job
-# runs this checkout's Justfile, so install it from a checkout that stays put.
-install-scratch-cleaner days="3":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    if [ "$(uname)" != Darwin ]; then
-        echo "launchd is macOS only; schedule 'just clean-scratch' with cron instead" >&2
-        exit 1
-    fi
-    label=dev.selfie.clean-scratch
-    plist="$HOME/Library/LaunchAgents/$label.plist"
-    just_bin="$(command -v just)"
-    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-    cat > "$plist" <<EOF
-    <?xml version="1.0" encoding="UTF-8"?>
-    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-    <plist version="1.0">
-    <dict>
-        <key>Label</key><string>$label</string>
-        <key>ProgramArguments</key>
-        <array>
-            <string>$just_bin</string>
-            <string>--justfile</string>
-            <string>{{ justfile() }}</string>
-            <string>clean-scratch</string>
-            <string>{{ days }}</string>
-        </array>
-        <key>StartCalendarInterval</key>
-        <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>0</integer></dict>
-        <key>StandardOutPath</key><string>$HOME/Library/Logs/selfie-clean-scratch.log</string>
-        <key>StandardErrorPath</key><string>$HOME/Library/Logs/selfie-clean-scratch.log</string>
-    </dict>
-    </plist>
-    EOF
-    plutil -lint "$plist" >/dev/null
-    # Bootstrapping a label that is already loaded fails, so a reinstall unloads it first.
-    launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$plist"
-    echo "installed $plist; it logs to ~/Library/Logs/selfie-clean-scratch.log"
 
 # Generate and open documentation
 docs:
