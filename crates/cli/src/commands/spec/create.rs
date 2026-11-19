@@ -472,19 +472,63 @@ fn prompt_package_name(default_name: &str, display: &DisplayManager) -> Result<S
 }
 
 fn prompt_package_homepage(display: &DisplayManager) -> Result<Option<String>, Exit> {
-    let homepage = display
-        .input(
-            lit!("Homepage URL (optional)"),
-            Suggestion::Nothing,
-            Blank::Allowed,
-        )
-        .map_err(|failure| refuse_interactive(display, &failure))?;
+    loop {
+        let homepage = display
+            .input(
+                lit!("Homepage URL (optional)"),
+                Suggestion::Nothing,
+                Blank::Allowed,
+            )
+            .map_err(|failure| refuse_interactive(display, &failure))?;
+        if homepage.trim().is_empty() {
+            return Ok(None);
+        }
+        // Here, not only when the spec is written: a homepage the library refuses
+        // there would throw away every answer after this one.
+        if !print_answer_issues(
+            display,
+            &selfie::package::validate::homepage_issues(&homepage),
+        ) {
+            return Ok(Some(homepage));
+        }
+    }
+}
 
-    Ok(if homepage.trim().is_empty() {
-        None
-    } else {
-        Some(homepage)
-    })
+/// Print each of `issues` with an answer the user just gave, and return whether
+/// one of them is an error, which the spec cannot be written with.
+fn print_answer_issues(
+    display: &DisplayManager,
+    issues: &[selfie::validation::ValidationIssue],
+) -> bool {
+    let shown: Vec<selfie::package::event::ValidationIssueData> =
+        issues.iter().map(Into::into).collect();
+    crate::commands::validation_display::print_issues(display, &shown);
+    issues
+        .iter()
+        .any(|issue| issue.level() == selfie::validation::ValidationLevel::Error)
+}
+
+/// Whether to keep `command` as the `field` command of `environment`: yes when
+/// nothing is wrong with it, no when an issue is an error, and otherwise what
+/// the user answers once its warnings are shown.
+fn keep_command(
+    environment: &str,
+    field: &str,
+    command: &str,
+    display: &DisplayManager,
+) -> Result<bool, Exit> {
+    let issues = selfie::package::validate::command_issues(environment, field, command);
+    if issues.is_empty() {
+        return Ok(true);
+    }
+    // A warning is the user's call, since their shell may accept what sh does
+    // not. An error would refuse the spec when it is written, so it is asked again.
+    if print_answer_issues(display, &issues) {
+        return Ok(false);
+    }
+    display
+        .confirm(lit!("Keep this command?"), true)
+        .map_err(|failure| refuse_interactive(display, &failure))
 }
 
 fn prompt_package_description(display: &DisplayManager) -> Result<Option<String>, Exit> {
@@ -514,8 +558,8 @@ fn prompt_environments(
         display.print_run_note(lit!("Adding environment configuration..."));
 
         let env_name = prompt_environment_name(&environments, config, display)?;
-        let install_cmd = prompt_install_command(display)?;
-        let check_cmd = prompt_check_command(package_name, display)?;
+        let install_cmd = prompt_install_command(&env_name, display)?;
+        let check_cmd = prompt_check_command(package_name, &env_name, display)?;
         let dependencies = prompt_dependencies(config, display)?;
 
         let env_config =
@@ -576,38 +620,47 @@ fn prompt_environment_name(
     }
 }
 
-fn prompt_install_command(display: &DisplayManager) -> Result<String, Exit> {
-    display
-        .input(
-            lit!("Install command (required)"),
-            Suggestion::Nothing,
-            Blank::RefusedCommand(lit!("Install command cannot be empty or only a comment.")),
-        )
-        .map_err(|failure| refuse_interactive(display, &failure))
+fn prompt_install_command(environment: &str, display: &DisplayManager) -> Result<String, Exit> {
+    loop {
+        let install = display
+            .input(
+                lit!("Install command (required)"),
+                Suggestion::Nothing,
+                Blank::RefusedCommand(lit!("Install command cannot be empty or only a comment.")),
+            )
+            .map_err(|failure| refuse_interactive(display, &failure))?;
+        if keep_command(environment, "install", &install, display)? {
+            return Ok(install);
+        }
+    }
 }
 
 fn prompt_check_command(
     package_name: &str,
+    environment: &str,
     display: &DisplayManager,
 ) -> Result<Option<String>, Exit> {
-    // Pre-filled, so clearing it leaves the spec with no check command.
-    let check_cmd = display
-        .input(
-            lit!("Check command (optional)"),
-            Suggestion::Keepable(format!("command -v {package_name}")),
-            Blank::Allowed,
-        )
-        .map_err(|failure| refuse_interactive(display, &failure))?;
+    loop {
+        // Pre-filled, so clearing it leaves the spec with no check command.
+        let check_cmd = display
+            .input(
+                lit!("Check command (optional)"),
+                Suggestion::Keepable(format!("command -v {package_name}")),
+                Blank::Allowed,
+            )
+            .map_err(|failure| refuse_interactive(display, &failure))?;
 
-    // This judges blank as the install prompt does. A comment-only check is
-    // saved as no check, which is what install and status make of it anyway,
-    // and so is an answer showing nothing, which the library would hand to the
-    // shell.
-    Ok(if is_blank_command_answer(&check_cmd) {
-        None
-    } else {
-        Some(check_cmd)
-    })
+        // This judges blank as the install prompt does. A comment-only check is
+        // saved as no check, which is what install and status make of it anyway,
+        // and so is an answer showing nothing, which the library would hand to the
+        // shell.
+        if is_blank_command_answer(&check_cmd) {
+            return Ok(None);
+        }
+        if keep_command(environment, "check", &check_cmd, display)? {
+            return Ok(Some(check_cmd));
+        }
+    }
 }
 
 /// The package names offerable as dependencies, sorted, with a warning for every
@@ -911,12 +964,91 @@ mod tests {
             answer("\u{115f}\u{200b}".to_string()),
             answer("true".to_string()),
         ]);
-        assert_eq!(prompt_install_command(&display).unwrap(), "true");
+        assert_eq!(prompt_install_command("work", &display).unwrap(), "true");
         assert_eq!(
             lines_containing(
                 &display,
                 "Install command cannot be empty or only a comment."
             ),
+            1
+        );
+    }
+
+    // A homepage the library would refuse when the spec is written is refused as
+    // it is given and asked again, so the answers after it are not lost.
+    #[test]
+    fn a_homepage_that_is_not_a_url_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let display = DisplayManager::new(false).answering(vec![
+            answer("not a url".to_string()),
+            answer("https://example.com".to_string()),
+        ]);
+
+        assert_eq!(
+            prompt_package_homepage(&display).unwrap().as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            lines_containing(&display, "ERROR homepage: Invalid URL format"),
+            1
+        );
+    }
+
+    // A homepage with only a warning, such as an ftp scheme, is kept once the
+    // warning is shown.
+    #[test]
+    fn a_homepage_with_a_warning_is_kept() {
+        use crate::display_manager::answer;
+
+        let display =
+            DisplayManager::new(false).answering(vec![answer("ftp://example.com".to_string())]);
+
+        assert_eq!(
+            prompt_package_homepage(&display).unwrap().as_deref(),
+            Some("ftp://example.com")
+        );
+        assert_eq!(lines_containing(&display, "WARN homepage:"), 1);
+    }
+
+    // A command that does not parse as POSIX sh is shown with its warning, named
+    // by its field, and kept when the user says so.
+    #[test]
+    fn an_install_command_with_a_warning_is_kept_when_the_user_says_so() {
+        use crate::display_manager::answer;
+
+        let display = DisplayManager::new(false)
+            .answering(vec![answer("echo 'open".to_string()), answer(true)]);
+
+        assert_eq!(
+            prompt_install_command("work", &display).unwrap(),
+            "echo 'open"
+        );
+        assert_eq!(
+            lines_containing(&display, "WARN environments.work.install:"),
+            1
+        );
+    }
+
+    // Declining a warned command asks for it again, and the next answer stands.
+    #[test]
+    fn a_declined_check_command_is_asked_again() {
+        use crate::display_manager::answer;
+
+        let display = DisplayManager::new(false).answering(vec![
+            answer("echo `date`".to_string()),
+            answer(false),
+            answer("command -v x".to_string()),
+        ]);
+
+        assert_eq!(
+            prompt_check_command("x", "work", &display)
+                .unwrap()
+                .as_deref(),
+            Some("command -v x")
+        );
+        assert_eq!(
+            lines_containing(&display, "WARN environments.work.check:"),
             1
         );
     }
@@ -933,7 +1065,7 @@ mod tests {
             answer("true".to_string()),
         ]);
 
-        assert_eq!(prompt_install_command(&display).unwrap(), "true");
+        assert_eq!(prompt_install_command("work", &display).unwrap(), "true");
         assert_eq!(
             lines_containing(
                 &display,
@@ -951,17 +1083,19 @@ mod tests {
         use crate::display_manager::answer;
 
         let display = DisplayManager::new(false).answering(vec![answer("# TODO".to_string())]);
-        assert_eq!(prompt_check_command("x", &display).unwrap(), None);
+        assert_eq!(prompt_check_command("x", "work", &display).unwrap(), None);
 
         // An answer showing nothing is refused at the install prompt, so it is
         // no check here.
         let display =
             DisplayManager::new(false).answering(vec![answer("\u{115f}\u{200b}".to_string())]);
-        assert_eq!(prompt_check_command("x", &display).unwrap(), None);
+        assert_eq!(prompt_check_command("x", "work", &display).unwrap(), None);
 
         let display = DisplayManager::new(false).answering(vec![answer("true".to_string())]);
         assert_eq!(
-            prompt_check_command("x", &display).unwrap().as_deref(),
+            prompt_check_command("x", "work", &display)
+                .unwrap()
+                .as_deref(),
             Some("true")
         );
     }

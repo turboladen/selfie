@@ -5038,6 +5038,19 @@ pub struct ValidationIssueData {
     pub location: Option<crate::yaml::SourceLocation>,
 }
 
+impl From<&crate::validation::ValidationIssue> for ValidationIssueData {
+    fn from(issue: &crate::validation::ValidationIssue) -> Self {
+        Self {
+            category: issue.category(),
+            field: issue.field().to_string(),
+            message: issue.wording().clone(),
+            level: issue.level(),
+            suggestion: issue.suggestion().map(std::string::ToString::to_string),
+            location: issue.location(),
+        }
+    }
+}
+
 /// Log levels for the `EventSender` log method
 #[derive(Debug, Clone, Copy)]
 pub enum LogLevel {

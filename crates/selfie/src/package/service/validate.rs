@@ -69,17 +69,7 @@ pub(super) fn issue_payload(issues: &ValidationIssues) -> Vec<ValidationIssueDat
         crate::validation::ValidationLevel::Warning => 1,
         crate::validation::ValidationLevel::Info => 2,
     });
-    ordered
-        .into_iter()
-        .map(|issue| ValidationIssueData {
-            category: issue.category(),
-            field: issue.field().to_string(),
-            message: issue.wording().clone(),
-            level: issue.level(),
-            suggestion: issue.suggestion().map(std::string::ToString::to_string),
-            location: issue.location(),
-        })
-        .collect()
+    ordered.into_iter().map(ValidationIssueData::from).collect()
 }
 
 /// What an issue found on a spec about to be written does to the write.
