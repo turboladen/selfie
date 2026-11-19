@@ -6,7 +6,7 @@ use crate::{
     config::SelfieConfig,
     package::{
         GetPackage, Package,
-        event::{EventSender, OperationResult, OperationSuccess},
+        event::{EventSender, OperationFailure, OperationResult, OperationSuccess},
         port::{PackageParseError, PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
@@ -78,6 +78,38 @@ where
         unreadable,
         scan_failure,
     }
+}
+
+/// Scan for dependents again, for a removal shown to the user before it runs:
+/// the failure refusing it when a package depends on the spec that `plan` did
+/// not list, or when the scan cannot run.
+pub(super) fn dependents_since<PR>(plan: &RemovalPlan, repo: &PR) -> Option<OperationFailure>
+where
+    PR: PackageRepository,
+{
+    // Only new dependents refuse. A spec that became unreadable since the plan
+    // could hide one too, but the plan already showed whether the first scan
+    // was complete, and that is what the user confirmed against.
+    let dependents = match repo.find_dependent_packages(&plan.package_name) {
+        Ok((dependents, _)) => dependents,
+        Err(err) => return Some(err.into()),
+    };
+    // Compared by file, not by `name:` field: two files may declare one name, and
+    // a listed dependent may change its `name:` while the prompt waits.
+    let added: Vec<String> = dependents
+        .iter()
+        .filter(|found| {
+            !plan
+                .dependents
+                .iter()
+                .any(|shown| shown.path() == found.path())
+        })
+        .map(|found| found.name().to_string())
+        .collect();
+    (!added.is_empty()).then(|| OperationFailure::DependentsAppeared {
+        package_name: plan.package_name.clone(),
+        added,
+    })
 }
 
 /// Remove the package `package_name` names, for a caller that shows nothing

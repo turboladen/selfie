@@ -570,6 +570,11 @@ where
             OperationContext::default(),
             1, // Remove
             move |repo, _, config, sender, mut progress, _token| async move {
+                // The plan was shown and confirmed some time ago, so what depends
+                // on the spec is checked again before anything is removed.
+                if let Some(failure) = remove::dependents_since(&plan, &repo) {
+                    return OperationResult::Failure(failure);
+                }
                 remove::remove_planned(plan, &repo, &config, &sender, &mut progress).await
             },
         )
