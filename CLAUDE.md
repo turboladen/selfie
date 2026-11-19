@@ -24,7 +24,6 @@ just sandbox-run <args>                        # Run the CLI against a throwaway
 just percommit <base>                          # just clippy on every commit below the tip
 just mutate <spec.toml>                        # Mutation runner (crates/xtask/README.md)
 just clean-scratch [days]                      # Delete scratch idle for that many days (default 3)
-just install-scratch-cleaner                   # Run clean-scratch daily through launchd (macOS)
 ```
 
 CI runs these same recipes (`.github/workflows/ci.yml`), so `Justfile` is the one place a gate's
