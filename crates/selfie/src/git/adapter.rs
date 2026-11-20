@@ -2108,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn a_push_the_remote_refuses_gives_no_pull_advice() {
+    fn a_push_the_remote_refuses_gives_no_merge_advice() {
         let (_temp, remote, local) = clone_with_upstream();
         // The isolated template directory is empty, so the bare remote has no
         // hooks directory yet.
@@ -2124,11 +2124,14 @@ mod tests {
             matches!(error, GitSyncError::OperationFailed { .. }),
             "got: {error}"
         );
-        assert!(!error.to_string().contains("sync pull"), "got: {error}");
+        assert!(
+            !error.to_string().contains("Merge or rebase"),
+            "got: {error}"
+        );
     }
 
     #[test]
-    fn a_rejected_tag_beside_a_pushed_branch_gives_no_pull_advice() {
+    fn a_rejected_tag_beside_a_pushed_branch_gives_no_merge_advice() {
         let (_temp, remote, local) = clone_with_upstream();
         // The remote already has `v1` at the first commit; the local `v1` is on a
         // newer one, and the push refspecs send both it and the branch.
@@ -2156,7 +2159,10 @@ mod tests {
             matches!(error, GitSyncError::OperationFailed { .. }),
             "got: {error}"
         );
-        assert!(!error.to_string().contains("sync pull"), "got: {error}");
+        assert!(
+            !error.to_string().contains("Merge or rebase"),
+            "got: {error}"
+        );
         assert!(
             error.to_string().contains("refs/tags/v1:refs/tags/v1"),
             "the failed ref must be named, got: {error}"

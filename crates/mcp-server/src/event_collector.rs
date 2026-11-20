@@ -30,6 +30,17 @@ fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -
     if let OperationFailure::InvalidSpec { issues, .. } = failure {
         payload["issues"] = issues.iter().map(issue_json).collect::<Vec<_>>().into();
     }
+    // A sync step that failed names the step and git's error as labels, so an
+    // assistant can offer a pull after a rejected push without parsing `error`.
+    if let OperationFailure::Git(git) = failure {
+        payload["kind"] = git.error().kind().into();
+        payload["step"] = git.step().label().into();
+    }
+    // A repository refusal names its error as a label, so an assistant can tell a
+    // spec changed since selfie read it, which a rerun settles, from the rest.
+    if let OperationFailure::Repository(repository) = failure {
+        payload["kind"] = repository.error().kind().into();
+    }
     // A refused create carries its reason as a label.
     if let OperationFailure::Uncreatable { reason, .. } = failure {
         payload["kind"] = reason.kind().into();
@@ -2068,6 +2079,48 @@ mod tests {
         assert_eq!(payload["kind"], "not_installed_after_install");
         assert_eq!(payload["package"], "dep");
         assert_eq!(payload["required_by"], "pkg");
+    }
+
+    // A rejected push names its kind and step, so an assistant can offer a pull
+    // without matching the sentence in `error`.
+    #[test]
+    fn a_rejected_push_carries_its_kind_and_step() {
+        use selfie::git::GitSyncError;
+        use selfie::sync_service::port::{GitFailure, GitStep};
+
+        let payload = failure_json(
+            &OperationFailure::Git(GitFailure::at(GitStep::Push, GitSyncError::PushRejected)),
+            None,
+        );
+
+        assert_eq!(payload["status"], "failure");
+        assert_eq!(payload["kind"], "push_rejected");
+        assert_eq!(payload["step"], "push");
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("Push failed: ")),
+            "{payload}"
+        );
+    }
+
+    // A spec that changed after selfie read it names its kind, so an assistant
+    // can tell a conflict a rerun settles from any other repository failure.
+    #[test]
+    fn a_spec_changed_since_load_carries_its_kind() {
+        use selfie::package::port::{PackageRepoError, RefusedChange};
+
+        let payload = failure_json(
+            &OperationFailure::from(PackageRepoError::ChangedSinceLoad {
+                path: "/p/a.yml".into(),
+                refused: RefusedChange::Write,
+            }),
+            None,
+        );
+
+        assert_eq!(payload["status"], "failure");
+        assert_eq!(payload["kind"], "changed_since_load");
+        assert!(payload.get("step").is_none(), "{payload}");
     }
 
     // A refused spec create says why as a label.

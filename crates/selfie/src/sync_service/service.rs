@@ -3745,21 +3745,21 @@ mod credential_egress_tests {
     }
 
     #[tokio::test]
-    async fn a_rejected_push_names_the_pull_to_run_once() {
+    async fn a_rejected_push_says_to_merge_or_rebase() {
         let text = push_failure_text(FailAt::PushRejected).await;
 
         assert_eq!(
             text,
-            "Push failed: the remote has new commits. Run 'selfie sync pull' first. \
+            "Push failed: the remote has commits this machine lacks. Merge or rebase onto them with git, then push again. \
              Your commits are preserved locally."
         );
     }
 
     #[tokio::test]
-    async fn a_push_that_fails_for_another_reason_gives_no_pull_advice() {
+    async fn a_push_that_fails_for_another_reason_gives_no_merge_advice() {
         let text = push_failure_text(FailAt::Push).await;
 
-        assert!(!text.contains("sync pull"), "got: {text}");
+        assert!(!text.contains("Merge or rebase"), "got: {text}");
         assert!(
             text.ends_with("Your commits are preserved locally."),
             "got: {text}"
