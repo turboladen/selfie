@@ -36,7 +36,7 @@ use super::classify::{
     planned_entries, read_repo_file,
 };
 use super::deploy_entry::{
-    Decided, DeployUnit, Ledger, Overwrite, conflict_diff, deploy_and_record, record_and_save,
+    Decided, DeployUnit, Ledger, conflict_diff, deploy_and_record, record_and_save,
 };
 use super::orphan::{self, Catalog};
 use super::port::ApplyOptions;
@@ -636,9 +636,6 @@ where
                     &target_checksum,
                 );
 
-                // Set only by the resolver's own Accept: `--yes` overwrites without
-                // asking, and no prompt answered it.
-                let mut overwrite = Overwrite::Unasked;
                 // Every arm that writes names what the target held when it decided, and
                 // the one write below carries it out, so the two ways to reach a write
                 // cannot count or record it differently.
@@ -762,11 +759,7 @@ where
                                 break 'entry EntryOutcome::Canceled;
                             }
                             declined = answer == Asked::Answered(ConflictResolution::Skip);
-                            let accepted = answer == Asked::Answered(ConflictResolution::Accept);
-                            if accepted {
-                                overwrite = Overwrite::Accepted;
-                            }
-                            accepted
+                            answer == Asked::Answered(ConflictResolution::Accept)
                         } else {
                             false
                         };
@@ -795,7 +788,6 @@ where
                     &mut ledger,
                     &unit,
                     decided,
-                    overwrite,
                     &mut backed_up,
                 )
                 .await
