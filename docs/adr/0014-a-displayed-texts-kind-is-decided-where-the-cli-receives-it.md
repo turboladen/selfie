@@ -23,6 +23,9 @@ Amended 2026-11-12: §1.8 covers the MCP server's stderr log, which escapes each
 Amended 2026-11-12: §2.2 lists no sentence the CLI composes from a library value's fields; each is
 `Composed` (§9.7).
 
+Amended 2026-11-19: §4.2 has `SafeTable` wrap a line too wide for its column, so its pieces keep the
+continuation indent.
+
 ## Context
 
 `selfie-cli` prints text from outside selfie: spec, package and environment names, paths, spec
@@ -169,7 +172,9 @@ Options considered:
    comfy-table `Table`.
 2. A cell takes a kind. A multi-line cell has its continuation lines indented two columns inside the
    cell by `SafeTable`, which is the layout layer for a table. With no row separators, a continued
-   line is told from the next row by that indent and by the empty cells beside it.
+   line is told from the next row by that indent and by the empty cells beside it. A line too wide
+   for its column is wrapped by `SafeTable`, not by comfy-table, so every piece after a cell's first
+   line keeps the indent and its styling.
 3. `apply` and `dotfiles drift` keep their streaming aligned columns
    (`crates/cli/src/entry_rows.rs`) and do not become `SafeTable`s. Each of their rows prints as its
    entry is processed, in columns fixed from the planned entries before the first row; a `SafeTable`
