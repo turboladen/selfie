@@ -80,7 +80,7 @@ impl Composed for GitSyncError {
             }
             Self::Diverged => Parts::new().text("remote has diverged — resolve manually with git"),
             Self::PushRejected => {
-                Parts::new().text("the remote has new commits. Run 'selfie sync pull' first")
+                Parts::new().text("the remote has commits this machine lacks. Merge or rebase onto them with git, then push again")
             }
             Self::OperationInProgress { operation } => Parts::new()
                 .text(operation.described())
@@ -372,7 +372,7 @@ mod tests {
             ),
             (
                 GitSyncError::PushRejected,
-                "the remote has new commits. Run 'selfie sync pull' first",
+                "the remote has commits this machine lacks. Merge or rebase onto them with git, then push again",
             ),
             (
                 GitSyncError::OperationInProgress {
