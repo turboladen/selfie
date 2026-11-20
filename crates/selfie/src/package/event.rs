@@ -1582,6 +1582,13 @@ pub enum OperationFailure {
     /// A spec update named an environment the spec does not have, or added
     /// one it already has. Nothing was written.
     SpecUpdate(SpecUpdateRefusal),
+    /// A confirmed removal found packages depending on the spec that were not
+    /// listed when the removal was shown. Nothing was removed.
+    DependentsAppeared {
+        package_name: String,
+        /// The dependents the removal was not shown, by name.
+        added: Vec<String>,
+    },
     /// A failure selfie words without naming any value.
     // `&'static str`, so a `format!` String does not compile into it. A leaked
     // String still would, so a sentence naming a value needs an arm of its
@@ -1845,6 +1852,20 @@ impl Composed for OperationFailure {
             OperationFailure::Git(failure) => failure.parts(),
             OperationFailure::Check(failure) => failure.parts(),
             OperationFailure::SpecUpdate(refusal) => refusal.parts(),
+            OperationFailure::DependentsAppeared {
+                package_name,
+                added,
+            } => Parts::new()
+                .text("'")
+                .name(package_name)
+                .text(
+                    "' was not removed: these depend on it and were not listed when the \
+                     removal was confirmed: ",
+                )
+                .append(Parts::joined(added, ", ", |name| {
+                    Parts::new().text("'").name(name).text("'")
+                }))
+                .text(". Run the command again to see them"),
             OperationFailure::Generic(words) => Parts::new().text(*words),
         }
     }
@@ -5015,6 +5036,19 @@ pub struct ValidationIssueData {
     pub suggestion: Option<String>,
     /// Where in the file the issue is, when the file says.
     pub location: Option<crate::yaml::SourceLocation>,
+}
+
+impl From<&crate::validation::ValidationIssue> for ValidationIssueData {
+    fn from(issue: &crate::validation::ValidationIssue) -> Self {
+        Self {
+            category: issue.category(),
+            field: issue.field().to_string(),
+            message: issue.wording().clone(),
+            level: issue.level(),
+            suggestion: issue.suggestion().map(std::string::ToString::to_string),
+            location: issue.location(),
+        }
+    }
 }
 
 /// Log levels for the `EventSender` log method

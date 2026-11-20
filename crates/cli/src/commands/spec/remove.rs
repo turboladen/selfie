@@ -322,6 +322,112 @@ mod tests {
         );
     }
 
+    // A spec that begins depending on the one being removed while the
+    // confirmation waits was never listed, so removing would leave it pointing at
+    // nothing. Nothing is removed, and the run fails naming the new dependent.
+    #[tokio::test]
+    async fn a_dependent_added_while_the_removal_prompt_waits_refuses() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        let (_temp, spec, service) = one_spec();
+        let user = spec.with_file_name("user.yml");
+        let planted = user.clone();
+        let display = DisplayManager::new(false)
+            .on_next_prompt(move || std::fs::write(&planted, spec_yaml("user", &["tool"])).unwrap())
+            .answering(vec![answer(true)]);
+
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
+
+        assert_eq!(exit, Exit::Failed);
+        assert!(spec.exists(), "the spec was removed under a new dependent");
+        let printed = display.printed();
+        assert!(
+            printed
+                .iter()
+                .any(|(_, line)| line.contains("'tool' was not removed:")
+                    && line.contains("not listed when the removal was confirmed: 'user'.")),
+            "{printed:?}"
+        );
+        assert!(
+            !printed
+                .iter()
+                .any(|(_, line)| line.contains("removed successfully")),
+            "{printed:?}"
+        );
+    }
+
+    // A dependent is told apart from the ones listed by its file, not its `name:`
+    // field: a second file declaring a listed dependent's name, appearing while
+    // the prompt waits, refuses the removal.
+    #[tokio::test]
+    async fn a_new_dependent_sharing_a_listed_dependents_name_refuses() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        let (_temp, spec, service) = one_spec();
+        std::fs::write(
+            spec.with_file_name("user.yml"),
+            spec_yaml("user", &["tool"]),
+        )
+        .unwrap();
+        let copy = spec.with_file_name("user-copy.yml");
+        let display = DisplayManager::new(false)
+            .on_next_prompt(move || std::fs::write(&copy, spec_yaml("user", &["tool"])).unwrap())
+            .answering(vec![answer(true)]);
+
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
+
+        assert_eq!(exit, Exit::Failed, "{:?}", display.printed());
+        assert!(spec.exists(), "the spec was removed under a new dependent");
+    }
+
+    // Control for the test above: a spec appearing while the prompt waits that
+    // does not depend on the one being removed leaves the removal to go ahead.
+    #[tokio::test]
+    async fn an_unrelated_spec_added_while_the_removal_prompt_waits_does_not_refuse() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        let (_temp, spec, service) = one_spec();
+        let other = spec.with_file_name("other.yml");
+        let display = DisplayManager::new(false)
+            .on_next_prompt(move || std::fs::write(&other, spec_yaml("other", &[])).unwrap())
+            .answering(vec![answer(true)]);
+
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
+
+        assert_eq!(exit, Exit::Clean);
+        assert!(!spec.exists(), "the confirmed removal left the spec");
+    }
+
+    // A dependent listed at the prompt is one the user confirmed against, so the
+    // re-scan after the prompt finds nothing new and the removal goes ahead.
+    #[tokio::test]
+    async fn a_dependent_listed_at_the_prompt_does_not_refuse_the_removal() {
+        use crate::display_manager::{DisplayManager, answer};
+
+        let (_temp, spec, service) = one_spec();
+        std::fs::write(
+            spec.with_file_name("user.yml"),
+            spec_yaml("user", &["tool"]),
+        )
+        .unwrap();
+        let display = DisplayManager::new(false).answering(vec![answer(true)]);
+
+        let exit = super::handle_remove(&service, "tool", &display, false).await;
+
+        assert_eq!(exit, Exit::Clean, "{:?}", display.printed());
+        assert!(!spec.exists(), "the confirmed removal left the spec");
+    }
+
+    // A spec named `name` for the test environment, depending on each of
+    // `dependencies`.
+    fn spec_yaml(name: &str, dependencies: &[&str]) -> String {
+        format!(
+            "name: {name}\nenvironments:\n  {}:\n    install: \"true\"\n    dependencies: [{}]\n",
+            test_common::TEST_ENV,
+            dependencies.join(", ")
+        )
+    }
+
     // A name no spec file answers to, but one spec's `name:` field declares, gets
     // the hint naming that file, as the service's own removal gives it.
     #[tokio::test]

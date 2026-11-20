@@ -345,6 +345,102 @@ fn not_posix_sh(field_name: &str, why: &str) -> ValidationIssue {
     )
 }
 
+/// The issues with `command` as the `field` command, such as `install`, of
+/// `environment`: where it does not parse as POSIX sh, or uses a form worth a
+/// second look. Each is a warning.
+#[must_use]
+pub fn command_issues(environment: &str, field: &str, command: &str) -> Vec<ValidationIssue> {
+    single_command_issues(command, &environment_field(environment, field))
+}
+
+fn single_command_issues(command: &str, field_name: &str) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+
+    // Commands run through the user's login shell, which may be fish or zsh, so a
+    // command that does not parse as POSIX sh is a warning, never an error: an
+    // error would make `spec create` refuse a command that runs.
+    //
+    // `shlex` reads quotes the way a POSIX shell does: a backslash escapes a
+    // quote, `'\''` closes and reopens, and a `#` comment ends the words. It
+    // fails only on a quote left open or a backslash with nothing after it. It
+    // does not know heredocs, whose body is raw text, so an apostrophe there
+    // reads as an open quote: a command with a heredoc operator is not checked.
+    if !command.contains("<<") && shlex::split(command).is_none() {
+        issues.push(not_posix_sh(
+            field_name,
+            "a quote is left open, or it ends in a backslash",
+        ));
+    }
+
+    if command.contains("| |") {
+        issues.push(not_posix_sh(
+            field_name,
+            "it has an empty pipeline stage, `| |`",
+        ));
+    }
+
+    // Check for invalid redirections
+    for redirect in &[">", ">>", "<"] {
+        if command.contains(&format!("{redirect} "))
+            && !command.contains(&format!("{redirect} /"))
+            && !command.contains(&format!("{redirect} ~/"))
+        {
+            issues.push(ValidationIssue::warning(
+                ValidationErrorCategory::CommandSyntax,
+                field_name,
+                crate::validation::IssueMessage::Text(format!(
+                    "Potential invalid redirection with {redirect}"
+                )),
+                Some("Ensure the redirection path is valid and absolute."),
+            ));
+        }
+    }
+
+    // Check for command injection risks with backticks
+    if command.contains('`') {
+        issues.push(ValidationIssue::warning(
+            ValidationErrorCategory::CommandSyntax,
+            field_name,
+            "Contains command substitution with backticks",
+            Some("Consider using $() for command substitution instead of backticks."),
+        ));
+    }
+
+    issues
+}
+
+/// The issues with `homepage` as a spec's homepage: an error when it does not
+/// parse as a URL, and a warning when its scheme is not http or https.
+#[must_use]
+pub fn homepage_issues(homepage: &str) -> Vec<ValidationIssue> {
+    homepage_issues_at(homepage, None)
+}
+
+fn homepage_issues_at(homepage: &str, location: Option<SourceLocation>) -> Vec<ValidationIssue> {
+    match url::Url::parse(homepage) {
+        Ok(url) if url.scheme() != "http" && url.scheme() != "https" => {
+            vec![ValidationIssue::warning_at(
+                ValidationErrorCategory::UrlFormat,
+                "homepage",
+                crate::validation::IssueMessage::Text(format!(
+                    "URL should use http or https scheme, found: {}",
+                    url.scheme()
+                )),
+                Some("Use https:// prefix for the URL."),
+                location,
+            )]
+        }
+        Ok(_) => Vec::new(),
+        Err(err) => vec![ValidationIssue::error_at(
+            ValidationErrorCategory::UrlFormat,
+            "homepage",
+            crate::validation::IssueMessage::Text(format!("Invalid URL format: {err}")),
+            Some("Provide a valid URL with http:// or https:// prefix."),
+            location,
+        )],
+    }
+}
+
 /// Results of a package validation
 #[derive(Debug, Clone, Default)]
 pub struct ValidationResult {
@@ -655,42 +751,14 @@ impl Package {
 
     /// Validate URL fields
     pub(crate) fn validate_urls(&self) -> Vec<ValidationIssue> {
-        let mut issues = Vec::new();
-
-        // Check homepage URL if present
-        if let Some(spanned_homepage) = &self.homepage {
-            let homepage = &spanned_homepage.value;
-            let hp_loc = SourceLocation::from_location(&spanned_homepage.defined);
-            match url::Url::parse(homepage) {
-                Ok(url) => {
-                    // Check scheme
-                    if url.scheme() != "http" && url.scheme() != "https" {
-                        issues.push(ValidationIssue::warning_at(
-                            ValidationErrorCategory::UrlFormat,
-                            "homepage",
-                            crate::validation::IssueMessage::Text(format!(
-                                "URL should use http or https scheme, found: {}",
-                                url.scheme()
-                            )),
-                            Some("Use https:// prefix for the URL."),
-                            hp_loc,
-                        ));
-                    }
-                }
-                Err(err) => {
-                    issues.push(ValidationIssue::error_at(
-                        ValidationErrorCategory::UrlFormat,
-                        "homepage",
-                        crate::validation::IssueMessage::Text(format!("Invalid URL format: {err}")),
-                        Some("Provide a valid URL with http:// or https:// prefix."),
-                        hp_loc,
-                    ));
-                }
-            }
-        }
-
-        issues
+        self.homepage.as_ref().map_or_else(Vec::new, |homepage| {
+            homepage_issues_at(
+                &homepage.value,
+                SourceLocation::from_location(&homepage.defined),
+            )
+        })
     }
+
     /// Basic command syntax validation that doesn't require external dependencies
     pub(crate) fn validate_command_syntax(&self) -> Vec<ValidationIssue> {
         // Sorted as the other walks are: every environment is checked, and the
@@ -712,81 +780,24 @@ impl Package {
                 continue;
             };
 
-            issues.extend(Self::validate_single_command(
+            issues.extend(single_command_issues(
                 &env_config.install,
                 &environment_field(env_name, "install"),
             ));
 
             if let Some(check_cmd) = &env_config.check {
-                issues.extend(Self::validate_single_command(
+                issues.extend(single_command_issues(
                     check_cmd,
                     &environment_field(env_name, "check"),
                 ));
             }
 
             if let Some(audit_cmd) = &env_config.audit {
-                issues.extend(Self::validate_single_command(
+                issues.extend(single_command_issues(
                     audit_cmd,
                     &environment_field(env_name, "audit"),
                 ));
             }
-        }
-
-        issues
-    }
-
-    /// Validate a single command for syntax issues
-    fn validate_single_command(command: &str, field_name: &str) -> Vec<ValidationIssue> {
-        let mut issues = Vec::new();
-
-        // Commands run through the user's login shell, which may be fish or zsh, so a
-        // command that does not parse as POSIX sh is a warning, never an error: an
-        // error would make `spec create` refuse a command that runs.
-        //
-        // `shlex` reads quotes the way a POSIX shell does: a backslash escapes a
-        // quote, `'\''` closes and reopens, and a `#` comment ends the words. It
-        // fails only on a quote left open or a backslash with nothing after it. It
-        // does not know heredocs, whose body is raw text, so an apostrophe there
-        // reads as an open quote: a command with a heredoc operator is not checked.
-        if !command.contains("<<") && shlex::split(command).is_none() {
-            issues.push(not_posix_sh(
-                field_name,
-                "a quote is left open, or it ends in a backslash",
-            ));
-        }
-
-        if command.contains("| |") {
-            issues.push(not_posix_sh(
-                field_name,
-                "it has an empty pipeline stage, `| |`",
-            ));
-        }
-
-        // Check for invalid redirections
-        for redirect in &[">", ">>", "<"] {
-            if command.contains(&format!("{redirect} "))
-                && !command.contains(&format!("{redirect} /"))
-                && !command.contains(&format!("{redirect} ~/"))
-            {
-                issues.push(ValidationIssue::warning(
-                    ValidationErrorCategory::CommandSyntax,
-                    field_name,
-                    crate::validation::IssueMessage::Text(format!(
-                        "Potential invalid redirection with {redirect}"
-                    )),
-                    Some("Ensure the redirection path is valid and absolute."),
-                ));
-            }
-        }
-
-        // Check for command injection risks with backticks
-        if command.contains('`') {
-            issues.push(ValidationIssue::warning(
-                ValidationErrorCategory::CommandSyntax,
-                field_name,
-                "Contains command substitution with backticks",
-                Some("Consider using $() for command substitution instead of backticks."),
-            ));
         }
 
         issues
@@ -1259,6 +1270,31 @@ mod tests {
     };
 
     use super::*;
+
+    // The homepage check a prompt runs on one answer refuses what validating
+    // the whole spec refuses, and only warns where it warns.
+    #[test]
+    fn a_homepage_answer_is_judged_as_the_spec_would_judge_it() {
+        let levels = |homepage: &str| -> Vec<ValidationLevel> {
+            homepage_issues(homepage)
+                .iter()
+                .map(ValidationIssue::level)
+                .collect()
+        };
+        assert_eq!(levels("not a url"), [ValidationLevel::Error]);
+        assert_eq!(levels("ftp://example.com"), [ValidationLevel::Warning]);
+        assert!(levels("https://example.com").is_empty());
+    }
+
+    // A command checked on its own is named by the spec field it will be written
+    // to, as validating the spec names it.
+    #[test]
+    fn a_command_answer_is_named_by_its_field() {
+        let issues = command_issues("work", "install", "echo 'open");
+        let fields: Vec<&str> = issues.iter().map(ValidationIssue::field).collect();
+        assert_eq!(fields, ["environments.work.install"]);
+        assert!(command_issues("work", "install", "true").is_empty());
+    }
 
     fn entry_from_yaml(yaml: &str) -> DotfileEntry {
         crate::yaml::parse(yaml).expect("dotfile entry should parse")
