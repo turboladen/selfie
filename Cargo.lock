@@ -2663,6 +2663,7 @@ dependencies = [
 name = "selfie-cli"
 version = "0.1.0"
 dependencies = [
+ "ansi-str",
  "anyhow",
  "assert_cmd",
  "clap",
@@ -2686,6 +2687,7 @@ dependencies = [
  "syn 3.0.10",
  "tempfile",
  "test-common",
+ "textwrap",
  "tokio",
  "tokio-test",
  "tokio-util",
@@ -3029,6 +3031,15 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "textwrap"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ecfad6c3abc80a577f2b91c1e412ee57e7a060d430b553c1b0c940974ebcd49"
+dependencies = [
+ "unicode-width",
 ]
 
 [[package]]
