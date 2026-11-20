@@ -191,7 +191,10 @@ impl MockPackageRepository {
 /// This enum represents all possible failures when interacting with the
 /// package repository, providing detailed context for debugging and
 /// error handling.
-#[derive(Debug, Clone)]
+///
+/// [`kind`](Self::kind) is its label, the variant's name in snake_case.
+#[derive(Debug, Clone, strum::IntoStaticStr, strum::VariantNames)]
+#[strum(serialize_all = "snake_case")]
 pub enum PackageRepoError {
     /// Package-specific error (not found, parse error, etc.)
     PackageError(Box<PackageError>),
@@ -409,6 +412,12 @@ impl From<PackageListError> for PackageRepoError {
 }
 
 impl PackageRepoError {
+    /// The label for this error, such as `"changed_since_load"`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+
     /// Whether this means no package file exists at that name.
     ///
     /// Two answers do: the name matched nothing, and nothing at all is at the
@@ -1761,6 +1770,37 @@ mod tests {
     use super::*;
 
     use mockall::predicate::*;
+
+    // The label set is the MCP contract for a repository failure, so each label
+    // is pinned. A rename here is a change an MCP client sees. A Repository
+    // failure never holds `package_error` or `package_list_error`, which become
+    // failures of their own, so a client sees only the other labels.
+    #[test]
+    fn every_package_repo_error_has_its_label() {
+        use strum::VariantNames;
+
+        assert_eq!(
+            PackageRepoError::VARIANTS,
+            [
+                "package_error",
+                "package_list_error",
+                "io_error",
+                "file_system_error",
+                "unserializable",
+                "untrusted_keys",
+                "unwritable_path",
+                "occupied",
+                "changed_since_load",
+                "not_loaded",
+                "another_file_answers",
+            ]
+        );
+        let changed = PackageRepoError::ChangedSinceLoad {
+            path: "/p/a.yml".into(),
+            refused: RefusedChange::Write,
+        };
+        assert_eq!(changed.kind(), "changed_since_load");
+    }
 
     fn listing(state: DirectoryState) -> PackageRepoError {
         PackageRepoError::from(PackageListError::new("/packages".into(), state))

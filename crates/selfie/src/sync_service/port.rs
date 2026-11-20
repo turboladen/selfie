@@ -32,6 +32,28 @@ pub enum SyncError {
 
 crate::parts::display_from_parts!(error SyncError);
 
+impl SyncError {
+    /// The label of the git error this is, such as `"not_a_repo"`, which a
+    /// failed git step's [`GitSyncError::kind`](crate::git::GitSyncError::kind)
+    /// shares. `None` for a refusal that is not git's.
+    #[must_use]
+    pub fn kind(&self) -> Option<&'static str> {
+        match self {
+            // The same condition `GitSyncError::NotARepo` names, so its label is
+            // taken from there rather than written twice. Only the variant is
+            // read, so the path is left empty.
+            Self::NotARepo(_) => Some(
+                crate::git::GitSyncError::NotARepo {
+                    path: PathBuf::new(),
+                }
+                .kind(),
+            ),
+            Self::GitError(error) => Some(error.kind()),
+            Self::ValidationFailed { .. } | Self::Privilege(_) => None,
+        }
+    }
+}
+
 impl crate::parts::Composed for SyncError {
     fn parts(&self) -> crate::parts::Parts<'_> {
         use crate::parts::Parts;
@@ -65,7 +87,10 @@ pub struct GitFailure {
 }
 
 /// A git step a sync command runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// [`label`](Self::label) is its label, the variant's name in snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr, strum::VariantNames)]
+#[strum(serialize_all = "snake_case")]
 pub enum GitStep {
     /// Finding the repository that holds the package directory.
     Discover,
@@ -83,6 +108,14 @@ pub enum GitStep {
     Fetch,
     /// Fast-forwarding to the remote branch.
     FastForward,
+}
+
+impl GitStep {
+    /// The label for this step, such as `"push"`.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        self.into()
+    }
 }
 
 impl GitFailure {

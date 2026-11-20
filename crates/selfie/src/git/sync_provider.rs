@@ -11,7 +11,10 @@ use super::message::GitMessage;
 use crate::parts::{Composed, Parts};
 
 /// Errors from git sync operations.
-#[derive(Debug, Clone)]
+///
+/// [`kind`](Self::kind) is its label, the variant's name in snake_case.
+#[derive(Debug, Clone, strum::IntoStaticStr, strum::VariantNames)]
+#[strum(serialize_all = "snake_case")]
 pub enum GitSyncError {
     /// The given path is not inside a git repository.
     NotARepo { path: PathBuf },
@@ -53,6 +56,14 @@ pub enum GitSyncError {
 }
 
 crate::parts::display_from_parts!(error GitSyncError);
+
+impl GitSyncError {
+    /// The label for this error, such as `"push_rejected"`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+}
 
 impl Composed for GitSyncError {
     // The repository's path is a path and the branch a name. Git's own text is
@@ -297,6 +308,43 @@ pub trait GitSyncProvider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The label sets are the MCP contract for a failed sync step, so each label
+    // is pinned. A rename here is a change an MCP client sees.
+    #[test]
+    fn every_git_sync_error_and_step_has_its_label() {
+        use strum::VariantNames;
+
+        assert_eq!(
+            GitSyncError::VARIANTS,
+            [
+                "not_a_repo",
+                "no_remote",
+                "dirty_working_tree",
+                "diverged",
+                "push_rejected",
+                "operation_in_progress",
+                "conflicted",
+                "nothing_to_commit",
+                "operation_failed",
+            ]
+        );
+        assert_eq!(GitSyncError::PushRejected.kind(), "push_rejected");
+        assert_eq!(
+            crate::sync_service::port::GitStep::VARIANTS,
+            [
+                "discover",
+                "status",
+                "check_status",
+                "stage",
+                "commit",
+                "push",
+                "fetch",
+                "fast_forward",
+            ]
+        );
+        assert_eq!(crate::sync_service::port::GitStep::Push.label(), "push");
+    }
 
     // Every git sync error, whole.
     #[test]
