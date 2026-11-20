@@ -1306,7 +1306,6 @@ mod tests {
             source: package_file("myapp/config.toml"),
             target: "/home/u/.config/app.toml".to_string(),
             backup: backup.map(str::to_string),
-            accepted_conflict: false,
         };
 
         let result = collect_events(Box::pin(stream::iter(vec![
@@ -1330,8 +1329,7 @@ mod tests {
         );
     }
 
-    // A deployment row has exactly these keys. Whether the write settled an
-    // accepted conflict lays out a terminal's table and is not one of them.
+    // A deployment row has exactly these keys.
     #[tokio::test]
     async fn a_deployment_row_keeps_its_published_keys() {
         let result = collect_events(Box::pin(stream::iter(vec![
@@ -1340,7 +1338,6 @@ mod tests {
                 source: package_file("myapp/config.toml"),
                 target: "/home/u/.config/app.toml".to_string(),
                 backup: None,
-                accepted_conflict: true,
             },
         ])))
         .await;
