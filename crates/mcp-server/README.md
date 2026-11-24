@@ -82,8 +82,10 @@ instructions.
 
 The MCP server handles two common issues with GUI-launched processes:
 
-- **PATH**: Uses a login shell (`$SHELL -l -c`) to source your profile, so tools in `~/.cargo/bin`,
-  homebrew paths, fnm, etc. are available for check/install/audit commands.
+- **PATH**: Uses a login shell (`$SHELL -l -c`, or `--login` for nu) to source your profile, so
+  tools in `~/.cargo/bin`, homebrew paths, fnm, etc. are available for check/install/audit commands.
+  A `SHELL` that is unset, empty, csh or tcsh runs commands with `/bin/sh -l -c` instead;
+  `docs/package-files.md` says which commands nu hands to `/bin/sh`.
 - **HOME**: Recovers the home directory from the system password database if `HOME` isn't set,
   ensuring `~` in config paths expands correctly.
 

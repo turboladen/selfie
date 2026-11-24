@@ -5,8 +5,9 @@
 //! and streaming execution modes with configurable timeouts.
 
 use std::{
+    ffi::OsString,
     future::Future,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Output, Stdio},
     sync::Arc,
     time::{Duration, Instant},
@@ -29,6 +30,9 @@ use super::{
 };
 
 mod content;
+mod family;
+
+pub use family::ShellFallback;
 
 /// Shell command runner implementation
 ///
@@ -38,16 +42,24 @@ mod content;
 #[derive(Clone, Debug)]
 pub struct ShellCommandRunner {
     /// Path to the shell executable to use for command execution
-    shell: String,
+    shell: PathBuf,
 
     /// Default timeout for commands when no explicit timeout is provided
     default_timeout: Duration,
 
-    /// Whether to run as a login shell (-l flag), sourcing the user's profile.
-    /// Needed when the process is launched from a GUI app (e.g., MCP server
-    /// started by Claude Desktop) where PATH doesn't include user-installed
-    /// tools like ~/.cargo/bin, homebrew, fnm, etc.
-    login: bool,
+    /// The flag that makes `shell` a login shell, sourcing the user's profile,
+    /// or `None` for a runner that sources none. A process launched from a GUI
+    /// app (e.g., MCP server started by Claude Desktop) needs one, because its
+    /// PATH doesn't include user-installed tools like ~/.cargo/bin, homebrew,
+    /// fnm, etc.
+    login_flag: Option<&'static str>,
+
+    /// The shell a command whose stdout becomes content runs with. It differs
+    /// from `shell` only when that one cannot run the content recipes.
+    content_shell: PathBuf,
+
+    /// What a login runner replaced in `SHELL`, if anything.
+    fallback: Option<ShellFallback>,
 
     /// Who answers a prompt a command writes to its terminal. Without one, such
     /// a command fails with [`CommandError::InputRequired`].
@@ -68,32 +80,64 @@ impl ShellCommandRunner {
     /// ```
     #[must_use]
     pub fn new(shell: &str, default_timeout: Duration) -> Self {
+        // Never substituted, whatever its name: callers pass scripts standing
+        // in for a shell, and a runner quietly using `/bin/sh` instead would
+        // make every test of what that script does pass without running it.
+        let shell = PathBuf::from(shell);
         Self {
-            shell: shell.to_string(),
+            content_shell: shell.clone(),
+            shell,
             default_timeout,
-            login: false,
+            login_flag: None,
+            fallback: None,
             prompt: None,
         }
     }
 
     /// Create a login shell command runner that sources the user's profile.
     ///
-    /// Uses the user's default shell (from `SHELL` env var, falling back to
-    /// `/bin/sh`) with the `-l` flag to source login profiles (`.bash_profile`,
-    /// `.zshrc`, etc.). This ensures PATH includes user-installed tools like
-    /// `~/.cargo/bin`, homebrew paths, etc.
+    /// Reads `SHELL` once, here. nu runs every command as `$SHELL --login -c`,
+    /// and every other shell as `$SHELL -l -c`. Sourcing the login profile puts
+    /// user-installed tools like `~/.cargo/bin` and homebrew paths on PATH.
+    ///
+    /// csh and tcsh, which refuse `-l` beside `-c`, and an unset or empty
+    /// `SHELL` run every command with `/bin/sh -l -c` instead. nu runs the
+    /// commands whose stdout becomes dotfile content with `/bin/sh -l -c` too.
+    /// [`shell_fallback`](Self::shell_fallback) says which of these happened.
     ///
     /// Use this when the process is launched from a non-shell context
     /// (e.g., an MCP server started by a GUI application).
     #[must_use]
     pub fn login_shell(default_timeout: Duration) -> Self {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| Self::default_shell().to_string());
+        Self::resolving_login_shell(std::env::var_os("SHELL"), default_timeout)
+    }
+
+    /// Builds a runner as [`login_shell`](Self::login_shell) does, with `shell`
+    /// standing for the value of `SHELL`, which is `None` when it is unset.
+    #[cfg(feature = "with_mocks")]
+    #[must_use]
+    pub fn login_shell_with(shell: Option<OsString>, default_timeout: Duration) -> Self {
+        Self::resolving_login_shell(shell, default_timeout)
+    }
+
+    fn resolving_login_shell(shell: Option<OsString>, default_timeout: Duration) -> Self {
+        let login = family::LoginShell::resolve(shell);
         Self {
-            shell,
+            shell: login.command,
             default_timeout,
-            login: true,
+            login_flag: Some(login.login_flag),
+            content_shell: login.content,
+            fallback: login.fallback,
             prompt: None,
         }
+    }
+
+    /// The shell `SHELL` named that this runner does not use, or `None` when
+    /// it uses that shell for everything. Always `None` for a runner built with
+    /// [`new`](Self::new).
+    #[must_use]
+    pub fn shell_fallback(&self) -> Option<&ShellFallback> {
+        self.fallback.as_ref()
     }
 
     /// Let `handler` answer the prompts a command writes to its terminal, such
@@ -115,8 +159,8 @@ impl ShellCommandRunner {
     /// string, to run in `working_dir`.
     fn build_command(&self, command: &str, working_dir: &Path) -> Command {
         let mut cmd = Command::new(&self.shell);
-        if self.login {
-            cmd.arg("-l");
+        if let Some(flag) = self.login_flag {
+            cmd.arg(flag);
         }
         cmd.arg("-c")
             .arg(command)
@@ -138,8 +182,8 @@ impl ShellCommandRunner {
     fn build_content_command(&self, recipe: &str, working_dir: &Path, fd: u8) -> Command {
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
-            .arg(content::wrapper(fd, self.login))
-            .env(content::SHELL_VAR, &self.shell)
+            .arg(content::wrapper(fd, self.login_flag.is_some()))
+            .env(content::SHELL_VAR, &self.content_shell)
             .env(content::COMMAND_VAR, recipe)
             .env_remove("ENV")
             .env_remove("BASH_ENV")
@@ -276,7 +320,7 @@ impl ShellCommandRunner {
     /// The default shell path, `/bin/sh`.
     #[must_use]
     pub fn default_shell() -> &'static str {
-        "/bin/sh"
+        family::FALLBACK_SHELL
     }
 }
 
@@ -427,11 +471,6 @@ impl CommandRunner for ShellCommandRunner {
     }
 
     /// Run a command whose stdout becomes a file's content.
-    ///
-    /// Deliberately **not** conditioned on `self.login`: a non-login shell is
-    /// quieter, not silent, and gating on the flag would leave every test built
-    /// with [`ShellCommandRunner::new`] passing against a splicing production
-    /// path.
     async fn execute_for_content(
         &self,
         command: &str,
@@ -439,9 +478,18 @@ impl CommandRunner for ShellCommandRunner {
         timeout: Duration,
         token: &CancellationToken,
     ) -> Result<ContentOutput, CommandError> {
+        // Deliberately not conditioned on `self.login_flag`: a non-login shell is
+        // quieter, not silent, and gating on the flag would leave every test built
+        // with `ShellCommandRunner::new` passing against a splicing production
+        // path.
         let markers = content::Markers::new();
         let fd = content::CAPTURE_FD;
-        let recipe = content::recipe(&self.shell, command, &markers, fd);
+        let recipe = content::recipe(
+            family::Recipe::of(&self.content_shell),
+            command,
+            &markers,
+            fd,
+        );
 
         let output = self
             .run_buffered(
@@ -2457,9 +2505,11 @@ mod content_tests {
         let dir = tempfile::tempdir().unwrap();
         let shell = noisy_shell(dir.path(), "LEADBANNER", "TRAILCHATTER", true);
         let runner = ShellCommandRunner {
-            shell: shell.to_str().unwrap().to_string(),
+            content_shell: shell.clone(),
+            shell,
             default_timeout: TIMEOUT,
-            login: true,
+            login_flag: Some("-l"),
+            fallback: None,
             prompt: None,
         };
 
@@ -2480,7 +2530,10 @@ mod content_tests {
         // asserts the flag directly rather than relying on the others.
         let dir = tempfile::tempdir().unwrap();
         let runner = noisy_runner(dir.path());
-        assert!(!runner.login, "the fixture must be a non-login runner");
+        assert!(
+            runner.login_flag.is_none(),
+            "the fixture must be a non-login runner"
+        );
 
         let output = runner
             .execute_for_content("printf '%s' 'plain'", dir.path(), TIMEOUT, &token())
