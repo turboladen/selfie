@@ -2,7 +2,12 @@
 
 use std::{
     ffi::{OsStr, OsString},
+    fmt,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::parts::{Composed, Parts};
@@ -153,6 +158,12 @@ impl ShellFallback {
             Self::Unsupported(shell) | Self::ContentUnsupported(shell) => Some(shell),
         }
     }
+
+    /// Whether ordinary commands run with the fallback, rather than only the
+    /// commands whose stdout becomes content.
+    pub(super) fn covers_every_command(&self) -> bool {
+        !matches!(self, Self::ContentUnsupported(_))
+    }
 }
 
 crate::parts::display_from_parts!(ShellFallback);
@@ -178,9 +189,48 @@ impl Composed for ShellFallback {
     }
 }
 
+/// Who is told, once, that a runner is using a fallback shell.
+///
+/// A runner and every clone of it share one notice, so the first command the
+/// fallback affects, whichever of them runs it, is the only one that tells.
+#[derive(Clone)]
+pub struct FallbackNotice {
+    tell: Arc<dyn Fn(&ShellFallback) + Send + Sync>,
+    told: Arc<AtomicBool>,
+}
+
+impl FallbackNotice {
+    /// Build a notice from `tell`, which is called at most once and may be
+    /// called from any thread.
+    pub fn new(tell: impl Fn(&ShellFallback) + Send + Sync + 'static) -> Self {
+        Self {
+            tell: Arc::new(tell),
+            told: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    // `swap` rather than a load and a store: commands run concurrently, and two
+    // that both loaded `false` would both tell.
+    pub(super) fn tell(&self, fallback: &ShellFallback) {
+        if !self.told.swap(true, Ordering::AcqRel) {
+            (self.tell)(fallback);
+        }
+    }
+}
+
+impl fmt::Debug for FallbackNotice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FallbackNotice")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, time::Duration};
+    use std::{
+        ffi::OsStr,
+        sync::{Barrier, atomic::AtomicUsize},
+        time::Duration,
+    };
 
     use super::super::{ShellCommandRunner, content};
     use super::*;
@@ -440,5 +490,76 @@ mod tests {
         );
         assert_eq!(content_of(&runner).0, Path::new("/x/noisy-shell"));
         assert_eq!(runner.shell_fallback(), None);
+    }
+
+    // Builds a runner on `shell` whose notice counts how often it is told.
+    fn counted(shell: Option<&str>) -> (ShellCommandRunner, Arc<AtomicUsize>) {
+        let told = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&told);
+        let runner =
+            login_runner(shell).with_shell_fallback_notice(FallbackNotice::new(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }));
+        (runner, told)
+    }
+
+    #[test]
+    fn a_fallback_is_told_once_across_commands_and_clones() {
+        let (runner, told) = counted(Some("/bin/tcsh"));
+        let clone = runner.clone();
+
+        command_of(&runner);
+        command_of(&clone);
+        content_of(&runner);
+        command_of(&runner);
+
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_runner_without_a_fallback_tells_nothing() {
+        let (runner, told) = counted(Some("/bin/zsh"));
+
+        command_of(&runner);
+        content_of(&runner);
+
+        assert_eq!(told.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn concurrent_first_commands_tell_once() {
+        let (runner, told) = counted(None);
+        let start = Arc::new(Barrier::new(16));
+
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let runner = runner.clone();
+                let start = Arc::clone(&start);
+                scope.spawn(move || {
+                    start.wait();
+                    command_of(&runner);
+                });
+            }
+        });
+
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn nu_tells_only_when_content_runs() {
+        let (runner, told) = counted(Some("/usr/local/bin/nu"));
+
+        command_of(&runner);
+        command_of(&runner);
+        command_of(&runner);
+        assert_eq!(
+            told.load(Ordering::SeqCst),
+            0,
+            "an ordinary command ran under nu"
+        );
+
+        content_of(&runner);
+        content_of(&runner);
+        assert_eq!(told.load(Ordering::SeqCst), 1);
     }
 }

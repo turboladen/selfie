@@ -32,7 +32,7 @@ use super::{
 mod content;
 mod family;
 
-pub use family::ShellFallback;
+pub use family::{FallbackNotice, ShellFallback};
 
 /// Shell command runner implementation
 ///
@@ -60,6 +60,9 @@ pub struct ShellCommandRunner {
 
     /// What a login runner replaced in `SHELL`, if anything.
     fallback: Option<ShellFallback>,
+
+    /// Who is told about `fallback` when the first command it affects runs.
+    notice: Option<FallbackNotice>,
 
     /// Who answers a prompt a command writes to its terminal. Without one, such
     /// a command fails with [`CommandError::InputRequired`].
@@ -90,6 +93,7 @@ impl ShellCommandRunner {
             default_timeout,
             login_flag: None,
             fallback: None,
+            notice: None,
             prompt: None,
         }
     }
@@ -128,6 +132,7 @@ impl ShellCommandRunner {
             login_flag: Some(login.login_flag),
             content_shell: login.content,
             fallback: login.fallback,
+            notice: None,
             prompt: None,
         }
     }
@@ -155,9 +160,30 @@ impl ShellCommandRunner {
         self
     }
 
+    /// Tell `notice` about the fallback, the first time a command runs that it
+    /// affects.
+    ///
+    /// A command whose stdout becomes content is affected by every fallback;
+    /// any other only by one that replaced the shell for every command.
+    #[must_use]
+    pub fn with_shell_fallback_notice(mut self, notice: FallbackNotice) -> Self {
+        self.notice = Some(notice);
+        self
+    }
+
+    fn announce_fallback(&self, for_content: bool) {
+        let (Some(fallback), Some(notice)) = (&self.fallback, &self.notice) else {
+            return;
+        };
+        if for_content || fallback.covers_every_command() {
+            notice.tell(fallback);
+        }
+    }
+
     /// Build a `Command` with the configured shell, login flag, and command
     /// string, to run in `working_dir`.
     fn build_command(&self, command: &str, working_dir: &Path) -> Command {
+        self.announce_fallback(false);
         let mut cmd = Command::new(&self.shell);
         if let Some(flag) = self.login_flag {
             cmd.arg(flag);
@@ -180,6 +206,7 @@ impl ShellCommandRunner {
     /// file it would source, and `SHELLOPTS`/`BASH_XTRACEFD` put its own trace
     /// output on a descriptor of the caller's choosing.
     fn build_content_command(&self, recipe: &str, working_dir: &Path, fd: u8) -> Command {
+        self.announce_fallback(true);
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c")
             .arg(content::wrapper(fd, self.login_flag.is_some()))
@@ -2510,6 +2537,7 @@ mod content_tests {
             default_timeout: TIMEOUT,
             login_flag: Some("-l"),
             fallback: None,
+            notice: None,
             prompt: None,
         };
 

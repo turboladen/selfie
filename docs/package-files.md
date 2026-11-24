@@ -1344,9 +1344,10 @@ behaves identically however you invoke it. Selfie picks the invocation by the fi
 | any other shell, such as `bash`, `zsh` or `fish` | `$SHELL -l -c`      | `$SHELL -l -c`                           |
 
 csh and tcsh refuse `-l` alongside `-c`, and selfie captures a command's output with a POSIX sh or
-fish script that nu cannot run, which is why those shells are replaced. Because the login profile is
-sourced, anything your profile _sets_ rather than exports — `SSH_AUTH_SOCK`, `OP_*` variables, PATH
-additions — is available to a provider command.
+fish script that nu cannot run, which is why those shells are replaced. When selfie replaces your
+shell it warns once, the first time a command it affects runs. Because the login profile is sourced,
+anything your profile _sets_ rather than exports — `SSH_AUTH_SOCK`, `OP_*` variables, PATH additions
+— is available to a provider command.
 
 **Only what your command itself writes to stdout becomes the file's content.** The shell's own
 output does not: selfie hands the shell a stdout of `/dev/null` and captures the command's on a
