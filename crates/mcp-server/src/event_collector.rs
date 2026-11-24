@@ -1,9 +1,9 @@
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
 use selfie::package::event::{
-    AuditResult, CheckFailure, ConflictReport, Coverage, DotfileSource, EnvironmentStatus,
-    EventStream, Gap, LinkAtTarget, NoSuchPackageReason, OperationFailure, OperationInfo,
-    OperationResult, Outcome, PackageEvent, SkipReason,
+    AuditResult, CheckFailure, CommandFailure, ConflictReport, Coverage, DotfileSource,
+    EnvironmentStatus, EventStream, Gap, LinkAtTarget, NoSuchPackageReason, OperationFailure,
+    OperationInfo, OperationResult, Outcome, PackageEvent, SkipReason,
 };
 use selfie::parts::SuggestedCommand;
 use selfie::validation::ValidationErrorCategory;
@@ -24,6 +24,15 @@ fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -
         if let Some(command) = operation.and_then(SuggestedCommand::for_operation) {
             payload["run_in_terminal"] = command.to_string().into();
         }
+    }
+    // A command that exited non-zero carries both of its pipes, bounded, since an
+    // MCP client was shown none of its output while it ran.
+    if let OperationFailure::CommandError(CommandFailure::ExecutionFailed {
+        stdout, stderr, ..
+    }) = failure
+    {
+        payload["stdout"] = stdout.as_str().into();
+        payload["stderr"] = stderr.as_str().into();
     }
     // Each issue as a validation result carries it, so an assistant fixes the field
     // without parsing the sentence in `error`.
@@ -47,15 +56,21 @@ fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -
     }
     // A label, the package and what needs it, so an assistant can tell this
     // from an install command that failed without parsing `error`.
+    // The install's own pipes ride along too, bounded, since its output is why
+    // the check may still say no and an MCP client was shown none of it.
     if let OperationFailure::NotInstalledAfterInstall {
         package_name,
         required_by,
+        stdout,
+        stderr,
         ..
     } = failure
     {
         payload["kind"] = failure.kind().into();
         payload["package"] = package_name.clone().into();
         payload["required_by"] = required_by.clone().into();
+        payload["stdout"] = stdout.as_str().into();
+        payload["stderr"] = stderr.as_str().into();
     }
     // A field, so an assistant can tell a typo from a spec that failed to load
     // without matching the sentence in `error`.
@@ -2059,7 +2074,7 @@ mod tests {
     }
 
     // An install its own check says did not take is a failure with a label,
-    // the package and the package that needs it.
+    // the package, the package that needs it, and the install's bounded pipes.
     #[test]
     fn an_install_its_check_says_did_not_take_carries_its_kind() {
         let payload = failure_json(
@@ -2068,6 +2083,8 @@ mod tests {
                 check_command: "check-dep".to_string(),
                 exit_code: Some(1),
                 required_by: Some("pkg".to_string()),
+                stdout: selfie::commands::BoundedText::bound(b"not on PATH"),
+                stderr: selfie::commands::BoundedText::bound(b"warning: shim"),
             },
             None,
         );
@@ -2076,6 +2093,8 @@ mod tests {
         assert_eq!(payload["kind"], "not_installed_after_install");
         assert_eq!(payload["package"], "dep");
         assert_eq!(payload["required_by"], "pkg");
+        assert_eq!(payload["stdout"], "not on PATH");
+        assert_eq!(payload["stderr"], "warning: shim");
     }
 
     // A rejected push names its kind and step, so an assistant can offer a pull
@@ -2644,23 +2663,24 @@ mod tests {
         );
     }
 
-    // A failed command's output must not reach the JSON an assistant reads.
-    //
-    // This passes today and is a lock, not a fix: failures are rendered with
-    // `Display`, which names the command and its exit code and nothing else. The
-    // secret is placed on **stderr** deliberately — `CommandFailure::ExecutionFailed`
-    // has no `stdout` field, so a secret on stdout could not reach this code by
-    // any route and the test would pass without observing anything.
+    // A failed command forwards each of its pipes bounded, and nothing past the
+    // bound. The secret sits in the middle of each pipe, where the bound elides;
+    // the last line of each, which the bound always keeps, is the control.
     #[tokio::test]
-    async fn a_failed_command_leaks_no_output_into_the_json() {
+    async fn a_failed_command_forwards_only_bounded_tails() {
         const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+        let pipe = |last| test_common::secret_between_filler(SECRET, last);
+        let output = selfie::commands::StreamedOutput::from_output(test_common::command_output(
+            1,
+            pipe("stdout-last"),
+            pipe("stderr-last"),
+        ));
 
         let events = vec![PackageEvent::Completed {
             operation_info: test_op_info(),
             result: OperationResult::Failure(OperationFailure::command_failed(
                 "install-with-token".to_string(),
-                Some(1),
-                &format!("error: vault sealed, TOKEN={SECRET}"),
+                &output,
             )),
         }];
 
@@ -2668,8 +2688,16 @@ mod tests {
         let json = serde_json::to_string(&result.data).unwrap();
 
         test_common::assert_secret_free(&json, SECRET, "the MCP JSON payload");
-        // Control: the failure was rendered at all, and stays diagnosable.
         assert!(!result.success);
+        let payload = &result.data["result"];
+        for (pipe, last) in [("stdout", "stdout-last"), ("stderr", "stderr-last")] {
+            let tail = payload[pipe].as_str().unwrap_or_default();
+            assert!(tail.trim_end().ends_with(last), "{pipe}: {tail}");
+            assert!(
+                tail.contains("bytes elided"),
+                "{pipe} was not bounded: {tail}"
+            );
+        }
         assert!(
             json.contains("install-with-token"),
             "the failing command must still be named:\n{json}"

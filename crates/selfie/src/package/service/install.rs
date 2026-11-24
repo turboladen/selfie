@@ -539,12 +539,12 @@ where
                     .text("' installation command failed"),
             ))
             .await;
-        // The install command's stdout has already been streamed to the caller
-        // line by line as it ran; it is deliberately not repeated here.
+        // Both pipes ride the failure, bounded, for an adapter that did not show
+        // the command's output as it ran. The CLI reprints the stderr tail with
+        // the error and leaves stdout to the step's own tail.
         return Err(OperationFailure::command_failed(
             context.install_cmd.to_string(),
-            Some(install_output.exit_code()),
-            install_output.stderr_str().as_ref(),
+            &install_output,
         ));
     }
 
@@ -557,12 +557,13 @@ where
         Ok(AfterInstall::Confirmed) => None,
         Ok(AfterInstall::Unconfirmed(gap)) => Some(gap),
         Ok(AfterInstall::NotInstalled { exit_code }) => {
-            return Err(OperationFailure::NotInstalledAfterInstall {
-                package_name: context.package_name.to_string(),
-                check_command: context.env_config.check().unwrap_or_default().to_string(),
+            return Err(OperationFailure::not_installed_after_install(
+                context.package_name.to_string(),
+                context.env_config.check().unwrap_or_default().to_string(),
                 exit_code,
-                required_by: context.required_by.map(str::to_string),
-            });
+                context.required_by.map(str::to_string),
+                &install_output,
+            ));
         }
         Ok(AfterInstall::Failed(failure)) => {
             return Err(OperationFailure::from(&failure));

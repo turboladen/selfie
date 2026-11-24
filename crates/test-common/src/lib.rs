@@ -47,7 +47,7 @@ pub use locked::LockedDir;
 pub use messages::{every_message, message};
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use plant::{PLANTED, Plant, PlantsBeforeWrite, Rewrite};
-pub use runner::FakeCommandRunner;
+pub use runner::{FakeCommandRunner, command_output, secret_between_filler};
 pub use scripts::{two_marking_lines, write_executable};
 pub use secrets::assert_secret_free;
 pub use service::{

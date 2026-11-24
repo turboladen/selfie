@@ -82,27 +82,47 @@ Test egress at the **boundary**, not by listing known paths:
   bound for the terminal, and it would hide forwarded stderr from the event scan above — a secret
   arriving on stderr later would go unseen instead of caught. Apply this rule to types that hold a
   secret, not to types that carry something already on its way out.
-- **No command's stdout may reach a failure type.** A provider's stdout _is_ the secret, and the
-  general failure path cannot know which commands produce one. This is currently enforced by
-  construction at both ends: **no `CommandError` variant carries a `stdout` field**, so
-  `OperationFailure::from(CommandError)` has nothing to read, and `CommandFailure::ExecutionFailed`
-  has none either, so it would have nowhere to put it. Adding a `stdout` field to either — or a new
-  `CommandError` variant that has one — reopens the path and needs a leak test again. Render a
-  `CommandError` with `to_string()`, never `{:?}`: `Display` writes the sentence its
+- **No `CommandError` variant carries stdout, and only an install's output reaches
+  `ExecutionFailed`.** A provider's stdout _is_ the secret, and the general failure path cannot know
+  which commands produce one. Three facts make up the contract, and they are enforced to different
+  degrees:
+  - **No `CommandError` variant has a `stdout` field.** That is enforced by construction, and it is
+    what keeps a timed-out, canceled or provider command's stdout out of every failure:
+    `OperationFailure::from(CommandError)` has nothing to read. A `stdout` field on `CommandError`,
+    or a new variant that has one, reopens the path and needs a leak test again.
+  - **`CommandFailure::ExecutionFailed` carries both pipes, each a `BoundedText`, and so does
+    `OperationFailure::NotInstalledAfterInstall`, the install whose check still says no.** Each
+    reaches every adapter, the MCP transcript included. The last 1000 input bytes of each pipe are
+    always forwarded, so a short failing command that echoed a token forwards it whole. That is the
+    maintainer's ruling for install commands, whose output the terminal already shows.
+  - **Only `OperationFailure::command_failed(&StreamedOutput)` and
+    `OperationFailure::not_installed_after_install(.., &StreamedOutput)` build them, from an
+    install's output.** `StreamedOutput` has a private field, and only the streaming install step
+    (`execute_command_streaming`) wraps one, so a check's, an audit's, a finder's or a provider's
+    output cannot be passed to either from any crate. Three gaps remain:
+    `StreamedOutput::from_output` is `pub` but compiled only under `with_mocks`, which `just build`
+    keeps out of the binaries; `StreamedOutput::new` is `pub(crate)`, so a second caller inside
+    `selfie` could wrap other output, and the variants are struct literals that any crate can write,
+    since `BoundedText::bound` is `pub`. The `BoundedText` fields still bound whatever any gap lets
+    in.
+
+  Render a `CommandError` with `to_string()`, never `{:?}`: `Display` writes the sentence its
   `Composed::parts` curates, while `Debug` prints whatever fields a future variant adds. Still
   prefer the resolve path's own error type over `from(CommandError)` or `command_failed`: those say
   "a command failed", not which entry or which var, and the resolve variants carry that.
-- **Forward command stderr on failure only**, bounded. It is content selfie does not control; a
-  provider run with a verbose flag can echo secret material there. Every failure's sentence names
-  the package file's own `command:` string only as a `SpecCommandText` part, which bounds it.
-  `BoundedText` in `commands/runner.rs` is the one bound. It is `pub` and re-exported as
+- **Forward command output on failure only**, bounded: stderr from any failing command, and stdout
+  only from a failing install, as above. It is content selfie does not control; a provider run with
+  a verbose flag can echo secret material to stderr. Every failure's sentence names the package
+  file's own `command:` string only as a `SpecCommandText` part, which bounds it. `BoundedText` in
+  `commands/runner.rs` is the one bound. It is `pub` and re-exported as
   `selfie::commands::BoundedText`, so the CLI and the MCP server can construct one — this rule is
   followable from every crate it is scoped to. Call `BoundedText::bound` rather than deciding a
   limit per site. What it _enforces_ is uneven, and the difference is the part worth knowing:
-  - **`CommandFailure::ExecutionFailed`'s `stderr` and the resolve path's `RunFailure::Exited` are
-    compiler-enforced.** Their type is `BoundedText`, whose field is private, so no struct-variant
-    literal — library, adapter, or test — can put unbounded text there. A runner error on the
-    resolve path stays a `CommandError`, whose parts bound each value it names.
+  - **`CommandFailure::ExecutionFailed`'s `stdout` and `stderr` and the resolve path's
+    `RunFailure::Exited` are compiler-enforced.** Their type is `BoundedText`, whose field is
+    private, so no struct-variant literal — library, adapter, or test — can put unbounded text
+    there. A runner error on the resolve path stays a `CommandError`, whose parts bound each value
+    it names.
   - **`AuditResult::Error` is a `String`.** It builds a `BoundedText` at the construction site and
     renders it into its sentence, because it is a rendered sentence rather than a stderr field. The
     bound there is still something a person has to remember; it is the site to check when adding a
@@ -112,8 +132,9 @@ Test egress at the **boundary**, not by listing known paths:
     6000 bytes of text. It bounds how much of the command's output survives, not `as_str().len()`.
   - **It keeps both ends, not a prefix.** The surviving 2000 bytes are split between the head and
     the tail, with the elided byte count named in between, because a failing command puts its
-    diagnosis last. That means **the last bytes of stderr are always forwarded** — a leak test that
-    plants its secret at the end will now see it where a head-only cut would have dropped it.
+    diagnosis last. That means **the last bytes of each pipe it forwards always survive** — a leak
+    test that plants its secret at the end will now see it where a head-only cut would have dropped
+    it.
   - **It bounds forwarded output, not every string in a failure.** `ExecutionFailed`'s `command` and
     `AuditResultData`'s `audit_command` are plain unbounded `String`s that also reach the MCP JSON.
     They are user-authored package-file text rather than process output, which is why they are not

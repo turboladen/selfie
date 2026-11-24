@@ -1558,6 +1558,11 @@ pub enum OperationFailure {
         /// The package that needs this one, when it is a dependency of the
         /// package being installed.
         required_by: Option<String>,
+        /// The install command's stdout and stderr, each bounded as
+        /// [`CommandFailure::ExecutionFailed`]'s are, since its output is why
+        /// the check may still say no.
+        stdout: crate::commands::BoundedText,
+        stderr: crate::commands::BoundedText,
     },
     /// A command that records what it writes stopped over the deploy state.
     DeployState(crate::dotfile_service::DeployStateFailure),
@@ -1725,19 +1730,21 @@ pub enum NoSuchPackageReason {
 pub enum CommandFailure {
     /// A command ran and exited non-zero.
     ///
-    /// Deliberately carries **no** `stdout`. selfie runs user-defined commands and
-    /// cannot know which of them print a credential, so a general failure value has
-    /// nowhere safe to put a command's whole output: this variant is cloned into
-    /// [`PackageEvent::Completed`], which every adapter receives. `stderr` is
-    /// forwarded because a failure has to stay diagnosable, and its
-    /// [`BoundedText`](crate::commands::BoundedText) type is what bounds it: the
-    /// newtype's field is private, so no struct-variant literal — here, in an
-    /// adapter, or in a test — can put unbounded text in this field. That makes
-    /// this the one stderr-forwarding site the compiler enforces. Do not add a
-    /// `stdout` field back.
+    /// Carries both of the command's pipes, each bounded, so the failure stays
+    /// diagnosable. This variant is cloned into [`PackageEvent::Completed`], which
+    /// every adapter receives, so whatever the command printed within the bound,
+    /// a credential included, reaches every one of them. The last bytes of each
+    /// pipe are always kept.
+    ///
+    /// Build it with [`OperationFailure::command_failed`], which takes only a
+    /// [`StreamedOutput`](crate::commands::StreamedOutput): the output of a
+    /// command selfie streamed to its caller as it ran. The
+    /// [`BoundedText`](crate::commands::BoundedText) fields have a private field,
+    /// so nothing can put unbounded text in them.
     ExecutionFailed {
         command: String,
         exit_code: Option<i32>,
+        stdout: crate::commands::BoundedText,
         stderr: crate::commands::BoundedText,
     },
     /// A command ran past its timeout and was stopped.
@@ -1827,6 +1834,7 @@ impl Composed for OperationFailure {
                 check_command,
                 exit_code,
                 required_by,
+                ..
             } => {
                 let by = crate::package::port::required_by_parts(required_by.as_deref());
                 // The clause is a parenthetical, so it closes with a comma.
@@ -3274,18 +3282,41 @@ impl OperationFailure {
         })
     }
 
-    /// Creates a command execution failed error.
+    /// The failure of `command`, which ran and exited non-zero with `output`.
     ///
-    /// Takes no `stdout`: see [`CommandFailure::ExecutionFailed`]. Takes `stderr`
-    /// as a `&str` and bounds it here, so a caller cannot supply an already-built
-    /// value that skipped the bound.
+    /// Both pipes are bounded here. The output must be a
+    /// [`StreamedOutput`](crate::commands::StreamedOutput), so a check's, an
+    /// audit's, a finder's or a provider's output cannot reach a failure this
+    /// way: see [`CommandFailure::ExecutionFailed`].
     #[must_use]
-    pub fn command_failed(command: String, exit_code: Option<i32>, stderr: &str) -> Self {
+    pub fn command_failed(command: String, output: &crate::commands::StreamedOutput) -> Self {
         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
             command,
-            exit_code,
-            stderr: crate::commands::BoundedText::bound(stderr.as_bytes()),
+            exit_code: output.code(),
+            stdout: crate::commands::BoundedText::bound(output.stdout()),
+            stderr: crate::commands::BoundedText::bound(output.stderr()),
         })
+    }
+
+    /// The failure of an install of `package_name` whose command succeeded
+    /// with `install`, but whose `check_command` still says it is not
+    /// installed. Both of the install command's pipes are bounded here.
+    #[must_use]
+    pub fn not_installed_after_install(
+        package_name: String,
+        check_command: String,
+        exit_code: Option<i32>,
+        required_by: Option<String>,
+        install: &crate::commands::StreamedOutput,
+    ) -> Self {
+        OperationFailure::NotInstalledAfterInstall {
+            package_name,
+            check_command,
+            exit_code,
+            required_by,
+            stdout: crate::commands::BoundedText::bound(install.stdout()),
+            stderr: crate::commands::BoundedText::bound(install.stderr()),
+        }
     }
 
     /// Checks if this is an environment-related error
@@ -5529,6 +5560,8 @@ mod tests {
                 check_command: "c".to_string(),
                 exit_code,
                 required_by: required_by.map(str::to_string),
+                stdout: crate::commands::BoundedText::bound(b""),
+                stderr: crate::commands::BoundedText::bound(b""),
             };
         let missing = |reason| OperationFailure::NoSuchPackage {
             name: "p".to_string(),
@@ -5679,6 +5712,7 @@ mod tests {
                 CommandFailure::ExecutionFailed {
                     command: "false #\u{200B}".to_string(),
                     exit_code: Some(127),
+                    stdout: crate::commands::BoundedText::bound(b""),
                     stderr: crate::commands::BoundedText::bound(b"e"),
                 },
                 "Command error: Command `false #\u{200B}` failed with exit code 127".to_string(),
@@ -5687,6 +5721,7 @@ mod tests {
                 CommandFailure::ExecutionFailed {
                     command: "false #\u{200B}".to_string(),
                     exit_code: None,
+                    stdout: crate::commands::BoundedText::bound(b""),
                     stderr: crate::commands::BoundedText::bound(b"e"),
                 },
                 "Command error: Command `false #\u{200B}` failed".to_string(),
@@ -5733,6 +5768,7 @@ mod tests {
                 CommandFailure::ExecutionFailed {
                     command: "c\u{200B}md".to_string(),
                     exit_code: Some(1),
+                    stdout: crate::commands::BoundedText::bound(b""),
                     stderr: crate::commands::BoundedText::bound(b""),
                 },
                 vec![command()],
@@ -6119,6 +6155,7 @@ mod tests {
         let execution = |exit_code| CommandFailure::ExecutionFailed {
             command: long.clone(),
             exit_code,
+            stdout: crate::commands::BoundedText::bound(b""),
             stderr: crate::commands::BoundedText::bound(b""),
         };
         // The inner types bound their own sentence, so an adapter that unwraps a
@@ -7249,6 +7286,8 @@ mod tests {
             check_command: "ch\u{200B}eck".to_string(),
             exit_code: Some(1),
             required_by: required_by.map(str::to_string),
+            stdout: crate::commands::BoundedText::bound(b""),
+            stderr: crate::commands::BoundedText::bound(b""),
         };
         let invalid = |action| OperationFailure::InvalidSpec {
             action,
@@ -7299,6 +7338,8 @@ mod tests {
             check_command: long.clone(),
             exit_code: None,
             required_by: None,
+            stdout: crate::commands::BoundedText::bound(b""),
+            stderr: crate::commands::BoundedText::bound(b""),
         };
 
         let words = failure.to_string();
@@ -7334,6 +7375,49 @@ mod tests {
             "Refusing to update 'myapp': selfie could not tell which spec directory \
              /p\u{200B}k/myapp.yml belongs in, so it could not compare it with the other specs, \
              and nothing was written"
+        );
+    }
+}
+
+// A command that died on a signal has no exit code, and a failure must not
+// invent one.
+#[cfg(test)]
+mod command_failed_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt as _;
+
+    fn failed(status: std::process::ExitStatus) -> OperationFailure {
+        let output = crate::commands::CommandOutput::from_parts(
+            status,
+            Vec::new(),
+            Vec::new(),
+            std::time::Duration::ZERO,
+        );
+        OperationFailure::command_failed(
+            "install-x".to_string(),
+            &crate::commands::StreamedOutput::new(output),
+        )
+    }
+
+    #[test]
+    fn a_command_killed_by_a_signal_reports_no_exit_code() {
+        // A raw wait status of 9 is death by SIGKILL; 3 << 8 is exit code 3.
+        let killed = failed(std::process::ExitStatus::from_raw(9));
+        let exited = failed(std::process::ExitStatus::from_raw(3 << 8));
+
+        let code = |failure: &OperationFailure| match failure {
+            OperationFailure::CommandError(CommandFailure::ExecutionFailed {
+                exit_code, ..
+            }) => *exit_code,
+            other => panic!("expected an execution failure, got {other:?}"),
+        };
+        assert_eq!(code(&killed), None);
+        assert!(!killed.to_string().contains("exit code"), "{killed}");
+        // Control: a command that exited names its code.
+        assert_eq!(code(&exited), Some(3));
+        assert!(
+            exited.to_string().ends_with("failed with exit code 3"),
+            "{exited}"
         );
     }
 }

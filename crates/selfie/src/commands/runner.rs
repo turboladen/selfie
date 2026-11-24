@@ -189,6 +189,13 @@ impl CommandOutput {
         self.output.status.code().unwrap_or(-1)
     }
 
+    /// The command's exit code, or `None` when it exited on a signal and so
+    /// has none.
+    #[must_use]
+    pub fn code(&self) -> Option<i32> {
+        self.output.status.code()
+    }
+
     /// Get the raw stdout bytes
     ///
     /// Returns the complete stdout output as a byte slice. Use [`stdout_str`](Self::stdout_str)
@@ -730,6 +737,43 @@ impl crate::parts::Composed for CommandError {
     }
 }
 
+/// The output of a command whose output selfie streamed to its caller as the
+/// command ran, such as an install.
+///
+/// Only the streaming install step builds one, so a value of this type cannot
+/// hold a check's, an audit's or a finder's output. Read it through
+/// [`CommandOutput`]'s methods.
+// The type marks the one command output whose stdout a failure may forward, by
+// the ruling for install commands. `OperationFailure::command_failed` takes
+// nothing else.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamedOutput(CommandOutput);
+
+impl StreamedOutput {
+    pub(crate) fn new(output: CommandOutput) -> Self {
+        Self(output)
+    }
+
+    /// Wrap `output` as though it had been streamed.
+    ///
+    /// For test doubles. Gated behind `with_mocks`, as
+    /// [`CommandOutput::from_parts`] is, so that production code cannot pass
+    /// another command's output off as streamed.
+    #[cfg(feature = "with_mocks")]
+    #[must_use]
+    pub fn from_output(output: CommandOutput) -> Self {
+        Self(output)
+    }
+}
+
+impl std::ops::Deref for StreamedOutput {
+    type Target = CommandOutput;
+
+    fn deref(&self) -> &CommandOutput {
+        &self.0
+    }
+}
+
 /// How many **input bytes** a [`BoundedText`] keeps, across both ends together.
 ///
 /// Also stated as a number in `docs/package-files.md`, because a user reading a
@@ -758,8 +802,8 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 /// error.
 ///
 /// The private field makes [`BoundedText::bound`] the only way to build one, so
-/// a field of this type, such as `CommandFailure::ExecutionFailed`'s `stderr`,
-/// cannot be given unbounded text. A caller whose field is a `String`
+/// a field of this type, such as `CommandFailure::ExecutionFailed`'s `stdout`
+/// and `stderr`, cannot be given unbounded text. A caller whose field is a `String`
 /// (`AuditResult::Error`) builds one and renders it into its sentence, and
 /// there the bound is a convention someone has to remember.
 ///

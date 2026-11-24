@@ -703,8 +703,10 @@ directly — do not `echo` it.
 
 Failure reports are narrower. When a command exits non-zero, what selfie reports about the failure
 itself is the command and its exit code — and its standard error, cut to 2000 bytes of what the
-command wrote. It does not repeat the command's standard output. The same limit applies to a failing
-`command` or `vars` dotfile entry and to the message a failing `audit` command produces.
+command wrote. A failing install's report also carries its standard output, cut the same way, for an
+MCP client that was shown none of it while it ran; the terminal does not repeat it. A failing check,
+`command` or `vars` dotfile entry, or `audit` command never repeats its standard output, and the
+same limit applies to its standard error and to the message a failing `audit` command produces.
 
 The cut keeps **both ends** — the first 1000 bytes and the last 1000 — and replaces the middle with
 a marker naming how much went:

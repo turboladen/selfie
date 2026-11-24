@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    commands::runner::{CommandError, CommandOutput, CommandRunner},
+    commands::runner::{CommandError, CommandOutput, CommandRunner, StreamedOutput},
     config::SelfieConfig,
     package::{
         EnvironmentConfig, GetPackage,
@@ -139,7 +139,7 @@ pub async fn execute_command_streaming<CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
-) -> Result<CommandOutput, CommandError>
+) -> Result<StreamedOutput, CommandError>
 where
     CR: CommandRunner,
 {
@@ -212,14 +212,15 @@ where
                         .await;
                 }
             } else {
+                // A command killed by a signal has no exit code to name.
+                let how = output
+                    .code()
+                    .map_or_else(String::new, |code| format!(" with exit code {code}"));
                 sender
-                    .send_warning(format!(
-                        "The `{command_type}` command failed with exit code {}",
-                        output.exit_code()
-                    ))
+                    .send_warning(format!("The `{command_type}` command failed{how}"))
                     .await;
             }
-            Ok(output)
+            Ok(StreamedOutput::new(output))
         }
         Err(error) => Err(error),
     }
@@ -495,7 +496,7 @@ rm -rf package package.tar.gz";
         use crate::config::SelfieConfigBuilder;
 
         // Run `cmd` as an install command with `package_dir` configured.
-        async fn install(package_dir: &Path, cmd: &str) -> Result<CommandOutput, CommandError> {
+        async fn install(package_dir: &Path, cmd: &str) -> Result<StreamedOutput, CommandError> {
             let config = SelfieConfigBuilder::default()
                 .environment("test")
                 .package_directory(package_dir)

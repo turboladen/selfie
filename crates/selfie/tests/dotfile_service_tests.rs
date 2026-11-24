@@ -7211,11 +7211,10 @@ mod secret_bearing {
     async fn a_failing_provider_does_not_leak_its_stdout() {
         // A provider's stdout IS the secret. Two separate things keep it out of
         // the event stream: this path reports failures with its own error type,
-        // which carries the command and its stderr and never the output, and
-        // `CommandFailure::ExecutionFailed` has no `stdout` field for a failure to
-        // be routed into. This test covers the first — prefer the resolve path's
-        // own variants over `OperationFailure::from` regardless, since those name
-        // the entry and the var rather than only saying a command failed.
+        // which carries the command and its stderr and never the output, and no
+        // `CommandError` variant has a `stdout` field for a failure to be routed
+        // into. This test covers the first. `CommandFailure::ExecutionFailed`
+        // does carry stdout, and only an install's output may be handed to it.
         let dirs = TestDirs::new();
         let target = dirs.target_dir.join("credentials");
         provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");

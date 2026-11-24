@@ -764,6 +764,8 @@ mod tests {
             check_command: "ch\u{200B}eck\nnext".to_string(),
             exit_code: Some(1),
             required_by: Some("ap\u{200B}p".to_string()),
+            stdout: selfie::commands::BoundedText::bound(b""),
+            stderr: selfie::commands::BoundedText::bound(b""),
         };
         let invalid = OperationFailure::InvalidSpec {
             action: selfie::package::event::SpecWrite::Update,

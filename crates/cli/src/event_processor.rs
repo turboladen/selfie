@@ -1426,6 +1426,7 @@ mod tests {
                 CommandFailure::ExecutionFailed {
                     command: "brew install bat".to_string(),
                     exit_code: Some(1),
+                    stdout: selfie::commands::BoundedText::bound(b"==> Pouring bat"),
                     stderr: selfie::commands::BoundedText::bound(b"Error: no bottle"),
                 },
             )),
@@ -1433,6 +1434,12 @@ mod tests {
         let printed = printed_for(DisplayManager::new(false), vec![failed]).await;
         assert!(
             printed.contains(&(Channel::Stderr, "Error: no bottle".to_string())),
+            "{printed:?}"
+        );
+        // The stdout tail is for an adapter that did not stream the command's
+        // output, and the terminal already showed it.
+        assert!(
+            !printed.iter().any(|(_, line)| line.contains("Pouring")),
             "{printed:?}"
         );
     }
@@ -1965,6 +1972,7 @@ mod tests {
                 CommandFailure::ExecutionFailed {
                     command: "brew install fail-pkg".to_string(),
                     exit_code: Some(1),
+                    stdout: selfie::commands::BoundedText::bound(b""),
                     stderr: selfie::commands::BoundedText::bound(b"not found"),
                 },
             )),

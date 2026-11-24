@@ -6,7 +6,7 @@ mod terminal;
 
 pub use runner::{
     BoundedText, CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk,
-    OutputStream,
+    OutputStream, StreamedOutput,
 };
 pub use shell::{FallbackNotice, ShellCommandRunner, ShellFallback};
 pub use terminal::{PromptHandler, TerminalAnswer, TerminalPrompt};
