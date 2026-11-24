@@ -11,6 +11,8 @@ futures.workspace = true
 nix = { workspace = true, features = ["fs"] }
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.0"

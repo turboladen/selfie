@@ -20,6 +20,7 @@ pub mod scripts;
 pub mod secrets;
 pub mod service;
 pub mod successes;
+pub mod tracing_capture;
 
 // Re-export the most commonly used items for convenience
 pub use config::{
@@ -55,6 +56,7 @@ pub use service::{
     create_test_service_for_env, create_test_service_with_config,
 };
 pub use successes::every_success;
+pub use tracing_capture::{CapturedTracing, capture_tracing};
 
 // Re-export commonly used external dependencies for convenience
 pub use selfie::{
