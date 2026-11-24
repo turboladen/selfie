@@ -1,21 +1,22 @@
-//! Leak regression for the general command-failure path.
-//!
-//! selfie runs user-defined commands and cannot know which of them print a
-//! credential, so a failure value that every adapter receives must not carry a
-//! command's whole output. `CommandFailure::ExecutionFailed` therefore has no
-//! `stdout` field, and these tests fail if one comes back.
-//!
-//! **This deliberately does not scan every event for the secret**, the way the
-//! dotfile leak tests do. That pattern belongs to the dotfile resolve path, where
-//! resolved content never enters an event at all. On the
-//! package path a check command's output entering the event stream *is* the
-//! design: `CheckResultCompleted` carries it, cut to the same bound as a failure,
-//! so that `selfie package check` can display it, and `PackageEvent::Info`
-//! streams an install command's output live.
-//! Scanning every event here would assert something this path never promised and
-//! could never pass. The narrower claim — that the *failure value* stays clean —
-//! is the one worth locking, because that value reaches adapters that never asked
-//! for command output.
+// Leak regression for the general command-failure path.
+//
+// selfie runs user-defined commands and cannot know which of them print a
+// credential, so a failure value that every adapter receives must not carry a
+// command's whole output. `CommandFailure::ExecutionFailed` therefore has no
+// `stdout` field, and these tests fail if one comes back.
+
+// **This deliberately does not scan every event for the secret**, the way the
+// dotfile leak tests do. That pattern belongs to the dotfile resolve path, where
+// resolved content never enters an event at all. On the
+// package path a check command's output entering the event stream *is* the
+// design: `CheckResultCompleted` carries it, cut to the same bound as a failure,
+// so that `selfie package check` can display it, and `PackageEvent::Info`
+// streams an install command's output live.
+
+// Scanning every event here would assert something this path never promised and
+// could never pass. The narrower claim — that the *failure value* stays clean —
+// is the one worth locking, because that value reaches adapters that never asked
+// for command output.
 
 use futures::StreamExt;
 use selfie::package::SpecOrigin;
