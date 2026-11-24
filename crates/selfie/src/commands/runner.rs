@@ -810,9 +810,10 @@ impl std::ops::Deref for StreamedOutput {
 
 /// How many **input bytes** a [`BoundedText`] keeps, across both ends together.
 ///
-/// Also stated as a number in `docs/package-files.md`, because a user reading a
-/// bounded failure needs to know how much of it they are seeing. Change both
-/// together.
+/// Also stated as a number wherever a reader of a bounded failure needs to know
+/// how much of it they are seeing: `docs/package-files.md`,
+/// [`BoundedText::bound`]'s doc, and the MCP server's `selfie_package_install`
+/// description and `command_failure_fields` doc. Change them all together.
 // `pub(crate)` deliberately: `BoundedText` is the public surface, and exporting
 // the number would pin 2000 as API for no caller that needs it. The cost is
 // that `selfie-cli` and `selfie-mcp` can call `BoundedText::bound` but cannot
@@ -859,7 +860,7 @@ pub struct BoundedText(String);
 impl BoundedText {
     /// Bound `bytes`, keeping **both ends** and eliding the middle.
     ///
-    /// Keeps the first and the last `BOUNDED_END_BYTES` and replaces what is
+    /// Keeps 1000 input bytes at each end, 2000 in all, and replaces what is
     /// between them with a marker naming how many bytes went. Both ends, because
     /// a failing command puts its diagnosis at the end — `brew` prints pages of
     /// `==> Downloading` and then one `Error:` line — while the head is where a
@@ -867,9 +868,8 @@ impl BoundedText {
     ///
     /// **The bound is on the input byte count, not on the length of the string
     /// this returns.** Invalid UTF-8 decodes lossily and each bad byte becomes a
-    /// 3-byte `U+FFFD`, so `MAX_BOUNDED_BYTES` bytes of binary input yield about
-    /// three times that many bytes of text. `as_str().len() <=
-    /// MAX_BOUNDED_BYTES` does not hold; what is bounded is how much of the
+    /// 3-byte `U+FFFD`, so 2000 bytes of binary input yield about 6000 bytes of
+    /// text. `as_str().len()` is not bounded; what is bounded is how much of the
     /// command's output survives.
     ///
     /// An input barely over the bound is returned whole, since eliding it would
