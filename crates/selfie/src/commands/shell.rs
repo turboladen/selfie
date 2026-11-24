@@ -2302,8 +2302,8 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_character_spanning_a_read_is_not_relayed_as_replacement_characters() {
         // The user-visible half of the decoder tests above, through the real
-        // adapter: a character split across two reads must not arrive as two
-        // U+FFFD, in the terminal or in the MCP server's JSON.
+        // adapter: a character split across two reads must not arrive in the
+        // terminal as two U+FFFD.
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
         let (tx, mut rx) = tokio::sync::mpsc::channel(10_000);

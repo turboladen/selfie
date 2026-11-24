@@ -628,11 +628,17 @@ impl EventSender {
     pub(crate) async fn send_info(&self, step: StepId, output: ConsoleOutput) {
         let operation_info = self.touch_operation_info();
 
+        // This records the length and never the text: a subscriber is an egress
+        // of its own, and an adapter that shows the output already has it from
+        // the event.
+        let stream: &'static str = (&output).into();
+        let text_len = output.text().len();
         tracing::info!(
             operation_type = operation_info.operation_type.to_string(),
             package_name = &operation_info.package_name,
             environment = &operation_info.environment,
-            output = ?&output,
+            stream,
+            text_len,
         );
 
         self.send(PackageEvent::Info {
@@ -5093,10 +5099,22 @@ pub enum LogLevel {
     Warning,
 }
 
-#[derive(Debug, Clone)]
+/// A piece of a command's output, tagged with the pipe it came from.
+#[derive(Debug, Clone, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum ConsoleOutput {
     Stdout(String),
     Stderr(String),
+}
+
+impl ConsoleOutput {
+    /// The output's text, whichever pipe it came from.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Stdout(text) | Self::Stderr(text) => text,
+        }
+    }
 }
 
 /// Structured update fields for modifying a package
@@ -7743,5 +7761,49 @@ mod settle_tests {
                 .count(),
             1
         );
+    }
+}
+
+// The `tracing` mirror of a command's output is an egress of its own, so it
+// records the pipe and the text's length and never the text.
+#[cfg(test)]
+mod info_tracing_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_info_logs_the_length_and_never_the_text() {
+        const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+        let line = format!("TOKEN={SECRET}");
+        let (tx, mut rx) = mpsc::channel(2);
+        let sender = EventSender::new_with_context(
+            tx,
+            metadata::OperationType::PackageInstall,
+            "p".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+        // This reaches the call site before the capture starts, as
+        // `capture_tracing` requires.
+        sender
+            .send_info(StepId::from_raw(1), ConsoleOutput::Stdout("warm".into()))
+            .await;
+        let _ = rx.recv().await;
+        let log = test_common::capture_tracing(tracing::Level::INFO);
+
+        sender
+            .send_info(StepId::from_raw(1), ConsoleOutput::Stdout(line.clone()))
+            .await;
+
+        let logged = log.text();
+        test_common::assert_secret_free(&logged, SECRET, "the tracing log");
+        assert!(
+            logged.contains(&format!("text_len={}", line.len())),
+            "the length was not logged: {logged}"
+        );
+        assert!(logged.contains("stream=\"stdout\""), "{logged}");
+        // Positive control: the event itself still carries the text, for the
+        // adapter that shows it.
+        let event = rx.recv().await;
+        assert!(format!("{event:?}").contains(SECRET), "{event:?}");
     }
 }

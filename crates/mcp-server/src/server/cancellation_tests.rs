@@ -33,7 +33,7 @@ fn marker() -> String {
     format!("cancel-marker-{}", uuid::Uuid::new_v4().simple())
 }
 
-fn write_spec(packages: &Path, name: &str, install: &str) {
+pub(super) fn write_spec(packages: &Path, name: &str, install: &str) {
     std::fs::write(
         packages.join(format!("{name}.yml")),
         format!("name: {name}\nenvironments:\n  test:\n    install: {install:?}\n"),
@@ -43,7 +43,7 @@ fn write_spec(packages: &Path, name: &str, install: &str) {
 
 // A server whose package service runs commands with `/bin/sh`, so no test
 // depends on the login profile of whoever runs it.
-fn server_over(packages: &Path, state: Option<&Path>) -> SelfieServer {
+pub(super) fn server_over(packages: &Path, state: Option<&Path>) -> SelfieServer {
     server_running(packages, None, state, |_| {
         ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(60))
     })
@@ -96,7 +96,9 @@ async fn within(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
     condition()
 }
 
-fn install_params(package: &str) -> rmcp::handler::server::wrapper::Parameters<InstallParam> {
+pub(super) fn install_params(
+    package: &str,
+) -> rmcp::handler::server::wrapper::Parameters<InstallParam> {
     rmcp::handler::server::wrapper::Parameters(InstallParam {
         package: package.to_string(),
         skip_recommends: false,

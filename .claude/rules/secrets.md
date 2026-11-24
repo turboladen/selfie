@@ -139,12 +139,14 @@ Test egress at the **boundary**, not by listing known paths:
     `AuditResultData`'s `audit_command` are plain unbounded `String`s that also reach the MCP JSON.
     They are user-authored package-file text rather than process output, which is why they are not
     bounded — do not read the bullet above as a claim that they are.
-- **Streamed command output is unconditional egress to every adapter.** `execute_command_streaming`
-  sends each line of an install command's stdout **and** stderr as `PackageEvent::Info`, on success
-  and on failure alike. The CLI prints those verbatim and the MCP server serializes them into its
-  JSON. Nothing on that path is truncated, redacted, or conditional, which makes it broader than any
-  other exit named in this file. A dotfile provider does not use it — the resolve path runs its own
-  non-streaming execution — but any install command that echoes a credential is exposed by it.
+- **Streamed command output reaches every adapter's event stream, and each adapter decides who sees
+  it.** `execute_command_streaming` sends every chunk of an install command's stdout **and** stderr
+  as `PackageEvent::Info`, on success and on failure alike, unbounded. The CLI prints those
+  verbatim. The MCP server drops them in `event_to_json`'s exhaustive match, so an MCP client sees
+  an install's output only in a failure's bounded pipes. Only the adapter enforces that: a new
+  adapter, or an MCP path that bypasses `collect_events`, must decide again. The `tracing` mirror in
+  `send_info` records the pipe and the decoded text's length, never the text. A dotfile provider
+  does not use this path; the resolve path runs its own non-streaming execution.
 - **Git's stderr is untrusted output too, and it has its own bound.** A remote URL can carry a
   credential in its userinfo, and a git that cannot prompt for a password names that URL in the
   failure — `could not read Password for 'http://<token>@host'`. That reaches an AI transcript

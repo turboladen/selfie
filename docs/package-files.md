@@ -690,16 +690,20 @@ print will be read.**
 - **`install` output is shown as the command runs**, on stderr, both its stdout and its stderr. On a
   terminal the latest line appears beside the spinner; with `--verbose` every line is printed. When
   the command fails, its last output is printed with the error whatever the verbosity. When selfie
-  is driven through its MCP server rather than the terminal, every line is included in the
-  structured response the AI assistant receives.
+  is driven through its MCP server rather than the terminal, a successful install's output is not
+  sent to the AI assistant at all. An install that exits non-zero, or whose check then says it is
+  not installed, carries the first and last 1000 bytes of each stream in its result, as described
+  below; one that is stopped by its timeout carries none.
 - **`check` output is displayed** when you run `selfie package check`, so that a check reporting
   "not installed" can tell you why: a passing check's output on stdout with its result, a failing
   check's error output on stderr. `--verbose` adds the full result card.
 
 This is deliberate: watching an install run and reading a check's explanation are the point. But it
-means **a command that prints a credential prints it to the terminal and to any connected MCP
-client**. If a command needs a token, pass it through the environment or have the command read it
-directly — do not `echo` it.
+means **a command that prints a credential prints it to the terminal, and can send it to a connected
+MCP client**: in the bounded output of an install that fails, in an audit command's parsed sources
+or its bounded error output, in a failing dotfile command's bounded error output, and in the text of
+a prompt a command shows when it asks for input. If a command needs a token, pass it through the
+environment or have the command read it directly — do not `echo` it.
 
 Failure reports are narrower. When a command exits non-zero, what selfie reports about the failure
 itself is the command and its exit code — and its standard error, cut to 2000 bytes of what the

@@ -579,13 +579,6 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "package_name": package_name,
             "dotfile_targets": dotfile_targets,
         })),
-        PackageEvent::Info { output, .. } => Some(serde_json::json!({
-            "type": "output",
-            "text": match output {
-                selfie::package::event::ConsoleOutput::Stdout(s) => s,
-                selfie::package::event::ConsoleOutput::Stderr(s) => s,
-            },
-        })),
         PackageEvent::SpecListItemCompleted { spec_item, .. } => Some(serde_json::json!({
             "type": "spec_list_item",
             "name": &spec_item.name,
@@ -915,6 +908,10 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
         | PackageEvent::Trace { .. }
         | PackageEvent::Debug { .. }
         | PackageEvent::DotfileEntriesPlanned { .. } => None,
+        // A command's streamed output is never sent to an MCP client, whose
+        // transcript an AI reads and keeps. A failed install carries both of its
+        // pipes, bounded, in the failure instead.
+        PackageEvent::Info { .. } => None,
     };
     row.into_iter().collect()
 }
@@ -2661,6 +2658,40 @@ mod tests {
             "{}",
             result.data
         );
+    }
+
+    // A command's streamed output never becomes a row, on either pipe. The
+    // warning in the same stream is the control that the collector ran.
+    #[tokio::test]
+    async fn command_output_never_reaches_the_json() {
+        use selfie::package::event::{ConsoleOutput, StepId};
+        const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+
+        let info = |output| PackageEvent::Info {
+            operation_info: test_op_info(),
+            step: StepId::from_raw(1),
+            output,
+        };
+        let events = vec![
+            info(ConsoleOutput::Stdout(format!("TOKEN={SECRET}"))),
+            info(ConsoleOutput::Stderr(format!("TOKEN={SECRET}"))),
+            PackageEvent::Warning {
+                operation_info: test_op_info(),
+                message: "still here".to_string(),
+            },
+            PackageEvent::Completed {
+                operation_info: test_op_info(),
+                result: OperationResult::Success(OperationSuccess::Generic("done")),
+            },
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+        let json = serde_json::to_string(&result.data).unwrap();
+
+        test_common::assert_secret_free(&json, SECRET, "the MCP JSON payload");
+        assert!(result.success);
+        assert_eq!(rows_of_type(&result.data, &["output"]).len(), 0, "{json}");
+        assert_eq!(warning_rows(&result.data).len(), 1, "{json}");
     }
 
     // A failed command forwards each of its pipes bounded, and nothing past the
