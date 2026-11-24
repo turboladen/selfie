@@ -9,8 +9,9 @@
 //! dotfile leak tests do. That pattern belongs to the dotfile resolve path, where
 //! resolved content never enters an event at all. On the
 //! package path a check command's output entering the event stream *is* the
-//! design: `CheckResultCompleted` carries it so that `selfie package check` can
-//! display it, and `PackageEvent::Info` streams an install command's output live.
+//! design: `CheckResultCompleted` carries it, cut to the same bound as a failure,
+//! so that `selfie package check` can display it, and `PackageEvent::Info`
+//! streams an install command's output live.
 //! Scanning every event here would assert something this path never promised and
 //! could never pass. The narrower claim — that the *failure value* stays clean —
 //! is the one worth locking, because that value reaches adapters that never asked

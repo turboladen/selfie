@@ -172,6 +172,7 @@ fn display_check_result_card(
 mod tests {
     use super::*;
     use crate::display_manager::{Channel, column};
+    use selfie::commands::BoundedText;
 
     // What a check printed continues under its first line in the card, past
     // its key, whether the check passed or failed.
@@ -183,15 +184,15 @@ mod tests {
         let results = [
             (
                 CheckResult::Success {
-                    stdout: "o1\no2\n".to_string(),
-                    stderr: String::new(),
+                    stdout: BoundedText::bound(b"o1\no2\n"),
+                    stderr: BoundedText::bound(b""),
                 },
                 "Output",
             ),
             (
                 CheckResult::Failed {
-                    stdout: String::new(),
-                    stderr: "o1\no2\n".to_string(),
+                    stdout: BoundedText::bound(b""),
+                    stderr: BoundedText::bound(b"o1\no2\n"),
                     exit_code: Some(1),
                 },
                 "Details",
@@ -232,8 +233,8 @@ mod tests {
                 environment: "test".to_string(),
                 check_command: None,
                 result: CheckResult::Failed {
-                    stdout: stdout.to_string(),
-                    stderr: " \n\n".to_string(),
+                    stdout: BoundedText::bound(stdout.as_bytes()),
+                    stderr: BoundedText::bound(b" \n\n"),
                     exit_code: Some(3),
                 },
             };
@@ -261,8 +262,8 @@ mod tests {
                 environment: "test".to_string(),
                 check_command: None,
                 result: CheckResult::Failed {
-                    stdout: stdout.to_string(),
-                    stderr: " \n\n".to_string(),
+                    stdout: BoundedText::bound(stdout.as_bytes()),
+                    stderr: BoundedText::bound(b" \n\n"),
                     exit_code: Some(3),
                 },
             };

@@ -91,14 +91,14 @@ impl From<&CheckResultData> for Check {
     fn from(data: &CheckResultData) -> Self {
         let answer = match &data.result {
             CheckResult::Success { stdout, stderr } => CheckAnswer::Installed {
-                output: first_output(stdout, stderr),
+                output: first_output(stdout.as_str(), stderr.as_str()),
             },
             CheckResult::Failed {
                 stdout,
                 stderr,
                 exit_code,
             } => CheckAnswer::NotInstalled {
-                output: first_output(stderr, stdout),
+                output: first_output(stderr.as_str(), stdout.as_str()),
                 exit_code: *exit_code,
             },
             CheckResult::NoCheckCommand | CheckResult::CouldNotRun(_) => CheckAnswer::None,

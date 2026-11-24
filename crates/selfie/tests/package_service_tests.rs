@@ -3692,7 +3692,10 @@ mod checks_that_gave_no_answer {
 
     use selfie::{
         commands::runner::{CommandError, TimeLimit, TimedOut},
-        package::event::{CheckFailure, CheckResult, EnvironmentStatus, UnknownStatus},
+        package::event::{
+            CheckFailure, CheckResult, CheckVerdict, EnvironmentStatus, OperationSuccess,
+            UnknownStatus,
+        },
     };
     use test_common::{FakeCommandRunner, create_service_test_service_with_runner};
 
@@ -3743,6 +3746,123 @@ mod checks_that_gave_no_answer {
             _ => None,
         });
         (row, events)
+    }
+
+    // Output long enough to be cut, with a mark at each end and filler between.
+    fn long_output() -> String {
+        format!("HEAD-MARK{}TAIL-MARK", "x".repeat(10_000))
+    }
+
+    // Asserts that `shown` kept both ends of `long_output` and cut the middle once.
+    fn assert_cut_at_both_ends(shown: &str) {
+        assert!(shown.contains("HEAD-MARK"), "{shown}");
+        assert!(shown.contains("TAIL-MARK"), "{shown}");
+        assert_eq!(shown.matches("bytes elided").count(), 1, "{shown}");
+        assert!(!shown.contains(&"x".repeat(1500)), "{shown}");
+    }
+
+    // A passing check's stdout reaches the row cut at both ends.
+    #[tokio::test]
+    async fn a_passing_checks_long_stdout_is_cut_at_both_ends() {
+        let runner = FakeCommandRunner::new().succeeding("check-app", long_output().as_bytes());
+
+        let (row, _) = checked(runner).await;
+
+        let Some(CheckResult::Success { stdout, .. }) = row else {
+            panic!("expected a passing check, got {row:?}");
+        };
+        assert_cut_at_both_ends(&stdout.to_string());
+    }
+
+    // A failing check's stdout reaches the row cut at both ends.
+    #[tokio::test]
+    async fn a_failing_checks_long_stdout_is_cut_at_both_ends() {
+        let runner = FakeCommandRunner::new().failing_with_stdout(
+            "check-app",
+            long_output().as_bytes(),
+            b"",
+        );
+
+        let (row, _) = checked(runner).await;
+
+        let Some(CheckResult::Failed { stdout, .. }) = row else {
+            panic!("expected a failing check, got {row:?}");
+        };
+        assert_cut_at_both_ends(&stdout.to_string());
+    }
+
+    // A failing check's stderr reaches the row cut at both ends.
+    #[tokio::test]
+    async fn a_failing_checks_long_stderr_is_cut_at_both_ends() {
+        let runner = FakeCommandRunner::new().failing("check-app", long_output().as_bytes());
+
+        let (row, _) = checked(runner).await;
+
+        let Some(CheckResult::Failed { stderr, .. }) = row else {
+            panic!("expected a failing check, got {row:?}");
+        };
+        assert_cut_at_both_ends(&stderr.to_string());
+    }
+
+    // Output within the bound is kept whole.
+    #[tokio::test]
+    async fn a_passing_checks_short_stdout_is_kept_whole() {
+        let runner = FakeCommandRunner::new().succeeding("check-app", b"app 1.2.3\n");
+
+        let (row, _) = checked(runner).await;
+
+        let Some(CheckResult::Success { stdout, .. }) = row else {
+            panic!("expected a passing check, got {row:?}");
+        };
+        assert_eq!(stdout.to_string(), "app 1.2.3\n");
+    }
+
+    // A long run of blank stderr reaches the row blank, not as an elision
+    // marker, so a reader can still fall back to what the check put on stdout.
+    #[tokio::test]
+    async fn a_failing_checks_long_blank_stderr_stays_blank() {
+        let runner = FakeCommandRunner::new().failing_with_stdout(
+            "check-app",
+            b"app is missing\n",
+            " \n".repeat(2000).as_bytes(),
+        );
+
+        let (row, _) = checked(runner).await;
+
+        let Some(CheckResult::Failed { stdout, stderr, .. }) = row else {
+            panic!("expected a failing check, got {row:?}");
+        };
+        assert_eq!(stderr.to_string(), "");
+        assert_eq!(stdout.to_string(), "app is missing\n");
+    }
+
+    // The stderr the completion carries is the row's already-cut text. A second
+    // cut would still leave one marker, but it would count the bytes the first
+    // marker took up, so the marker has to name the bytes the command wrote
+    // past the bound: 10018 written, 2000 kept.
+    #[tokio::test]
+    async fn a_failing_checks_completion_cuts_stderr_once() {
+        let runner = FakeCommandRunner::new().failing("check-app", long_output().as_bytes());
+
+        let (_, events) = checked(runner).await;
+
+        let verdict = events
+            .iter()
+            .find_map(|event| match event {
+                PackageEvent::Completed {
+                    result:
+                        OperationResult::Success(OperationSuccess::PackageChecked {
+                            verdict: verdict @ CheckVerdict::NotInstalled { .. },
+                            ..
+                        }),
+                    ..
+                } => Some(verdict),
+                _ => None,
+            })
+            .expect("a failing check completes as not installed");
+        let shown = format!("{verdict:?}");
+        assert_cut_at_both_ends(&shown);
+        assert!(shown.contains("(8018 bytes elided)"), "{shown}");
     }
 
     // A check the run's cancellation stopped sends a row that says canceled,
