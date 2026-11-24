@@ -12,7 +12,8 @@ use selfie::validation::ValidationIssue;
 ///
 /// Each cell is built from a kind or a [`Shown`], which keeps its text and
 /// styling. Every multi-line cell has its lines after the first indented two
-/// columns inside the cell.
+/// columns inside the cell, except a [`Cell::list`], each of whose entries
+/// starts at the cell's left edge.
 // The indent is what tells a continued line from the next row, since the
 // table draws no line between rows.
 pub(crate) struct SafeTable {
@@ -27,24 +28,39 @@ pub(crate) struct SafeTable {
 const HANG: &str = "  ";
 
 /// Holds one cell of a [`SafeTable`].
+// The text is held with its later lines already indented, so a list can
+// indent each entry's lines and leave the entries themselves at the edge.
 pub(crate) struct Cell(Shown);
 
 impl Cell {
     /// Builds a cell from `text`, styled by `paint` when `use_colors`.
     pub(crate) fn painted(text: impl Into<Shown>, use_colors: bool, paint: Paint) -> Self {
-        Self(text.into().paint(use_colors, paint))
+        Self(hung(text.into().paint(use_colors, paint)))
     }
 
-    // The cell's text as the table lays it out, its lines after the first two
-    // columns in. A line too wide for its column is wrapped when the table is
-    // rendered, which indents its pieces the same way.
+    /// Builds a cell listing `entries` one to a line, each starting at the
+    /// cell's left edge and its own later lines two columns inside it.
+    pub(crate) fn list(entries: impl IntoIterator<Item = impl Into<Shown>>) -> Self {
+        Self(Shown::join(
+            entries.into_iter().map(|entry| hung(entry.into())),
+            lit!("\n"),
+        ))
+    }
+
+    // The cell's text as the table lays it out. A line too wide for its column
+    // is wrapped when the table is rendered, which indents its pieces.
     //
     // A tab is expanded here, because comfy-table counts it as one column where
     // the terminal moves to the next tab stop, which pushes that row's right
     // border out of line.
     fn laid_out(self) -> String {
-        self.0.hang(HANG.len()).tabs_expanded().into_string()
+        self.0.tabs_expanded().into_string()
     }
+}
+
+// Returns `text` with its lines after the first indented two columns.
+fn hung(text: Shown) -> Shown {
+    text.hang(HANG.len())
 }
 
 // A cell shows a kind as it is, styling included.
@@ -52,7 +68,7 @@ macro_rules! cells_from {
     ($($kind:ty),*) => {$(
         impl From<$kind> for Cell {
             fn from(text: $kind) -> Self {
-                Self(Shown::from(text))
+                Self(hung(Shown::from(text)))
             }
         }
     )*};
@@ -403,6 +419,35 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    // Every entry of a list cell starts at the cell's left edge, and an entry's
+    // own later lines and wrapped pieces start two columns inside it.
+    #[test]
+    fn a_list_cell_starts_each_entry_at_the_left_edge() {
+        let mut table = SafeTable::new().with_width(40);
+        table.add_row([
+            Cell::from(lit!("k")),
+            Cell::list([
+                Prose::new("first: ok\nits note"),
+                Prose::new("second: a status long enough to wrap in its column"),
+            ]),
+        ]);
+
+        let rendered = table.to_string();
+        let lines = values(&rendered);
+
+        assert_eq!(lines[0], "first: ok", "{rendered}");
+        assert_eq!(lines[1], "  its note", "{rendered}");
+        assert!(lines[2].starts_with("second:"), "{rendered}");
+        assert!(lines.len() > 3, "nothing wrapped:\n{rendered}");
+        for line in &lines[3..] {
+            assert!(line.starts_with(HANG), "{line:?}:\n{rendered}");
+            assert!(
+                !line[HANG.len()..].starts_with(' '),
+                "{line:?}:\n{rendered}"
+            );
+        }
     }
 
     // A line too wide for its column is wrapped so that every piece after the
