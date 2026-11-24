@@ -726,6 +726,9 @@ it would cost more in marker text than it saved.
 The 2000 counts what the command wrote, not the length of the message you read: invalid UTF-8 is
 replaced character by character, so binary output can render longer than the bytes it came from.
 
+What `selfie package check` shows of a check's output, with or without `--verbose`, is cut the same
+way: stdout and stderr each to 2000 bytes, keeping both ends.
+
 A failure that names the command itself, such as a check that timed out, cuts a command longer than
 2000 bytes the same way, inside the command, so the words around it stay whole. A failure that also
 names a working directory selfie could not enter gives the command, the directory and the reason a

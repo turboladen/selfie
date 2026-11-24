@@ -2703,8 +2703,8 @@ mod tests {
                 ),
             ))),
             row(CheckResult::Success {
-                stdout: String::new(),
-                stderr: String::new(),
+                stdout: selfie::commands::BoundedText::bound(b""),
+                stderr: selfie::commands::BoundedText::bound(b""),
             }),
         ];
 
@@ -2855,8 +2855,8 @@ mod tests {
                     environment: "test".to_string(),
                     check_command: Some("which test".to_string()),
                     result: CheckResult::Success {
-                        stdout: "found".to_string(),
-                        stderr: String::new(),
+                        stdout: selfie::commands::BoundedText::bound(b"found"),
+                        stderr: selfie::commands::BoundedText::bound(b""),
                     },
                 },
             },

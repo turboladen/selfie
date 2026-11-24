@@ -4786,14 +4786,22 @@ pub struct CheckResultData {
 }
 
 /// Result of a check operation
+///
+/// A check's `stdout` and `stderr` are each bounded as [`BoundedText`] bounds
+/// text, and a stream that held only whitespace is empty.
+///
+/// [`BoundedText`]: crate::commands::BoundedText
 #[derive(Debug, Clone)]
 pub enum CheckResult {
     /// The check ran and said the package is installed.
-    Success { stdout: String, stderr: String },
+    Success {
+        stdout: crate::commands::BoundedText,
+        stderr: crate::commands::BoundedText,
+    },
     /// The check ran and said the package is not installed.
     Failed {
-        stdout: String,
-        stderr: String,
+        stdout: crate::commands::BoundedText,
+        stderr: crate::commands::BoundedText,
         exit_code: Option<i32>,
     },
     /// The package declares no check command here.

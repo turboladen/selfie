@@ -2,7 +2,10 @@
 
 use super::steps;
 use crate::{
-    commands::runner::{CommandError, CommandRunner},
+    commands::{
+        BoundedText,
+        runner::{CommandError, CommandRunner},
+    },
     config::SelfieConfig,
     package::{
         GetPackage,
@@ -214,7 +217,7 @@ fn create_operation_result(
                 .unwrap_or("unknown command")
                 .to_string(),
             exit_code: *exit_code,
-            stderr: crate::commands::BoundedText::bound(stderr.as_bytes()),
+            stderr: stderr.clone(),
         }),
         CheckResult::CouldNotRun(failure) => OperationResult::Failure(failure.into()),
         // A package with no check command is answered before any command runs,
@@ -361,12 +364,12 @@ where
     // kill cannot be told from an exit.
     let result = match command_runner.execute(cmd, package_dir, token).await {
         Ok(output) if output.is_success() => CheckResult::Success {
-            stdout: output.stdout_str().to_string(),
-            stderr: output.stderr_str().to_string(),
+            stdout: bound_output(output.stdout()),
+            stderr: bound_output(output.stderr()),
         },
         Ok(output) => CheckResult::Failed {
-            stdout: output.stdout_str().to_string(),
-            stderr: output.stderr_str().to_string(),
+            stdout: bound_output(output.stdout()),
+            stderr: bound_output(output.stderr()),
             exit_code: Some(output.exit_code()),
         },
         Err(
@@ -383,6 +386,17 @@ where
         check_command: Some(cmd.to_string()),
         result,
     })
+}
+
+// A check's output bounded, or empty when it is only whitespace. A reader
+// falls back to the other stream when one is blank, and the elision marker
+// would make a long run of blank lines look like output.
+fn bound_output(bytes: &[u8]) -> BoundedText {
+    if String::from_utf8_lossy(bytes).trim().is_empty() {
+        BoundedText::bound(b"")
+    } else {
+        BoundedText::bound(bytes)
+    }
 }
 
 #[cfg(test)]

@@ -962,16 +962,16 @@ mod tests {
         let ran = [
             (
                 CheckResult::Success {
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: crate::commands::BoundedText::bound(b""),
+                    stderr: crate::commands::BoundedText::bound(b""),
                 },
                 "confirmed",
             ),
             (CheckResult::NoCheckCommand, "confirmed"),
             (
                 CheckResult::Failed {
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout: crate::commands::BoundedText::bound(b""),
+                    stderr: crate::commands::BoundedText::bound(b""),
                     exit_code: Some(1),
                 },
                 "not installed",
