@@ -25,14 +25,8 @@ fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -
             payload["run_in_terminal"] = command.to_string().into();
         }
     }
-    // A command that exited non-zero carries both of its pipes, bounded, since an
-    // MCP client was shown none of its output while it ran.
-    if let OperationFailure::CommandError(CommandFailure::ExecutionFailed {
-        stdout, stderr, ..
-    }) = failure
-    {
-        payload["stdout"] = stdout.as_str().into();
-        payload["stderr"] = stderr.as_str().into();
+    if let OperationFailure::CommandError(command) = failure {
+        payload = with_fields(payload, command_failure_fields(command));
     }
     // Each issue as a validation result carries it, so an assistant fixes the field
     // without parsing the sentence in `error`.
@@ -93,6 +87,58 @@ fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -
         });
     }
     payload
+}
+
+/// A failed command's `kind`, its `command` as the failure's sentence bounds
+/// it, and the fields of that kind:
+/// - `"execution_failed"`: `exit_code`, and `stdout` and `stderr`, each
+///   bounded to its first and last 1000 bytes;
+/// - `"timed_out"`: `timeout_seconds`, and `limit`, `"total"` or `"silence"`;
+/// - `"working_directory_unusable"`: `working_directory`, as the sentence
+///   bounds it.
+// The pipes ride an execution failure because an MCP client was shown none of
+// the command's output while it ran. The command and the directory are the
+// bounded forms the sentence shows, so the JSON carries no more of either than
+// `error` does.
+fn command_failure_fields(failure: &CommandFailure) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("kind".to_string(), failure.kind().into());
+    let command = failure.command_bounded();
+    fields.insert("command".to_string(), command.as_str().into());
+    match failure {
+        CommandFailure::ExecutionFailed {
+            exit_code,
+            stdout,
+            stderr,
+            ..
+        } => {
+            fields.insert("exit_code".to_string(), (*exit_code).into());
+            fields.insert("stdout".to_string(), stdout.as_str().into());
+            fields.insert("stderr".to_string(), stderr.as_str().into());
+        }
+        CommandFailure::TimedOut(timed_out) => fields.extend(timed_out_fields(Some(timed_out))),
+        CommandFailure::WorkingDirectoryUnusable(unusable) => {
+            let directory = unusable.working_directory_bounded();
+            fields.insert("working_directory".to_string(), directory.into());
+        }
+    }
+    fields
+}
+
+/// `timeout_seconds` and `limit` for a timeout, each null without one.
+fn timed_out_fields(
+    timed_out: Option<&selfie::commands::runner::TimedOut>,
+) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "timeout_seconds".to_string(),
+        Value::from(timed_out.map(|t| t.timeout().as_secs())),
+    );
+    fields.insert(
+        "limit".to_string(),
+        timed_out.map_or(Value::Null, |t| label(t.limit())),
+    );
+    fields
 }
 
 /// `row` with the fields naming where a dotfile's content comes from:
@@ -658,14 +704,26 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             "package": recommend_name,
         })),
         PackageEvent::RecommendFailed {
+            operation_info,
             recommend_name,
             error,
-            ..
-        } => Some(serde_json::json!({
-            "type": "recommend_failed",
-            "package": recommend_name,
-            "error": error.to_string(),
-        })),
+        } => {
+            // The row carries the failure's own fields, `package` included when the
+            // failure names one, and the recommend under a key of its own, since a
+            // dependency of the recommend can be what failed. A command to run in
+            // a terminal installs the recommend, not its parent.
+            let recommend = OperationInfo {
+                package_name: recommend_name.clone(),
+                ..operation_info.clone()
+            };
+            let mut row = failure_json(error, Some(&recommend));
+            if let Value::Object(map) = &mut row {
+                map.remove("status");
+            }
+            row["type"] = "recommend_failed".into();
+            row["recommend"] = recommend_name.as_str().into();
+            Some(row)
+        }
         PackageEvent::SettledEarlier {
             package_name,
             recommend_name,
@@ -1042,9 +1100,8 @@ fn with_fields(mut row: Value, fields: serde_json::Map<String, Value>) -> Value 
     row
 }
 
-/// Renders why a check gave no answer as `kind` (the label), `reason` (prose)
-/// and `working_directory`, which is set only for a directory that could not be
-/// entered. All three are null for a check that answered.
+/// Renders why a check gave no answer as the fields [`failure_fields`] gives,
+/// each null for a check that answered.
 fn check_failure_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
     failure_fields(match status {
         EnvironmentStatus::Unknown(selfie::package::event::UnknownStatus::CheckFailed(failure)) => {
@@ -1054,8 +1111,9 @@ fn check_failure_fields(status: &EnvironmentStatus) -> serde_json::Map<String, V
     })
 }
 
-/// Renders why a check or audit command gave no answer as `kind`, `reason`
-/// and `working_directory`, each null where it does not apply.
+/// Renders why a check or audit command gave no answer as `kind`, `reason`,
+/// `working_directory`, and for a timeout `timeout_seconds` and `limit`, each
+/// null where it does not apply.
 fn failure_fields(
     failure: Option<&selfie::package::event::CheckFailure>,
 ) -> serde_json::Map<String, Value> {
@@ -1063,7 +1121,7 @@ fn failure_fields(
 
     let working_directory = match failure {
         Some(CheckFailure::WorkingDirectoryUnusable(unusable)) => {
-            Some(unusable.working_directory().display().to_string())
+            Some(unusable.working_directory_bounded())
         }
         _ => None,
     };
@@ -1080,6 +1138,10 @@ fn failure_fields(
         "working_directory".to_string(),
         Value::from(working_directory),
     );
+    fields.extend(timed_out_fields(match failure {
+        Some(CheckFailure::TimedOut(timed_out)) => Some(timed_out),
+        _ => None,
+    }));
     fields
 }
 
@@ -1099,8 +1161,9 @@ fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -
 /// Renders a package's status as `status`, and for an unknown one `kind` (the
 /// label to branch on) and `reason` (prose), plus `failure` for a spec that
 /// could not be parsed or read, `conflicting_paths` for a name several files
-/// claim, and `refusal`, `{kind, reason}`, for a refused spec. A field that does
-/// not apply is null.
+/// claim, `refusal`, `{kind, reason}`, for a refused spec, and for a check that
+/// gave no answer the `working_directory`, `timeout_seconds` and `limit`
+/// [`failure_fields`] gives a check row. A field that does not apply is null.
 // One function renders the package's own status and every dependency and
 // recommendation row, so the two shapes cannot disagree.
 fn status_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
@@ -1150,6 +1213,24 @@ fn status_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
         _ => Value::Null,
     };
     fields.insert("refusal".to_string(), refusal);
+    let check = match unknown {
+        Some(UnknownStatus::CheckFailed(check)) => Some(check),
+        _ => None,
+    };
+    let working_directory = match check {
+        Some(CheckFailure::WorkingDirectoryUnusable(unusable)) => {
+            Some(unusable.working_directory_bounded())
+        }
+        _ => None,
+    };
+    fields.insert(
+        "working_directory".to_string(),
+        Value::from(working_directory),
+    );
+    fields.extend(timed_out_fields(match check {
+        Some(CheckFailure::TimedOut(timed_out)) => Some(timed_out),
+        _ => None,
+    }));
     fields
 }
 
@@ -2732,6 +2813,333 @@ mod tests {
         assert!(
             json.contains("install-with-token"),
             "the failing command must still be named:\n{json}"
+        );
+    }
+
+    // Each kind of command failure names its label and its own fields, so an
+    // assistant branches on `kind` rather than on `error`.
+    #[tokio::test]
+    async fn a_command_failure_names_its_kind_and_fields() {
+        use selfie::commands::runner::{TimeLimit, TimedOut, UnusableDirectory};
+
+        let payload = |failure| failure_json(&OperationFailure::CommandError(failure), None);
+        let executed = payload(CommandFailure::ExecutionFailed {
+            command: "brew install x".to_string(),
+            exit_code: Some(3),
+            stdout: selfie::commands::BoundedText::bound(b"out"),
+            stderr: selfie::commands::BoundedText::bound(b"err"),
+        });
+        let timed_out = payload(CommandFailure::TimedOut(TimedOut::new(
+            "brew install x",
+            std::time::Duration::from_secs(7),
+            TimeLimit::Silence,
+        )));
+        let unusable = payload(CommandFailure::WorkingDirectoryUnusable(
+            UnusableDirectory::new(
+                "brew install x",
+                "/gone",
+                std::sync::Arc::new(std::io::Error::other("missing")),
+            ),
+        ));
+
+        let fields = |payload: &Value, keys: &[&str]| -> Vec<Value> {
+            keys.iter().map(|key| payload[*key].clone()).collect()
+        };
+        assert_eq!(
+            fields(
+                &executed,
+                &["kind", "command", "exit_code", "stdout", "stderr"]
+            ),
+            [
+                Value::from("execution_failed"),
+                Value::from("brew install x"),
+                Value::from(3),
+                Value::from("out"),
+                Value::from("err"),
+            ]
+        );
+        assert_eq!(
+            fields(&timed_out, &["kind", "command", "timeout_seconds", "limit"]),
+            [
+                Value::from("timed_out"),
+                Value::from("brew install x"),
+                Value::from(7),
+                Value::from("silence"),
+            ]
+        );
+        assert_eq!(
+            fields(&unusable, &["kind", "command", "working_directory"]),
+            [
+                Value::from("working_directory_unusable"),
+                Value::from("brew install x"),
+                Value::from("/gone"),
+            ]
+        );
+        // Every failure also carries `status` and `error`.
+        assert_eq!(executed["status"], "failure");
+        assert!(executed["error"].is_string());
+    }
+
+    // A command field, and a directory field, carry no more of a long value than
+    // the failure's own sentence does, for every kind of command failure.
+    #[test]
+    fn a_command_failures_command_is_bounded_as_its_sentence_bounds_it() {
+        use selfie::commands::runner::{TimeLimit, TimedOut, UnusableDirectory};
+
+        let long = format!("head-{}-tail", "z".repeat(5_000));
+        let failures = [
+            CommandFailure::ExecutionFailed {
+                command: long.clone(),
+                exit_code: Some(1),
+                stdout: selfie::commands::BoundedText::bound(b""),
+                stderr: selfie::commands::BoundedText::bound(b""),
+            },
+            CommandFailure::TimedOut(TimedOut::new(
+                long.clone(),
+                std::time::Duration::from_secs(1),
+                TimeLimit::Total,
+            )),
+            CommandFailure::WorkingDirectoryUnusable(UnusableDirectory::new(
+                long.clone(),
+                format!("/head-{}-tail", "d".repeat(5_000)),
+                std::sync::Arc::new(std::io::Error::other("missing")),
+            )),
+        ];
+        let mut directories = 0;
+        for failure in failures {
+            let kind = failure.kind();
+            let payload = failure_json(&OperationFailure::CommandError(failure), None);
+            let command = payload["command"].as_str().unwrap_or_default();
+            assert!(command.len() < 2_100, "{kind}: {} bytes", command.len());
+            // Control: both ends survive, and the sentence carries the same cut.
+            assert!(
+                command.starts_with("head-") && command.ends_with("-tail"),
+                "{kind}"
+            );
+            assert!(
+                payload["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(command),
+                "{kind}: the command field and the sentence disagree"
+            );
+            if let Some(directory) = payload["working_directory"].as_str() {
+                directories += 1;
+                assert!(directory.len() < 2_100, "{} bytes", directory.len());
+                assert!(directory.starts_with("/head-") && directory.ends_with("-tail"));
+                assert!(
+                    payload["error"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains(directory),
+                    "the directory field and the sentence disagree"
+                );
+            }
+        }
+        // Control: the directory case really carried one.
+        assert_eq!(directories, 1);
+    }
+
+    // A check row's directory is bounded as its reason bounds it, as a failed
+    // command's is.
+    #[tokio::test]
+    async fn a_check_rows_working_directory_is_bounded() {
+        use selfie::package::event::CheckFailure;
+
+        let directory = format!("/head-{}-tail", "d".repeat(5_000));
+        let events = vec![PackageEvent::CheckResultCompleted {
+            operation_info: test_op_info(),
+            check_result: CheckResultData {
+                package_name: "p".to_string(),
+                environment: "test".to_string(),
+                check_command: Some("check-p".to_string()),
+                result: CheckResult::CouldNotRun(CheckFailure::WorkingDirectoryUnusable(
+                    selfie::commands::runner::UnusableDirectory::new(
+                        "check-p",
+                        directory.as_str(),
+                        std::sync::Arc::new(std::io::Error::other("missing")),
+                    ),
+                )),
+            },
+        }];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let row = &result.data["data"][0];
+        let shown = row["working_directory"].as_str().unwrap_or_default();
+        assert!(shown.len() < 2_100, "{} bytes", shown.len());
+        // Control: both ends survive, and the reason carries the same cut.
+        assert!(
+            shown.starts_with("/head-") && shown.ends_with("-tail"),
+            "{shown}"
+        );
+        assert!(
+            row["reason"].as_str().unwrap_or_default().contains(shown),
+            "the directory field and the reason disagree"
+        );
+    }
+
+    // A recommend whose install command failed carries the same fields as a
+    // failed install does.
+    #[test]
+    fn a_failed_recommend_carries_its_command_fields() {
+        let output = selfie::commands::StreamedOutput::from_output(test_common::command_output(
+            2,
+            b"rec-out".to_vec(),
+            b"rec-err".to_vec(),
+        ));
+        let rows = event_to_json(&PackageEvent::RecommendFailed {
+            operation_info: test_op_info(),
+            recommend_name: "b".to_string(),
+            error: Box::new(OperationFailure::command_failed(
+                "install-b".to_string(),
+                &output,
+            )),
+        });
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row["type"], "recommend_failed");
+        assert_eq!(row["kind"], "execution_failed");
+        assert_eq!(row["exit_code"], 2);
+        assert_eq!(row["stdout"], "rec-out");
+        assert_eq!(row["stderr"], "rec-err");
+    }
+
+    // A recommend whose install asked for input says so as a top-level failure
+    // does, with the command that installs the recommend, not its parent.
+    #[test]
+    fn a_recommend_that_asked_for_input_says_what_to_run() {
+        use selfie::package::event::CheckFailure;
+
+        let rows = event_to_json(&PackageEvent::RecommendFailed {
+            operation_info: test_op_info(),
+            recommend_name: "rec-b".to_string(),
+            error: Box::new(OperationFailure::Check(CheckFailure::InputRequired {
+                message: test_common::message("m"),
+            })),
+        });
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row["type"], "recommend_failed");
+        assert_eq!(row["recommend"], "rec-b");
+        assert_eq!(row["kind"], "input_required");
+        let run = row["run_in_terminal"].as_str().unwrap_or_default();
+        assert!(run.ends_with("rec-b"), "{row}");
+        assert!(row.get("status").is_none(), "{row}");
+    }
+
+    // A status row whose check gave no answer carries the fields a check row
+    // carries for the same failure.
+    #[test]
+    fn a_status_rows_check_failure_carries_the_check_rows_fields() {
+        use selfie::package::event::{CheckFailure, UnknownStatus};
+
+        let timed_out = status_fields(&EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
+            CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
+                "check-p",
+                std::time::Duration::from_secs(4),
+                selfie::commands::runner::TimeLimit::Total,
+            )),
+        )));
+        let directory = format!("/head-{}-tail", "d".repeat(5_000));
+        let unusable = status_fields(&EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
+            CheckFailure::WorkingDirectoryUnusable(
+                selfie::commands::runner::UnusableDirectory::new(
+                    "check-p",
+                    directory.as_str(),
+                    std::sync::Arc::new(std::io::Error::other("missing")),
+                ),
+            ),
+        )));
+
+        assert_eq!(timed_out["timeout_seconds"], 4);
+        assert_eq!(timed_out["limit"], "total");
+        assert_eq!(timed_out["working_directory"], Value::Null);
+        // The directory is bounded as the reason bounds it, both ends kept.
+        let shown = unusable["working_directory"].as_str().unwrap_or_default();
+        assert!(shown.len() < 2_100, "{} bytes", shown.len());
+        assert!(
+            shown.starts_with("/head-") && shown.ends_with("-tail"),
+            "{shown}"
+        );
+        assert!(
+            unusable["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(shown),
+            "the directory field and the reason disagree"
+        );
+        assert_eq!(unusable["limit"], Value::Null);
+    }
+
+    // A recommend whose own dependency installed but failed its check names the
+    // dependency as the package, and the recommend under its own key.
+    #[test]
+    fn a_failed_recommends_dependency_keeps_its_own_name() {
+        let rows = event_to_json(&PackageEvent::RecommendFailed {
+            operation_info: test_op_info(),
+            recommend_name: "rec".to_string(),
+            error: Box::new(OperationFailure::NotInstalledAfterInstall {
+                package_name: "dep".to_string(),
+                check_command: "check-dep".to_string(),
+                exit_code: Some(1),
+                required_by: Some("rec".to_string()),
+                stdout: selfie::commands::BoundedText::bound(b""),
+                stderr: selfie::commands::BoundedText::bound(b""),
+            }),
+        });
+
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row["kind"], "not_installed_after_install");
+        assert_eq!(row["package"], "dep", "{row}");
+        assert_eq!(row["required_by"], "rec", "{row}");
+        assert_eq!(row["recommend"], "rec", "{row}");
+    }
+
+    // A check that timed out says how long it had and which limit stopped it,
+    // as a failed install's `timed_out` does; any other row carries null.
+    #[tokio::test]
+    async fn a_timed_out_check_row_names_its_limit() {
+        use selfie::package::event::CheckFailure;
+
+        let row = |result| PackageEvent::CheckResultCompleted {
+            operation_info: test_op_info(),
+            check_result: CheckResultData {
+                package_name: "p".to_string(),
+                environment: "test".to_string(),
+                check_command: Some("check-p".to_string()),
+                result,
+            },
+        };
+        let events = vec![
+            row(CheckResult::CouldNotRun(CheckFailure::TimedOut(
+                selfie::commands::runner::TimedOut::new(
+                    "check-p",
+                    std::time::Duration::from_secs(4),
+                    selfie::commands::runner::TimeLimit::Total,
+                ),
+            ))),
+            row(CheckResult::CouldNotRun(CheckFailure::CouldNotStart {
+                message: test_common::message("m"),
+            })),
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let rows = result.data["data"].as_array().expect("data is an array");
+        let fields: Vec<(&Value, &Value)> = rows
+            .iter()
+            .map(|r| (&r["timeout_seconds"], &r["limit"]))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (&Value::from(4), &Value::from("total")),
+                (&Value::Null, &Value::Null),
+            ]
         );
     }
 

@@ -443,6 +443,35 @@ impl UnusableDirectory {
     pub fn cause(&self) -> &std::io::Error {
         &self.cause
     }
+
+    /// The command as this failure's sentence shows it, cut to its share of
+    /// the bound.
+    #[must_use]
+    pub fn command_bounded(&self) -> crate::parts::SpecCommandText {
+        crate::parts::SpecCommandText::within(&self.command, self.shares()[0])
+    }
+
+    /// The directory as this failure's sentence shows it, cut to its share of
+    /// the bound.
+    #[must_use]
+    pub fn working_directory_bounded(&self) -> String {
+        crate::parts::cut_path(&self.working_directory, self.shares()[1])
+            .unwrap_or_else(|| self.working_directory.display().to_string())
+    }
+
+    // Returns the bytes the sentence gives the command, the directory and the
+    // cause, which share the bound one diagnostic keeps.
+    fn shares(&self) -> [usize; 3] {
+        crate::parts::shares(
+            [
+                self.command.len(),
+                // Measured as shown: a byte that is not UTF-8 shows as U+FFFD.
+                self.working_directory.to_string_lossy().len(),
+                crate::parts::cause_words(&*self.cause).len(),
+            ],
+            MAX_BOUNDED_BYTES,
+        )
+    }
 }
 
 crate::parts::display_from_parts!(UnusableDirectory);
@@ -453,15 +482,7 @@ impl crate::parts::Composed for UnusableDirectory {
     // the bound one diagnostic keeps.
     fn parts(&self) -> crate::parts::Parts<'_> {
         let cause = crate::parts::cause_words(&*self.cause);
-        let [command, directory, why] = crate::parts::shares(
-            [
-                self.command.len(),
-                // Measured as shown: a byte that is not UTF-8 shows as U+FFFD.
-                self.working_directory.to_string_lossy().len(),
-                cause.len(),
-            ],
-            MAX_BOUNDED_BYTES,
-        );
+        let [command, directory, why] = self.shares();
         crate::parts::Parts::new()
             .text("Cannot run '")
             .spec_command_within(&self.command, command)
@@ -473,7 +494,8 @@ impl crate::parts::Composed for UnusableDirectory {
 }
 
 /// Which `command_timeout` limit stopped a command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum TimeLimit {
     /// The command ran for `command_timeout` in total.
     Total,
@@ -510,6 +532,18 @@ impl TimedOut {
     #[must_use]
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Which limit stopped it.
+    #[must_use]
+    pub fn limit(&self) -> TimeLimit {
+        self.limit
+    }
+
+    /// The command as this failure's sentence shows it, bounded.
+    #[must_use]
+    pub fn command_bounded(&self) -> crate::parts::SpecCommandText {
+        crate::parts::SpecCommandText::of(&self.command)
     }
 }
 

@@ -1732,7 +1732,8 @@ pub enum NoSuchPackageReason {
 }
 
 /// Command execution failure details
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum CommandFailure {
     /// A command ran and exited non-zero.
     ///
@@ -1909,6 +1910,26 @@ fn invalid_spec_parts<'a>(
         .text(verdict)
         .text(errors)
         .text("), so nothing was written")
+}
+
+impl CommandFailure {
+    /// The label for this failure, such as `"execution_failed"`.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        self.into()
+    }
+
+    /// The command as this failure's sentence shows it, bounded.
+    #[must_use]
+    pub fn command_bounded(&self) -> crate::parts::SpecCommandText {
+        match self {
+            CommandFailure::ExecutionFailed { command, .. } => {
+                crate::parts::SpecCommandText::of(command)
+            }
+            CommandFailure::TimedOut(timed_out) => timed_out.command_bounded(),
+            CommandFailure::WorkingDirectoryUnusable(unusable) => unusable.command_bounded(),
+        }
+    }
 }
 
 crate::parts::display_from_parts!(CommandFailure);

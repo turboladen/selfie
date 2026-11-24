@@ -135,10 +135,11 @@ Test egress at the **boundary**, not by listing known paths:
     diagnosis last. That means **the last bytes of each pipe it forwards always survive** — a leak
     test that plants its secret at the end will now see it where a head-only cut would have dropped
     it.
-  - **It bounds forwarded output, not every string in a failure.** `ExecutionFailed`'s `command` and
-    `AuditResultData`'s `audit_command` are plain unbounded `String`s that also reach the MCP JSON.
-    They are user-authored package-file text rather than process output, which is why they are not
-    bounded — do not read the bullet above as a claim that they are.
+  - **It bounds forwarded output, not every string in a failure.** `ExecutionFailed`'s `command` is
+    a plain unbounded `String`, user-authored package-file text rather than process output. Its
+    sentence and the MCP failure's `command` field carry it bounded, through `command_bounded`. A
+    check or list row's `command` and `AuditResultData`'s `audit_command` reach the MCP JSON raw —
+    do not read the bullet above as a claim that they are bounded.
 - **Streamed command output reaches every adapter's event stream, and each adapter decides who sees
   it.** `execute_command_streaming` sends every chunk of an install command's stdout **and** stderr
   as `PackageEvent::Info`, on success and on failure alike, unbounded. The CLI prints those

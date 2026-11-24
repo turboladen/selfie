@@ -34,19 +34,19 @@ pub enum Part<'a> {
 /// A command a spec's author wrote, as a sentence carries it: shell text of any
 /// shape, bounded to the length a diagnostic keeps of it.
 ///
-/// Built only by this module's builders, so every one is bounded.
+/// Built only inside `selfie`, and always bounded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpecCommandText(String);
 
 impl SpecCommandText {
     // `command`, keeping both its ends and eliding its middle when it is longer
     // than `BoundedText` keeps.
-    fn of(command: &str) -> Self {
+    pub(crate) fn of(command: &str) -> Self {
         Self::within(command, crate::commands::runner::MAX_BOUNDED_BYTES)
     }
 
     // `command`, bounded to its `share` of a sentence's bound.
-    fn within(command: &str, share: usize) -> Self {
+    pub(crate) fn within(command: &str, share: usize) -> Self {
         Self(crate::commands::BoundedText::text_within(command, share).into_string())
     }
 
@@ -315,16 +315,10 @@ impl<'a> Parts<'a> {
     // its share, or decoded lossily, names no file any more, so it enters as a
     // name, which claims nothing about the file system.
     pub(crate) fn path_within(self, path: &'a Path, share: usize) -> Self {
-        let bytes = path.as_os_str().as_encoded_bytes();
-        if bytes.len() <= share && path.to_str().is_some() {
-            return self.path(path);
+        match cut_path(path, share) {
+            None => self.path(path),
+            Some(cut) => self.name(cut),
         }
-        // Decoded before it is cut: each byte that is not UTF-8 decodes to a
-        // three-byte U+FFFD, so cutting the bytes first would show up to three
-        // times the share.
-        let decoded = path.to_string_lossy();
-        let bounded = crate::commands::BoundedText::text_within(&decoded, share);
-        self.name(bounded.into_string())
     }
 
     // `cause` is `cause_words`' text, measured for its share as it is.
@@ -514,6 +508,20 @@ impl fmt::Display for Parts<'_> {
         }
         Ok(())
     }
+}
+
+// Returns `path` as `path_within` shows it in `share` bytes: `None` when it fits
+// and is valid UTF-8, so it stays a path, and otherwise the text it is cut to.
+pub(crate) fn cut_path(path: &Path, share: usize) -> Option<String> {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    if bytes.len() <= share && path.to_str().is_some() {
+        return None;
+    }
+    // Decoded before it is cut: each byte that is not UTF-8 decodes to a
+    // three-byte U+FFFD, so cutting the bytes first would show up to three times
+    // the share.
+    let decoded = path.to_string_lossy();
+    Some(crate::commands::BoundedText::text_within(&decoded, share).into_string())
 }
 
 /// A library value whose sentence is built from [`Parts`].
