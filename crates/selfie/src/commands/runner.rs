@@ -93,15 +93,16 @@ pub trait CommandRunner: Send + Sync {
     /// Run a command in `working_dir`, relaying stdout and stderr through
     /// `output_sender` as they arrive.
     ///
-    /// For long-running commands that need real-time feedback. Chunks are
-    /// best-effort: an implementation may drop one rather than block when the
-    /// receiver falls behind, and drops it outright once the receiver is gone,
-    /// so what arrives on the channel is not guaranteed to be the whole output.
-    /// The returned [`CommandOutput`] holds all of it.
+    /// For long-running commands that need real-time feedback. Every chunk is
+    /// delivered while the receiver lives: a receiver that falls behind slows
+    /// the command down rather than losing output. Once the receiver is gone,
+    /// chunks are discarded and the command still runs to completion. The
+    /// returned [`CommandOutput`] holds all of the output either way.
     ///
     /// `timeout` bounds silence, not run time: the command is terminated once
     /// it has written nothing to stdout or stderr for `timeout`, and a command
-    /// that keeps writing is never terminated by it. The error is
+    /// that keeps writing is never terminated by it. Time spent waiting for the
+    /// receiver to take output does not count. The error is
     /// [`CommandError::Timeout`] with [`TimeLimit::Silence`].
     ///
     /// # Errors

@@ -388,8 +388,9 @@ impl CommandRunner for ShellCommandRunner {
         .await
     }
 
-    // Drops a chunk rather than blocking the read loop when the receiver falls
-    // behind, which is the best-effort delivery the trait allows for.
+    // A chunk the receiver has no room for is sent with `send().await`, with the
+    // budget paused while it waits, so a slow reader slows the command down and
+    // is never mistaken for a command that went quiet.
     async fn execute_streaming(
         &self,
         command: &str,
@@ -430,9 +431,9 @@ impl CommandRunner for ShellCommandRunner {
         let mut full_stdout = Vec::new();
         let mut full_stderr = Vec::new();
 
-        // Tapped here, ahead of the relay in `drain_and_wait`, which may drop a
-        // chunk: output the receiver did not take is still output the command
-        // produced.
+        // The frames are tapped here, ahead of the relay in `drain_and_wait`: a
+        // frame restarts the budget when it is read, whether or not a receiver is
+        // still there to take it.
         let frames = futures::stream::select(
             tagged_frames(stdout, OutputStream::Stdout),
             tagged_frames(stderr, OutputStream::Stderr),
@@ -452,7 +453,10 @@ impl CommandRunner for ShellCommandRunner {
                 frames,
                 &mut full_stdout,
                 &mut full_stderr,
-                &output_sender,
+                Relay {
+                    sender: &output_sender,
+                    budget: &budget,
+                },
                 command,
                 &working_directory,
             ) => result,
@@ -856,7 +860,7 @@ async fn drain_and_wait<S>(
     frames: S,
     full_stdout: &mut Vec<u8>,
     full_stderr: &mut Vec<u8>,
-    output_sender: &tokio::sync::mpsc::Sender<OutputChunk>,
+    relay: Relay<'_>,
     command: &str,
     working_directory: &Path,
 ) -> Result<std::process::ExitStatus, CommandError>
@@ -891,10 +895,7 @@ where
                 OutputStream::Stderr => OutputChunk::Stderr(text),
             };
 
-            // Best-effort, as the port documents: a chunk is dropped rather than
-            // stalling the only thing draining the child's pipes. The captured
-            // output above is unaffected.
-            let _ = output_sender.try_send(chunk);
+            relay.send(chunk).await;
         }
 
         Ok(())
@@ -910,6 +911,34 @@ where
 
     let (status, ()) = tokio::try_join!(wait, pump)?;
     Ok(status)
+}
+
+// The pump hands a command's output to the receiver through this, and a wait
+// for the receiver pauses the budget.
+struct Relay<'a> {
+    sender: &'a tokio::sync::mpsc::Sender<OutputChunk>,
+    budget: &'a Budget,
+}
+
+impl Relay<'_> {
+    // Hand `chunk` to the receiver, waiting for room rather than dropping it.
+    //
+    // The budget is paused only while selfie waits on its reader, and resumed
+    // rather than restarted: the next frame read restarts it. A receiver that is
+    // gone takes nothing, and the pump must keep draining anyway, or the child
+    // dies writing to a closed pipe.
+    async fn send(&self, chunk: OutputChunk) {
+        use tokio::sync::mpsc::error::TrySendError;
+
+        // `try_send` first, so the budget is paused only when the receiver really
+        // has no room, never for a chunk it takes at once. A receiver that stays
+        // alive and never reads holds the command, its budget paused, until the
+        // command is canceled.
+        if let Err(TrySendError::Full(chunk)) = self.sender.try_send(chunk) {
+            let _paused = self.budget.pause();
+            let _ = self.sender.send(chunk).await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2144,7 +2173,10 @@ mod tests {
                 frames,
                 &mut Vec::new(),
                 &mut Vec::new(),
-                &tx,
+                Relay {
+                    sender: &tx,
+                    budget: &Budget::new(Duration::from_secs(30)),
+                },
                 "cmd",
                 Path::new("/pkg"),
             ),
@@ -2190,7 +2222,10 @@ mod tests {
             frames,
             &mut out,
             &mut err,
-            &tx,
+            Relay {
+                sender: &tx,
+                budget: &Budget::new(Duration::from_secs(30)),
+            },
             "cmd",
             Path::new("/pkg"),
         )
@@ -2420,6 +2455,153 @@ mod tests {
     // racing the two would flake in the *false failure* direction, since a token
     // canceled while the command is still running makes `Canceled` the correct
     // answer. Left untested rather than covered by a test that cannot fail.
+
+    // ---- Relay back-pressure ---------------------------------------------------
+
+    // Runs `script` through the streaming path into a one-slot channel whose
+    // reader starts only after `delay`, and returns the result, how long the
+    // command took, and every chunk the reader received.
+    async fn relay_slowly(
+        script: &str,
+        timeout: Duration,
+        delay: Duration,
+    ) -> (
+        Result<CommandOutput, CommandError>,
+        Duration,
+        Vec<OutputChunk>,
+    ) {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let reader = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let mut chunks = Vec::new();
+            while let Some(chunk) = rx.recv().await {
+                chunks.push(chunk);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            chunks
+        });
+        let started = Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(20),
+            runner.execute_streaming(script, Path::new("."), timeout, tx, &token()),
+        )
+        .await
+        .expect("the streaming command hung");
+        let took = started.elapsed();
+        (result, took, reader.await.unwrap())
+    }
+
+    // Joins the text of every stdout chunk, in order.
+    fn relayed_stdout(chunks: &[OutputChunk]) -> String {
+        chunks
+            .iter()
+            .filter_map(|chunk| match chunk {
+                OutputChunk::Stdout(text) => Some(text.as_str()),
+                OutputChunk::Stderr(_) => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_slow_receiver_still_receives_every_chunk() {
+        // 400,000 bytes is dozens of frames into one slot behind a reader that
+        // starts late, so a relay that drops a chunk when the slot is full
+        // relays far less than the command wrote.
+        let delay = Duration::from_millis(200);
+        let (result, took, chunks) = relay_slowly(
+            "head -c 400000 /dev/zero | tr '\\0' a",
+            Duration::from_secs(5),
+            delay,
+        )
+        .await;
+        let output = result.expect("command failed");
+
+        assert_eq!(output.stdout().len(), 400_000);
+        assert_eq!(
+            relayed_stdout(&chunks),
+            String::from_utf8_lossy(output.stdout()),
+            "the relay lost output"
+        );
+        // Positive controls: the slot really filled, and the command really
+        // waited for the late reader.
+        assert!(chunks.len() > 1, "{} chunks", chunks.len());
+        assert!(
+            took >= delay,
+            "the command finished before its reader started"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_receiver_does_not_stop_the_drain() {
+        // A pump that stops reading once nobody takes its chunks closes the
+        // pipes, and the command dies writing to them.
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        drop(rx);
+
+        let output = tokio::time::timeout(
+            Duration::from_secs(20),
+            runner.execute_streaming(
+                BOTH_PIPES_PAST_THE_BUFFER,
+                Path::new("."),
+                Duration::from_secs(2),
+                tx,
+                &token(),
+            ),
+        )
+        .await
+        .expect("the streaming command hung")
+        .expect("command failed");
+
+        assert!(output.is_success(), "exit code {}", output.exit_code());
+        assert!(
+            output.stdout().len() > 200_000,
+            "stdout was only {} bytes",
+            output.stdout().len()
+        );
+    }
+
+    // The script writes three frames, kept apart by the pauses and by switching
+    // pipes.
+    const THREE_FRAMES: &str = "echo a; sleep 0.05; echo b >&2; sleep 0.05; echo c";
+
+    // The silence limit leaves a slow machine room to start the shell, and the
+    // reader starts well after that limit would have run out.
+    const RELAY_LIMIT: Duration = Duration::from_millis(1500);
+    const LATE_READER: Duration = Duration::from_secs(4);
+
+    #[tokio::test]
+    async fn a_reader_slower_than_the_timeout_does_not_time_the_command_out() {
+        let (result, took, chunks) = relay_slowly(THREE_FRAMES, RELAY_LIMIT, LATE_READER).await;
+
+        let output = result.expect("a slow reader timed the command out");
+        assert!(output.is_success());
+        // Positive controls: more chunks than the slot holds, and the command
+        // waited on its reader for longer than its timeout.
+        assert!(chunks.len() >= 2, "{} chunks", chunks.len());
+        assert!(took >= LATE_READER, "the send never blocked: took {took:?}");
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_catches_up_leaves_the_silence_limit_in_force() {
+        // Once the reader has caught up the budget must run again, so the quiet
+        // `sleep 10` is stopped at its timeout, about 5.5s in, rather than
+        // allowed to finish.
+        let (result, took, chunks) = relay_slowly(
+            &format!("{THREE_FRAMES}; sleep 10"),
+            RELAY_LIMIT,
+            LATE_READER,
+        )
+        .await;
+
+        assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
+        assert!(took < Duration::from_secs(8), "took {took:?}");
+        // Control: the send did block first, so the pause really happened.
+        assert!(chunks.len() >= 2, "{} chunks", chunks.len());
+    }
 }
 
 // What a noisy login shell does to a command whose output becomes a file.

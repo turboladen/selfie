@@ -33,12 +33,13 @@ These options were considered:
 ## Decision
 
 An install command, including each of its steps, is stopped after `command_timeout` seconds with no
-output on either stdout or stderr. Every chunk read from either pipe restarts the count, and a chunk
-that is not relayed to the caller still counts. The count covers the whole run. A command that
-closes its pipes and keeps running, or that leaves a grandchild holding a pipe open, is stopped once
-it has been silent that long. Time spent waiting for the user to answer one of the command's
-terminal questions does not count, and the count starts over once the answer is sent. An install
-command has no limit on total run time.
+output on either stdout or stderr. Every chunk read from either pipe restarts the count. The count
+covers the whole run. A command that closes its pipes and keeps running, or that leaves a grandchild
+holding a pipe open, is stopped once it has been silent that long. Time spent waiting for the user
+to answer one of the command's terminal questions does not count, and neither does time spent
+waiting for the caller to take the command's output. Once such a wait ends, the count resumes with
+the time it had left, and starts over at the next output. An install command has no limit on total
+run time.
 
 Every other command (check, audit, finder, dotfile `command:` sources and template bindings) is
 stopped after `command_timeout` seconds in total.
@@ -57,6 +58,9 @@ name `command_timeout`.
 - The MCP server stops an install that keeps printing when its client cancels the tool call or
   disconnects, because each call runs on services that carry that request's own token. A client with
   no way to cancel a call has no way to stop such an install.
+- An install whose output nobody takes is never stopped by its timeout: the wait for the caller does
+  not count, so a caller that stays connected and stops reading holds the command until the call is
+  canceled.
 - The key means two things depending on the command, so its documentation has to state both.
 - Output decides the limit, so output a command buffers internally and has not yet written does not
   count. A tool that flushes rarely can look silent while it works.
