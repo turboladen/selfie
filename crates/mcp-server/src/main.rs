@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use rmcp::{ServiceExt, transport::io::stdio};
 use selfie::{
-    commands::ShellCommandRunner,
+    commands::{FallbackNotice, ShellCommandRunner},
     config::{Overrides, YamlLoader, loader::ConfigLoader},
     fs::RealFileSystem,
     git::GixGitAdapter,
@@ -126,12 +126,17 @@ async fn async_main() -> Result<()> {
     );
     // Use a login shell so the user's PATH includes tools like ~/.cargo/bin,
     // homebrew, fnm, etc. GUI-launched processes (like MCP servers started by
-    // Claude Desktop) don't inherit the terminal's environment.
-    let runner = ShellCommandRunner::login_shell(config.command_timeout());
+    // Claude Desktop) don't inherit the terminal's environment. Every service
+    // uses this one runner, so its clones share one notice and it logs at most
+    // once.
+    let runner = ShellCommandRunner::login_shell(config.command_timeout())
+        .with_shell_fallback_notice(FallbackNotice::new(|fallback| {
+            tracing::warn!("{fallback}");
+        }));
     let service = PackageServiceImpl::new(
         repo,
         server::dotfiles_repository(&config),
-        runner,
+        runner.clone(),
         GixGitStatusProvider::default(),
         config.clone(),
         // Never canceled: each tool call runs on a copy of the service that
@@ -141,8 +146,13 @@ async fn async_main() -> Result<()> {
         CancellationToken::new(),
     );
 
-    let mcp_server =
-        server::SelfieServer::new(service, config, ignored_keys, GixGitAdapter::default());
+    let mcp_server = server::SelfieServer::new(
+        service,
+        config,
+        ignored_keys,
+        runner,
+        GixGitAdapter::default(),
+    );
 
     let in_flight = mcp_server.in_flight();
     let (stdin, stdout) = stdio();

@@ -271,6 +271,10 @@ async fn main() -> anyhow::Result<()> {
     // dispatch, so they are not buried under a command's own output.
     crate::config::report_config_notices(&notices, &display);
 
+    // One notice for the whole run, so every runner warns through it at most once.
+    let config =
+        config.with_shell_fallback_notice(commands::common::shell_fallback_notice(&display));
+
     // Set up graceful shutdown: first SIGINT/SIGTERM cancels in-flight operations,
     // second signal forces immediate exit.
     let mut signals = ShutdownSignals::register();

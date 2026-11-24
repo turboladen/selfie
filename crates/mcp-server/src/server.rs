@@ -12,7 +12,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use selfie::{
-    commands::ShellCommandRunner,
+    commands::{ShellCommandRunner, ShellFallback},
     config::{IgnoredKey, SelfieConfig},
     dotfile_service::{port::ApplyOptions, service::DotfileServiceImpl},
     fs::RealFileSystem,
@@ -62,6 +62,9 @@ pub struct SelfieServer {
     /// Reported through `selfie_config_get` rather than only logged: an
     /// assistant driving this server usually cannot see stderr.
     ignored_config_keys: Vec<IgnoredKey>,
+    /// The shell selfie replaced in `SHELL`, reported through
+    /// `selfie_config_get` for the same reason.
+    shell_fallback: Option<ShellFallback>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -248,6 +251,7 @@ impl SelfieServer {
         service: ConcreteService,
         config: SelfieConfig,
         ignored_config_keys: Vec<IgnoredKey>,
+        runner: ShellCommandRunner,
         git: GixGitAdapter,
     ) -> Self {
         let repo = YamlPackageRepository::new(
@@ -259,9 +263,7 @@ impl SelfieServer {
         // reports a configured one that is missing on every call that reads it,
         // and a directory created after startup is read on the next call.
         let dotfiles_repo = dotfiles_repository(&config);
-        // Login shell: a GUI-launched MCP server does not inherit terminal PATH,
-        // and provider commands (`op`, `teller`) live on the user's PATH.
-        let runner = ShellCommandRunner::login_shell(config.command_timeout());
+        let shell_fallback = runner.shell_fallback().cloned();
         // The token given below is never canceled. A tool call runs on a copy of
         // the service that carries the request's own token (`for_request`), and
         // `main.rs` does the same for `PackageServiceImpl`.
@@ -272,6 +274,9 @@ impl SelfieServer {
             repo,
             dotfiles_repo,
             RealFileSystem,
+            // The package service's own runner, a login shell: a GUI-launched
+            // MCP server does not inherit terminal PATH, and provider commands
+            // (`op`, `teller`) live on the user's PATH.
             runner,
             config.clone(),
             CancellationToken::new(),
@@ -286,6 +291,7 @@ impl SelfieServer {
             git,
             in_flight: TaskTracker::new(),
             ignored_config_keys,
+            shell_fallback,
         }
     }
 
@@ -669,7 +675,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
 
     #[tool(
         name = "selfie_config_get",
-        description = "Get the current selfie configuration including environment, package directory, dotfiles directory, state directory, and settings. `dotfiles_directory` and `state_directory` are the paths in effect: the configured one, or the default when none is set (beside the package directory, and `~/.local/state/selfie`). Both are reported whether or not a directory is at them; the dotfile tools say what is at a configured one when it is not a directory. `state_directory` is selfie's own and is created on the first write that needs it, whether configured or defaulted. `state_directory` is null when neither a setting nor a home directory gives it a value, or when the configured value is not an absolute path."
+        description = "Get the current selfie configuration including environment, package directory, dotfiles directory, state directory, and settings. `dotfiles_directory` and `state_directory` are the paths in effect: the configured one, or the default when none is set (beside the package directory, and `~/.local/state/selfie`). Both are reported whether or not a directory is at them; the dotfile tools say what is at a configured one when it is not a directory. `state_directory` is selfie's own and is created on the first write that needs it, whether configured or defaulted. `state_directory` is null when neither a setting nor a home directory gives it a value, or when the configured value is not an absolute path. `shell_fallback` is null when selfie runs commands with the shell `SHELL` names; otherwise it names that shell (`shell`, null when `SHELL` is unset or empty) and says which commands run with `/bin/sh -l` instead: every command for `kind` `unsupported` or `unset`, and only those producing dotfile content for `content_unsupported`."
     )]
     async fn config_get(&self) -> Result<CallToolResult, McpError> {
         let config_data = serde_json::json!({
@@ -697,6 +703,12 @@ with all=true, when a key in any environment cannot be trusted or a package spec
                     "suggestion": ignored.suggestion(),
                 }))
                 .collect::<Vec<_>>(),
+            // Null when selfie runs commands with the shell `SHELL` names.
+            "shell_fallback": self.shell_fallback.as_ref().map(|fallback| serde_json::json!({
+                "kind": fallback.kind(),
+                "shell": fallback.shell().map(|shell| shell.display().to_string()),
+                "message": fallback.to_string(),
+            })),
         });
         Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string_pretty(&config_data).unwrap_or_default(),
@@ -1621,10 +1633,11 @@ mod tests {
             config.package_directory().to_path_buf(),
             SpecOrigin::PackageDirectory,
         );
+        let runner = runner(&config);
         let service = PackageServiceImpl::new(
             repo,
             dotfiles_repository(&config),
-            runner(&config),
+            runner.clone(),
             test_common::isolated_git_adapter(),
             config.clone(),
             CancellationToken::new(),
@@ -1633,6 +1646,7 @@ mod tests {
             service,
             config,
             Vec::new(),
+            runner,
             test_common::isolated_git_adapter(),
         )
     }
@@ -2369,6 +2383,40 @@ mod tests {
                 && reported.ends_with("/.local/state/selfie"),
             "the default is the XDG state home under the home directory, got: {reported}"
         );
+    }
+
+    // Returns `selfie_config_get`'s answer from a server whose runner resolved
+    // `shell`.
+    async fn config_under_shell(shell: &str) -> serde_json::Value {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+
+        let server = server_running(&packages, None, None, |config| {
+            ShellCommandRunner::login_shell_with(Some(shell.into()), config.command_timeout())
+        });
+        tool_json(&server.config_get().await.unwrap())
+    }
+
+    // An assistant rarely sees this server's stderr, so the shell selfie
+    // replaced has to reach it through a tool response.
+    #[tokio::test]
+    async fn config_get_reports_the_shell_selfie_replaced() {
+        let json = config_under_shell("/bin/tcsh").await;
+
+        let fallback = &json["shell_fallback"];
+        assert_eq!(fallback["kind"], "unsupported", "{json}");
+        assert_eq!(fallback["shell"], "/bin/tcsh", "{json}");
+        let message = fallback["message"].as_str().unwrap();
+        assert!(message.contains("/bin/tcsh"), "{message}");
+        assert!(message.contains("/bin/sh -l"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn config_get_reports_no_fallback_for_a_shell_selfie_uses() {
+        let json = config_under_shell("/bin/sh").await;
+
+        assert!(json["shell_fallback"].is_null(), "{json}");
     }
 
     // A configured value with no usable resolution is null rather than echoed:

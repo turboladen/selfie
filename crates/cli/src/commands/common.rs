@@ -5,7 +5,7 @@
 
 use crate::terminal_text::{DisplayPath, Name, Shown, lit, shown};
 use selfie::{
-    commands::{PromptHandler, ShellCommandRunner, TerminalAnswer},
+    commands::{FallbackNotice, PromptHandler, ShellCommandRunner, TerminalAnswer},
     dotfile_service::{port::DotfileService, service::DotfileServiceImpl},
     fs::{filesystem::FileSystem, real::RealFileSystem},
     git::GixGitAdapter,
@@ -107,7 +107,30 @@ pub(crate) fn file_name_of(package: &selfie::package::Package) -> Option<String>
 // `clippy.toml` makes a non-login runner a build error crate-wide, including
 // inside this function.
 fn create_command_runner(config: &CliConfig) -> ShellCommandRunner {
-    ShellCommandRunner::login_shell(config.command_timeout())
+    with_fallback_notice(
+        ShellCommandRunner::login_shell(config.command_timeout()),
+        config,
+    )
+}
+
+/// Returns `runner` with the process's one fallback notice attached, so the
+/// runner tells that notice about a shell it replaced.
+// Every runner shares that notice, so a run warns once however many runners it
+// builds.
+fn with_fallback_notice(runner: ShellCommandRunner, config: &CliConfig) -> ShellCommandRunner {
+    match config.shell_fallback_notice() {
+        Some(notice) => runner.with_shell_fallback_notice(notice.clone()),
+        None => runner,
+    }
+}
+
+/// The notice that warns on `display` when selfie replaces `SHELL`. Build one
+/// per process.
+pub(crate) fn shell_fallback_notice(display: &DisplayManager) -> FallbackNotice {
+    let display = display.clone();
+    FallbackNotice::new(move |fallback| {
+        display.print_warning(crate::received::composed(fallback));
+    })
 }
 
 /// The handler that asks the user a question a command wrote to its terminal,
@@ -491,6 +514,56 @@ pub(crate) fn create_package_service(
 mod tests {
     use super::*;
     use selfie::package::port::MockPackageRepository;
+
+    // A run can build more than one runner, since a package service and a
+    // dotfile service each build their own. Both share the config's notice, so
+    // a replaced `SHELL` is warned about once. The commands run with `/bin/sh`,
+    // since the shell named here does not exist.
+    #[tokio::test]
+    async fn every_runner_a_run_builds_shares_one_fallback_notice() {
+        use selfie::commands::CommandRunner as _;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+
+        let told = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&told);
+        let config = CliConfig::new(
+            selfie::config::SelfieConfigBuilder::default()
+                .environment("test")
+                .package_directory("/nonexistent/packages")
+                .build(),
+            crate::config::CliSection::default(),
+        )
+        .with_shell_fallback_notice(FallbackNotice::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }));
+        let dir = tempfile::tempdir().unwrap();
+
+        for _ in 0..2 {
+            let runner = with_fallback_notice(
+                ShellCommandRunner::login_shell_with(
+                    Some("/nonexistent/tcsh".into()),
+                    Duration::from_secs(30),
+                ),
+                &config,
+            );
+            let output = runner
+                .execute_in_dir(
+                    "true",
+                    dir.path(),
+                    Duration::from_secs(30),
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert!(output.is_success());
+        }
+
+        assert_eq!(told.load(Ordering::SeqCst), 1);
+    }
 
     // A package's name in the track-dotfile command is one shell word, after
     // `--` when it starts with a dash. The command has a line of its own, so a

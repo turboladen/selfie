@@ -8,7 +8,7 @@ pub use runner::{
     BoundedText, CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk,
     OutputStream,
 };
-pub use shell::ShellCommandRunner;
+pub use shell::{FallbackNotice, ShellCommandRunner, ShellFallback};
 pub use terminal::{PromptHandler, TerminalAnswer, TerminalPrompt};
 
 #[cfg(feature = "with_mocks")]

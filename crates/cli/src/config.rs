@@ -166,6 +166,9 @@ pub(crate) struct CliConfig {
     /// not think through; keeping the field out of that struct makes writing one
     /// impossible rather than merely discouraged.
     allow_sudo: bool,
+    /// The one notice every runner in the process shares, so a replaced
+    /// `SHELL` is warned about once per run.
+    shell_fallback_notice: Option<selfie::commands::FallbackNotice>,
 }
 
 impl CliConfig {
@@ -175,6 +178,7 @@ impl CliConfig {
             selfie,
             cli,
             allow_sudo: false,
+            shell_fallback_notice: None,
         }
     }
 
@@ -195,6 +199,20 @@ impl CliConfig {
 
     pub(crate) fn allow_sudo(&self) -> bool {
         self.allow_sudo
+    }
+
+    /// Returns this config with `notice`, which is told when selfie replaces
+    /// `SHELL`.
+    pub(crate) fn with_shell_fallback_notice(
+        mut self,
+        notice: selfie::commands::FallbackNotice,
+    ) -> Self {
+        self.shell_fallback_notice = Some(notice);
+        self
+    }
+
+    pub(crate) fn shell_fallback_notice(&self) -> Option<&selfie::commands::FallbackNotice> {
+        self.shell_fallback_notice.as_ref()
     }
 
     // --- Delegated core getters ---

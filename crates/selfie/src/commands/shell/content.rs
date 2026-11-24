@@ -14,6 +14,8 @@
 
 use uuid::Uuid;
 
+use super::family::Recipe;
+
 /// Environment variable carrying the shell to run the command with.
 pub(super) const SHELL_VAR: &str = "SELFIE_CONTENT_SHELL";
 
@@ -78,17 +80,6 @@ impl Markers {
     }
 }
 
-/// Whether `shell` is fish, which needs the other recipe.
-///
-/// Getting this wrong in either direction is safe: a POSIX shell treated as fish
-/// still separates, and fish given the POSIX recipe writes `exec`'s manual page
-/// ahead of the start marker, where extraction discards it.
-pub(super) fn is_fish(shell: &str) -> bool {
-    std::path::Path::new(shell)
-        .file_name()
-        .is_some_and(|name| name == "fish")
-}
-
 /// The recipe a POSIX shell is given.
 ///
 /// The `trap` displaces any `EXIT` trap the profile installed, which is why a
@@ -104,12 +95,11 @@ pub(super) fn posix_recipe(command: &str, markers: &Markers, fd: u8) -> String {
     )
 }
 
-/// The recipe `shell` is given: fish needs the other one.
-pub(super) fn recipe(shell: &str, command: &str, markers: &Markers, fd: u8) -> String {
-    if is_fish(shell) {
-        fish_recipe(command, markers, fd)
-    } else {
-        posix_recipe(command, markers, fd)
+/// The text a shell taking `recipe` is given to run `command`.
+pub(super) fn recipe(recipe: Recipe, command: &str, markers: &Markers, fd: u8) -> String {
+    match recipe {
+        Recipe::Fish => fish_recipe(command, markers, fd),
+        Recipe::Posix => posix_recipe(command, markers, fd),
     }
 }
 
@@ -276,9 +266,8 @@ mod tests {
         // page into the capture — would go unnoticed here.
         let m = markers();
 
-        assert!(recipe("/opt/homebrew/bin/fish", "cmd", &m, 8).starts_with("begin\n"));
-        assert!(recipe("/bin/sh", "cmd", &m, 8).starts_with("exec >&8"));
-        assert!(recipe("/bin/zsh", "cmd", &m, 8).starts_with("exec >&8"));
+        assert!(recipe(Recipe::Fish, "cmd", &m, 8).starts_with("begin\n"));
+        assert!(recipe(Recipe::Posix, "cmd", &m, 8).starts_with("exec >&8"));
     }
 
     #[test]
@@ -321,14 +310,5 @@ mod tests {
             wrapper(9, false),
             r#"exec 9>&1 1>/dev/null; exec "$SELFIE_CONTENT_SHELL" -c "$SELFIE_CONTENT_CMD""#
         );
-    }
-
-    #[test]
-    fn fish_is_recognized_by_file_name() {
-        assert!(is_fish("/opt/homebrew/bin/fish"));
-        assert!(is_fish("fish"));
-        assert!(!is_fish("/bin/sh"));
-        assert!(!is_fish("/bin/zsh"));
-        assert!(!is_fish("/bin/fisher"));
     }
 }
