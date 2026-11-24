@@ -242,6 +242,7 @@ fn wrapped_cell(cell: &str, width: usize) -> String {
     cell.ansi_split("\n")
         .enumerate()
         .flat_map(|(index, line)| wrapped_line(&line, index > 0, width))
+        .map(reset_closed)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -292,6 +293,29 @@ fn wrapped_line(line: &str, continued: bool, width: usize) -> Vec<String> {
             format!("{prefix}{styled}")
         })
         .collect()
+}
+
+// Returns `piece` with the styling sequences that end it replaced by one reset.
+// ansi-str closes a line it splits or cuts with a sequence per style, such as
+// `ESC[23m` for italic, and the printer's guard escapes those as text. Every
+// style is closed at a piece's end, so a reset there leaves it shown the same.
+fn reset_closed(piece: String) -> String {
+    const RESET: &str = "\u{1b}[0m";
+    let mut end = piece.len();
+    while let Some(start) = piece[..end].rfind("\u{1b}[") {
+        let sequence = &piece[start + 2..end];
+        let Some(parameters) = sequence.strip_suffix('m') else {
+            break;
+        };
+        if !parameters.chars().all(|c| c.is_ascii_digit() || c == ';') {
+            break;
+        }
+        end = start;
+    }
+    if end == piece.len() || piece[end..] == *RESET {
+        return piece;
+    }
+    format!("{}{RESET}", &piece[..end])
 }
 
 pub(crate) struct ValidationTableReporter {
@@ -516,6 +540,44 @@ mod tests {
             assert!(
                 value.trim_end().ends_with("\u{1b}[0m"),
                 "{value:?} runs its style on"
+            );
+        }
+    }
+
+    // Every line of a styled cell in a wrapped table closes its style with a
+    // reset, the one closing sequence the printer's guard keeps, so no line
+    // shows an escape as text: a wrapped piece, and a line of a multi-line
+    // cell that fits. Bold, italic and underline each close with a sequence of
+    // their own when a line is cut.
+    #[test]
+    fn a_wrapped_styled_piece_closes_with_what_the_guard_keeps() {
+        let text = "a styled line with enough words in it to need wrapping twice over";
+        let paints: [Paint; 3] = [
+            |s| s.yellow().italic(),
+            |s| s.bold().green(),
+            |s| s.underlined().blue(),
+        ];
+        for paint in paints {
+            let mut table = SafeTable::new().with_width(30);
+            table.add_row([
+                Cell::from(lit!("k")),
+                crate::status_style::styled_text(Prose::new(text), true, paint).into(),
+            ]);
+            table.add_row([
+                Cell::from(lit!("k")),
+                crate::status_style::styled_text(Prose::new("fits\nthis too"), true, paint).into(),
+            ]);
+
+            let rendered = table.to_string();
+
+            assert!(
+                values(&console::strip_ansi_codes(&rendered)).len() > 4,
+                "{rendered}"
+            );
+            assert_eq!(
+                crate::terminal_text::guard(&rendered, true),
+                rendered,
+                "{rendered:?}"
             );
         }
     }
