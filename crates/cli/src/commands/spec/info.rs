@@ -205,25 +205,22 @@ pub(crate) fn create_environment_table(
     // names alone, one to a line either way. A status can end in a note under
     // its line, which must not land between two entries, so no two entries
     // share a line.
-    let listed = |checked: &[(Name, EnvironmentStatus)], names: Vec<Name>| -> Option<Shown> {
+    let listed = |checked: &[(Name, EnvironmentStatus)], names: Vec<Name>| -> Option<Cell> {
         if !checked.is_empty() {
-            Some(Shown::join(
-                checked
-                    .iter()
-                    .map(|(name, status)| format_dependency_with_status(name, status, use_colors)),
-                lit!("\n"),
-            ))
+            Some(Cell::list(checked.iter().map(|(name, status)| {
+                format_dependency_with_status(name, status, use_colors)
+            })))
         } else if !names.is_empty() {
-            Some(Shown::join(names, lit!("\n")))
+            Some(Cell::list(names))
         } else {
             None
         }
     };
     if let Some(dependencies) = listed(&environment.dependency_statuses, environment.dependencies) {
-        env_table.add_row([format_env_key(lit!("Dependencies")), dependencies.into()]);
+        env_table.add_row([format_env_key(lit!("Dependencies")), dependencies]);
     }
     if let Some(recommends) = listed(&environment.recommend_statuses, environment.recommends) {
-        env_table.add_row([format_env_key(lit!("Recommends")), recommends.into()]);
+        env_table.add_row([format_env_key(lit!("Recommends")), recommends]);
     }
 
     env_table
@@ -327,6 +324,8 @@ mod tests {
             .unwrap_or_else(|| panic!("{table}"));
         assert!(lines[at + 1].contains("y: "), "{table}");
         assert!(!lines[at].contains("y: "), "{table}");
+        // Both entries start at the cell's left edge.
+        assert_eq!(lines[at].find("x: "), lines[at + 1].find("y: "), "{table}");
     }
 
     // An install command that reads as another gets an `Escaped` row right
