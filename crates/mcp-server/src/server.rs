@@ -899,7 +899,7 @@ Rows are in package-name order, as `selfie package list` prints them."
 
     #[tool(
         name = "selfie_sync_pull",
-        description = "Fetch and fast-forward merge from remote. Refuses if anything is staged, and refuses when this machine has commits the remote lacks, since it only fast-forwards; neither refusal carries `kind`. A failed git step's result carries `step`, such as \"fetch\", and `kind`, git's error as a label, such as \"operation_failed\"."
+        description = "Fetch and fast-forward merge from remote. Refuses if anything is staged, and refuses when this machine has commits the remote lacks, since it only fast-forwards. Staged changes refuse with `kind` \"staged_changes\" and `step` \"check_status\", and commits of its own with `kind` \"diverged\" and `step` \"fast_forward\"; the `error` is the same sentence the CLI prints. A failed git step's result carries `step`, such as \"fetch\", and `kind`, git's error as a label, such as \"operation_failed\"."
     )]
     async fn selfie_sync_pull(&self) -> Result<CallToolResult, McpError> {
         let stream = self.sync_service.pull().await;

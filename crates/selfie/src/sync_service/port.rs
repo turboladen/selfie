@@ -76,10 +76,11 @@ impl crate::parts::Composed for SyncError {
     }
 }
 
-/// The git step of a sync command that failed, and git's error.
+/// The git step of a sync command that failed or refused, and git's error.
 ///
 /// Its sentence frames the error with the step, such as "Fetch failed: ",
-/// and names the error's paths and git's text as parts.
+/// and names the error's paths and git's text as parts. A refusal, such as a
+/// pull that found staged changes, is its own sentence with no frame.
 #[derive(Debug, Clone)]
 pub struct GitFailure {
     step: GitStep,
@@ -119,13 +120,13 @@ impl GitStep {
 }
 
 impl GitFailure {
-    /// `error`, which `step` failed with.
+    /// `error`, which `step` failed or refused with.
     #[must_use]
     pub fn at(step: GitStep, error: crate::git::GitSyncError) -> Self {
         Self { step, error }
     }
 
-    /// The step that failed.
+    /// The step that failed, or that found what a refusal refuses.
     #[must_use]
     pub fn step(&self) -> GitStep {
         self.step
@@ -144,6 +145,11 @@ impl crate::parts::Composed for GitFailure {
     fn parts(&self) -> crate::parts::Parts<'_> {
         use crate::parts::Parts;
 
+        // A refusal is not a step that failed: the step ran and found something
+        // to refuse, so the refusal reads as its own sentence, with no frame.
+        if self.error.is_refusal() {
+            return self.error.parts();
+        }
         let frame = match self.step {
             // A failed push keeps the commits made before it, and says so.
             GitStep::Push => {

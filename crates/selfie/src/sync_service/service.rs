@@ -596,8 +596,8 @@ where
             {
                 Ok(status) if !status.staged.is_empty() => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            "Staged changes detected. Commit or unstage them before pulling.",
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::CheckStatus, GitSyncError::StagedChanges),
                         )))
                         .await;
                     return;
@@ -710,8 +710,8 @@ where
                 }
                 Ok(crate::git::FastForwardResult::Diverged) => {
                     sender
-                        .send_completed(OperationResult::Failure(OperationFailure::Generic(
-                            "Remote has diverged. Resolve manually with git.",
+                        .send_completed(OperationResult::Failure(OperationFailure::Git(
+                            GitFailure::at(GitStep::FastForward, GitSyncError::Diverged),
                         )))
                         .await;
                 }
@@ -5773,6 +5773,24 @@ mod git_failure_words {
             };
             let events: Vec<PackageEvent> = stream.collect().await;
             assert_eq!(failure_of(&events), expected, "{command}");
+        }
+    }
+
+    // Each of pull's refusals is a typed git failure, at the step that found it
+    // and with its own label, so an adapter can branch on it.
+    #[tokio::test]
+    async fn a_pull_refusal_is_a_typed_git_failure() {
+        use crate::sync_service::port::GitStep;
+
+        for (step, expected) in [
+            (Step::Staged, (GitStep::CheckStatus, "staged_changes")),
+            (Step::Diverged, (GitStep::FastForward, "diverged")),
+        ] {
+            let events: Vec<PackageEvent> = service(step).pull().await.collect().await;
+            let OperationFailure::Git(failure) = failure_value(events) else {
+                panic!("a refusal is a git failure, for {expected:?}");
+            };
+            assert_eq!((failure.step(), failure.error().kind()), expected);
         }
     }
 

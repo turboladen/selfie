@@ -2210,6 +2210,38 @@ mod tests {
         );
     }
 
+    // A pull's refusal names its kind and the step that found it, and its
+    // sentence is the refusal alone, not a step that failed.
+    #[test]
+    fn a_pull_refusal_carries_its_kind_and_step() {
+        use selfie::git::GitSyncError;
+        use selfie::sync_service::port::{GitFailure, GitStep};
+
+        for (step, error, labels, sentence) in [
+            (
+                GitStep::CheckStatus,
+                GitSyncError::StagedChanges,
+                ("staged_changes", "check_status"),
+                "Staged changes detected. Commit or unstage them before pulling.",
+            ),
+            (
+                GitStep::FastForward,
+                GitSyncError::Diverged,
+                ("diverged", "fast_forward"),
+                "Remote has diverged. Resolve manually with git.",
+            ),
+        ] {
+            let payload = failure_json(&OperationFailure::Git(GitFailure::at(step, error)), None);
+
+            assert_eq!(payload["status"], "failure");
+            assert_eq!(
+                (&payload["kind"], &payload["step"]),
+                (&labels.0.into(), &labels.1.into())
+            );
+            assert_eq!(payload["error"], sentence);
+        }
+    }
+
     // A spec that changed after selfie read it names its kind, so an assistant
     // can tell a conflict a rerun settles from any other repository failure.
     #[test]
