@@ -649,7 +649,8 @@ Each `package_list_item` row's `status` is \"installed\", \"not installed\", \"n
 A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location. \
 A spec that loaded but that selfie will not read is listed in the summary's `refused` array, with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim; branch on it, knowing that a spec refused for several reasons carries the first one's kind, and its `reason` names them all) and `reason`, \
 and is not counted in total_packages. Without all=true, a spec is refused when 'selfie apply' would refuse it in the current environment; \
-with all=true, when a key in any environment cannot be trusted or a package spec declares no environment. A result that completed carries `steps`, `{completed, total}`, the operation's step count; no message carries a count, and a result with status 'failure' carries none."
+with all=true, when a key in any environment cannot be trusted or a package spec declares no environment. A result that completed carries `steps`, `{completed, total}`, the operation's step count; no message carries a count, and a result with status 'failure' carries none. \
+Rows are in package-name order, as `selfie package list` prints them."
     )]
     async fn package_list(
         &self,
