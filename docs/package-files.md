@@ -1560,11 +1560,12 @@ its own keypress. It is never the default and is never reachable by accepting on
 provides no interactive resolver at all, so it cannot reach that path.
 
 `--yes` / `auto_accept` does **not** apply to these entries. For an ordinary dotfile it forces the
-overwrite; for a secret-bearing one the conflict is always reported and skipped, and only an
-interactive answer can overwrite. The reason is asymmetric risk: an ordinary target that gets
-overwritten wrongly can be recovered from the repository, whereas a credential can not, because
-selfie recorded nothing about it. This matters most for non-interactive callers such as the MCP
-server, which can set the flag but has no human behind it.
+overwrite of a conflicting target, never of a target that is a symlink, which apply refuses; for a
+secret-bearing one the conflict is always reported and skipped, and only an interactive answer can
+overwrite. The reason is asymmetric risk: an ordinary target that gets overwritten wrongly can be
+recovered from the repository, whereas a credential can not, because selfie recorded nothing about
+it. This matters most for non-interactive callers such as the MCP server, which can set the flag but
+has no human behind it.
 
 `--dry-run` does not run any provider or `vars` command. That means it usually cannot tell you
 whether a secret-bearing entry would change — knowing that needs the content, and the content needs
