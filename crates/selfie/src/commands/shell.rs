@@ -1248,39 +1248,39 @@ mod tests {
 
     #[tokio::test]
     async fn a_buffered_command_hangs_on_a_grandchild_only_until_its_timeout() {
-        // selfie-b7mv, the buffered half — the same shape as the streaming test
-        // above, and the reason this bead is not closed by either commit alone.
+        // selfie-b7mv, the buffered half of the streaming test of the same name.
         //
         // The timeout and cancellation arms must not sit inside a `select!` that
         // `child.wait()` can win. A grandchild inheriting the stdout pipe keeps it
         // open after the shell exits, so `wait()` returns in milliseconds and the
-        // reads that follow would have no deadline at all: the command runs to
-        // completion against an unenforced budget, and the caller is
-        // told the command had succeeded.
+        // reads that follow would have no deadline: the command would run to
+        // completion and be reported as a success.
         //
         // The grandchild ignores SIGHUP, which the terminal sends when the shell
         // exits; otherwise it would end there and release the pipe on its own.
+        let marker = long_sleep(1);
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
         let started = Instant::now();
 
         let result = runner
             .execute_in_dir(
-                "trap '' HUP; sleep 8 & echo started",
+                &format!("trap '' HUP; {marker} & echo started"),
                 Path::new("."),
                 Duration::from_secs(2),
                 &token(),
             )
             .await;
+        let took = started.elapsed();
+        kill_processes_matching(&marker);
 
         assert!(
             stopped_by(&result, TimeLimit::Total),
             "a command past its timeout was reported as: {result:?}"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(6),
-            "the timeout was not enforced; took {:?}",
-            started.elapsed()
+            took < UNENFORCED_BOUND,
+            "the timeout was not enforced; took {took:?}"
         );
     }
 
@@ -1289,26 +1289,26 @@ mod tests {
     // SIGHUP ends with the command instead of outliving it.
     #[tokio::test]
     async fn a_background_job_is_hung_up_when_its_command_ends() {
+        // A job that outlived the command would hold the output pipe open, and the
+        // 20s limit would stop the command with a timeout, which the `unwrap`
+        // reports. The process table says whether the job itself is gone.
+        let marker = long_sleep(2);
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
-        let started = Instant::now();
 
         let output = runner
             .execute_in_dir(
-                "sleep 8 & echo started",
+                &format!("{marker} & echo started"),
                 Path::new("."),
                 Duration::from_secs(20),
                 &token(),
             )
-            .await
-            .unwrap();
+            .await;
+        let survived = !gone_within(&marker, REAPING_GRACE).await;
+        kill_processes_matching(&marker);
 
-        assert_eq!(output.stdout_str(), "started\n");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the background sleep held the command for {:?}",
-            started.elapsed()
-        );
+        assert_eq!(output.unwrap().stdout_str(), "started\n");
+        assert!(!survived, "the background job outlived its command");
     }
 
     // Is a process whose command line contains `marker` still running?
@@ -1341,21 +1341,68 @@ mod tests {
             .output();
     }
 
+    // Kills every process matching its marker when dropped, for a test that can
+    // panic before reaching its own cleanup.
+    struct KillOnDrop<'a>(&'a str);
+
+    impl Drop for KillOnDrop<'_> {
+        fn drop(&mut self) {
+            kill_processes_matching(self.0);
+        }
+    }
+
+    // A sleep command line no other process, test or run shares: the tag names the
+    // test and the process id names the test binary, so two suites running at once
+    // never match, or kill, each other's children. It outlives every bound below.
+    fn long_sleep(tag: u8) -> String {
+        // One digit, so the tag and the process id cannot run into each other:
+        // tag 12 of pid 345 would otherwise be tag 1 of pid 2345.
+        assert!(tag < 10, "a sleep tag is one digit, got {tag}");
+        format!("sleep 60.{tag}{}", std::process::id())
+    }
+
+    // The most a command that should have been stopped after a few seconds may
+    // take before its stop counts as not enforced. A command whose limit never
+    // fires waits out a child that lives for 60s, so it overshoots this bound
+    // while a loaded machine has half a minute of slack.
+    const UNENFORCED_BOUND: Duration = Duration::from_secs(30);
+
+    // How long a killed or hung-up process may take to leave the process table on
+    // a loaded machine.
+    const REAPING_GRACE: Duration = Duration::from_secs(10);
+
+    // Waits up to `grace` for no process to match `marker`, and reports whether
+    // that happened.
+    async fn gone_within(marker: &str, grace: Duration) -> bool {
+        let deadline = Instant::now() + grace;
+        loop {
+            if !a_process_matching(marker) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     #[tokio::test]
     async fn a_timed_out_command_does_not_leave_its_child_running() {
         // Abandoning the child would leave a process holding pipes nobody reads
         // for as long as it wants. Without this, deleting the kill above fails
         // no test — the error is returned either way, and only the process table
         // shows the difference.
-        // An unusual duration, so it is both findable and self-limiting if the
-        // assertion below fails.
-        const MARKER: &str = "sleep 33.71";
+        // The command ignores SIGHUP, which an ignored disposition carries through
+        // `exec`: the terminal's hang-up would otherwise end the child on its own
+        // and hide a missing kill. An unusual duration makes it both findable and
+        // self-limiting if the assertion below fails.
+        let marker = long_sleep(3);
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
 
         let result = runner
             .execute_in_dir(
-                &format!("exec {MARKER}"),
+                &format!("trap '' HUP; exec {marker}"),
                 Path::new("."),
                 Duration::from_millis(300),
                 &token(),
@@ -1363,8 +1410,8 @@ mod tests {
             .await;
 
         assert!(stopped_by(&result, TimeLimit::Total), "{result:?}");
-        let survived = a_process_matching(MARKER);
-        kill_processes_matching(MARKER);
+        let survived = !gone_within(&marker, REAPING_GRACE).await;
+        kill_processes_matching(&marker);
         assert!(!survived, "the timed-out command's child is still running");
     }
 
@@ -1372,14 +1419,14 @@ mod tests {
     async fn a_timed_out_streaming_command_does_not_leave_its_child_running() {
         // The streaming half of the test above. Distinct markers so the two
         // cannot see each other's child when the suite runs them in parallel.
-        const MARKER: &str = "sleep 33.72";
+        let marker = long_sleep(4);
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
 
         let result = runner
             .execute_streaming(
-                &format!("exec {MARKER}"),
+                &format!("trap '' HUP; exec {marker}"),
                 Path::new("."),
                 Duration::from_millis(300),
                 tx,
@@ -1388,8 +1435,8 @@ mod tests {
             .await;
 
         assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
-        let survived = a_process_matching(MARKER);
-        kill_processes_matching(MARKER);
+        let survived = !gone_within(&marker, REAPING_GRACE).await;
+        kill_processes_matching(&marker);
         assert!(!survived, "the timed-out command's child is still running");
     }
 
@@ -2360,18 +2407,20 @@ mod tests {
         // shape's deadline arm was guarded `if !process_done`, so once the shell
         // exited nothing bounded the reads: the command ran ~8s past a 2s budget
         // and was then reported as `Ok`.
+        let marker = long_sleep(5);
         let (result, took) = stream_with_timeout(
-            "trap '' HUP; sleep 8 & echo started",
+            &format!("trap '' HUP; {marker} & echo started"),
             Duration::from_secs(2),
         )
         .await;
+        kill_processes_matching(&marker);
 
         assert!(
             stopped_by(&result, TimeLimit::Silence),
             "a command past its timeout was not reported as one: {result:?}"
         );
         assert!(
-            took < Duration::from_secs(6),
+            took < UNENFORCED_BOUND,
             "the timeout was not enforced; took {took:?}"
         );
     }
@@ -2427,25 +2476,29 @@ mod tests {
 
     #[tokio::test]
     async fn a_streaming_command_is_stopped_once_it_goes_quiet_after_printing() {
-        let (result, took) = stream_with_timeout("echo hi; sleep 30", Duration::from_secs(1)).await;
+        let marker = long_sleep(6);
+        let (result, took) =
+            stream_with_timeout(&format!("echo hi; {marker}"), Duration::from_secs(1)).await;
+        kill_processes_matching(&marker);
 
         assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
-        assert!(took < Duration::from_secs(10), "{took:?}");
+        assert!(took < UNENFORCED_BOUND, "{took:?}");
     }
 
     #[tokio::test]
     async fn a_streaming_command_that_closes_its_pipes_and_stays_silent_is_stopped() {
         // The drain finishes its pipes at once and only `wait` is left, so this
         // fails if the limit is enforced by the drain instead of beside it.
+        let marker = long_sleep(7);
         let (result, took) = stream_with_timeout(
-            "echo hi; exec >/dev/null 2>&1; sleep 33.73",
+            &format!("echo hi; exec >/dev/null 2>&1; {marker}"),
             Duration::from_secs(1),
         )
         .await;
 
-        kill_processes_matching("sleep 33.73");
+        kill_processes_matching(&marker);
         assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
-        assert!(took < Duration::from_secs(10), "{took:?}");
+        assert!(took < UNENFORCED_BOUND, "{took:?}");
     }
 
     // NOTE: the `biased;` on the outer `select!` has no test, deliberately.
@@ -2588,17 +2641,20 @@ mod tests {
     #[tokio::test]
     async fn a_reader_that_catches_up_leaves_the_silence_limit_in_force() {
         // Once the reader has caught up the budget must run again, so the quiet
-        // `sleep 10` is stopped at its timeout, about 5.5s in, rather than
-        // allowed to finish.
-        let (result, took, chunks) = relay_slowly(
-            &format!("{THREE_FRAMES}; sleep 10"),
+        // minute-long sleep is stopped at its timeout, about 5.5s in, rather than
+        // allowed to finish. A limit that never fires runs into the 20s ceiling
+        // `relay_slowly` puts on the command and panics there, so the sleep is
+        // killed on drop rather than by a line that panic would skip.
+        let marker = long_sleep(8);
+        let _cleanup = KillOnDrop(&marker);
+        let (result, _, chunks) = relay_slowly(
+            &format!("{THREE_FRAMES}; {marker}"),
             RELAY_LIMIT,
             LATE_READER,
         )
         .await;
 
         assert!(stopped_by(&result, TimeLimit::Silence), "{result:?}");
-        assert!(took < Duration::from_secs(8), "took {took:?}");
         // Control: the send did block first, so the pause really happened.
         assert!(chunks.len() >= 2, "{} chunks", chunks.len());
     }
