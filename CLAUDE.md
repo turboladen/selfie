@@ -82,6 +82,10 @@ reads an empty deploy state, because the second run is a different machine as fa
 concerned. One invocation runs exactly one selfie command, arguments passed through verbatim, so to
 watch state change, drive the binary against the printed sandbox directory yourself.
 
+Both `just sandbox-run` and `.claude/skills/run-selfie/driver.mjs` pin `SHELL=/bin/sh`, so neither
+can show shell-dependent behavior. Run the binary under `env -i` with your own `SHELL`, pointed at a
+stub script that logs its argv rather than a real csh.
+
 ### Pre-commit checklist
 
 Before every commit (unless instructed otherwise), run `just check` and fix any issues. It runs
@@ -161,6 +165,10 @@ There are multiple crates in the repo, all under the `crates/` subdirectory:
 5. `xtask`, the verification instruments behind `just percommit` and `just mutate`.
 6. `selfie-escape` (in `escape/`), the character sets and escaping loop behind the CLI's terminal
    text and both binaries' stderr logs.
+
+`selfie-mcp` has no library target, so tests that build a `SelfieServer` live in-crate
+(`crates/mcp-server/src/server/*_tests.rs`), and `crates/mcp-server/tests/` holds only tests that
+spawn the built binary over stdio.
 
 The CLI and MCP server are both "driving adapters" in hexagonal terms — they consume the same
 `PackageService` trait but present results differently (terminal output vs structured JSON). Keep
