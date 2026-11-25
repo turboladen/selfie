@@ -94,7 +94,8 @@ Key differences from the CLI:
   boundary rule above, not a pattern to copy.
 - `SelfieServer` is generic over a `ServiceSet` (`crates/mcp-server/src/services.rs`), which hands
   each tool call its package, dotfile and sync services bound to that call's cancellation token.
-  `LiveServices` is the set `main.rs` runs; a test supplies its own set to put a mock behind a tool.
+  `LiveServices` is the set `main.rs` runs; a test supplies its own set to put a mock behind a tool,
+  as `server/sync_tests.rs` does for the sync service.
 - Tool descriptions are written to guide AI assistants — be specific about what's returned and when
   to use each tool (e.g., "Use this instead of calling selfie_spec_info repeatedly").
 

@@ -1001,6 +1001,9 @@ mod cancellation_tests;
 mod output_tests;
 
 #[cfg(test)]
+mod sync_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::LiveServices;
@@ -1691,7 +1694,7 @@ mod tests {
     }
 
     // As `server_over`, with a configured `state_directory` as well.
-    fn server_with(
+    pub(super) fn server_with(
         packages: &std::path::Path,
         dotfiles: Option<&std::path::Path>,
         state: Option<&std::path::Path>,
@@ -1709,6 +1712,17 @@ mod tests {
         state: Option<&std::path::Path>,
         runner: impl FnOnce(&SelfieConfig) -> ShellCommandRunner,
     ) -> LiveServer {
+        server_wrapping(packages, dotfiles, state, runner, |live| live)
+    }
+
+    // As `server_running`, over the service set `wrap` makes of the live one.
+    pub(super) fn server_wrapping<S: ServiceSet>(
+        packages: &std::path::Path,
+        dotfiles: Option<&std::path::Path>,
+        state: Option<&std::path::Path>,
+        runner: impl FnOnce(&SelfieConfig) -> ShellCommandRunner,
+        wrap: impl FnOnce(LiveServices) -> S,
+    ) -> SelfieServer<S> {
         let mut builder = selfie::config::SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(packages);
@@ -1739,7 +1753,7 @@ mod tests {
             runner,
             test_common::isolated_git_adapter(),
         );
-        SelfieServer::new(services, Vec::new())
+        SelfieServer::new(wrap(services), Vec::new())
     }
 
     // `selfie_spec_create` for `name`, with an inert install command.
