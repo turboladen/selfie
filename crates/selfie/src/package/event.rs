@@ -7426,12 +7426,16 @@ mod command_failed_tests {
     use std::os::unix::process::ExitStatusExt as _;
 
     fn failed(status: std::process::ExitStatus) -> OperationFailure {
-        let output = crate::commands::CommandOutput::from_parts(
-            status,
-            Vec::new(),
-            Vec::new(),
-            std::time::Duration::ZERO,
-        );
+        // The struct literal, not `from_parts`, which only the `with_mocks`
+        // feature provides; a unit test must build without it.
+        let output = crate::commands::CommandOutput {
+            output: std::process::Output {
+                status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+            duration: std::time::Duration::ZERO,
+        };
         OperationFailure::command_failed(
             "install-x".to_string(),
             &crate::commands::StreamedOutput::new(output),

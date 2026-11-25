@@ -18,7 +18,7 @@ use crate::{
 
 /// Port for package storage: discovering, loading, saving and removing package
 /// definitions.
-#[cfg_attr(feature = "with_mocks", mockall::automock)]
+#[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait PackageRepository: Send + Sync {
     /// Load a package by name, with every environment configuration, dependency
     /// and piece of metadata it declares.

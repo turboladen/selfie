@@ -577,191 +577,23 @@ fn capture_warnings(origin: &Parts<'_>, captured: &Captured, into: &mut Vec<Mess
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::runner::{CommandError, CommandOutput, ContentOutput};
+    use crate::commands::{FakeCommandRunner, OutputStream};
     use crate::fs::MockFileSystem;
-    use std::os::unix::process::ExitStatusExt;
-    use std::path::PathBuf;
 
     const TIMEOUT: Duration = Duration::from_secs(5);
     const BASE: &str = "/pkg";
 
-    // A runner with a fixed answer per command, recording what it was asked.
-    //
-    // Not `test_common::FakeCommandRunner`, which is the same thing: `test-common`
-    // depends on `selfie`, so a unit-test build links a second copy of the lib and
-    // its runner implements a different `CommandRunner`. Integration tests under
-    // `tests/` link the real lib and can use it.
-    #[derive(Default, Clone)]
-    struct FakeRunner {
-        // command -> (exit code, stdout, stderr)
-        responses: std::collections::HashMap<String, (i32, Vec<u8>, Vec<u8>)>,
-        // Commands whose output cannot be read to the end.
-        read_failing: std::collections::HashSet<String>,
-        // Commands whose output could not be told from the shell's.
-        unseparable: std::collections::HashSet<String>,
-        // command -> (bytes discarded ahead of the output, tail established).
-        // Absent means the clean answer: nothing discarded, tail established.
-        separation: std::collections::HashMap<String, (usize, bool)>,
-        calls: std::sync::Arc<std::sync::Mutex<Vec<(String, PathBuf)>>>,
-    }
-
-    impl FakeRunner {
-        fn succeeding(command: &str, stdout: &[u8]) -> Self {
-            let mut this = Self::default();
-            this.responses
-                .insert(command.to_string(), (0, stdout.to_vec(), Vec::new()));
-            this
-        }
-
-        fn failing(command: &str, stderr: &[u8]) -> Self {
-            let mut this = Self::default();
-            this.responses
-                .insert(command.to_string(), (1, Vec::new(), stderr.to_vec()));
-            this
-        }
-
-        fn with(mut self, command: &str, stdout: &[u8]) -> Self {
-            self.responses
-                .insert(command.to_string(), (0, stdout.to_vec(), Vec::new()));
-            self
-        }
-
-        // The command runs, but its stdout pipe dies part-way through.
-        fn read_failing(command: &str) -> Self {
-            let mut this = Self::default();
-            this.read_failing.insert(command.to_string());
-            this
-        }
-
-        fn also_read_failing(mut self, command: &str) -> Self {
-            self.read_failing.insert(command.to_string());
-            self
-        }
-
-        // The command ran, but its output could not be told from the shell's.
-        fn unseparable(command: &str) -> Self {
-            let mut this = Self::default();
-            this.unseparable.insert(command.to_string());
-            this
-        }
-
-        // The command succeeded, with `discarded` bytes cut off ahead of its
-        // output.
-        fn with_noise_before(command: &str, stdout: &[u8], discarded: usize) -> Self {
-            let mut this = Self::succeeding(command, stdout);
-            this.separation
-                .insert(command.to_string(), (discarded, true));
-            this
-        }
-
-        // The command succeeded, but where its output ended is not established.
-        fn with_unverified_tail(command: &str, stdout: &[u8]) -> Self {
-            let mut this = Self::succeeding(command, stdout);
-            this.separation.insert(command.to_string(), (0, false));
-            this
-        }
-
-        fn calls(&self) -> Vec<(String, PathBuf)> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl CommandRunner for FakeRunner {
-        async fn is_command_available(&self, _command: &str) -> bool {
-            true
-        }
-
-        async fn execute(
-            &self,
-            command: &str,
-            working_dir: &Path,
-            token: &CancellationToken,
-        ) -> Result<CommandOutput, CommandError> {
-            self.execute_in_dir(command, working_dir, TIMEOUT, token)
-                .await
-        }
-
-        async fn execute_in_dir(
-            &self,
-            command: &str,
-            working_dir: &Path,
-            _timeout: Duration,
-            _token: &CancellationToken,
-        ) -> Result<CommandOutput, CommandError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((command.to_string(), working_dir.to_path_buf()));
-
-            if self.read_failing.contains(command) {
-                return Err(CommandError::OutputReadFailed {
-                    command: command.to_string(),
-                    working_directory: working_dir.to_path_buf(),
-                    stream: crate::commands::OutputStream::Stdout,
-                    cause: std::sync::Arc::new(std::io::Error::other("pipe died mid-read")),
-                });
-            }
-
-            let (code, stdout, stderr) = self
-                .responses
-                .get(command)
-                .cloned()
-                .unwrap_or_else(|| panic!("unexpected command: {command}"));
-
-            Ok(CommandOutput {
-                output: std::process::Output {
-                    status: ExitStatusExt::from_raw(code << 8),
-                    stdout,
-                    stderr,
-                },
-                duration: Duration::ZERO,
+    // Whether `failure` is the runner reporting that stdout could not be read to
+    // the end. An unscripted command is an error too, so a test of a read failure
+    // that matched only the outer variant would pass on a mistyped command.
+    fn is_stdout_read_failure(failure: &RunFailure) -> bool {
+        matches!(
+            failure,
+            RunFailure::Errored(CommandError::OutputReadFailed {
+                stream: OutputStream::Stdout,
+                ..
             })
-        }
-
-        async fn execute_streaming(
-            &self,
-            _command: &str,
-            _working_dir: &Path,
-            _timeout: Duration,
-            _output_sender: tokio::sync::mpsc::Sender<crate::commands::OutputChunk>,
-            _token: &CancellationToken,
-        ) -> Result<CommandOutput, CommandError> {
-            unimplemented!("not used by resolve")
-        }
-
-        async fn execute_for_content(
-            &self,
-            command: &str,
-            working_dir: &Path,
-            timeout: Duration,
-            token: &CancellationToken,
-        ) -> Result<ContentOutput, CommandError> {
-            if self.unseparable.contains(command) {
-                self.calls
-                    .lock()
-                    .unwrap()
-                    .push((command.to_string(), working_dir.to_path_buf()));
-                return Err(CommandError::ContentMarkersAbsent {
-                    command: command.to_string(),
-                    working_directory: working_dir.to_path_buf(),
-                });
-            }
-
-            let output = self
-                .execute_in_dir(command, working_dir, timeout, token)
-                .await?;
-            let (discarded_before, tail_verified) =
-                self.separation.get(command).copied().unwrap_or((0, true));
-            let success = output.is_success();
-            let stderr = output.stderr().to_vec();
-            Ok(ContentOutput::from_capture(
-                success,
-                output.into_stdout(),
-                stderr,
-                discarded_before,
-                tail_verified,
-            ))
-        }
+        )
     }
 
     fn no_fs() -> MockFileSystem {
@@ -795,7 +627,7 @@ mod tests {
     async fn resolve(
         entry: &DotfileEntry,
         fs: &MockFileSystem,
-        runner: &FakeRunner,
+        runner: &FakeCommandRunner,
     ) -> Result<ResolvedContent, ResolveError> {
         resolve_content(
             entry,
@@ -810,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_output_becomes_the_content() {
-        let runner = FakeRunner::succeeding("op read x", b"secret-token");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"secret-token");
         let entry = provider_entry("op read x", "~/.gem/credentials");
 
         let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
@@ -824,7 +656,8 @@ mod tests {
         // The content is returned: refusing it would break a command that works.
         // The warning is what stops selfie reporting a credential with foreign
         // bytes appended to it as a clean success.
-        let runner = FakeRunner::with_unverified_tail("op read x", b"secret-tokenMYCLEANUP");
+        let runner =
+            FakeCommandRunner::new().with_unverified_tail("op read x", b"secret-tokenMYCLEANUP");
         let entry = provider_entry("op read x", "~/.gem/credentials");
 
         let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
@@ -843,7 +676,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_binding_with_an_unverified_tail_warns_and_names_the_var() {
-        let runner = FakeRunner::with_unverified_tail("op read t", b"secret-tokenMYCLEANUP");
+        let runner =
+            FakeCommandRunner::new().with_unverified_tail("op read t", b"secret-tokenMYCLEANUP");
         let entry = template_entry("f", &[("token", "op read t")], "~/.netrc");
 
         let resolved = resolve(&entry, &fs_with_template("t={{token}}"), &runner)
@@ -863,12 +697,12 @@ mod tests {
     #[tokio::test]
     async fn a_capture_warning_names_its_command_and_var_as_parts() {
         let command = "op read\u{200B}x";
-        let runner = FakeRunner::with_unverified_tail(command, b"tok");
+        let runner = FakeCommandRunner::new().with_unverified_tail(command, b"tok");
         let provided = resolve(&provider_entry(command, "~/.x"), &no_fs(), &runner)
             .await
             .unwrap();
 
-        let runner = FakeRunner::with_unverified_tail(command, b"tok\nmore");
+        let runner = FakeCommandRunner::new().with_unverified_tail(command, b"tok\nmore");
         let entry = template_entry("t.tpl", &[("token", command)], "~/.x");
         let rendered = resolve(&entry, &fs_with_template("{{ token }}"), &runner)
             .await
@@ -886,7 +720,7 @@ mod tests {
 
     #[tokio::test]
     async fn bytes_arriving_before_the_output_are_reported() {
-        let runner = FakeRunner::with_noise_before("op read x", b"secret-token", 12);
+        let runner = FakeCommandRunner::new().with_noise_before("op read x", b"secret-token", 12);
         let entry = provider_entry("op read x", "~/.gem/credentials");
 
         let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
@@ -904,7 +738,7 @@ mod tests {
     async fn a_warning_carries_no_part_of_the_content() {
         // Both advisories describe bytes selfie handled. Neither may repeat one.
         let secret = b"Kp7-vault-Token-93xQ";
-        let runner = FakeRunner::with_unverified_tail("op read x", secret);
+        let runner = FakeCommandRunner::new().with_unverified_tail("op read x", secret);
         let entry = provider_entry("op read x", "~/.gem/credentials");
 
         let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
@@ -923,7 +757,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_that_cannot_be_told_from_the_shells_is_refused() {
-        let runner = FakeRunner::unseparable("op read x");
+        let runner = FakeCommandRunner::new().unseparable("op read x");
         let entry = provider_entry("op read x", "~/.gem/credentials");
 
         let error = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
@@ -936,7 +770,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_binding_that_cannot_be_told_from_the_shells_is_refused() {
-        let runner = FakeRunner::unseparable("op read t");
+        let runner = FakeCommandRunner::new().unseparable("op read t");
         let entry = template_entry("f", &[("token", "op read t")], "~/.netrc");
 
         let error = resolve(&entry, &fs_with_template("t={{token}}"), &runner)
@@ -951,7 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn commands_run_in_the_package_directory() {
-        let runner = FakeRunner::succeeding("op read x", b"t");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"t");
         let entry = provider_entry("op read x", "~/.x");
 
         resolve(&entry, &no_fs(), &runner).await.unwrap();
@@ -961,7 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn zero_length_output_is_an_error() {
-        let runner = FakeRunner::succeeding("op read x", b"");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"");
         let entry = provider_entry("op read x", "~/.gem/credentials");
 
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
@@ -971,7 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn whitespace_only_output_is_content_not_empty() {
-        let runner = FakeRunner::succeeding("op read x", b"\n");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"\n");
         let entry = provider_entry("op read x", "~/.x");
 
         let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
@@ -981,7 +815,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_output_is_byte_exact_including_non_utf8() {
-        let runner = FakeRunner::succeeding("op read key", &[0x00, 0xff, 0xfe, 0x0a]);
+        let runner = FakeCommandRunner::new().succeeding("op read key", &[0x00, 0xff, 0xfe, 0x0a]);
         let entry = provider_entry("op read key", "~/.ssh/id_ed25519");
 
         let resolved = resolve(&entry, &no_fs(), &runner).await.unwrap();
@@ -991,7 +825,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_provider_forwards_stderr() {
-        let runner = FakeRunner::failing("op read x", b"not logged in");
+        let runner = FakeCommandRunner::new().failing("op read x", b"not logged in");
         let entry = provider_entry("op read x", "~/.x");
 
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
@@ -1014,7 +848,8 @@ mod tests {
         // measures the forwarded stderr and nothing else.
         use crate::commands::runner::MAX_BOUNDED_BYTES;
 
-        let runner = FakeRunner::failing("op read x", &vec![b'Z'; MAX_BOUNDED_BYTES * 3]);
+        let runner =
+            FakeCommandRunner::new().failing("op read x", &vec![b'Z'; MAX_BOUNDED_BYTES * 3]);
         let entry = provider_entry("op read x", "~/.x");
 
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
@@ -1033,10 +868,10 @@ mod tests {
 
     #[tokio::test]
     async fn stderr_is_not_forwarded_when_the_command_succeeds() {
-        let mut runner = FakeRunner::default();
-        runner.responses.insert(
-            "op read x".to_string(),
-            (0, b"content".to_vec(), b"verbose: token=SECRET".to_vec()),
+        let runner = FakeCommandRunner::new().succeeding_noisy(
+            "op read x",
+            b"content",
+            b"verbose: token=SECRET",
         );
         let entry = provider_entry("op read x", "~/.x");
 
@@ -1052,7 +887,9 @@ mod tests {
 
     #[tokio::test]
     async fn template_substitutes_each_binding() {
-        let runner = FakeRunner::succeeding("op read a", b"AAA").with("teller get B", b"BBB");
+        let runner = FakeCommandRunner::new()
+            .succeeding("op read a", b"AAA")
+            .succeeding("teller get B", b"BBB");
         let entry = template_entry(
             "creds.tpl",
             &[("api_key", "op read a"), ("corp", "teller get B")],
@@ -1072,7 +909,9 @@ mod tests {
 
     #[tokio::test]
     async fn bindings_resolve_in_a_deterministic_order() {
-        let runner = FakeRunner::succeeding("cmd-z", b"Z").with("cmd-a", b"A");
+        let runner = FakeCommandRunner::new()
+            .succeeding("cmd-z", b"Z")
+            .succeeding("cmd-a", b"A");
         let entry = template_entry("t.tpl", &[("zeta", "cmd-z"), ("alpha", "cmd-a")], "~/.x");
 
         resolve(&entry, &fs_with_template("{{ alpha }}{{ zeta }}"), &runner)
@@ -1089,7 +928,7 @@ mod tests {
 
     #[tokio::test]
     async fn value_containing_newline_warns_but_still_substitutes() {
-        let runner = FakeRunner::succeeding("op read x", b"tok\nevil: injected");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"tok\nevil: injected");
         let entry = template_entry("t.tpl", &[("api_key", "op read x")], "~/.x");
 
         let resolved = resolve(&entry, &fs_with_template("key: {{ api_key }}"), &runner)
@@ -1113,7 +952,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_line_break_warning_does_not_contain_the_value() {
-        let runner = FakeRunner::succeeding("op read x", b"s3cr3t\nmore");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"s3cr3t\nmore");
         let entry = template_entry("t.tpl", &[("api_key", "op read x")], "~/.x");
 
         let resolved = resolve(&entry, &fs_with_template("key: {{ api_key }}"), &runner)
@@ -1130,10 +969,9 @@ mod tests {
 
     #[tokio::test]
     async fn failing_binding_names_the_binding_and_stops() {
-        let mut runner = FakeRunner::failing("teller get Y", b"not logged in");
-        runner
-            .responses
-            .insert("op read later".to_string(), (0, b"X".to_vec(), Vec::new()));
+        let runner = FakeCommandRunner::new()
+            .failing("teller get Y", b"not logged in")
+            .succeeding("op read later", b"X");
         let entry = template_entry(
             "t.tpl",
             &[("a", "teller get Y"), ("z_later", "op read later")],
@@ -1155,7 +993,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_binding_is_an_error() {
-        let runner = FakeRunner::succeeding("op read x", b"");
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"");
         let entry = template_entry("t.tpl", &[("api_key", "op read x")], "~/.x");
 
         let err = resolve(&entry, &fs_with_template("key: {{ api_key }}"), &runner)
@@ -1168,7 +1006,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_non_utf8_binding_survives_into_the_rendered_output() {
-        let runner = FakeRunner::succeeding("op read x", &[0xff, 0xfe]);
+        let runner = FakeCommandRunner::new().succeeding("op read x", &[0xff, 0xfe]);
         let entry = template_entry("t.tpl", &[("v", "op read x")], "~/.x");
 
         let resolved = resolve(&entry, &fs_with_template("k: {{ v }}"), &runner)
@@ -1180,7 +1018,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreadable_template_names_the_template() {
-        let runner = FakeRunner::default();
+        let runner = FakeCommandRunner::new();
         let mut fs = MockFileSystem::default();
         // Absent, not irregular: the guard passes and the *read* is what fails,
         // which is the distinction this test is about.
@@ -1207,7 +1045,7 @@ mod tests {
     #[tokio::test]
     async fn oversized_provider_output_is_rejected() {
         let big = vec![b'x'; MAX_CONTENT_BYTES + 1];
-        let runner = FakeRunner::succeeding("op read big", &big);
+        let runner = FakeCommandRunner::new().succeeding("op read big", &big);
         let entry = provider_entry("op read big", "~/.x");
 
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
@@ -1222,23 +1060,30 @@ mod tests {
         // reaching a file — is asserted at the apply level, in
         // `tests/dotfile_service_tests.rs`, because that is where a write
         // happens and where this test would not notice one.
-        let runner = FakeRunner::read_failing("op read x");
+        let runner = FakeCommandRunner::new().stdout_read_failing("op read x");
         let entry = provider_entry("op read x", "~/.gem/credentials");
 
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
 
-        assert!(matches!(err, ResolveError::CommandFailed { .. }), "{err}");
+        assert!(
+            matches!(&err, ResolveError::CommandFailed { failure, .. } if is_stdout_read_failure(failure)),
+            "{err}"
+        );
     }
 
     // The runner's error keeps its own parts, so the command it names is a part
     // rather than text flattened into the sentence, and is named once.
     #[tokio::test]
     async fn a_runner_error_keeps_its_parts_in_a_failed_resolve() {
-        let runner = FakeRunner::read_failing("op read\u{200B}x");
+        let runner = FakeCommandRunner::new().stdout_read_failing("op read\u{200B}x");
         let entry = provider_entry("op read\u{200B}x", "~/.x");
 
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
 
+        assert!(
+            matches!(&err, ResolveError::CommandFailed { failure, .. } if is_stdout_read_failure(failure)),
+            "{err}"
+        );
         assert_eq!(
             crate::parts::values_of(&err.parts().into()),
             ["op read\u{200B}x"]
@@ -1252,13 +1097,15 @@ mod tests {
         use crate::commands::runner::MAX_BOUNDED_BYTES;
 
         let command = "Z".repeat(MAX_BOUNDED_BYTES * 3);
-        let runner = FakeRunner::read_failing(&command);
+        let runner = FakeCommandRunner::new().stdout_read_failing(&command);
         let entry = provider_entry(&command, "~/.x");
 
-        let rendered = resolve(&entry, &no_fs(), &runner)
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();
+        assert!(
+            matches!(&err, ResolveError::CommandFailed { failure, .. } if is_stdout_read_failure(failure)),
+            "{err}"
+        );
+        let rendered = err.to_string();
 
         let kept = rendered.chars().filter(|c| *c == 'Z').count();
         assert!(kept <= MAX_BOUNDED_BYTES, "{kept} bytes kept");
@@ -1270,7 +1117,9 @@ mod tests {
         // The second call site of `run_capture`, and the less guarded one: a
         // truncated binding is non-empty, so `EmptyBinding` does not catch it,
         // and truncation shrinks the render, so the size cap does not either.
-        let runner = FakeRunner::succeeding("op read a", b"AAA").also_read_failing("teller get B");
+        let runner = FakeCommandRunner::new()
+            .succeeding("op read a", b"AAA")
+            .stdout_read_failing("teller get B");
         let entry = template_entry(
             "creds.tpl",
             &[("api_key", "op read a"), ("corp", "teller get B")],
@@ -1286,14 +1135,20 @@ mod tests {
         .unwrap_err();
 
         match err {
-            ResolveError::BindingFailed { ref name, .. } => assert_eq!(name, "corp"),
+            ResolveError::BindingFailed {
+                ref name,
+                ref failure,
+            } => {
+                assert_eq!(name, "corp");
+                assert!(is_stdout_read_failure(failure), "{failure:?}");
+            }
             other => panic!("expected BindingFailed, got: {other}"),
         }
     }
 
     #[tokio::test]
     async fn a_repo_file_entry_is_refused_rather_than_panicking() {
-        let runner = FakeRunner::default();
+        let runner = FakeCommandRunner::new();
         let entry = DotfileEntry::new("bat/config", "~/.config/bat/config");
 
         let err = resolve(&entry, &no_fs(), &runner).await.unwrap_err();

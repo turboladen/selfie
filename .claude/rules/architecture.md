@@ -103,29 +103,37 @@ Key differences from the CLI:
 - **Rust 2024 edition**: All crates use `edition = "2024"`. This affects import syntax and some
   trait behavior.
 - **`with_mocks` feature flag**: **Do not drop `features = ["with_mocks"]` from
-  `crates/test-common/Cargo.toml:7`.** `just test-lib` compiles without a flag only because of that
-  line; remove it and the build fails inside `test-common`, naming a crate you did not touch:
-  `no associated function or constant named from_parts found for struct CommandOutput`. The feature
-  gates both the `mockall`-generated mocks and `CommandOutput::from_parts`
-  (`crates/selfie/src/commands/runner.rs:190`). `test-common` needs it for `from_parts`, which its
-  fake runner calls (`crates/test-common/src/runner.rs:194`), not for the mocks, which it never
-  uses. Because `test-common` is in turn a `[dev-dependencies]` entry of `selfie` itself
-  (`crates/selfie/Cargo.toml:41`), Cargo unifies the feature into `selfie`'s own test build.
-  `selfie-cli` enables it separately for its own tests. **This cannot be replaced by `cfg(test)`:
-  `test-common` is a separate crate, and `cfg(test)` is not set when it is compiled as a
-  dependency.** `from_parts` is deliberately gated on the feature alone, where most `automock` sites
-  use `any(test, ...)`: widening it would let production code fabricate the result of a command that
-  never ran (see its doc comment). The feature must reach test builds only. `test-common` depends on
-  `selfie[with_mocks]` normally, so a build that selects it links the mocks and test-only helpers
-  into every binary. The root `Cargo.toml` therefore lists `default-members` without `test-common`
-  and `xtask`: a bare `cargo build` builds only the binaries' dependency tree, and `just build`
-  fails if any artifact it builds carries `with_mocks`. `cargo build --workspace` still unifies the
-  feature, so build the binaries with `cargo build` or `-p`. A test build uses the feature, and its
-  binaries would overwrite those in `target/debug`, so the test recipes build into a `test`
-  directory under cargo's target directory, with intermediate artifacts shared with the main one. A
-  bare `cargo test` builds into `target/debug` and overwrites those binaries with mock-carrying
-  ones, so use the `just test-*` recipes. Recipes that must cover `xtask` and `test-common`,
-  `clippy` and `test` among them, pass `--workspace`.
+  `crates/test-common/Cargo.toml:7`.** `test-common`, and with it every selfie test build, unit and
+  integration alike, compiles only because of that line; remove it and the build fails inside
+  `test-common`, naming a crate you did not touch, starting with
+  `unresolved import selfie::commands::FakeCommandRunner`. The feature gates test doubles and
+  helpers such as the `mockall`-generated mocks, `FakeCommandRunner` and the `Parts` test helpers,
+  and four constructors that stay feature-only: `CommandOutput::from_parts`,
+  `ContentOutput::from_parts`, `StreamedOutput::from_output` and
+  `ShellCommandRunner::login_shell_with`. `test-common` itself needs three of these: it re-exports
+  `FakeCommandRunner`, its `command_output` calls `CommandOutput::from_parts`, and its message
+  helpers build `Parts`. Tests elsewhere reach the rest only through the same line: `selfie`'s
+  integration tests call `ContentOutput::from_parts`, and `selfie-mcp`'s tests reach
+  `StreamedOutput::from_output` and `login_shell_with`. Because `test-common` is in turn a
+  `[dev-dependencies]` entry of `selfie` itself, Cargo unifies the feature into `selfie`'s own test
+  build. `selfie-cli` enables it separately for its own tests. Selfie's own unit tests do not need
+  the feature: every mock, the fake runner, their re-exports and their helpers are gated
+  `any(test, feature = "with_mocks")`, so a unit-test build has them either way. A new gate on a
+  test double takes the same form, or the unit tests come to depend on the unification again.
+  **`test-common` and the integration tests cannot use `cfg(test)` instead:** `cfg(test)` is not set
+  on a crate compiled as a dependency. `from_parts` is deliberately gated on the feature alone,
+  where every `automock` site uses `any(test, ...)`: widening it would let production code fabricate
+  the result of a command that never ran (see its doc comment). The feature must reach test builds
+  only. `test-common` depends on `selfie[with_mocks]` normally, so a build that selects it links the
+  mocks and test-only helpers into every binary. The root `Cargo.toml` therefore lists
+  `default-members` without `test-common` and `xtask`: a bare `cargo build` builds only the
+  binaries' dependency tree, and `just build` fails if any artifact it builds carries `with_mocks`.
+  `cargo build --workspace` still unifies the feature, so build the binaries with `cargo build` or
+  `-p`. A test build uses the feature, and its binaries would overwrite those in `target/debug`, so
+  the test recipes build into a `test` directory under cargo's target directory, with intermediate
+  artifacts shared with the main one. A bare `cargo test` builds into `target/debug` and overwrites
+  those binaries with mock-carrying ones, so use the `just test-*` recipes. Recipes that must cover
+  `xtask` and `test-common`, `clippy` and `test` among them, pass `--workspace`.
 - **Workspace dependencies**: Common deps (`tokio`, `console`, `tracing`, etc.) are defined in the
   root `Cargo.toml` under `[workspace.dependencies]` and referenced with `.workspace = true`.
 - **`which` crate vs shell builtins**: `is_command_available` uses the `which` crate for native PATH

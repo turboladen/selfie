@@ -363,7 +363,7 @@ pub enum Removal {
 /// fifo, socket or device node, including one a link resolves to. Both still
 /// follow symlinked **parent** directories — a planted directory symlink can
 /// redirect where a file lands either way.
-#[cfg_attr(feature = "with_mocks", mockall::automock)]
+#[cfg_attr(any(test, feature = "with_mocks"), mockall::automock)]
 pub trait FileSystem: Send + Sync {
     /// Read a file's contents as a UTF-8 string, all of it into memory.
     ///
@@ -1173,7 +1173,7 @@ fn climb(path: &Path) -> Option<PathBuf> {
 ///     selfie::package::SpecOrigin::PackageDirectory,
 /// );
 /// ```
-#[cfg(feature = "with_mocks")]
+#[cfg(any(test, feature = "with_mocks"))]
 impl MockFileSystem {
     /// Answer `state` for every directory classified.
     ///

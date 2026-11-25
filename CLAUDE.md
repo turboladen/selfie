@@ -34,12 +34,13 @@ catch:
   rejects. CI runs `cargo clippy --workspace --all-targets -- -D warnings`, and without
   `--workspace` a bare run skips `xtask` and `test-common`. Use the CI form when running clippy
   directly; `just check` already does.
-- `cargo test -p selfie` takes no feature flag — `just test-lib` is the canonical form. It compiles
+- `cargo test -p selfie` takes no feature flag — `just test-lib` is the canonical form. Selfie's own
+  unit tests need no feature of their own, because their mocks are gated `any(test, ...)`.
+  `test-common`, a dev-dependency of every selfie test build, unit and integration alike, compiles
   only because `crates/test-common/Cargo.toml:7` requests `features = ["with_mocks"]`. **Do not drop
   that line**, or the build fails inside `test-common` with an error naming a crate you did not
-  touch. `.claude/rules/architecture.md` explains the mechanism. The command compiles today. It did
-  not before PR #67, which is why older instructions prescribe a `--features with_mocks` flag that
-  is now unnecessary.
+  touch. `.claude/rules/architecture.md` explains the mechanism. Instructions that prescribe a
+  `--features with_mocks` flag are out of date; the flag is unnecessary.
 - **A bare `cargo build` builds only the CLI, the MCP server and `selfie`.** The root `Cargo.toml`
   sets `default-members` so that `test-common`, whose `selfie[with_mocks]` dependency would put
   mocks in the binaries, is not built with them. `just build` fails when any artifact it builds
