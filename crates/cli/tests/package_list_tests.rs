@@ -81,38 +81,6 @@ fn test_package_list_multiple_packages() {
 }
 
 #[test]
-fn test_package_list_with_invalid_yaml() {
-    let temp_dir = setup_default_test_config();
-
-    // Create a valid package
-    let package = PackageBuilder::default()
-        .name("valid-package")
-        .environment(SELFIE_ENV, |b| b.install("echo 'Valid'"))
-        .build();
-
-    add_package(&temp_dir, &package);
-
-    // Add an invalid package file
-    let packages_dir = temp_dir.path().join("packages");
-    let invalid_path = packages_dir.join("invalid-package.yaml");
-    let invalid_yaml = r#"
-    name: "invalid-package"
-    invalid_yaml: :::
-    "#;
-
-    fs::write(invalid_path, invalid_yaml).unwrap();
-
-    let mut cmd = sandboxed_command(&temp_dir);
-    cmd.args(["package", "list"]);
-
-    // Should show the valid package but report error for invalid one
-    cmd.assert()
-        .code(FOUND)
-        .stdout(predicate::str::contains("valid-package"))
-        .stdout(predicate::str::contains("invalid-package"));
-}
-
-#[test]
 fn test_package_list_different_environments() {
     let temp_dir = setup_default_test_config();
 
@@ -499,6 +467,14 @@ fn test_package_list_environment_mismatch_shows_stats() {
 #[test]
 fn an_invalid_package_row_names_the_file_once_and_fits_one_line() {
     let temp_dir = setup_default_test_config();
+    // A valid package beside the broken one: the listing has to carry on past it.
+    add_package(
+        &temp_dir,
+        &PackageBuilder::default()
+            .name("valid-package")
+            .environment(SELFIE_ENV, |b| b.install("echo 'Valid'"))
+            .build(),
+    );
     let packages_dir = temp_dir.path().join("packages");
     fs::create_dir_all(&packages_dir).unwrap();
     fs::write(
@@ -517,6 +493,10 @@ fn an_invalid_package_row_names_the_file_once_and_fits_one_line() {
         .clone();
     let stdout = String::from_utf8(output).expect("stdout must be UTF-8");
 
+    assert!(
+        stdout.contains("valid-package"),
+        "the valid package must still be listed, got: {stdout}"
+    );
     let row = stdout
         .lines()
         .find(|line| line.contains("broken"))

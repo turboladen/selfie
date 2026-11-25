@@ -1395,36 +1395,25 @@ mod tests {
 
     #[test]
     fn test_permission_denied() {
+        // Mode bits do not bind root, so the read would succeed there. The skip
+        // says so, since an early return is otherwise indistinguishable from a pass.
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP test_permission_denied: running as root");
+            return;
+        }
         let fs = RealFileSystem;
-
-        // Create a temporary directory and file
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("no_access.txt");
+        fs::write(&file_path, "Hello, world!").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o000)).unwrap();
 
-        // Write test content
-        let test_content = "Hello, world!";
-        fs::write(&file_path, test_content).unwrap();
+        let result = fs.read_file(&file_path);
 
-        // Set permissions to read-only for owner, nothing for others
-        let metadata = fs::metadata(&file_path).unwrap();
-        let mut perms = metadata.permissions();
-        perms.set_mode(0o400); // Read-only for owner
-        fs::set_permissions(&file_path, perms).unwrap();
-
-        // If running as root, this test won't work properly
-        if !nix::unistd::Uid::effective().is_root() {
-            // Remove read permission for current user
-            // This is a best-effort test - it may not work in all environments
-            let _ = std::process::Command::new("chmod")
-                .args(["000", file_path.to_str().unwrap()])
-                .output();
-
-            // Try to read the file - may or may not fail with permission denied
-            // depending on the environment
-            let result = fs.read_file(&file_path);
-            if let Err(FileSystemError::IoError(_)) = result {
-                // Test passed
+        match result {
+            Err(FileSystemError::IoError(error)) => {
+                assert_eq!(error.error().kind(), io::ErrorKind::PermissionDenied);
             }
+            other => panic!("reading a 0o000 file returned {other:?}"),
         }
     }
 
@@ -1860,29 +1849,35 @@ mod private_write_tests {
         // This is only observable where the target and `$TMPDIR` are on different
         // filesystems: a temporary file created anywhere else would then fail to
         // rename into place with `EXDEV`. On CI runners `/dev/shm` is a tmpfs while
-        // `$TMPDIR` is not. Where that does not hold the test cannot discriminate,
-        // so it skips rather than asserting something vacuous — each skip path says
-        // so, since an early return is otherwise indistinguishable from a pass.
+        // `$TMPDIR` is not. Where that does not hold the test cannot discriminate.
+        // A developer machine skips with a message, since an early return is
+        // otherwise indistinguishable from a pass. When the `CI` variable is set
+        // the test fails instead, so a runner that cannot discriminate cannot
+        // report a green run that asserted nothing.
         #[cfg(target_os = "linux")]
         #[test]
         fn creates_the_temporary_file_in_the_targets_own_directory() {
-            const SKIP: &str = "SKIP creates_the_temporary_file_in_the_targets_own_directory:";
+            const NAME: &str = "creates_the_temporary_file_in_the_targets_own_directory";
+
+            let skip = |reason: &str| {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "{NAME} cannot discriminate on CI: {reason}"
+                );
+                eprintln!("SKIP {NAME}: {reason}");
+            };
 
             let Ok(shm) = fs::metadata("/dev/shm") else {
-                eprintln!("{SKIP} /dev/shm is not present");
-                return;
+                return skip("/dev/shm is not present");
             };
             let Ok(tmp) = fs::metadata(std::env::temp_dir()) else {
-                eprintln!("{SKIP} $TMPDIR is not readable");
-                return;
+                return skip("$TMPDIR is not readable");
             };
             if shm.dev() == tmp.dev() {
-                eprintln!("{SKIP} /dev/shm and $TMPDIR are on the same filesystem");
-                return;
+                return skip("/dev/shm and $TMPDIR are on the same filesystem");
             }
             let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
-                eprintln!("{SKIP} /dev/shm is not writable");
-                return;
+                return skip("/dev/shm is not writable");
             };
 
             let target = dir.path().join("creds");
