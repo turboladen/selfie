@@ -746,7 +746,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List the dotfile mappings `selfie apply` would use, with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec whose top level or any environment selfie will not trust, or a package spec that declares no environment, is left out of the entries and listed in the row's `refused` array with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim, since none of them deploys; branch on it, knowing that a spec refused for several reasons carries the first one's kind, and its `reason` names them all) and `reason`. A listing with any `refused` row, or a spec that does not parse, is a successful call with status 'found' and `outcome` \"found\", with the package in `unanswered`, and it still lists everything it could read. An invalid entry in a spec it could read stays a row with status 'success'. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "List the dotfile mappings `selfie apply` would use, with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A dotfiles directory that is there and cannot be read, or whose path cannot be classified at all, fails the call: a `warning` row names it, and the result is an ERROR with status 'failure', since the listing would be missing every standalone dotfile. A package directory that cannot be read fails it too. A spec whose top level or any environment selfie will not trust, or a package spec that declares no environment, is left out of the entries and listed in the row's `refused` array with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim, since none of them deploys; branch on it, knowing that a spec refused for several reasons carries the first one's kind, and its `reason` names them all) and `reason`. A listing with any `refused` row, or a spec that does not parse, is a successful call with status 'found' and `outcome` \"found\", with the package in `unanswered`, and it still lists everything it could read. An invalid entry in a spec it could read stays a row with status 'success'. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -1547,6 +1547,62 @@ mod tests {
         let description = tool.description.unwrap_or_default();
         let promise = between(&description, "unless you pass auto_accept=true", ".");
         assert!(promise.contains("symlinked target"), "{promise:?}");
+    }
+
+    // A dotfiles directory that is there and cannot be listed fails the listing,
+    // after a warning row naming it, and the description says so.
+    #[tokio::test]
+    async fn dotfiles_list_fails_on_a_dotfiles_directory_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Checked first, so a run that skips the behavior below still checks
+        // the promise.
+        let description = SelfieServer::selfie_dotfiles_list_tool_attr()
+            .description
+            .unwrap_or_default();
+        assert!(
+            description.contains(
+                "A dotfiles directory that is there and cannot be read, or whose path cannot be \
+                 classified at all, fails the call"
+            ),
+            "{description}"
+        );
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::write(dotfiles.join("rc.yml"), "name: rc\n").unwrap();
+        // Restores the mode on drop, before `temp` is removed, so a failed
+        // assertion cannot leave the temp dir unremovable.
+        struct Restore<'a>(&'a std::path::Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = Restore(&dotfiles);
+        if std::fs::read_dir(&dotfiles).is_ok() {
+            eprintln!("skipped: this user can list a mode-0 directory");
+            return;
+        }
+        let server = server_over(&packages, Some(&dotfiles));
+
+        let result = server.selfie_dotfiles_list().await.unwrap();
+
+        let json = tool_json(&result);
+        assert_eq!(result.is_error, Some(true), "got {json}");
+        assert_eq!(json["result"]["status"], "failure", "got {json}");
+        let warnings = event_collector::warning_rows(&json);
+        assert_eq!(warnings.len(), 1, "got {json}");
+        assert!(
+            warnings[0]
+                .to_string()
+                .contains(&dotfiles.display().to_string()),
+            "got {json}"
+        );
     }
 
     #[test]
