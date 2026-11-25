@@ -113,6 +113,12 @@ one does. Confirm the container case in a throwaway container
 (`docker run --rm -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/build rust:latest` — a separate target
 dir because macOS artifacts are Mach-O).
 
+## A process marker must be unique to the test binary
+
+A test that finds or kills its child by command line (`pgrep`/`pkill -x`) puts the test binary's pid
+and a per-test tag in that command line. A fixed marker such as `sleep 33.71` matches another
+suite's child, and suites running at the same time then kill each other's processes.
+
 ## Ordering
 
 Do not depend on filesystem enumeration order. `readdir` returns sorted-ish order on macOS/APFS and
