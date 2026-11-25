@@ -117,15 +117,35 @@ impl std::fmt::Debug for PromptHandler {
     }
 }
 
-/// The time one command may run, which does not pass while a question of its
-/// own waits for an answer.
-// A person typing a password is not the command running, and a budget that kept
-// counting would end the command in the middle of the answer. The deadline is
-// `None` while paused, and `left` holds what was unspent at that moment.
+/// The time one command may run, which does not pass while selfie waits on
+/// something other than the command: a question of its own being answered, or
+/// selfie's own reader taking its output.
+// A person typing a password is not the command running, and neither is a slow
+// reader holding up the relay, so a budget that kept counting would end the
+// command for selfie's own delay. The two waits can overlap, so pausing is
+// counted: the deadline is `None` exactly while `depth > 0`, and `left` holds
+// what was unspent when the first pause began.
 pub(crate) struct Budget {
     timeout: Duration,
     deadline: watch::Sender<Option<Instant>>,
-    left: std::sync::Mutex<Duration>,
+    state: std::sync::Mutex<Clock>,
+}
+
+// `Budget` keeps these under its lock: the time unspent at the first pause, and
+// how many pauses are open.
+struct Clock {
+    left: Duration,
+    depth: usize,
+}
+
+/// A pause of a [`Budget`], which resumes it when dropped.
+#[must_use = "the budget resumes as soon as the pause is dropped"]
+pub(crate) struct Paused<'a>(&'a Budget);
+
+impl Drop for Paused<'_> {
+    fn drop(&mut self) {
+        self.0.resume();
+    }
 }
 
 impl Budget {
@@ -133,38 +153,59 @@ impl Budget {
         Self {
             timeout,
             deadline: watch::Sender::new(Some(Instant::now() + timeout)),
-            left: std::sync::Mutex::new(timeout),
+            state: std::sync::Mutex::new(Clock {
+                left: timeout,
+                depth: 0,
+            }),
         }
     }
 
-    fn pause(&self) {
-        if let Some(at) = *self.deadline.borrow()
-            && let Ok(mut left) = self.left.lock()
-        {
-            *left = at.saturating_duration_since(Instant::now());
-        }
-        self.deadline.send_replace(None);
+    // Locks the clock's state. It is plain data that every update leaves whole, so a
+    // panic while it was held leaves nothing half-written to refuse.
+    fn clock(&self) -> std::sync::MutexGuard<'_, Clock> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Stops the clock until the returned guard is dropped. Pauses nest: the
+    /// clock runs again only once every open pause has ended.
+    pub(crate) fn pause(&self) -> Paused<'_> {
+        // The deadline is copied out in a statement of its own: the `Ref` holds
+        // the channel's read lock, and `send_replace` below needs the write lock.
+        let deadline = *self.deadline.borrow();
+        let mut clock = self.clock();
+        clock.depth += 1;
+        if clock.depth == 1 {
+            if let Some(at) = deadline {
+                clock.left = at.saturating_duration_since(Instant::now());
+            }
+            self.deadline.send_replace(None);
+        }
+        Paused(self)
+    }
+
+    // Ends one pause. The clock resumes with what was unspent when the first
+    // pause began, or with the whole allowance if output restarted it meanwhile.
     fn resume(&self) {
-        let left = self.left.lock().map_or(Duration::ZERO, |left| *left);
-        self.deadline.send_replace(Some(Instant::now() + left));
+        let mut clock = self.clock();
+        clock.depth = clock.depth.saturating_sub(1);
+        if clock.depth == 0 {
+            self.deadline
+                .send_replace(Some(Instant::now() + clock.left));
+        }
     }
 
     /// Gives the command its whole allowance again, so the budget counts time
-    /// since the last restart. A budget paused for a question stays paused and
-    /// resumes with the full allowance.
+    /// since the last restart. A paused budget stays paused and resumes with
+    /// the whole allowance.
     pub(crate) fn restart(&self) {
-        if let Ok(mut left) = self.left.lock() {
-            *left = self.timeout;
+        let mut clock = self.clock();
+        clock.left = self.timeout;
+        if clock.depth == 0 {
+            self.deadline
+                .send_replace(Some(Instant::now() + self.timeout));
         }
-        self.deadline.send_if_modified(|deadline| match deadline {
-            Some(at) => {
-                *at = Instant::now() + self.timeout;
-                true
-            }
-            None => false,
-        });
     }
 
     /// Resolves once the time has run out, not counting any time paused.
@@ -174,9 +215,12 @@ impl Budget {
             let deadline = *changes.borrow_and_update();
             match deadline {
                 Some(at) => {
+                    // The select is biased toward a change, so a restart or a pause
+                    // landing in the same poll as the old deadline is honored.
                     tokio::select! {
-                        () = tokio::time::sleep_until(at) => return,
+                        biased;
                         _ = changes.changed() => {}
+                        () = tokio::time::sleep_until(at) => return,
                     }
                 }
                 None => {
@@ -279,12 +323,12 @@ pub(crate) async fn watch(
                 let prompt =
                     TerminalPrompt::new(&String::from_utf8_lossy(&std::mem::take(&mut shown)));
                 let asked = BoundedText::bound(prompt.text().as_bytes());
-                budget.pause();
+                let paused = budget.pause();
                 let answer = match handler {
                     Some(handler) => (handler.0)(prompt).await,
                     None => None,
                 };
-                budget.resume();
+                drop(paused);
                 let Some(answer) = answer else {
                     return CommandError::InputRequired {
                         command: command.to_string(),
@@ -341,13 +385,13 @@ mod tests {
     {
         let budget = Budget::new(Duration::from_secs(10));
         tokio::time::sleep(Duration::from_secs(6)).await;
-        budget.pause();
+        let pause = budget.pause();
 
         budget.restart();
 
         let paused = tokio::time::timeout(Duration::from_secs(100), budget.expired()).await;
         assert!(paused.is_err(), "a paused budget expired");
-        budget.resume();
+        drop(pause);
         let resumed = tokio::time::timeout(Duration::from_secs(9), budget.expired()).await;
         assert!(
             resumed.is_err(),
@@ -355,6 +399,30 @@ mod tests {
         );
         let expired = tokio::time::timeout(Duration::from_secs(2), budget.expired()).await;
         assert!(expired.is_ok());
+    }
+
+    // A question and a blocked relay can each pause the same budget, and either
+    // can end first. The clock must stay stopped until both have.
+    #[tokio::test(start_paused = true)]
+    async fn nested_pauses_hold_the_budget_until_the_last_resume() {
+        let budget = Budget::new(Duration::from_secs(10));
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let outer = budget.pause();
+        let inner = budget.pause();
+
+        drop(inner);
+
+        let held = tokio::time::timeout(Duration::from_secs(100), budget.expired()).await;
+        assert!(held.is_err(), "the budget ran while a pause was still open");
+        drop(outer);
+        // It resumes with the 6 seconds it had left at the first pause.
+        let early = tokio::time::timeout(Duration::from_secs(5), budget.expired()).await;
+        assert!(early.is_err(), "resumed with less than it had left");
+        let late = tokio::time::timeout(Duration::from_secs(2), budget.expired()).await;
+        assert!(
+            late.is_ok(),
+            "the budget never ran again after the last resume"
+        );
     }
 
     #[test]

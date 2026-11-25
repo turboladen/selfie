@@ -93,15 +93,16 @@ pub trait CommandRunner: Send + Sync {
     /// Run a command in `working_dir`, relaying stdout and stderr through
     /// `output_sender` as they arrive.
     ///
-    /// For long-running commands that need real-time feedback. Chunks are
-    /// best-effort: an implementation may drop one rather than block when the
-    /// receiver falls behind, and drops it outright once the receiver is gone,
-    /// so what arrives on the channel is not guaranteed to be the whole output.
-    /// The returned [`CommandOutput`] holds all of it.
+    /// For long-running commands that need real-time feedback. Every chunk is
+    /// delivered while the receiver lives: a receiver that falls behind slows
+    /// the command down rather than losing output. Once the receiver is gone,
+    /// chunks are discarded and the command still runs to completion. The
+    /// returned [`CommandOutput`] holds all of the output either way.
     ///
     /// `timeout` bounds silence, not run time: the command is terminated once
     /// it has written nothing to stdout or stderr for `timeout`, and a command
-    /// that keeps writing is never terminated by it. The error is
+    /// that keeps writing is never terminated by it. Time spent waiting for the
+    /// receiver to take output does not count. The error is
     /// [`CommandError::Timeout`] with [`TimeLimit::Silence`].
     ///
     /// # Errors
@@ -186,6 +187,13 @@ impl CommandOutput {
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         self.output.status.code().unwrap_or(-1)
+    }
+
+    /// The command's exit code, or `None` when it exited on a signal and so
+    /// has none.
+    #[must_use]
+    pub fn code(&self) -> Option<i32> {
+        self.output.status.code()
     }
 
     /// Get the raw stdout bytes
@@ -435,6 +443,35 @@ impl UnusableDirectory {
     pub fn cause(&self) -> &std::io::Error {
         &self.cause
     }
+
+    /// The command as this failure's sentence shows it, cut to its share of
+    /// the bound.
+    #[must_use]
+    pub fn command_bounded(&self) -> crate::parts::SpecCommandText {
+        crate::parts::SpecCommandText::within(&self.command, self.shares()[0])
+    }
+
+    /// The directory as this failure's sentence shows it, cut to its share of
+    /// the bound.
+    #[must_use]
+    pub fn working_directory_bounded(&self) -> String {
+        crate::parts::cut_path(&self.working_directory, self.shares()[1])
+            .unwrap_or_else(|| self.working_directory.display().to_string())
+    }
+
+    // Returns the bytes the sentence gives the command, the directory and the
+    // cause, which share the bound one diagnostic keeps.
+    fn shares(&self) -> [usize; 3] {
+        crate::parts::shares(
+            [
+                self.command.len(),
+                // Measured as shown: a byte that is not UTF-8 shows as U+FFFD.
+                self.working_directory.to_string_lossy().len(),
+                crate::parts::cause_words(&*self.cause).len(),
+            ],
+            MAX_BOUNDED_BYTES,
+        )
+    }
 }
 
 crate::parts::display_from_parts!(UnusableDirectory);
@@ -445,15 +482,7 @@ impl crate::parts::Composed for UnusableDirectory {
     // the bound one diagnostic keeps.
     fn parts(&self) -> crate::parts::Parts<'_> {
         let cause = crate::parts::cause_words(&*self.cause);
-        let [command, directory, why] = crate::parts::shares(
-            [
-                self.command.len(),
-                // Measured as shown: a byte that is not UTF-8 shows as U+FFFD.
-                self.working_directory.to_string_lossy().len(),
-                cause.len(),
-            ],
-            MAX_BOUNDED_BYTES,
-        );
+        let [command, directory, why] = self.shares();
         crate::parts::Parts::new()
             .text("Cannot run '")
             .spec_command_within(&self.command, command)
@@ -465,7 +494,8 @@ impl crate::parts::Composed for UnusableDirectory {
 }
 
 /// Which `command_timeout` limit stopped a command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum TimeLimit {
     /// The command ran for `command_timeout` in total.
     Total,
@@ -502,6 +532,18 @@ impl TimedOut {
     #[must_use]
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    /// Which limit stopped it.
+    #[must_use]
+    pub fn limit(&self) -> TimeLimit {
+        self.limit
+    }
+
+    /// The command as this failure's sentence shows it, bounded.
+    #[must_use]
+    pub fn command_bounded(&self) -> crate::parts::SpecCommandText {
+        crate::parts::SpecCommandText::of(&self.command)
     }
 }
 
@@ -729,11 +771,49 @@ impl crate::parts::Composed for CommandError {
     }
 }
 
+/// The output of a command whose output selfie streamed to its caller as the
+/// command ran, such as an install.
+///
+/// Only the streaming install step builds one, so a value of this type cannot
+/// hold a check's, an audit's or a finder's output. Read it through
+/// [`CommandOutput`]'s methods.
+// The type marks the one command output whose stdout a failure may forward, by
+// the ruling for install commands. `OperationFailure::command_failed` takes
+// nothing else.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamedOutput(CommandOutput);
+
+impl StreamedOutput {
+    pub(crate) fn new(output: CommandOutput) -> Self {
+        Self(output)
+    }
+
+    /// Wrap `output` as though it had been streamed.
+    ///
+    /// For test doubles. Gated behind `with_mocks`, as
+    /// [`CommandOutput::from_parts`] is, so that production code cannot pass
+    /// another command's output off as streamed.
+    #[cfg(feature = "with_mocks")]
+    #[must_use]
+    pub fn from_output(output: CommandOutput) -> Self {
+        Self(output)
+    }
+}
+
+impl std::ops::Deref for StreamedOutput {
+    type Target = CommandOutput;
+
+    fn deref(&self) -> &CommandOutput {
+        &self.0
+    }
+}
+
 /// How many **input bytes** a [`BoundedText`] keeps, across both ends together.
 ///
-/// Also stated as a number in `docs/package-files.md`, because a user reading a
-/// bounded failure needs to know how much of it they are seeing. Change both
-/// together.
+/// Also stated as a number wherever a reader of a bounded failure needs to know
+/// how much of it they are seeing: `docs/package-files.md`,
+/// [`BoundedText::bound`]'s doc, and the MCP server's `selfie_package_install`
+/// description and `command_failure_fields` doc. Change them all together.
 // `pub(crate)` deliberately: `BoundedText` is the public surface, and exporting
 // the number would pin 2000 as API for no caller that needs it. The cost is
 // that `selfie-cli` and `selfie-mcp` can call `BoundedText::bound` but cannot
@@ -757,8 +837,8 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 /// error.
 ///
 /// The private field makes [`BoundedText::bound`] the only way to build one, so
-/// a field of this type, such as `CommandFailure::ExecutionFailed`'s `stderr`,
-/// cannot be given unbounded text. A caller whose field is a `String`
+/// a field of this type, such as `CommandFailure::ExecutionFailed`'s `stdout`
+/// and `stderr`, cannot be given unbounded text. A caller whose field is a `String`
 /// (`AuditResult::Error`) builds one and renders it into its sentence, and
 /// there the bound is a convention someone has to remember.
 ///
@@ -780,7 +860,7 @@ pub struct BoundedText(String);
 impl BoundedText {
     /// Bound `bytes`, keeping **both ends** and eliding the middle.
     ///
-    /// Keeps the first and the last `BOUNDED_END_BYTES` and replaces what is
+    /// Keeps 1000 input bytes at each end, 2000 in all, and replaces what is
     /// between them with a marker naming how many bytes went. Both ends, because
     /// a failing command puts its diagnosis at the end — `brew` prints pages of
     /// `==> Downloading` and then one `Error:` line — while the head is where a
@@ -788,9 +868,8 @@ impl BoundedText {
     ///
     /// **The bound is on the input byte count, not on the length of the string
     /// this returns.** Invalid UTF-8 decodes lossily and each bad byte becomes a
-    /// 3-byte `U+FFFD`, so `MAX_BOUNDED_BYTES` bytes of binary input yield about
-    /// three times that many bytes of text. `as_str().len() <=
-    /// MAX_BOUNDED_BYTES` does not hold; what is bounded is how much of the
+    /// 3-byte `U+FFFD`, so 2000 bytes of binary input yield about 6000 bytes of
+    /// text. `as_str().len()` is not bounded; what is bounded is how much of the
     /// command's output survives.
     ///
     /// An input barely over the bound is returned whole, since eliding it would

@@ -383,8 +383,10 @@ Timeout for commands, in seconds. It means two things, depending on the command:
 
 - An **install command** is stopped after this many seconds with no output on stdout or stderr.
   Output from either stream restarts the count, so a long build that keeps printing finishes however
-  long it takes, and Ctrl+C is what stops one that prints without progressing. A step that stays
-  silent longer than this still fails, as a quiet compile can. Raise the value for such a package.
+  long it takes, and Ctrl+C is what stops one that prints without progressing. Time the command
+  spends waiting for selfie to take its output, or for you to answer a question it asked, does not
+  count. A step that stays silent longer than this still fails, as a quiet compile can. Raise the
+  value for such a package.
 - Every other command is stopped after this many seconds **in total**: check and audit commands,
   every dotfile provider command and every template binding. The limit applies per command rather
   than per entry, so an entry with several bindings can take longer than this in total to resolve.

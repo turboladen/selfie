@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    commands::runner::{CommandError, CommandOutput, CommandRunner},
+    commands::runner::{CommandError, CommandOutput, CommandRunner, StreamedOutput},
     config::SelfieConfig,
     package::{
         EnvironmentConfig, GetPackage,
@@ -139,7 +139,7 @@ pub async fn execute_command_streaming<CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
-) -> Result<CommandOutput, CommandError>
+) -> Result<StreamedOutput, CommandError>
 where
     CR: CommandRunner,
 {
@@ -195,12 +195,7 @@ where
         )
         .await;
 
-    // Wait for the output task to finish and handle any task errors
-    if let Err(join_error) = output_task.await {
-        sender
-            .send_warning(format!("Output streaming task failed: {join_error}"))
-            .await;
-    }
+    report_relay_end(output_task.await, sender).await;
 
     // Ended before anything else is said about the command, so a consumer
     // closes the step before it reports the result.
@@ -217,17 +212,38 @@ where
                         .await;
                 }
             } else {
+                // A command killed by a signal has no exit code to name.
+                let how = output
+                    .code()
+                    .map_or_else(String::new, |code| format!(" with exit code {code}"));
                 sender
-                    .send_warning(format!(
-                        "The `{command_type}` command failed with exit code {}",
-                        output.exit_code()
-                    ))
+                    .send_warning(format!("The `{command_type}` command failed{how}"))
                     .await;
             }
-            Ok(output)
+            Ok(StreamedOutput::new(output))
         }
         Err(error) => Err(error),
     }
+}
+
+/// Warn when the task relaying a command's output did not finish cleanly.
+///
+/// The warning is a fixed sentence and never the [`JoinError`] itself.
+///
+/// [`JoinError`]: tokio::task::JoinError
+// A `JoinError`'s `Display` renders the panic payload, and the task that panicked
+// was holding the command's output, so the payload can be derived from a
+// credential. Only `is_cancelled` is read.
+async fn report_relay_end(result: Result<(), tokio::task::JoinError>, sender: &EventSender) {
+    let Err(join_error) = result else {
+        return;
+    };
+    let message = if join_error.is_cancelled() {
+        "The task relaying the command's output was canceled, so some of it may not have been shown"
+    } else {
+        "The task relaying the command's output failed, so some of it may not have been shown"
+    };
+    sender.send_warning(message).await;
 }
 
 /// How a waiting step that ran a command ended, given what the command
@@ -296,6 +312,48 @@ mod tests {
         EventSender, OperationContext, PackageEvent, metadata::OperationType,
     };
     use tokio::sync::mpsc;
+
+    // The relay task holds the command's output, so a panic payload can be
+    // derived from a credential. Neither the warning event nor its tracing
+    // mirror may carry it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_relay_panic_reports_no_payload() {
+        const SECRET: &str = "s3cr3t-v4lue-DO-NOT-LEAK";
+        let (tx, mut rx) = mpsc::channel::<PackageEvent>(10);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageInstall,
+            "test".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+        // This reaches the warning's call site before the capture starts, as
+        // `capture_tracing` requires, with a canceled task's harmless error.
+        let canceled = tokio::spawn(std::future::pending::<()>());
+        canceled.abort();
+        report_relay_end(canceled.await, &sender).await;
+        let _ = rx.recv().await;
+        let log = test_common::capture_tracing(tracing::Level::TRACE);
+        let panicked = tokio::spawn(async { panic!("relay held TOKEN={SECRET}") }).await;
+
+        report_relay_end(panicked, &sender).await;
+        drop(sender);
+
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        test_common::assert_secret_free(&format!("{events:?}"), SECRET, "the events");
+        let logged = log.text();
+        test_common::assert_secret_free(&logged, SECRET, "the tracing log");
+        // Positive controls: the failure was reported, once, and logged.
+        let warnings = events
+            .iter()
+            .filter(|event| matches!(event, PackageEvent::Warning { .. }))
+            .count();
+        assert_eq!(warnings, 1, "{events:?}");
+        assert!(!logged.is_empty(), "nothing was logged");
+    }
 
     #[tokio::test]
     async fn test_check_command_safety_single_line() {
@@ -438,7 +496,7 @@ rm -rf package package.tar.gz";
         use crate::config::SelfieConfigBuilder;
 
         // Run `cmd` as an install command with `package_dir` configured.
-        async fn install(package_dir: &Path, cmd: &str) -> Result<CommandOutput, CommandError> {
+        async fn install(package_dir: &Path, cmd: &str) -> Result<StreamedOutput, CommandError> {
             let config = SelfieConfigBuilder::default()
                 .environment("test")
                 .package_directory(package_dir)

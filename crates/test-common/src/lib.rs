@@ -20,6 +20,7 @@ pub mod scripts;
 pub mod secrets;
 pub mod service;
 pub mod successes;
+pub mod tracing_capture;
 
 // Re-export the most commonly used items for convenience
 pub use config::{
@@ -46,7 +47,7 @@ pub use locked::LockedDir;
 pub use messages::{every_message, message};
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use plant::{PLANTED, Plant, PlantsBeforeWrite, Rewrite};
-pub use runner::FakeCommandRunner;
+pub use runner::{FakeCommandRunner, command_output, secret_between_filler};
 pub use scripts::{two_marking_lines, write_executable};
 pub use secrets::assert_secret_free;
 pub use service::{
@@ -55,6 +56,7 @@ pub use service::{
     create_test_service_for_env, create_test_service_with_config,
 };
 pub use successes::every_success;
+pub use tracing_capture::{CapturedTracing, capture_tracing};
 
 // Re-export commonly used external dependencies for convenience
 pub use selfie::{
