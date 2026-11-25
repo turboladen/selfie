@@ -115,9 +115,9 @@ Key differences from the CLI:
   `ContentOutput::from_parts`, `StreamedOutput::from_output` and
   `ShellCommandRunner::login_shell_with`. `test-common` itself needs three of these: it re-exports
   `FakeCommandRunner`, its `command_output` calls `CommandOutput::from_parts`, and its message
-  helpers build `Parts`. Tests elsewhere reach the rest only through the same line: `selfie`'s
-  integration tests call `ContentOutput::from_parts`, and `selfie-mcp`'s tests reach
-  `StreamedOutput::from_output` and `login_shell_with`. Because `test-common` is in turn a
+  helpers build `Parts`. `selfie`'s integration tests reach `ContentOutput::from_parts` only through
+  the same line. `selfie-mcp` requests the feature in its own `[dev-dependencies]`, for selfie's
+  mocks, `StreamedOutput::from_output` and `login_shell_with`. Because `test-common` is in turn a
   `[dev-dependencies]` entry of `selfie` itself, Cargo unifies the feature into `selfie`'s own test
   build. `selfie-cli` enables it separately for its own tests. Selfie's own unit tests do not need
   the feature: every mock, the fake runner, their re-exports and their helpers are gated
