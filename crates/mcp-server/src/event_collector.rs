@@ -72,11 +72,7 @@ fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -
         // The files to rename or remove, so an assistant need not parse them out of
         // `error`.
         if let NoSuchPackageReason::Ambiguous { conflicting_paths } = reason {
-            payload["conflicting_paths"] = conflicting_paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .into();
+            payload["conflicting_paths"] = paths_json(conflicting_paths);
         }
         payload["reason"] = Value::from(match reason {
             NoSuchPackageReason::NotFound => "not_found",
@@ -470,6 +466,15 @@ fn skip_reason_fields(mut row: Value, reason: &SkipReason) -> Value {
     row
 }
 
+/// Returns `paths` as a JSON array of their display strings, in order.
+pub(crate) fn paths_json(paths: &[std::path::PathBuf]) -> Value {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .into()
+}
+
 /// Builds one package's row of a package listing.
 fn package_list_item_json(item: &selfie::package::event::PackageListItem) -> Value {
     with_fields(
@@ -517,11 +522,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                     serde_json::json!({
                         "type": "package_refused",
                         "package": &package.name,
-                        "paths": package
-                            .paths
-                            .iter()
-                            .map(|path| path.display().to_string())
-                            .collect::<Vec<_>>(),
+                        "paths": paths_json(&package.paths),
                         "kind": label(*kind),
                         "reason": reason.to_string(),
                     })
@@ -1210,12 +1211,9 @@ fn status_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
     };
     fields.insert("failure".to_string(), failure);
     let paths = match unknown {
-        Some(UnknownStatus::LookupFailed(LookupFailure::AmbiguousName(name))) => Value::from(
-            name.conflicting_paths()
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>(),
-        ),
+        Some(UnknownStatus::LookupFailed(LookupFailure::AmbiguousName(name))) => {
+            paths_json(name.conflicting_paths())
+        }
         _ => Value::Null,
     };
     fields.insert("conflicting_paths".to_string(), paths);

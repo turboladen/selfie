@@ -333,7 +333,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate validates it, before it is written, except that its dependency graph is not resolved, including the check against the other specs for a shared target; a spec this tool creates has no dotfile entry, so that check finds nothing for it: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\"). A write the repository refused carries `kind` too, such as \"occupied\" when a file appeared at the spec's path."
+        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate validates it, before it is written, except that its dependency graph is not resolved, including the check against the other specs for a shared target; a spec this tool creates has no dotfile entry, so that check finds nothing for it: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\"). A write the repository refused carries `kind` too, such as \"occupied\" when a file appeared at the spec's path. A name another spec already claims is refused as invalid params, and the error's `data.conflicting_paths` lists every spec file claiming it."
     )]
     async fn spec_create(
         &self,
@@ -770,7 +770,7 @@ Rows are in package-name order, as `selfie package list` prints them."
 
     #[tool(
         name = "selfie_dotfiles_track",
-        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. It also fails, writing nothing, when another spec, a package or a standalone dotfile, already has an entry for the file in any environment, since apply refuses two specs deploying one file; the error names that spec. A spec that could not be loaded, or one of several spec files claiming one name, may also track the file; each is named in a `warning` row and the track goes on. Fails, writing nothing, when no readable directory is at the dotfiles directory path — nothing there, something that is not a directory, a symlink whose destination is gone, or a directory whose entries cannot be read, since a directory selfie cannot read may already hold the name — or when the package directory cannot be read or something other than a directory is at its path (status 'refused' with package_directory), or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy. It also fails, writing nothing, when the deploy state cannot be written back before the copy is made. A spec that cannot be saved also writes nothing: the copy is removed again, or, where that removal also fails, the failure names the file to delete. A deploy state that cannot be written at the end is the one partial outcome — the copy and the spec entry are in place and only the record is missing, and the failure names both files. Call selfie_apply_dotfiles to finish it; tracking again records nothing."
+        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. A name another spec already claims is refused as invalid params, and the error's `data.conflicting_paths` lists every spec file claiming it. It also fails, writing nothing, when another spec, a package or a standalone dotfile, already has an entry for the file in any environment, since apply refuses two specs deploying one file; the error names that spec. A spec that could not be loaded, or one of several spec files claiming one name, may also track the file; each is named in a `warning` row and the track goes on. Fails, writing nothing, when no readable directory is at the dotfiles directory path — nothing there, something that is not a directory, a symlink whose destination is gone, or a directory whose entries cannot be read, since a directory selfie cannot read may already hold the name — or when the package directory cannot be read or something other than a directory is at its path (status 'refused' with package_directory), or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy. It also fails, writing nothing, when the deploy state cannot be written back before the copy is made. A spec that cannot be saved also writes nothing: the copy is removed again, or, where that removal also fails, the failure names the file to delete. A deploy state that cannot be written at the end is the one partial outcome — the copy and the spec entry are in place and only the record is missing, and the failure names both files. Call selfie_apply_dotfiles to finish it; tracking again records nothing."
     )]
     async fn selfie_dotfiles_track(
         &self,
@@ -949,11 +949,14 @@ pub async fn wait_for_calls(in_flight: &TaskTracker, limit: std::time::Duration)
 
 /// The MCP answer to a refused name check.
 ///
-/// A conflict is about the name the caller sent, so it is `invalid_params`: the
-/// fact, then what the calling tool can do about it. A package or dotfiles
-/// directory selfie could not read is not about the name at all, so it comes back
-/// as a refusal in the shape the apply and drift tools use: `status` and `reason`,
-/// plus `package_directory` or `dotfiles_directory` naming the directory.
+/// A conflict is about the name the caller sent, so it is `invalid_params`. Its
+/// message states the fact and what the calling tool can do about it, and its
+/// data lists every file claiming the name under `conflicting_paths`.
+///
+/// A package or dotfiles directory selfie could not read is not about the name,
+/// so it comes back as a refusal in the shape the apply and drift tools use:
+/// `status` and `reason`, plus `package_directory` or `dotfiles_directory`
+/// naming the directory.
 // Reporting an unreadable directory as invalid input is what sends an agent round a
 // loop of names that all fail identically.
 fn namespace_refusal(
@@ -979,9 +982,13 @@ fn namespace_refusal(
                 }
                 (Remedy::RemoveTheDotfileSpec, _) => "Remove it first or choose a different name.",
             };
+            // The paths as a field, so an assistant need not parse them out of
+            // the message.
             return Err(McpError::invalid_params(
                 format!("{conflict} {remedy}"),
-                None,
+                Some(serde_json::json!({
+                    "conflicting_paths": event_collector::paths_json(conflict.paths()),
+                })),
             ));
         }
     };
@@ -1490,6 +1497,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    // A taken name carries every file claiming it as data, in lookup order, so
+    // a path holding the ", " the message joins them with cannot blur the list.
+    #[test]
+    fn a_name_conflict_carries_its_claimants_as_data() {
+        let paths = ["/s/a, b/dup.yaml", "/s/dup.yml"];
+        for check in [NameCheck::SpecCreate, NameCheck::DotfilesTrack] {
+            let conflict = selfie::namespace::NamespaceConflict::new(
+                "dup",
+                selfie::namespace::NameLocation::Packages,
+                paths.iter().map(std::path::PathBuf::from).collect(),
+            )
+            .expect("two claimants");
+            let Err(refusal) = namespace_refusal(conflict.into(), check) else {
+                panic!("a conflict is an error");
+            };
+
+            assert_eq!(
+                refusal.data,
+                Some(serde_json::json!({ "conflicting_paths": paths })),
+                "{refusal:?}"
+            );
+        }
+    }
+
+    // A create over a taken name names the file that holds it.
+    #[tokio::test]
+    async fn spec_create_names_the_file_that_holds_the_name() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        write_spec(&packages, "bat", "test");
+        let server = server_over(&packages, None);
+        let params: CreateParam = serde_json::from_value(serde_json::json!({
+            "package": "bat",
+            "install": "true",
+            "environment": "test",
+        }))
+        .unwrap();
+
+        let Err(refusal) = server.spec_create(Parameters(params)).await else {
+            panic!("a taken name is refused");
+        };
+
+        let data = refusal.data.expect("the refusal carries data");
+        let claimant = packages.join("bat.yml").display().to_string();
+        assert_eq!(data["conflicting_paths"], serde_json::json!([claimant]));
     }
 
     // A package's name gets the remedy for the tool that asked: an update for
