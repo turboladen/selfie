@@ -92,6 +92,9 @@ Key differences from the CLI:
   through `SpecService::validate_all`. `selfie_track_dotfile`'s name check reads the dotfiles
   repository directly through `namespace::validate_unique_name`; that is a known deviation from the
   boundary rule above, not a pattern to copy.
+- `SelfieServer` is generic over a `ServiceSet` (`crates/mcp-server/src/services.rs`), which hands
+  each tool call its package, dotfile and sync services bound to that call's cancellation token.
+  `LiveServices` is the set `main.rs` runs; a test supplies its own set to put a mock behind a tool.
 - Tool descriptions are written to guide AI assistants — be specific about what's returned and when
   to use each tool (e.g., "Use this instead of calling selfie_spec_info repeatedly").
 

@@ -12,48 +12,29 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use selfie::{
-    commands::{ShellCommandRunner, ShellFallback},
     config::{IgnoredKey, SelfieConfig},
-    dotfile_service::{port::ApplyOptions, service::DotfileServiceImpl},
+    dotfile_service::port::ApplyOptions,
     fs::RealFileSystem,
-    git::GixGitAdapter,
     package::{
         EnvironmentConfig, Package, PackageService, SpecOrigin, SpecService,
-        event::PackageUpdateFields, git_adapter::GixGitStatusProvider,
-        repository::yaml::YamlPackageRepository, service::PackageServiceImpl,
+        event::PackageUpdateFields, repository::yaml::YamlPackageRepository,
     },
-    privilege::{RealPrivilege, SudoPolicy},
-    sync_service::{ConfirmedCommit, PushOptions, SyncService, service::SyncServiceImpl},
+    sync_service::{ConfirmedCommit, PushOptions, SyncService},
 };
 use serde::Deserialize;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::event_collector;
+use crate::services::{ServiceSet, dotfiles_repository};
 
-type ConcreteService = PackageServiceImpl<
-    YamlPackageRepository<RealFileSystem>,
-    ShellCommandRunner,
-    GixGitStatusProvider,
->;
-
-type ConcreteDotfileService = DotfileServiceImpl<
-    YamlPackageRepository<RealFileSystem>,
-    RealFileSystem,
-    ShellCommandRunner,
-    RealPrivilege,
->;
-
-type ConcreteSyncService = SyncServiceImpl<GixGitAdapter, ConcreteDotfileService, RealPrivilege>;
-
-#[derive(Clone)]
-pub struct SelfieServer {
-    service: Arc<ConcreteService>,
-    dotfile_service: Arc<ConcreteDotfileService>,
-    sync_service: Arc<ConcreteSyncService>,
-    config: SelfieConfig,
-    /// Builds the sync service for a request, whose dotfile service carries that
-    /// request's token.
-    git: GixGitAdapter,
+pub struct SelfieServer<S: ServiceSet> {
+    /// Supplies each request's services, bound to its token.
+    services: Arc<S>,
+    // The services a tool method runs on when called directly; `call_tool`
+    // replaces them with the request's through `for_request`.
+    service: Arc<S::Package>,
+    dotfile_service: Arc<S::Dotfile>,
+    sync_service: Arc<S::Sync>,
     /// Holds a token for as long as a tool call runs, so shutdown can wait for a
     /// canceled call to stop its commands.
     in_flight: TaskTracker,
@@ -62,9 +43,21 @@ pub struct SelfieServer {
     /// Reported through `selfie_config_get` rather than only logged: an
     /// assistant driving this server usually cannot see stderr.
     ignored_config_keys: Vec<IgnoredKey>,
-    /// The shell selfie replaced in `SHELL`, reported through
-    /// `selfie_config_get` for the same reason.
-    shell_fallback: Option<ShellFallback>,
+}
+
+// By hand, because a derive would require `S: Clone`, and every field is
+// shared.
+impl<S: ServiceSet> Clone for SelfieServer<S> {
+    fn clone(&self) -> Self {
+        Self {
+            services: Arc::clone(&self.services),
+            service: Arc::clone(&self.service),
+            dotfile_service: Arc::clone(&self.dotfile_service),
+            sync_service: Arc::clone(&self.sync_service),
+            in_flight: self.in_flight.clone(),
+            ignored_config_keys: self.ignored_config_keys.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -248,77 +241,29 @@ pub struct SyncPushParam {
 // ─── Spec (definition) tools ───────────────────────────────────────────────
 
 #[tool_router]
-impl SelfieServer {
-    pub fn new(
-        service: ConcreteService,
-        config: SelfieConfig,
-        ignored_config_keys: Vec<IgnoredKey>,
-        runner: ShellCommandRunner,
-        git: GixGitAdapter,
-    ) -> Self {
-        let repo = YamlPackageRepository::new(
-            RealFileSystem,
-            config.package_directory().to_path_buf(),
-            SpecOrigin::PackageDirectory,
-        );
-        // Attached whether or not the directory exists. The dotfile service
-        // reports a configured one that is missing on every call that reads it,
-        // and a directory created after startup is read on the next call.
-        let dotfiles_repo = dotfiles_repository(&config);
-        let shell_fallback = runner.shell_fallback().cloned();
-        // The token given below is never canceled. A tool call runs on a copy of
-        // the service that carries the request's own token (`for_request`), and
-        // `main.rs` does the same for `PackageServiceImpl`.
-        // No `allowing_sudo` call, and no tool parameter that could reach one: an
-        // AI assistant has no reason to be driving selfie under sudo, so the
-        // refusal here is unconditional.
-        let dotfile_service = DotfileServiceImpl::new(
-            repo,
-            dotfiles_repo,
-            RealFileSystem,
-            // The package service's own runner, a login shell: a GUI-launched
-            // MCP server does not inherit terminal PATH, and provider commands
-            // (`op`, `teller`) live on the user's PATH.
-            runner,
-            config.clone(),
-            CancellationToken::new(),
-            SudoPolicy::new(RealPrivilege),
-        );
-        let sync_service = Self::sync_service(&git, &dotfile_service, &config);
+impl<S: ServiceSet> SelfieServer<S> {
+    /// A server whose tools run on `services`.
+    pub fn new(services: S, ignored_config_keys: Vec<IgnoredKey>) -> Self {
+        // Never canceled: each tool call runs on `for_request`'s copy instead.
+        let scoped = services.for_request(CancellationToken::new());
         Self {
-            service: Arc::new(service),
-            dotfile_service: Arc::new(dotfile_service),
-            sync_service: Arc::new(sync_service),
-            config,
-            git,
+            services: Arc::new(services),
+            service: scoped.package,
+            dotfile_service: scoped.dotfile,
+            sync_service: scoped.sync,
             in_flight: TaskTracker::new(),
             ignored_config_keys,
-            shell_fallback,
         }
-    }
-
-    fn sync_service(
-        git: &GixGitAdapter,
-        dotfile_service: &ConcreteDotfileService,
-        config: &SelfieConfig,
-    ) -> ConcreteSyncService {
-        SyncServiceImpl::new(
-            git.clone(),
-            dotfile_service.clone(),
-            config.clone(),
-            SudoPolicy::new(RealPrivilege),
-        )
     }
 
     /// A copy of this server whose services run their commands under `ct`, the
     /// token of one request.
     fn for_request(&self, ct: CancellationToken) -> Self {
-        let dotfile_service = self.dotfile_service.with_cancellation(ct.clone());
-        let sync_service = Self::sync_service(&self.git, &dotfile_service, &self.config);
+        let scoped = self.services.for_request(ct);
         Self {
-            service: Arc::new(self.service.with_cancellation(ct)),
-            dotfile_service: Arc::new(dotfile_service),
-            sync_service: Arc::new(sync_service),
+            service: scoped.package,
+            dotfile_service: scoped.dotfile,
+            sync_service: scoped.sync,
             ..self.clone()
         }
     }
@@ -329,6 +274,10 @@ impl SelfieServer {
     #[must_use]
     pub fn in_flight(&self) -> TaskTracker {
         self.in_flight.clone()
+    }
+
+    fn config(&self) -> &SelfieConfig {
+        self.services.config()
     }
 
     #[tool(
@@ -366,13 +315,13 @@ impl SelfieServer {
         // Check for namespace conflicts across packages/ and dotfiles/ directories
         let pkg_repo = YamlPackageRepository::new(
             RealFileSystem,
-            self.config.package_directory().clone(),
+            self.config().package_directory().clone(),
             SpecOrigin::PackageDirectory,
         );
         // A dotfiles directory that is genuinely not there holds no names. One that
         // will not read is a different answer, and the check refuses on it rather
         // than reporting the name free.
-        let dotfiles_repo = dotfiles_repository(&self.config);
+        let dotfiles_repo = dotfiles_repository(self.config());
         if let Err(e) = selfie::namespace::validate_unique_name(
             &params.package,
             &pkg_repo,
@@ -382,7 +331,7 @@ impl SelfieServer {
         }
 
         let file_path = self
-            .config
+            .config()
             .package_directory()
             .join(format!("{}.yml", params.package));
 
@@ -687,19 +636,19 @@ Rows are in package-name order, as `selfie package list` prints them."
     )]
     async fn config_get(&self) -> Result<CallToolResult, McpError> {
         let config_data = serde_json::json!({
-            "environment": self.config.environment(),
-            "package_directory": self.config.package_directory().display().to_string(),
+            "environment": self.config().environment(),
+            "package_directory": self.config().package_directory().display().to_string(),
             // The path in effect rather than the configured one, so a consumer
             // reads the same shape whether or not the default applies. Whether
             // it exists is the dotfile tools' answer to give, and they do.
-            "dotfiles_directory": self.config.dotfiles_directory().display().to_string(),
+            "dotfiles_directory": self.config().dotfiles_directory().display().to_string(),
             "state_directory": selfie::fs::state_directory(
                 &RealFileSystem,
-                self.config.state_directory().map(|p| p.as_path()),
+                self.config().state_directory().map(|p| p.as_path()),
             )
             .ok()
             .map(|directory| directory.display().to_string()),
-            "command_timeout_secs": self.config.command_timeout().as_secs(),
+            "command_timeout_secs": self.config().command_timeout().as_secs(),
             // Always present, empty when the file is clean, so a consumer can
             // read the same shape every time.
             "ignored_config_keys": self
@@ -712,7 +661,9 @@ Rows are in package-name order, as `selfie package list` prints them."
                 }))
                 .collect::<Vec<_>>(),
             // Null when selfie runs commands with the shell `SHELL` names.
-            "shell_fallback": self.shell_fallback.as_ref().map(|fallback| serde_json::json!({
+            // Reported here rather than only logged, since an assistant
+            // driving this server usually cannot see stderr.
+            "shell_fallback": self.services.shell_fallback().map(|fallback| serde_json::json!({
                 "kind": fallback.kind(),
                 "shell": fallback.shell().map(|shell| shell.display().to_string()),
                 "message": fallback.to_string(),
@@ -786,10 +737,10 @@ Rows are in package-name order, as `selfie package list` prints them."
         // Namespace validation — prevent conflicts with existing packages
         let pkg_repo = YamlPackageRepository::new(
             RealFileSystem,
-            self.config.package_directory().to_owned(),
+            self.config().package_directory().to_owned(),
             SpecOrigin::PackageDirectory,
         );
-        let dotfiles_repo = dotfiles_repository(&self.config);
+        let dotfiles_repo = dotfiles_repository(self.config());
         if let Err(e) =
             selfie::namespace::validate_unique_name(&params.name, &pkg_repo, Some(&dotfiles_repo))
         {
@@ -909,7 +860,7 @@ Rows are in package-name order, as `selfie package list` prints them."
 }
 
 #[tool_handler]
-impl ServerHandler for SelfieServer {
+impl<S: ServiceSet> ServerHandler for SelfieServer<S> {
     // The one place every tool call passes through. The macro's own `call_tool`
     // is what this repeats, with two additions: the call runs on a copy of the
     // server whose services carry the request's token, which rmcp cancels when
@@ -1015,16 +966,6 @@ enum NameCheck {
     DotfilesTrack,
 }
 
-/// Returns the standalone dotfiles repository for `config`'s
-/// `dotfiles_directory`. It is built whether or not the directory exists.
-pub(crate) fn dotfiles_repository(config: &SelfieConfig) -> YamlPackageRepository<RealFileSystem> {
-    YamlPackageRepository::new(
-        RealFileSystem,
-        config.dotfiles_directory(),
-        SpecOrigin::DotfilesDirectory,
-    )
-}
-
 fn tool_result(result: event_collector::EventCollectorResult) -> CallToolResult {
     let json = serde_json::to_string_pretty(&result.data).unwrap_or_default();
     if result.success {
@@ -1062,6 +1003,14 @@ mod output_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::LiveServices;
+    use selfie::{
+        commands::ShellCommandRunner,
+        package::{repository::yaml::YamlPackageRepository, service::PackageServiceImpl},
+    };
+
+    // The server selfie-mcp runs.
+    pub(super) type LiveServer = SelfieServer<LiveServices>;
 
     // A push that fails before any git step names the label the same git error
     // has inside a failed step, so the two phases share one label set.
@@ -1120,7 +1069,7 @@ mod tests {
         let quoted = |description: &str, label: &str| description.contains(&format!("\"{label}\""));
         let description = |tool: rmcp::model::Tool| tool.description.unwrap_or_default();
 
-        let status = description(SelfieServer::package_status_tool_attr());
+        let status = description(LiveServer::package_status_tool_attr());
         for label in LookupFailure::VARIANTS.iter().chain(&own) {
             assert!(quoted(&status, label), "package_status omits {label}");
         }
@@ -1128,11 +1077,11 @@ mod tests {
             ("package_status", &status),
             (
                 "package_check",
-                &description(SelfieServer::package_check_tool_attr()),
+                &description(LiveServer::package_check_tool_attr()),
             ),
             (
                 "package_list",
-                &description(SelfieServer::package_list_tool_attr()),
+                &description(LiveServer::package_list_tool_attr()),
             ),
         ] {
             for label in CheckFailure::VARIANTS {
@@ -1188,7 +1137,7 @@ mod tests {
 
         // package_list names the error labels, and every other check with no
         // answer is unanswered.
-        let list = description(SelfieServer::package_list_tool_attr());
+        let list = description(LiveServer::package_list_tool_attr());
         let checks: Vec<UnknownStatus> = reasons
             .into_iter()
             .filter(|reason| matches!(reason, UnknownStatus::CheckFailed(_)))
@@ -1235,7 +1184,7 @@ mod tests {
     fn the_spec_create_description_lists_its_refusal_labels() {
         use selfie::package::event::Uncreatable;
 
-        let description = SelfieServer::spec_create_tool_attr()
+        let description = LiveServer::spec_create_tool_attr()
             .description
             .unwrap_or_default();
         assert_eq!(
@@ -1262,8 +1211,8 @@ mod tests {
             .filter(|label| *label != internal)
             .collect();
         for tool in [
-            SelfieServer::package_audit_tool_attr(),
-            SelfieServer::package_audit_all_tool_attr(),
+            LiveServer::package_audit_tool_attr(),
+            LiveServer::package_audit_all_tool_attr(),
         ] {
             let description = tool.description.unwrap_or_default();
             let mut listed = labels_after(&description, "`kind` is \"canceled\"");
@@ -1293,23 +1242,19 @@ mod tests {
         .map(|kind| <&str>::from(kind).to_string())
         .collect();
         for (tool, lead, expected) in [
+            (LiveServer::spec_list_tool_attr(), "`refused` array", &every),
             (
-                SelfieServer::spec_list_tool_attr(),
+                LiveServer::package_list_tool_attr(),
                 "`refused` array",
                 &every,
             ),
             (
-                SelfieServer::package_list_tool_attr(),
+                LiveServer::selfie_dotfiles_list_tool_attr(),
                 "`refused` array",
                 &every,
             ),
             (
-                SelfieServer::selfie_dotfiles_list_tool_attr(),
-                "`refused` array",
-                &every,
-            ),
-            (
-                SelfieServer::package_audit_all_tool_attr(),
+                LiveServer::package_audit_all_tool_attr(),
                 "`package_refused` row per package",
                 &every,
             ),
@@ -1382,9 +1327,9 @@ mod tests {
             .cloned()
             .collect();
         for (tool, expected) in [
-            (SelfieServer::spec_validate_tool_attr(), &emitted),
-            (SelfieServer::spec_validate_all_tool_attr(), &emitted),
-            (SelfieServer::spec_create_tool_attr(), &without_dependency),
+            (LiveServer::spec_validate_tool_attr(), &emitted),
+            (LiveServer::spec_validate_all_tool_attr(), &emitted),
+            (LiveServer::spec_create_tool_attr(), &without_dependency),
         ] {
             let description = tool.description.unwrap_or_default();
             assert_eq!(
@@ -1414,7 +1359,7 @@ mod tests {
             .into_iter()
             .map(|c| event_collector::push_category_label(c).to_string())
             .collect();
-        let push = SelfieServer::selfie_sync_push_tool_attr()
+        let push = LiveServer::selfie_sync_push_tool_attr()
             .description
             .unwrap_or_default();
         assert_eq!(labels_after(&push, "Its `category` is"), push_only);
@@ -1591,7 +1536,7 @@ mod tests {
     // about it may promise an overwrite without naming that refusal.
     #[test]
     fn the_auto_accept_promise_names_the_symlink_exception() {
-        let tool = SelfieServer::selfie_apply_dotfiles_tool_attr();
+        let tool = LiveServer::selfie_apply_dotfiles_tool_attr();
         // The field's doc comment keeps its line breaks in the schema.
         let field = tool.input_schema["properties"]["auto_accept"]["description"]
             .as_str()
@@ -1618,7 +1563,7 @@ mod tests {
 
         // Checked first, so a run that skips the behavior below still checks
         // the promise.
-        let description = SelfieServer::selfie_dotfiles_list_tool_attr()
+        let description = LiveServer::selfie_dotfiles_list_tool_attr()
             .description
             .unwrap_or_default();
         assert!(
@@ -1741,7 +1686,7 @@ mod tests {
     // A server over `packages` and the given `dotfiles_directory`, or the
     // sibling default when `None`. Listing runs no command, so the login-shell
     // runner is never used.
-    fn server_over(packages: &std::path::Path, dotfiles: Option<&std::path::Path>) -> SelfieServer {
+    fn server_over(packages: &std::path::Path, dotfiles: Option<&std::path::Path>) -> LiveServer {
         server_with(packages, dotfiles, None)
     }
 
@@ -1750,7 +1695,7 @@ mod tests {
         packages: &std::path::Path,
         dotfiles: Option<&std::path::Path>,
         state: Option<&std::path::Path>,
-    ) -> SelfieServer {
+    ) -> LiveServer {
         server_running(packages, dotfiles, state, |config| {
             ShellCommandRunner::login_shell(config.command_timeout())
         })
@@ -1763,7 +1708,7 @@ mod tests {
         dotfiles: Option<&std::path::Path>,
         state: Option<&std::path::Path>,
         runner: impl FnOnce(&SelfieConfig) -> ShellCommandRunner,
-    ) -> SelfieServer {
+    ) -> LiveServer {
         let mut builder = selfie::config::SelfieConfigBuilder::default()
             .environment("test")
             .package_directory(packages);
@@ -1788,17 +1733,17 @@ mod tests {
             config.clone(),
             CancellationToken::new(),
         );
-        SelfieServer::new(
+        let services = LiveServices::new(
             service,
-            config,
-            Vec::new(),
+            &config,
             runner,
             test_common::isolated_git_adapter(),
-        )
+        );
+        SelfieServer::new(services, Vec::new())
     }
 
     // `selfie_spec_create` for `name`, with an inert install command.
-    async fn create(server: &SelfieServer, name: &str) -> serde_json::Value {
+    async fn create(server: &LiveServer, name: &str) -> serde_json::Value {
         let params: CreateParam = serde_json::from_value(serde_json::json!({
             "package": name,
             "install": "true",
@@ -2343,7 +2288,7 @@ mod tests {
     // A batch entry carries the rows the single call reports about what it could
     // not check, so its result is no cleaner than that call's.
     async fn single_and_batch_warnings(
-        server: &SelfieServer,
+        server: &LiveServer,
     ) -> (Vec<serde_json::Value>, serde_json::Value) {
         let single = tool_json(
             &server

@@ -1,5 +1,6 @@
 mod event_collector;
 mod server;
+mod services;
 #[cfg(test)]
 mod test_samples;
 
@@ -135,24 +136,19 @@ async fn async_main() -> Result<()> {
         }));
     let service = PackageServiceImpl::new(
         repo,
-        server::dotfiles_repository(&config),
+        services::dotfiles_repository(&config),
         runner.clone(),
         GixGitStatusProvider::default(),
         config.clone(),
         // Never canceled: each tool call runs on a copy of the service that
         // carries that request's own token, and rmcp cancels that one when the
-        // client cancels the call or disconnects. `server.rs` does the same for the
+        // client cancels the call or disconnects. `services.rs` does the same for the
         // dotfile service.
         CancellationToken::new(),
     );
 
-    let mcp_server = server::SelfieServer::new(
-        service,
-        config,
-        ignored_keys,
-        runner,
-        GixGitAdapter::default(),
-    );
+    let services = services::LiveServices::new(service, &config, runner, GixGitAdapter::default());
+    let mcp_server = server::SelfieServer::new(services, ignored_keys);
 
     let in_flight = mcp_server.in_flight();
     let (stdin, stdout) = stdio();
