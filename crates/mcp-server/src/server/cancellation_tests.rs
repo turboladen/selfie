@@ -11,9 +11,11 @@ use rmcp::{
 use selfie::commands::ShellCommandRunner;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+use crate::services::ServiceSet;
+
 use super::{
-    InstallParam, SelfieServer,
-    tests::{server_running, tool_json},
+    InstallParam,
+    tests::{LiveServer, server_running, tool_json},
     wait_for_calls,
 };
 
@@ -43,10 +45,13 @@ pub(super) fn write_spec(packages: &Path, name: &str, install: &str) {
 
 // A server whose package service runs commands with `/bin/sh`, so no test
 // depends on the login profile of whoever runs it.
-pub(super) fn server_over(packages: &Path, state: Option<&Path>) -> SelfieServer {
-    server_running(packages, None, state, |_| {
-        ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(60))
-    })
+pub(super) fn server_over(packages: &Path, state: Option<&Path>) -> LiveServer {
+    server_running(packages, None, state, sh_runner)
+}
+
+// A runner on `/bin/sh` rather than the login shell of whoever runs the tests.
+pub(super) fn sh_runner(_: &selfie::config::SelfieConfig) -> ShellCommandRunner {
+    ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(60))
 }
 
 // How many processes have `marker` in their command line.
@@ -228,8 +233,8 @@ async fn canceling_a_request_stops_a_dotfile_command() {
 }
 
 // A client and a server joined by an in-memory pipe, speaking the real protocol.
-async fn connected(
-    server: &SelfieServer,
+pub(super) async fn connected<S: ServiceSet>(
+    server: &super::SelfieServer<S>,
 ) -> (
     rmcp::service::RunningService<rmcp::RoleClient, ()>,
     tokio::task::JoinHandle<()>,

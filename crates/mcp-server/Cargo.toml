@@ -23,7 +23,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+nix = { workspace = true, features = ["signal"] }
 rmcp = { version = "3.1", features = ["client"] }
+# The tests use selfie's mocks and test-only constructors, which only this
+# feature compiles. Dev-dependency features stay out of `cargo build`.
+selfie = { path = "../selfie", features = ["with_mocks"] }
 strum.workspace = true
 test-common = { path = "../test-common/" }
 tempfile.workspace = true

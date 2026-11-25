@@ -92,6 +92,10 @@ Key differences from the CLI:
   through `SpecService::validate_all`. `selfie_track_dotfile`'s name check reads the dotfiles
   repository directly through `namespace::validate_unique_name`; that is a known deviation from the
   boundary rule above, not a pattern to copy.
+- `SelfieServer` is generic over a `ServiceSet` (`crates/mcp-server/src/services.rs`), which hands
+  each tool call its package, dotfile and sync services bound to that call's cancellation token.
+  `LiveServices` is the set `main.rs` runs; a test supplies its own set to put a mock behind a tool,
+  as `server/sync_tests.rs` does for the sync service.
 - Tool descriptions are written to guide AI assistants — be specific about what's returned and when
   to use each tool (e.g., "Use this instead of calling selfie_spec_info repeatedly").
 
@@ -112,9 +116,9 @@ Key differences from the CLI:
   `ContentOutput::from_parts`, `StreamedOutput::from_output` and
   `ShellCommandRunner::login_shell_with`. `test-common` itself needs three of these: it re-exports
   `FakeCommandRunner`, its `command_output` calls `CommandOutput::from_parts`, and its message
-  helpers build `Parts`. Tests elsewhere reach the rest only through the same line: `selfie`'s
-  integration tests call `ContentOutput::from_parts`, and `selfie-mcp`'s tests reach
-  `StreamedOutput::from_output` and `login_shell_with`. Because `test-common` is in turn a
+  helpers build `Parts`. `selfie`'s integration tests reach `ContentOutput::from_parts` only through
+  the same line. `selfie-mcp` requests the feature in its own `[dev-dependencies]`, for selfie's
+  mocks, `StreamedOutput::from_output` and `login_shell_with`. Because `test-common` is in turn a
   `[dev-dependencies]` entry of `selfie` itself, Cargo unifies the feature into `selfie`'s own test
   build. `selfie-cli` enables it separately for its own tests. Selfie's own unit tests do not need
   the feature: every mock, the fake runner, their re-exports and their helpers are gated
