@@ -15,5 +15,5 @@ pub use self::target::{
     state_directory,
 };
 
-#[cfg(feature = "with_mocks")]
+#[cfg(any(test, feature = "with_mocks"))]
 pub use self::filesystem::MockFileSystem;

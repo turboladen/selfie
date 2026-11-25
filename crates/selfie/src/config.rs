@@ -7,7 +7,7 @@ pub use self::diagnostics::{IgnoredKey, LoadedConfig};
 pub use self::loader::ConfigLoadError;
 pub use self::yaml::YamlLoader;
 
-#[cfg(feature = "with_mocks")]
+#[cfg(any(test, feature = "with_mocks"))]
 pub use self::loader::MockConfigLoader;
 
 use std::{

@@ -11,7 +11,7 @@ pub use runner::{
 pub use shell::{FallbackNotice, ShellCommandRunner, ShellFallback};
 pub use terminal::{PromptHandler, TerminalAnswer, TerminalPrompt};
 
-#[cfg(feature = "with_mocks")]
+#[cfg(any(test, feature = "with_mocks"))]
 pub use runner::MockCommandRunner;
 
 #[cfg(test)]

@@ -459,7 +459,7 @@ where
     })
 }
 
-#[cfg(all(test, feature = "with_mocks"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::package::{
