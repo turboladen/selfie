@@ -1395,36 +1395,25 @@ mod tests {
 
     #[test]
     fn test_permission_denied() {
+        // Mode bits do not bind root, so the read would succeed there. The skip
+        // says so, since an early return is otherwise indistinguishable from a pass.
+        if nix::unistd::Uid::effective().is_root() {
+            eprintln!("SKIP test_permission_denied: running as root");
+            return;
+        }
         let fs = RealFileSystem;
-
-        // Create a temporary directory and file
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("no_access.txt");
+        fs::write(&file_path, "Hello, world!").unwrap();
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(0o000)).unwrap();
 
-        // Write test content
-        let test_content = "Hello, world!";
-        fs::write(&file_path, test_content).unwrap();
+        let result = fs.read_file(&file_path);
 
-        // Set permissions to read-only for owner, nothing for others
-        let metadata = fs::metadata(&file_path).unwrap();
-        let mut perms = metadata.permissions();
-        perms.set_mode(0o400); // Read-only for owner
-        fs::set_permissions(&file_path, perms).unwrap();
-
-        // If running as root, this test won't work properly
-        if !nix::unistd::Uid::effective().is_root() {
-            // Remove read permission for current user
-            // This is a best-effort test - it may not work in all environments
-            let _ = std::process::Command::new("chmod")
-                .args(["000", file_path.to_str().unwrap()])
-                .output();
-
-            // Try to read the file - may or may not fail with permission denied
-            // depending on the environment
-            let result = fs.read_file(&file_path);
-            if let Err(FileSystemError::IoError(_)) = result {
-                // Test passed
+        match result {
+            Err(FileSystemError::IoError(error)) => {
+                assert_eq!(error.error().kind(), io::ErrorKind::PermissionDenied);
             }
+            other => panic!("reading a 0o000 file returned {other:?}"),
         }
     }
 
