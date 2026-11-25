@@ -2711,6 +2711,7 @@ dependencies = [
  "anyhow",
  "futures",
  "libc",
+ "nix",
  "rmcp",
  "schemars",
  "selfie",

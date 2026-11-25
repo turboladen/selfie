@@ -23,6 +23,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+nix = { workspace = true, features = ["signal"] }
 rmcp = { version = "3.1", features = ["client"] }
 strum.workspace = true
 test-common = { path = "../test-common/" }
