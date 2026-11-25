@@ -449,7 +449,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update_batch",
-        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. An entry whose update reported anything about the spec carries selfie_spec_update's validation_result entry under `validation_result`, whether or not the save succeeded; an entry with nothing to report has no such key. An entry whose update sent warnings, such as a spec the check against other specs could not read, carries them under `warnings`, as the `warning` and `spec_skipped` rows selfie_spec_update returns in `data`; an entry with none has no such key. An entry whose save the repository refused carries `kind` in its `result`, as selfie_spec_update's does, so a \"changed_since_load\" entry can be sent again on its own. Prefer this over calling selfie_spec_update repeatedly."
+        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. An entry whose update reported anything about the spec carries selfie_spec_update's validation_result entry under `validation_result`, whether or not the save succeeded; an entry with nothing to report has no such key. An entry whose update sent warnings, such as a spec the check against other specs could not read, carries them under `warnings`, as the `warning` and `spec_skipped` rows selfie_spec_update returns in `data`; an entry with none has no such key. An entry whose save the repository refused carries `kind` in its `result`, as selfie_spec_update's does, so a \"changed_since_load\" entry can be sent again on its own. When any entry fails, the call is an ERROR result with the same body (`total`, `succeeded`, `failed` and `results`), so read `results` for which ones. Prefer this over calling selfie_spec_update repeatedly."
     )]
     async fn spec_update_batch(
         &self,
@@ -523,9 +523,14 @@ impl SelfieServer {
             "results": results,
         });
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(
+        let content = vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
-        )]))
+        )];
+        if failed > 0 {
+            Ok(CallToolResult::error(content))
+        } else {
+            Ok(CallToolResult::success(content))
+        }
     }
 
     #[tool(
@@ -2296,6 +2301,43 @@ mod tests {
             "got {json}"
         );
         assert_eq!(json["succeeded"], 2, "got {json}");
+    }
+
+    // A batch with a failed entry is an error result, its body unchanged, and a
+    // batch with none is not.
+    #[tokio::test]
+    async fn spec_update_batch_is_an_error_when_an_entry_fails() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        write_spec(&packages, "fine", "test");
+        let server = server_over(&packages, None);
+        let batch = |updates: serde_json::Value| -> BatchUpdateParam {
+            serde_json::from_value(serde_json::json!({ "updates": updates })).unwrap()
+        };
+
+        let mixed = server
+            .spec_update_batch(Parameters(batch(serde_json::json!([
+                { "package": "fine", "description": "d" },
+                { "package": "nope", "description": "d" },
+            ]))))
+            .await
+            .unwrap();
+        let json = tool_json(&mixed);
+        assert_eq!(mixed.is_error, Some(true), "got {json}");
+        assert_eq!(json["total"], 2, "got {json}");
+        assert_eq!(json["succeeded"], 1, "got {json}");
+        assert_eq!(json["failed"], 1, "got {json}");
+        assert_eq!(json["results"][0]["success"], true, "got {json}");
+        assert_eq!(json["results"][1]["success"], false, "got {json}");
+
+        let clean = server
+            .spec_update_batch(Parameters(batch(serde_json::json!([
+                { "package": "fine", "description": "e" },
+            ]))))
+            .await
+            .unwrap();
+        assert_ne!(clean.is_error, Some(true), "got {}", tool_json(&clean));
     }
 
     // A batch entry carries the rows the single call reports about what it could
