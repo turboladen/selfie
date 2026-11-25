@@ -193,7 +193,9 @@ pub struct ApplyParam {
     /// Overwrite a conflicting target (one that exists, is untracked by selfie,
     /// and differs from the repo source). Defaults to `false`: conflicts are
     /// skipped and reported with a diff rather than silently overwritten, since
-    /// the MCP path has no interactive prompt. Set `true` to force overwrite.
+    /// the MCP path has no interactive prompt. Set `true` to overwrite it. A
+    /// repository-file entry whose target is a symlink is refused, whatever
+    /// this is set to.
     ///
     /// Does NOT apply to secret-bearing dotfiles — those whose content comes from
     /// a `command` or from a `source` with `vars`. Their conflicts are always
@@ -331,7 +333,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_create",
-        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate validates it, before it is written, except that its dependency graph is not resolved, including the check against the other specs for a shared target; a spec this tool creates has no dotfile entry, so that check finds nothing for it: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\"). A write the repository refused carries `kind` too, such as \"occupied\" when a file appeared at the spec's path."
+        description = "Create a new package spec file. Requires name, environment, and install command; a blank install command (empty, whitespace, or only a comment) is refused and nothing is written. Use selfie_config_get to check the current environment. The spec is validated as selfie_spec_validate validates it, before it is written, except that its dependency graph is not resolved, including the check against the other specs for a shared target; a spec this tool creates has no dotfile entry, so that check finds nothing for it: with errors nothing is written, the call fails, and the result carries every issue under issues, each with `line` and `column` (null when it has no place in the file); warnings, such as an environment other than the current one, are reported as a validation_result entry and the spec is still written. An issue's `category` is \"required_field\", \"invalid_value\", \"environment\", \"command_syntax\", \"url_format\", \"path_format\" or \"advisory\". The validation_result entry carries the spec's own `outcome`: \"found\" for warnings, or \"clean\" for notices alone. When the package or dotfiles directory cannot be read, or something other than a directory is at the package directory's path, the call is refused rather than reported as invalid params: the result carries status 'refused' with a reason and the directory's path under package_directory or dotfiles_directory. A package directory with nothing at its path is not refused; the first spec creates it. The name may be free and nothing could check it, so retrying with another name fails the same way. A name that breaks the spec-name rule is refused after the name is checked for a clash and before anything is written: the error result carries `kind` (\"invalid_name\"). A write the repository refused carries `kind` too, such as \"occupied\" when a file appeared at the spec's path. A name another spec already claims is refused as invalid params, and the error's `data.conflicting_paths` lists every spec file claiming it."
     )]
     async fn spec_create(
         &self,
@@ -447,7 +449,7 @@ impl SelfieServer {
 
     #[tool(
         name = "selfie_spec_update_batch",
-        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. An entry whose update reported anything about the spec carries selfie_spec_update's validation_result entry under `validation_result`, whether or not the save succeeded; an entry with nothing to report has no such key. An entry whose update sent warnings, such as a spec the check against other specs could not read, carries them under `warnings`, as the `warning` and `spec_skipped` rows selfie_spec_update returns in `data`; an entry with none has no such key. An entry whose save the repository refused carries `kind` in its `result`, as selfie_spec_update's does, so a \"changed_since_load\" entry can be sent again on its own. Prefer this over calling selfie_spec_update repeatedly."
+        description = "Update multiple specs in a single call. Each entry has the same fields as selfie_spec_update, and an entry that would leave its spec invalid fails with `issues` in its `result`, as selfie_spec_update does. An entry whose update reported anything about the spec carries selfie_spec_update's validation_result entry under `validation_result`, whether or not the save succeeded; an entry with nothing to report has no such key. An entry whose update sent warnings, such as a spec the check against other specs could not read, carries them under `warnings`, as the `warning` and `spec_skipped` rows selfie_spec_update returns in `data`; an entry with none has no such key. An entry whose save the repository refused carries `kind` in its `result`, as selfie_spec_update's does, so a \"changed_since_load\" entry can be sent again on its own. When any entry fails, the call is an ERROR result with the same body (`total`, `succeeded`, `failed` and `results`), so read `results` for which ones. Prefer this over calling selfie_spec_update repeatedly."
     )]
     async fn spec_update_batch(
         &self,
@@ -521,9 +523,14 @@ impl SelfieServer {
             "results": results,
         });
 
-        Ok(CallToolResult::success(vec![ContentBlock::text(
+        let content = vec![ContentBlock::text(
             serde_json::to_string_pretty(&output).unwrap_or_default(),
-        )]))
+        )];
+        if failed > 0 {
+            Ok(CallToolResult::error(content))
+        } else {
+            Ok(CallToolResult::success(content))
+        }
     }
 
     #[tool(
@@ -647,7 +654,8 @@ Each `package_list_item` row's `status` is \"installed\", \"not installed\", \"n
 A spec that could not be loaded is reported in the summary's invalid_packages, with its kind, reason and location. \
 A spec that loaded but that selfie will not read is listed in the summary's `refused` array, with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim; branch on it, knowing that a spec refused for several reasons carries the first one's kind, and its `reason` names them all) and `reason`, \
 and is not counted in total_packages. Without all=true, a spec is refused when 'selfie apply' would refuse it in the current environment; \
-with all=true, when a key in any environment cannot be trusted or a package spec declares no environment. A result that completed carries `steps`, `{completed, total}`, the operation's step count; no message carries a count, and a result with status 'failure' carries none."
+with all=true, when a key in any environment cannot be trusted or a package spec declares no environment. A result that completed carries `steps`, `{completed, total}`, the operation's step count; no message carries a count, and a result with status 'failure' carries none. \
+Rows are in package-name order, as `selfie package list` prints them."
     )]
     async fn package_list(
         &self,
@@ -719,7 +727,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
 
     #[tool(
         name = "selfie_apply_dotfiles",
-        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\", \"maybe_in_uncheckable_directory\", \"not_loaded\" or \"ambiguous\" (several spec files, such as bat.yml and bat.yaml, claim the name, so none is used, whatever they declare; a `conflicting_paths` field lists them); branch on `reason`, not on `error`. The two directory reasons differ in what is known: \"unlistable\" means a directory is there and its entries could not be read, \"uncheckable\" means the path could not be classified at all, so whether a directory is there is unknown. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true. A file with different content that appears at a target while apply is writing it is left in place and reported as a conflict with a `warning` row, even with auto_accept=true; the next call handles it as any existing target. On a volume or sandbox without an exclusive rename, selfie only looks once more just before writing, which narrows that window rather than closing it. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. A `dotfile_conflict` row carries `diff` for a repository file, and for a secret-bearing entry `hidden`, `{resolved_lines, current_lines}`, instead; the other is null. `declined` says whether an interactive resolver answered and declined the conflict; this server supplies none, so it is always false here. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. An entry left as it is comes back as a `dotfile_skipped` row whose `reason` is \"up_to_date\", \"in_sync\", \"permissions_tightened\", \"dry_run\" or \"secret_dry_run\"; a \"secret_dry_run\" row also carries `commands`, how many commands the deploy would run, and `link`, `{kind, destination}` with `kind` \"none\" or \"symlink\" for a link the deploy would replace (`destination` null when it could not be read). Other rows carry null for both. If selfie refuses any entry — an unrecognized key, two or more entries that deploy to the same target in this environment, whether of one package or of several specs, packages or standalone dotfiles (every one of them is refused, one `dotfile_refused` row each, and none is written; applying one package by name refuses its entry when another spec deploys there too), a target it will not write to or cannot read (a repository-file entry's symlinked target is always refused, even one whose content already matches; a secret-bearing entry's link is replaced instead, and reported in a `warning` row), a source it cannot read — or, when deploying all, cannot read a dotfiles directory that is there or cannot classify the path at all, or finds several spec files in one directory claiming one name where one failed to parse or declares dotfiles for this environment (none of them deploys) or a spec file it could not load, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run carried on; a conflict is reported instead as a conflict and is not a refusal. Each refused entry is a `dotfile_refused` row with `package`, `spec_target` (the target as the package file spells it), `condition` (what selfie found: \"collision\", \"invalid_entry\", \"target_rule\", \"escapes\", \"symlink\", \"irregular\", \"directory\", \"not_a_directory\", \"absent\", \"unreadable\", \"undetermined\" or \"earlier_program_failed\"; branch on it), `location` (where it found it: \"entry\", \"source\", \"template\", \"target\" or \"above_target\") and `message` (prose for display). An entry selfie tried to deploy where an operation it ran failed is a `dotfile_failed` row instead, with `package`, `spec_target`, `operation` (\"resolve\", \"backup\", \"write\" or \"permission_fix\"; branch on it), `error` (the error, as prose) and `message`; a run with a failed entry and no refused one comes back as an ERROR result with status 'failed'. Every apply result that completes carries both counts, `refused` and `failed`, whatever its status ('success', 'refused' or 'failed'); when both are non-zero the status is 'refused'. A run that stops early (status 'failure', as when stop_on_error stops it) or is canceled carries neither count, as it carries no `steps`. A package refused whole (an unrecognized top-level or environment key, a top level that could not be re-read, no environment declared, or a name several spec files claim) is reported before anything deploys as a `package_refused` row per package, with `package`, `paths` (its spec file, or every file claiming the name), `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\"; branch on it, knowing that a spec refused for several reasons carries the first one's kind, and its `reason` names them all) and `reason` (prose, shared by every package refused for it). With stop_on_error set, any such package stops the call before anything deploys. Once a provider command fails, later entries running the same program (the first word of a command or of a template binding, after any leading NAME=value assignments) are refused without running, each in a `dotfile_refused` row with `condition` \"earlier_program_failed\": they share one cause, such as a locked vault, and did not run, so fix that one failure rather than each entry. Entries running another program still run. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is refused: the call comes back as an ERROR result with status 'failure' whose message names the file and the remedy, and nothing is deployed; a dry run warns instead and previews against an empty state. So is a deploy state selfie cannot write: the state is written back before the call's first write of any kind (a secret-bearing file, a backup, a deployed file or a record), and when that fails the call is an ERROR result with nothing written. A call that writes nothing is not stopped by it. A dry run warns when the state directory's permissions would stop a real run, and previews. A write that fails later anyway (a full disk, for example) stops the run after that one file, and the failure names it. A file selfie deployed that no entry deploys to any more in this environment (its target changed, or its entry or package was removed) is reported as a `dotfile_orphaned` row with `source`, `target` and `package` (null when the record does not name one) and counted in the result's `orphan_count`; selfie never deletes it, and it is not an error. With a name, only that package's orphans are reported. Once such a file is gone, a non-dry run drops selfie's record of it. The same file under another spelling (a symlinked directory, or a case-only change on a case-insensitive volume) is not an orphan. When selfie cannot see every entry (a spec it could not load or use, a package it refused, a dotfiles directory it could not read or that is missing, no home directory, or no package deploying anything in this environment), orphans are not judged and a `warning` row names the reason, so an `orphan_count` of 0 then means unjudged, not none. Targets are not compared with a spec file selfie could not load, one of several spec files claiming one name, or a dotfiles directory it could not read, so a `warning` row names them: one row naming every one when deploying all (as `packages/<file>`, `dotfiles/<file>` or \"the dotfiles directory\"), or one row each, saying why, for a named package. There is no such row when nothing deploys in this environment or when stop_on_error stopped the run. A result that completed carries `steps`, `{completed, total}`, the operation's step count; no message carries a count, and a result with status 'failure' carries none. Every row that names a dotfile's source (`dotfile_deploying`, `dotfile_deployed`, `dotfile_skipped`, `dotfile_conflict` and `dotfile_orphaned`) carries `kind`: \"file\", \"template\", \"command\" or \"recorded\" (an old record naming no base directory). The kind says which of the other source fields apply: `source` is the file's full path, with a template's var names, or the command; `base` (\"packages\" or \"dotfiles\") and `relative_path` give the file relative to the directory it was read from, and `vars` lists a template's var names. An orphan's full path joins its recorded path to the directory configured now, so after `package_directory` or `dotfiles_directory` changes it names the new one; an orphan whose record names no base directory has a null `source` and gives `recorded_source`, the spelling the record holds."
+        description = "Deploy dotfiles to their target locations. Omit name to deploy all. A name is matched against package file names, ignoring case, the way selfie_package_install resolves one; a name matching no package, or naming a spec that could not be loaded, comes back as an ERROR result with status 'failure' and nothing deployed, and a `reason` field of \"not_found\", \"maybe_in_unlistable_directory\", \"maybe_in_uncheckable_directory\", \"not_loaded\" or \"ambiguous\" (several spec files, such as bat.yml and bat.yaml, claim the name, so none is used, whatever they declare; a `conflicting_paths` field lists them); branch on `reason`, not on `error`. The two directory reasons differ in what is known: \"unlistable\" means a directory is there and its entries could not be read, \"uncheckable\" means the path could not be classified at all, so whether a directory is there is unknown. Conflicts (a target that exists, is untracked by selfie, and differs from the repo source — e.g. a second machine with its own edits) are skipped and reported with a diff, never overwritten, unless you pass auto_accept=true, and auto_accept never writes through a repository-file entry's symlinked target, which is refused. A file with different content that appears at a target while apply is writing it is left in place and reported as a conflict with a `warning` row, even with auto_accept=true; the next call handles it as any existing target. On a volume or sandbox without an exclusive rename, selfie only looks once more just before writing, which narrows that window rather than closing it. Secret-bearing dotfiles — content from a `command`, or from a `source` with `vars` — are an exception: their conflicts are ALWAYS reported and skipped, auto_accept has no effect on them, and their content is never returned. A `dotfile_conflict` row carries `diff` for a repository file, and for a secret-bearing entry `hidden`, `{resolved_lines, current_lines}`, instead; the other is null. `declined` says whether an interactive resolver answered and declined the conflict; this server supplies none, so it is always false here. dry_run=true previews without running any provider command, so it cannot say whether a secret-bearing entry would change. An entry left as it is comes back as a `dotfile_skipped` row whose `reason` is \"up_to_date\", \"in_sync\", \"permissions_tightened\", \"dry_run\" or \"secret_dry_run\"; a \"secret_dry_run\" row also carries `commands`, how many commands the deploy would run, and `link`, `{kind, destination}` with `kind` \"none\" or \"symlink\" for a link the deploy would replace (`destination` null when it could not be read). Other rows carry null for both. If selfie refuses any entry — an unrecognized key, two or more entries that deploy to the same target in this environment, whether of one package or of several specs, packages or standalone dotfiles (every one of them is refused, one `dotfile_refused` row each, and none is written; applying one package by name refuses its entry when another spec deploys there too), a target it will not write to or cannot read (a repository-file entry's symlinked target is always refused, even one whose content already matches; a secret-bearing entry's link is replaced instead, and reported in a `warning` row), a source it cannot read — or, when deploying all, cannot read a dotfiles directory that is there or cannot classify the path at all, or finds several spec files in one directory claiming one name where one failed to parse or declares dotfiles for this environment (none of them deploys) or a spec file it could not load, the call comes back as an ERROR result with status 'refused' and a non-zero `refused` count, even though the rest of the run carried on; a conflict is reported instead as a conflict and is not a refusal. Each refused entry is a `dotfile_refused` row with `package`, `spec_target` (the target as the package file spells it), `condition` (what selfie found: \"collision\", \"invalid_entry\", \"target_rule\", \"escapes\", \"symlink\", \"irregular\", \"directory\", \"not_a_directory\", \"absent\", \"unreadable\", \"undetermined\" or \"earlier_program_failed\"; branch on it), `location` (where it found it: \"entry\", \"source\", \"template\", \"target\" or \"above_target\") and `message` (prose for display). An entry selfie tried to deploy where an operation it ran failed is a `dotfile_failed` row instead, with `package`, `spec_target`, `operation` (\"resolve\", \"backup\", \"write\" or \"permission_fix\"; branch on it), `error` (the error, as prose) and `message`; a run with a failed entry and no refused one comes back as an ERROR result with status 'failed'. Every apply result that completes carries both counts, `refused` and `failed`, whatever its status ('success', 'refused' or 'failed'); when both are non-zero the status is 'refused'. A run that stops early (status 'failure', as when stop_on_error stops it) or is canceled carries neither count, as it carries no `steps`. A package refused whole (an unrecognized top-level or environment key, a top level that could not be re-read, no environment declared, or a name several spec files claim) is reported before anything deploys as a `package_refused` row per package, with `package`, `paths` (its spec file, or every file claiming the name), `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\"; branch on it, knowing that a spec refused for several reasons carries the first one's kind, and its `reason` names them all) and `reason` (prose, shared by every package refused for it). With stop_on_error set, any such package stops the call before anything deploys. Once a provider command fails, later entries running the same program (the first word of a command or of a template binding, after any leading NAME=value assignments) are refused without running, each in a `dotfile_refused` row with `condition` \"earlier_program_failed\": they share one cause, such as a locked vault, and did not run, so fix that one failure rather than each entry. Entries running another program still run. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec that could not be loaded is reported as structured fields — `kind` (\"yaml\", \"io\", \"unreadable\", \"irregular_file\", \"refused\" or \"invalid_name\"), `reason`, and `line`/`column` where the kind has a location. Branch on `kind`; `reason` is prose for display, not for matching. A deploy state file that exists but cannot be read, is empty, or does not parse is refused: the call comes back as an ERROR result with status 'failure' whose message names the file and the remedy, and nothing is deployed; a dry run warns instead and previews against an empty state. So is a deploy state selfie cannot write: the state is written back before the call's first write of any kind (a secret-bearing file, a backup, a deployed file or a record), and when that fails the call is an ERROR result with nothing written. A call that writes nothing is not stopped by it. A dry run warns when the state directory's permissions would stop a real run, and previews. A write that fails later anyway (a full disk, for example) stops the run after that one file, and the failure names it. A file selfie deployed that no entry deploys to any more in this environment (its target changed, or its entry or package was removed) is reported as a `dotfile_orphaned` row with `source`, `target` and `package` (null when the record does not name one) and counted in the result's `orphan_count`; selfie never deletes it, and it is not an error. With a name, only that package's orphans are reported. Once such a file is gone, a non-dry run drops selfie's record of it. The same file under another spelling (a symlinked directory, or a case-only change on a case-insensitive volume) is not an orphan. When selfie cannot see every entry (a spec it could not load or use, a package it refused, a dotfiles directory it could not read or that is missing, no home directory, or no package deploying anything in this environment), orphans are not judged and a `warning` row names the reason, so an `orphan_count` of 0 then means unjudged, not none. Targets are not compared with a spec file selfie could not load, one of several spec files claiming one name, or a dotfiles directory it could not read, so a `warning` row names them: one row naming every one when deploying all (as `packages/<file>`, `dotfiles/<file>` or \"the dotfiles directory\"), or one row each, saying why, for a named package. There is no such row when nothing deploys in this environment or when stop_on_error stopped the run. A result that completed carries `steps`, `{completed, total}`, the operation's step count; no message carries a count, and a result with status 'failure' carries none. Every row that names a dotfile's source (`dotfile_deploying`, `dotfile_deployed`, `dotfile_skipped`, `dotfile_conflict` and `dotfile_orphaned`) carries `kind`: \"file\", \"template\", \"command\" or \"recorded\" (an old record naming no base directory). The kind says which of the other source fields apply: `source` is the file's full path, with a template's var names, or the command; `base` (\"packages\" or \"dotfiles\") and `relative_path` give the file relative to the directory it was read from, and `vars` lists a template's var names. An orphan's full path joins its recorded path to the directory configured now, so after `package_directory` or `dotfiles_directory` changes it names the new one; an orphan whose record names no base directory has a null `source` and gives `recorded_source`, the spelling the record holds."
     )]
     async fn selfie_apply_dotfiles(
         &self,
@@ -744,7 +752,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
 
     #[tool(
         name = "selfie_dotfiles_list",
-        description = "List the dotfile mappings `selfie apply` would use, with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A spec whose top level or any environment selfie will not trust, or a package spec that declares no environment, is left out of the entries and listed in the row's `refused` array with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim, since none of them deploys; branch on it, knowing that a spec refused for several reasons carries the first one's kind, and its `reason` names them all) and `reason`. A listing with any `refused` row, or a spec that does not parse, is a successful call with status 'found' and `outcome` \"found\", with the package in `unanswered`, and it still lists everything it could read. An invalid entry in a spec it could read stays a row with status 'success'. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
+        description = "List the dotfile mappings `selfie apply` would use, with package name, environment (null for shared entries, or the environment name for environment-specific ones), target, and where the content comes from. `kind` is one of \"file\" (a repository file, given in `source`), \"template\" (a repository file in `source` rendered by substituting the named values in `vars`), \"command\" (the whole file is the stdout of `command`), or \"invalid\". For template and command entries only the var names and the command string are returned — never a resolved value, and no command is executed. If `dotfiles_directory` is set and no directory is at that path, a `warning` row says what is there instead — nothing, a file, a symlink whose destination is gone, or a path running through a non-directory — and the call carries on without standalone dotfiles. A dotfiles directory that is there and cannot be read, or whose path cannot be classified at all, fails the call: a `warning` row names it, and the result is an ERROR with status 'failure', since the listing would be missing every standalone dotfile. A package directory that cannot be read fails it too. A spec whose top level or any environment selfie will not trust, or a package spec that declares no environment, is left out of the entries and listed in the row's `refused` array with `package`, `path`, `kind` (\"unknown_top_level_keys\", \"unknown_environment_keys\", \"unchecked_top_level\", \"no_environments\" or \"ambiguous_name\", one row per file of a name several spec files claim, since none of them deploys; branch on it, knowing that a spec refused for several reasons carries the first one's kind, and its `reason` names them all) and `reason`. A listing with any `refused` row, or a spec that does not parse, is a successful call with status 'found' and `outcome` \"found\", with the package in `unanswered`, and it still lists everything it could read. An invalid entry in a spec it could read stays a row with status 'success'. A spec this tool could not load is reported as a `spec_skipped` row carrying its `kind`, `path` and `line`/`column`, the same shape every other tool uses. Branch on `kind`; `reason` is prose for display, not for matching. Fast — no commands executed."
     )]
     async fn selfie_dotfiles_list(&self) -> Result<CallToolResult, McpError> {
         use selfie::dotfile_service::port::DotfileService;
@@ -767,7 +775,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
 
     #[tool(
         name = "selfie_dotfiles_track",
-        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. It also fails, writing nothing, when another spec, a package or a standalone dotfile, already has an entry for the file in any environment, since apply refuses two specs deploying one file; the error names that spec. A spec that could not be loaded, or one of several spec files claiming one name, may also track the file; each is named in a `warning` row and the track goes on. Fails, writing nothing, when no readable directory is at the dotfiles directory path — nothing there, something that is not a directory, a symlink whose destination is gone, or a directory whose entries cannot be read, since a directory selfie cannot read may already hold the name — or when the package directory cannot be read or something other than a directory is at its path (status 'refused' with package_directory), or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy. It also fails, writing nothing, when the deploy state cannot be written back before the copy is made. A spec that cannot be saved also writes nothing: the copy is removed again, or, where that removal also fails, the failure names the file to delete. A deploy state that cannot be written at the end is the one partial outcome — the copy and the spec entry are in place and only the record is missing, and the failure names both files. Call selfie_apply_dotfiles to finish it; tracking again records nothing."
+        description = "Track a file as a standalone dotfile. Copies it into the dotfiles directory and creates a YAML spec. A name another spec already claims is refused as invalid params, and the error's `data.conflicting_paths` lists every spec file claiming it. It also fails, writing nothing, when another spec, a package or a standalone dotfile, already has an entry for the file in any environment, since apply refuses two specs deploying one file; the error names that spec. A spec that could not be loaded, or one of several spec files claiming one name, may also track the file; each is named in a `warning` row and the track goes on. Fails, writing nothing, when no readable directory is at the dotfiles directory path — nothing there, something that is not a directory, a symlink whose destination is gone, or a directory whose entries cannot be read, since a directory selfie cannot read may already hold the name — or when the package directory cannot be read or something other than a directory is at its path (status 'refused' with package_directory), or when a deploy state file exists that cannot be read, is empty, or does not parse; the message names the file and the remedy. It also fails, writing nothing, when the deploy state cannot be written back before the copy is made. A spec that cannot be saved also writes nothing: the copy is removed again, or, where that removal also fails, the failure names the file to delete. A deploy state that cannot be written at the end is the one partial outcome — the copy and the spec entry are in place and only the record is missing, and the failure names both files. Call selfie_apply_dotfiles to finish it; tracking again records nothing."
     )]
     async fn selfie_dotfiles_track(
         &self,
@@ -891,7 +899,7 @@ with all=true, when a key in any environment cannot be trusted or a package spec
 
     #[tool(
         name = "selfie_sync_pull",
-        description = "Fetch and fast-forward merge from remote. Refuses if anything is staged, and refuses when this machine has commits the remote lacks, since it only fast-forwards; neither refusal carries `kind`. A failed git step's result carries `step`, such as \"fetch\", and `kind`, git's error as a label, such as \"operation_failed\"."
+        description = "Fetch and fast-forward merge from remote. Refuses if anything is staged, and refuses when this machine has commits the remote lacks, since it only fast-forwards. Staged changes refuse with `kind` \"staged_changes\" and `step` \"check_status\", and commits of its own with `kind` \"diverged\" and `step` \"fast_forward\"; the `error` is the same sentence the CLI prints. A failed git step's result carries `step`, such as \"fetch\", and `kind`, git's error as a label, such as \"operation_failed\"."
     )]
     async fn selfie_sync_pull(&self) -> Result<CallToolResult, McpError> {
         let stream = self.sync_service.pull().await;
@@ -946,11 +954,14 @@ pub async fn wait_for_calls(in_flight: &TaskTracker, limit: std::time::Duration)
 
 /// The MCP answer to a refused name check.
 ///
-/// A conflict is about the name the caller sent, so it is `invalid_params`: the
-/// fact, then what the calling tool can do about it. A package or dotfiles
-/// directory selfie could not read is not about the name at all, so it comes back
-/// as a refusal in the shape the apply and drift tools use: `status` and `reason`,
-/// plus `package_directory` or `dotfiles_directory` naming the directory.
+/// A conflict is about the name the caller sent, so it is `invalid_params`. Its
+/// message states the fact and what the calling tool can do about it, and its
+/// data lists every file claiming the name under `conflicting_paths`.
+///
+/// A package or dotfiles directory selfie could not read is not about the name,
+/// so it comes back as a refusal in the shape the apply and drift tools use:
+/// `status` and `reason`, plus `package_directory` or `dotfiles_directory`
+/// naming the directory.
 // Reporting an unreadable directory as invalid input is what sends an agent round a
 // loop of names that all fail identically.
 fn namespace_refusal(
@@ -976,9 +987,13 @@ fn namespace_refusal(
                 }
                 (Remedy::RemoveTheDotfileSpec, _) => "Remove it first or choose a different name.",
             };
+            // The paths as a field, so an assistant need not parse them out of
+            // the message.
             return Err(McpError::invalid_params(
                 format!("{conflict} {remedy}"),
-                None,
+                Some(serde_json::json!({
+                    "conflicting_paths": event_collector::paths_json(conflict.paths()),
+                })),
             ));
         }
     };
@@ -1489,6 +1504,54 @@ mod tests {
         }
     }
 
+    // A taken name carries every file claiming it as data, in lookup order, so
+    // a path holding the ", " the message joins them with cannot blur the list.
+    #[test]
+    fn a_name_conflict_carries_its_claimants_as_data() {
+        let paths = ["/s/a, b/dup.yaml", "/s/dup.yml"];
+        for check in [NameCheck::SpecCreate, NameCheck::DotfilesTrack] {
+            let conflict = selfie::namespace::NamespaceConflict::new(
+                "dup",
+                selfie::namespace::NameLocation::Packages,
+                paths.iter().map(std::path::PathBuf::from).collect(),
+            )
+            .expect("two claimants");
+            let Err(refusal) = namespace_refusal(conflict.into(), check) else {
+                panic!("a conflict is an error");
+            };
+
+            assert_eq!(
+                refusal.data,
+                Some(serde_json::json!({ "conflicting_paths": paths })),
+                "{refusal:?}"
+            );
+        }
+    }
+
+    // A create over a taken name names the file that holds it.
+    #[tokio::test]
+    async fn spec_create_names_the_file_that_holds_the_name() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        write_spec(&packages, "bat", "test");
+        let server = server_over(&packages, None);
+        let params: CreateParam = serde_json::from_value(serde_json::json!({
+            "package": "bat",
+            "install": "true",
+            "environment": "test",
+        }))
+        .unwrap();
+
+        let Err(refusal) = server.spec_create(Parameters(params)).await else {
+            panic!("a taken name is refused");
+        };
+
+        let data = refusal.data.expect("the refusal carries data");
+        let claimant = packages.join("bat.yml").display().to_string();
+        assert_eq!(data["conflicting_paths"], serde_json::json!([claimant]));
+    }
+
     // A package's name gets the remedy for the tool that asked: an update for
     // a create, the package's own track tool for a track.
     #[test]
@@ -1520,6 +1583,86 @@ mod tests {
         assert!(
             track.message.contains("selfie_package_track_dotfile"),
             "{track:?}"
+        );
+    }
+
+    // auto_accept answers a conflict and never authorizes writing through a
+    // repository file's symlinked target, so neither text an assistant reads
+    // about it may promise an overwrite without naming that refusal.
+    #[test]
+    fn the_auto_accept_promise_names_the_symlink_exception() {
+        let tool = SelfieServer::selfie_apply_dotfiles_tool_attr();
+        // The field's doc comment keeps its line breaks in the schema.
+        let field = tool.input_schema["properties"]["auto_accept"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!field.contains("force overwrite"), "{field}");
+        assert!(
+            field.contains("A repository-file entry whose target is a symlink is refused"),
+            "{field}"
+        );
+
+        let description = tool.description.unwrap_or_default();
+        let promise = between(&description, "unless you pass auto_accept=true", ".");
+        assert!(promise.contains("symlinked target"), "{promise:?}");
+    }
+
+    // A dotfiles directory that is there and cannot be listed fails the listing,
+    // after a warning row naming it, and the description says so.
+    #[tokio::test]
+    async fn dotfiles_list_fails_on_a_dotfiles_directory_it_cannot_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Checked first, so a run that skips the behavior below still checks
+        // the promise.
+        let description = SelfieServer::selfie_dotfiles_list_tool_attr()
+            .description
+            .unwrap_or_default();
+        assert!(
+            description.contains(
+                "A dotfiles directory that is there and cannot be read, or whose path cannot be \
+                 classified at all, fails the call"
+            ),
+            "{description}"
+        );
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        let dotfiles = temp.path().join("dotfiles");
+        std::fs::create_dir_all(&packages).unwrap();
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::write(dotfiles.join("rc.yml"), "name: rc\n").unwrap();
+        // Restores the mode on drop, before `temp` is removed, so a failed
+        // assertion cannot leave the temp dir unremovable.
+        struct Restore<'a>(&'a std::path::Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        std::fs::set_permissions(&dotfiles, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = Restore(&dotfiles);
+        if std::fs::read_dir(&dotfiles).is_ok() {
+            eprintln!("skipped: this user can list a mode-0 directory");
+            return;
+        }
+        let server = server_over(&packages, Some(&dotfiles));
+
+        let result = server.selfie_dotfiles_list().await.unwrap();
+
+        let json = tool_json(&result);
+        assert_eq!(result.is_error, Some(true), "got {json}");
+        assert_eq!(json["result"]["status"], "failure", "got {json}");
+        let warnings = event_collector::warning_rows(&json);
+        assert_eq!(warnings.len(), 1, "got {json}");
+        assert!(
+            warnings[0]
+                .to_string()
+                .contains(&dotfiles.display().to_string()),
+            "got {json}"
         );
     }
 
@@ -2158,6 +2301,43 @@ mod tests {
             "got {json}"
         );
         assert_eq!(json["succeeded"], 2, "got {json}");
+    }
+
+    // A batch with a failed entry is an error result, its body unchanged, and a
+    // batch with none is not.
+    #[tokio::test]
+    async fn spec_update_batch_is_an_error_when_an_entry_fails() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let packages = temp.path().join("packages");
+        std::fs::create_dir_all(&packages).unwrap();
+        write_spec(&packages, "fine", "test");
+        let server = server_over(&packages, None);
+        let batch = |updates: serde_json::Value| -> BatchUpdateParam {
+            serde_json::from_value(serde_json::json!({ "updates": updates })).unwrap()
+        };
+
+        let mixed = server
+            .spec_update_batch(Parameters(batch(serde_json::json!([
+                { "package": "fine", "description": "d" },
+                { "package": "nope", "description": "d" },
+            ]))))
+            .await
+            .unwrap();
+        let json = tool_json(&mixed);
+        assert_eq!(mixed.is_error, Some(true), "got {json}");
+        assert_eq!(json["total"], 2, "got {json}");
+        assert_eq!(json["succeeded"], 1, "got {json}");
+        assert_eq!(json["failed"], 1, "got {json}");
+        assert_eq!(json["results"][0]["success"], true, "got {json}");
+        assert_eq!(json["results"][1]["success"], false, "got {json}");
+
+        let clean = server
+            .spec_update_batch(Parameters(batch(serde_json::json!([
+                { "package": "fine", "description": "e" },
+            ]))))
+            .await
+            .unwrap();
+        assert_ne!(clean.is_error, Some(true), "got {}", tool_json(&clean));
     }
 
     // A batch entry carries the rows the single call reports about what it could

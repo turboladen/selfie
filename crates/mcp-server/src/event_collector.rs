@@ -72,11 +72,7 @@ fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -
         // The files to rename or remove, so an assistant need not parse them out of
         // `error`.
         if let NoSuchPackageReason::Ambiguous { conflicting_paths } = reason {
-            payload["conflicting_paths"] = conflicting_paths
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .into();
+            payload["conflicting_paths"] = paths_json(conflicting_paths);
         }
         payload["reason"] = Value::from(match reason {
             NoSuchPackageReason::NotFound => "not_found",
@@ -470,6 +466,29 @@ fn skip_reason_fields(mut row: Value, reason: &SkipReason) -> Value {
     row
 }
 
+/// Returns `paths` as a JSON array of their display strings, in order.
+pub(crate) fn paths_json(paths: &[std::path::PathBuf]) -> Value {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .into()
+}
+
+/// Builds one package's row of a package listing.
+fn package_list_item_json(item: &selfie::package::event::PackageListItem) -> Value {
+    with_fields(
+        serde_json::json!({
+            "type": "package_list_item",
+            "name": &item.name,
+            "environments": &item.environments,
+            "command": &item.check_command,
+            "status": check_status_label(&item.status),
+        }),
+        check_failure_fields(&item.status),
+    )
+}
+
 /// One parse failure as fields, shared by every surface that reports one.
 ///
 /// `kind` is what a caller branches on; `reason` is prose to display. `line` and
@@ -503,11 +522,7 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                     serde_json::json!({
                         "type": "package_refused",
                         "package": &package.name,
-                        "paths": package
-                            .paths
-                            .iter()
-                            .map(|path| path.display().to_string())
-                            .collect::<Vec<_>>(),
+                        "paths": paths_json(&package.paths),
                         "kind": label(*kind),
                         "reason": reason.to_string(),
                     })
@@ -591,16 +606,10 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
             ))
         }
         PackageEvent::PackageListReady { .. } => None, // CLI-specific event for spinner setup
-        PackageEvent::PackageListItemCompleted { package_item, .. } => Some(with_fields(
-            serde_json::json!({
-                "type": "package_list_item",
-                "name": &package_item.name,
-                "environments": &package_item.environments,
-                "command": &package_item.check_command,
-                "status": check_status_label(&package_item.status),
-            }),
-            check_failure_fields(&package_item.status),
-        )),
+        // Checks finish in any order, so an item's row comes from the listing
+        // that follows the last item, in the listing's order. `handle_list` sends
+        // that listing after every item it sends, cancellation included.
+        PackageEvent::PackageListItemCompleted { .. } => None,
         PackageEvent::ValidationResultCompleted {
             validation_result, ..
         } => {
@@ -686,14 +695,20 @@ fn event_to_json(event: &PackageEvent) -> Vec<Value> {
                 .iter()
                 .map(parse_failure_json)
                 .collect();
-            Some(serde_json::json!({
+            let summary = serde_json::json!({
                 "type": "package_list_summary",
                 "environment": &package_list.current_environment,
                 "package_directory": &package_list.package_directory,
                 "total_packages": package_list.valid_packages.len(),
                 "invalid_packages": invalid,
                 "refused": refused_json(&package_list.refused),
-            }))
+            });
+            return package_list
+                .valid_packages
+                .iter()
+                .map(package_list_item_json)
+                .chain([summary])
+                .collect();
         }
         PackageEvent::RecommendStarted { recommend_name, .. } => Some(serde_json::json!({
             "type": "recommend_started",
@@ -1196,12 +1211,9 @@ fn status_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
     };
     fields.insert("failure".to_string(), failure);
     let paths = match unknown {
-        Some(UnknownStatus::LookupFailed(LookupFailure::AmbiguousName(name))) => Value::from(
-            name.conflicting_paths()
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>(),
-        ),
+        Some(UnknownStatus::LookupFailed(LookupFailure::AmbiguousName(name))) => {
+            paths_json(name.conflicting_paths())
+        }
         _ => Value::Null,
     };
     fields.insert("conflicting_paths".to_string(), paths);
@@ -2198,6 +2210,38 @@ mod tests {
         );
     }
 
+    // A pull's refusal names its kind and the step that found it, and its
+    // sentence is the refusal alone, not a step that failed.
+    #[test]
+    fn a_pull_refusal_carries_its_kind_and_step() {
+        use selfie::git::GitSyncError;
+        use selfie::sync_service::port::{GitFailure, GitStep};
+
+        for (step, error, labels, sentence) in [
+            (
+                GitStep::CheckStatus,
+                GitSyncError::StagedChanges,
+                ("staged_changes", "check_status"),
+                "Staged changes detected. Commit or unstage them before pulling.",
+            ),
+            (
+                GitStep::FastForward,
+                GitSyncError::Diverged,
+                ("diverged", "fast_forward"),
+                "Remote has diverged. Resolve manually with git.",
+            ),
+        ] {
+            let payload = failure_json(&OperationFailure::Git(GitFailure::at(step, error)), None);
+
+            assert_eq!(payload["status"], "failure");
+            assert_eq!(
+                (&payload["kind"], &payload["step"]),
+                (&labels.0.into(), &labels.1.into())
+            );
+            assert_eq!(payload["error"], sentence);
+        }
+    }
+
     // A spec that changed after selfie read it names its kind, so an assistant
     // can tell a conflict a rerun settles from any other repository failure.
     #[test]
@@ -3190,6 +3234,105 @@ mod tests {
         );
     }
 
+    // An item event for `item`, as a package list sends one when its check
+    // finishes.
+    fn item_completed(item: &selfie::package::event::PackageListItem) -> PackageEvent {
+        PackageEvent::PackageListItemCompleted {
+            operation_info: test_op_info(),
+            package_item: item.clone(),
+        }
+    }
+
+    // The listing event a package list ends with. It holds `items` in the order
+    // they are passed, which stands for the library's name order.
+    fn listed(items: Vec<selfie::package::event::PackageListItem>) -> PackageEvent {
+        PackageEvent::PackageListLoaded {
+            operation_info: test_op_info(),
+            package_list: selfie::package::event::PackageListData {
+                valid_packages: items,
+                invalid_packages: vec![],
+                refused: vec![],
+                current_environment: "test".to_string(),
+                package_directory: "/packages".to_string(),
+                environment_stats: std::collections::HashMap::new(),
+            },
+        }
+    }
+
+    // The events a package list sends for `items`: each item as its check
+    // finishes, then the listing.
+    fn listing(items: Vec<selfie::package::event::PackageListItem>) -> Vec<PackageEvent> {
+        let mut events: Vec<PackageEvent> = items.iter().map(item_completed).collect();
+        events.push(listed(items));
+        events
+    }
+
+    // Returns the `package_list_item` rows of a collected result.
+    fn list_rows(result: &EventCollectorResult) -> Vec<&Value> {
+        rows_of_type(&result.data, &["package_list_item"])
+    }
+
+    // Checks finish in any order, and the rows come in the listing's order
+    // whatever order they finished in, each once, before the summary.
+    #[tokio::test]
+    async fn package_list_rows_follow_the_listing_order() {
+        use selfie::package::event::PackageListItem;
+
+        let item = |name: &str| PackageListItem {
+            check_command: None,
+            name: name.to_string(),
+            environments: vec!["test".to_string()],
+            status: EnvironmentStatus::Installed,
+        };
+        let (alpha, mid, zeta) = (item("alpha"), item("mid"), item("zeta"));
+        let events = vec![
+            item_completed(&zeta),
+            item_completed(&alpha),
+            item_completed(&mid),
+            listed(vec![alpha, mid, zeta]),
+        ];
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        let names: Vec<&Value> = list_rows(&result).iter().map(|row| &row["name"]).collect();
+        assert_eq!(names, ["alpha", "mid", "zeta"], "{}", result.data);
+        let last = result.data["data"].as_array().and_then(|rows| rows.last());
+        assert_eq!(
+            last.map(|row| &row["type"]),
+            Some(&Value::from("package_list_summary")),
+            "{}",
+            result.data
+        );
+    }
+
+    // A listing canceled while its checks ran keeps its rows: the library sends
+    // the listing before it reports the cancellation.
+    #[tokio::test]
+    async fn a_canceled_listing_keeps_its_rows() {
+        use selfie::package::event::PackageListItem;
+
+        let mut events = listing(vec![PackageListItem {
+            check_command: Some("sleep 5".to_string()),
+            name: "slow".to_string(),
+            environments: vec!["test".to_string()],
+            status: EnvironmentStatus::Installed,
+        }]);
+        events.push(PackageEvent::Canceled {
+            operation_info: test_op_info(),
+            reason: "Operation canceled".to_string(),
+        });
+
+        let result = collect_events(Box::pin(stream::iter(events))).await;
+
+        assert_eq!(
+            result.data["result"]["status"], "canceled",
+            "{}",
+            result.data
+        );
+        let names: Vec<&Value> = list_rows(&result).iter().map(|row| &row["name"]).collect();
+        assert_eq!(names, ["slow"], "{}", result.data);
+    }
+
     // A listing row for a package with no entry in this environment, shown
     // under `all`, has a null status and no reason, while one with no check
     // command says so.
@@ -3197,26 +3340,21 @@ mod tests {
     async fn a_row_not_in_this_environment_has_no_status() {
         use selfie::package::event::{PackageListItem, UnknownStatus};
 
-        let row = |name: &str, status| PackageEvent::PackageListItemCompleted {
-            operation_info: test_op_info(),
-            package_item: PackageListItem {
-                check_command: None,
-                name: name.to_string(),
-                environments: vec!["other".to_string()],
-                status: EnvironmentStatus::Unknown(status),
-            },
+        let row = |name: &str, status| PackageListItem {
+            check_command: None,
+            name: name.to_string(),
+            environments: vec!["other".to_string()],
+            status: EnvironmentStatus::Unknown(status),
         };
-        let events = vec![
+        let events = listing(vec![
             row("elsewhere", UnknownStatus::NotInEnvironment),
             row("unchecked", UnknownStatus::NoCheckCommand),
-        ];
+        ]);
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
-        let rows: Vec<(&Value, &Value, &Value)> = result.data["data"]
-            .as_array()
-            .expect("data is an array")
-            .iter()
+        let rows: Vec<(&Value, &Value, &Value)> = list_rows(&result)
+            .into_iter()
             .map(|row| (&row["status"], &row["kind"], &row["reason"]))
             .collect();
         assert_eq!(
@@ -3238,25 +3376,22 @@ mod tests {
     async fn a_listing_row_names_its_command() {
         use selfie::package::event::{CheckFailure, PackageListItem, UnknownStatus};
 
-        let events = vec![PackageEvent::PackageListItemCompleted {
-            operation_info: test_op_info(),
-            package_item: PackageListItem {
-                check_command: Some("sleep 5".to_string()),
-                name: "slow".to_string(),
-                environments: vec!["test".to_string()],
-                status: EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(
-                    CheckFailure::TimedOut(selfie::commands::runner::TimedOut::new(
-                        "sleep 5",
-                        std::time::Duration::from_secs(1),
-                        selfie::commands::runner::TimeLimit::Total,
-                    )),
-                )),
-            },
-        }];
+        let events = listing(vec![PackageListItem {
+            check_command: Some("sleep 5".to_string()),
+            name: "slow".to_string(),
+            environments: vec!["test".to_string()],
+            status: EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(
+                selfie::commands::runner::TimedOut::new(
+                    "sleep 5",
+                    std::time::Duration::from_secs(1),
+                    selfie::commands::runner::TimeLimit::Total,
+                ),
+            ))),
+        }]);
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
-        let row = &result.data["data"][0];
+        let row = list_rows(&result)[0];
         assert_eq!(row["kind"], "timed_out");
         assert_eq!(row["command"], "sleep 5");
     }
@@ -3279,31 +3414,26 @@ mod tests {
                 ),
             ))
         };
-        let events = vec![
-            PackageEvent::CheckResultCompleted {
-                operation_info: test_op_info(),
-                check_result: CheckResultData {
-                    package_name: "p".to_string(),
-                    environment: "test".to_string(),
-                    check_command: Some("check-p".to_string()),
-                    result: failure(),
-                },
+        let mut events = vec![PackageEvent::CheckResultCompleted {
+            operation_info: test_op_info(),
+            check_result: CheckResultData {
+                package_name: "p".to_string(),
+                environment: "test".to_string(),
+                check_command: Some("check-p".to_string()),
+                result: failure(),
             },
-            PackageEvent::PackageListItemCompleted {
-                operation_info: test_op_info(),
-                package_item: PackageListItem {
-                    check_command: Some("check-p".to_string()),
-                    name: "p".to_string(),
-                    environments: vec!["test".to_string()],
-                    status: EnvironmentStatus::from(&failure()),
-                },
-            },
-        ];
+        }];
+        events.extend(listing(vec![PackageListItem {
+            check_command: Some("check-p".to_string()),
+            name: "p".to_string(),
+            environments: vec!["test".to_string()],
+            status: EnvironmentStatus::from(&failure()),
+        }]));
 
         let result = collect_events(Box::pin(stream::iter(events))).await;
 
-        let rows = result.data["data"].as_array().expect("data is an array");
-        for row in rows {
+        let rows = rows_of_type(&result.data, &["check_result", "package_list_item"]);
+        for row in &rows {
             assert_eq!(row["kind"], "working_directory_unusable", "{row}");
             assert_eq!(row["reason"], "Cannot run 'check-p' in /gone: missing");
             assert_eq!(row["working_directory"], "/gone");
@@ -4111,43 +4241,35 @@ mod tests {
     async fn test_collect_package_list_with_status() {
         use selfie::package::event::PackageListItem;
 
-        let events = vec![
-            PackageEvent::PackageListItemCompleted {
-                operation_info: test_op_info(),
-                package_item: PackageListItem {
-                    check_command: None,
-                    name: "ripgrep".to_string(),
-
-                    environments: vec!["macos".to_string()],
-                    status: EnvironmentStatus::Installed,
-                },
+        let mut events = listing(vec![
+            PackageListItem {
+                check_command: None,
+                name: "ripgrep".to_string(),
+                environments: vec!["macos".to_string()],
+                status: EnvironmentStatus::Installed,
             },
-            PackageEvent::PackageListItemCompleted {
-                operation_info: test_op_info(),
-                package_item: PackageListItem {
-                    check_command: None,
-                    name: "missing-pkg".to_string(),
-
-                    environments: vec!["macos".to_string()],
-                    status: EnvironmentStatus::NotInstalled,
-                },
+            PackageListItem {
+                check_command: None,
+                name: "missing-pkg".to_string(),
+                environments: vec!["macos".to_string()],
+                status: EnvironmentStatus::NotInstalled,
             },
-            PackageEvent::Completed {
-                operation_info: test_op_info(),
-                result: OperationResult::Success(OperationSuccess::Generic("listed")),
-            },
-        ];
+        ]);
+        events.push(PackageEvent::Completed {
+            operation_info: test_op_info(),
+            result: OperationResult::Success(OperationSuccess::Generic("listed")),
+        });
 
         let stream: EventStream = Box::pin(stream::iter(events));
         let result = collect_events(stream).await;
 
         assert!(result.success);
-        assert_eq!(result.data["data"].as_array().unwrap().len(), 2);
-        assert_eq!(result.data["data"][0]["type"], "package_list_item");
-        assert_eq!(result.data["data"][0]["name"], "ripgrep");
-        assert_eq!(result.data["data"][0]["status"], "installed");
-        assert_eq!(result.data["data"][1]["name"], "missing-pkg");
-        assert_eq!(result.data["data"][1]["status"], "not installed");
+        let rows = list_rows(&result);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["name"], "ripgrep");
+        assert_eq!(rows[0]["status"], "installed");
+        assert_eq!(rows[1]["name"], "missing-pkg");
+        assert_eq!(rows[1]["status"], "not installed");
     }
 
     #[tokio::test]

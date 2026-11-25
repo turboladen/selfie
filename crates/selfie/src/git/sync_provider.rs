@@ -22,8 +22,8 @@ pub enum GitSyncError {
     /// No remote is configured for the current branch.
     NoRemote { branch: String },
 
-    /// Working tree has uncommitted changes.
-    DirtyWorkingTree,
+    /// The index holds staged changes, which a pull would disturb.
+    StagedChanges,
 
     /// Fast-forward is not possible (histories have diverged).
     Diverged,
@@ -63,6 +63,23 @@ impl GitSyncError {
     pub fn kind(&self) -> &'static str {
         self.into()
     }
+
+    /// Whether this error is a refusal a step made after it ran, such as a pull
+    /// that found staged changes, rather than the step itself failing.
+    #[must_use]
+    pub fn is_refusal(&self) -> bool {
+        // Exhaustive, so a new variant has to choose a side.
+        match self {
+            Self::StagedChanges | Self::Diverged => true,
+            Self::NotARepo { .. }
+            | Self::NoRemote { .. }
+            | Self::PushRejected
+            | Self::OperationInProgress { .. }
+            | Self::Conflicted { .. }
+            | Self::NothingToCommit
+            | Self::OperationFailed { .. } => false,
+        }
+    }
 }
 
 impl Composed for GitSyncError {
@@ -75,10 +92,9 @@ impl Composed for GitSyncError {
                 .text("no remote configured for branch '")
                 .name(branch)
                 .text("'"),
-            Self::DirtyWorkingTree => {
-                Parts::new().text("working tree is dirty — commit or stash changes first")
-            }
-            Self::Diverged => Parts::new().text("remote has diverged — resolve manually with git"),
+            Self::StagedChanges => Parts::new()
+                .text("Staged changes detected. Commit or unstage them before pulling."),
+            Self::Diverged => Parts::new().text("Remote has diverged. Resolve manually with git."),
             Self::PushRejected => {
                 Parts::new().text("the remote has commits this machine lacks. Merge or rebase onto them with git, then push again")
             }
@@ -320,7 +336,7 @@ mod tests {
             [
                 "not_a_repo",
                 "no_remote",
-                "dirty_working_tree",
+                "staged_changes",
                 "diverged",
                 "push_rejected",
                 "operation_in_progress",
@@ -363,12 +379,12 @@ mod tests {
                 "no remote configured for branch 'm\u{200B}n'",
             ),
             (
-                GitSyncError::DirtyWorkingTree,
-                "working tree is dirty — commit or stash changes first",
+                GitSyncError::StagedChanges,
+                "Staged changes detected. Commit or unstage them before pulling.",
             ),
             (
                 GitSyncError::Diverged,
-                "remote has diverged — resolve manually with git",
+                "Remote has diverged. Resolve manually with git.",
             ),
             (
                 GitSyncError::PushRejected,

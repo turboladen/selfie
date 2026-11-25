@@ -332,6 +332,9 @@ mod tests {
         delay: std::time::Duration,
         // Whether `execute` panics, as a bug in a check task would.
         panics: bool,
+        // Whether `execute` cancels the operation's token, as a caller canceling
+        // mid-run would.
+        cancels: bool,
     }
 
     impl ConcurrencyTrackingRunner {
@@ -341,6 +344,7 @@ mod tests {
                 peak: Arc::new(AtomicUsize::new(0)),
                 delay,
                 panics: false,
+                cancels: false,
             }
         }
 
@@ -358,9 +362,12 @@ mod tests {
             &self,
             _command: &str,
             _working_dir: &std::path::Path,
-            _token: &CancellationToken,
+            token: &CancellationToken,
         ) -> Result<CommandOutput, CommandError> {
             assert!(!self.panics, "the check task panicked");
+            if self.cancels {
+                token.cancel();
+            }
             let active = self.current.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(active, Ordering::SeqCst);
 
@@ -503,6 +510,82 @@ mod tests {
             ),
             "{listed:?}"
         );
+    }
+
+    // A listing canceled while its checks run still ends with the summary, and
+    // the summary holds every item sent, in name order. An adapter that builds
+    // its rows from the summary loses none of them.
+    #[tokio::test]
+    async fn a_canceled_listing_still_sends_every_item_in_its_summary() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory(temp_dir.path())
+            .build();
+        let packages: Vec<_> = ["zeta", "alpha", "mid"]
+            .into_iter()
+            .map(|name| {
+                PackageBuilder::default()
+                    .name(name)
+                    .environment("test", |b| {
+                        b.install("echo install").check_some("echo check")
+                    })
+                    .path(temp_dir.path().join(format!("{name}.yml")))
+                    .build()
+            })
+            .collect();
+        let mut mock_repo = MockPackageRepository::new();
+        mock_repo.expect_list_packages().returning(move || {
+            Ok(crate::package::port::ListPackagesOutput(
+                packages.iter().cloned().map(Ok).collect(),
+            ))
+        });
+        let runner = ConcurrencyTrackingRunner {
+            cancels: true,
+            ..ConcurrencyTrackingRunner::new(std::time::Duration::ZERO)
+        };
+        let (sender, mut rx) = test_sender();
+        let mut progress = ProgressTracker::new(2);
+        let token = CancellationToken::new();
+
+        handle_list(
+            &mock_repo,
+            &config,
+            &runner,
+            &sender,
+            &mut progress,
+            false,
+            &token,
+        )
+        .await;
+        drop(sender);
+
+        assert!(token.is_cancelled(), "the run must have been canceled");
+        let mut streamed = Vec::new();
+        let mut listed = None;
+        while let Some(event) = rx.recv().await {
+            match event {
+                crate::package::event::PackageEvent::PackageListItemCompleted {
+                    package_item,
+                    ..
+                } => {
+                    assert!(listed.is_none(), "an item arrived after the summary");
+                    streamed.push(package_item.name);
+                }
+                crate::package::event::PackageEvent::PackageListLoaded { package_list, .. } => {
+                    listed = Some(package_list.valid_packages);
+                }
+                _ => {}
+            }
+        }
+        let listed: Vec<String> = listed
+            .expect("the summary must be sent")
+            .into_iter()
+            .map(|item| item.name)
+            .collect();
+        assert_eq!(listed, ["alpha", "mid", "zeta"]);
+        streamed.sort();
+        assert_eq!(streamed, listed);
     }
 
     #[tokio::test]
