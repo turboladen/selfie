@@ -105,15 +105,21 @@ Key differences from the CLI:
 - **`with_mocks` feature flag**: **Do not drop `features = ["with_mocks"]` from
   `crates/test-common/Cargo.toml:7`.** `test-common`, and with it every selfie test build, unit and
   integration alike, compiles only because of that line; remove it and the build fails inside
-  `test-common`, naming a crate you did not touch:
-  `no associated function or constant named from_parts found for struct CommandOutput`. The feature
-  gates both the `mockall`-generated mocks and `CommandOutput::from_parts`. `test-common` needs it
-  for `from_parts`, which its fake runner calls, not for the mocks, which it never uses. Because
-  `test-common` is in turn a `[dev-dependencies]` entry of `selfie` itself, Cargo unifies the
-  feature into `selfie`'s own test build. `selfie-cli` enables it separately for its own tests.
-  Selfie's own unit tests do not need the feature: every mock, its re-export and its helpers are
-  gated `any(test, feature = "with_mocks")`, so a unit-test build has them either way. A new gate on
-  a test double takes the same form, or the unit tests come to depend on the unification again.
+  `test-common`, naming a crate you did not touch, starting with
+  `unresolved import selfie::commands::FakeCommandRunner`. The feature gates test doubles and
+  helpers such as the `mockall`-generated mocks, `FakeCommandRunner` and the `Parts` test helpers,
+  and four constructors that stay feature-only: `CommandOutput::from_parts`,
+  `ContentOutput::from_parts`, `StreamedOutput::from_output` and
+  `ShellCommandRunner::login_shell_with`. `test-common` itself needs three of these: it re-exports
+  `FakeCommandRunner`, its `command_output` calls `CommandOutput::from_parts`, and its message
+  helpers build `Parts`. Tests elsewhere reach the rest only through the same line: `selfie`'s
+  integration tests call `ContentOutput::from_parts`, and `selfie-mcp`'s tests reach
+  `StreamedOutput::from_output` and `login_shell_with`. Because `test-common` is in turn a
+  `[dev-dependencies]` entry of `selfie` itself, Cargo unifies the feature into `selfie`'s own test
+  build. `selfie-cli` enables it separately for its own tests. Selfie's own unit tests do not need
+  the feature: every mock, the fake runner, their re-exports and their helpers are gated
+  `any(test, feature = "with_mocks")`, so a unit-test build has them either way. A new gate on a
+  test double takes the same form, or the unit tests come to depend on the unification again.
   **`test-common` and the integration tests cannot use `cfg(test)` instead:** `cfg(test)` is not set
   on a crate compiled as a dependency. `from_parts` is deliberately gated on the feature alone,
   where every `automock` site uses `any(test, ...)`: widening it would let production code fabricate

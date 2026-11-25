@@ -14,6 +14,14 @@ pub use terminal::{PromptHandler, TerminalAnswer, TerminalPrompt};
 #[cfg(any(test, feature = "with_mocks"))]
 pub use runner::MockCommandRunner;
 
+#[cfg(any(test, feature = "with_mocks"))]
+mod fake;
+// A unit test inside selfie uses this path, never `test_common::FakeCommandRunner`.
+// test-common links a second copy of selfie, so its re-export implements that
+// copy's `CommandRunner` and no service in this crate accepts it.
+#[cfg(any(test, feature = "with_mocks"))]
+pub use fake::FakeCommandRunner;
+
 #[cfg(test)]
 mod tests {
     // Error context tests temporarily disabled due to compilation issues
