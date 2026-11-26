@@ -706,6 +706,15 @@ struct WaitingLine {
     tail: VecDeque<Output>,
 }
 
+impl WaitingLine {
+    /// Show `line` as the spinner's message, when the step draws a spinner.
+    fn show(&self, line: &str) {
+        if let Some(bar) = &self.bar {
+            bar.set_message(fit_to_terminal(line));
+        }
+    }
+}
+
 // How many of a step's last output lines a failure shows.
 const TAIL_LINES: usize = 10;
 
@@ -1220,10 +1229,12 @@ impl DisplayManager {
                 current.tail.pop_front();
             }
             current.tail.push_back(output.clone());
-            if !self.is_verbose()
-                && let Some(bar) = &current.bar
-            {
-                bar.set_message(fit_to_terminal(line));
+            // Under `--verbose` the line prints above the spinner, which goes
+            // back to the subject alone in place of a frame it showed.
+            if self.is_verbose() {
+                current.show(current.subject.as_str());
+            } else {
+                current.show(line);
             }
         }
         drop(waiting);
@@ -1241,6 +1252,29 @@ impl DisplayManager {
             shown!("  {} │ {}", subject, output)
         };
         self.draw(|| self.put(Channel::Stderr, &rendered));
+    }
+
+    /// Show `frame`, the unfinished line of the command step `step` runs, as
+    /// that step's spinner message on a terminal, at every verbosity. Under
+    /// `--verbose` it follows the step's subject. It is never printed and never
+    /// kept in the step's tail.
+    pub(crate) fn command_frame(&self, step: StepId, frame: Output) {
+        // The command may still redraw the frame, so only the spinner shows it.
+        let line = frame.as_str();
+        if line.trim().is_empty() {
+            return;
+        }
+        if let Ok(waiting) = self.waiting.lock()
+            && let Some(current) = waiting.get(&step)
+        {
+            // Printed lines carry the subject under `--verbose`, so the spinner
+            // keeps it too and a frame still says whose it is.
+            if self.is_verbose() {
+                current.show(&format!("{} │ {}", current.subject, line));
+            } else {
+                current.show(line);
+            }
+        }
     }
 
     // The message each waiting spinner shows, in the order the steps started
