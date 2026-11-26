@@ -339,13 +339,13 @@ impl EventProcessor {
                         }) => stderr.as_str().lines().map(Output::line).collect(),
                         _ => Vec::new(),
                     };
+                    // The command as the sentence bounds it, so the summary carries
+                    // no more of a long command than the error does.
                     let error_detail = match &err {
-                        OperationFailure::CommandError(CommandFailure::ExecutionFailed {
-                            command,
-                            exit_code,
-                            ..
-                        }) => ErrorDetail {
-                            command: Some(Command::written(command)),
+                        OperationFailure::CommandError(
+                            failure @ CommandFailure::ExecutionFailed { exit_code, .. },
+                        ) => ErrorDetail {
+                            command: Some(Command::written(failure.command_bounded().as_str())),
                             exit_code: *exit_code,
                             stderr: Some(stderr_lines.clone()),
                             ..detail
@@ -2685,6 +2685,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["not found"]
         );
+    }
+
+    // A long install command is named in the summary as the error sentence
+    // bounds it, keeping both ends, never whole.
+    #[tokio::test]
+    async fn a_failure_summary_names_a_long_command_in_its_bounded_form() {
+        use selfie::package::event::{CommandFailure, OperationFailure, OperationResult};
+
+        let command = format!("head-{}-tail", "z".repeat(3_000));
+        let events = vec![PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::ExecutionFailed {
+                    command: command.clone(),
+                    exit_code: Some(1),
+                    stdout: selfie::commands::BoundedText::bound(b""),
+                    stderr: selfie::commands::BoundedText::bound(b"e"),
+                },
+            )),
+        }];
+        let display = DisplayManager::new(false);
+
+        let _ = printed_for(display.clone(), events).await;
+
+        let errors = display.collected_errors();
+        let named = errors[0]
+            .command
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(named.len() < 2_100, "{} bytes", named.len());
+        assert!(
+            named.starts_with("head-") && named.ends_with("-tail"),
+            "{named}"
+        );
+        assert!(named.contains("bytes elided"), "{named}");
     }
 
     // A completed apply that refused an entry exits non-zero.
