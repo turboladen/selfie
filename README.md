@@ -246,10 +246,12 @@ to `63`; `64` to `78` (the `sysexits.h` codes) and `126` and up (reserved by she
 | `sync push`           | pushed; nothing to push                                                 | never                                                                                                                                                                                                                            | an error                                                                                                                                                                                                                                                                          |
 
 A configured command's exit status is all selfie knows about it. Your shell reports a command killed
-by a signal as an ordinary non-zero status, so a check that was killed reads as "not installed". An
-audit reports "not installed" when its command exits 0 and prints no source; an audit command that
-exits non-zero is a failure. An informational note, such as the one saying `apply` runs a spec's
-commands, never makes a run exit `3`.
+by a signal as an ordinary non-zero status, so a check that was killed reads as "not installed". A
+check that exits 127 or 126, a POSIX shell's or fish's codes for a command it could not find or
+execute, also reads as "not installed", and says which. An audit reports "not installed" when its
+command exits 0 and prints no source; an audit command that exits non-zero is a failure. An
+informational note, such as the one saying `apply` runs a spec's commands, never makes a run exit
+`3`.
 
 `selfie apply <name>` matches the name against package file names, ignoring case, the same way
 `selfie package install` does. A name that matches no package, names a package file that could not

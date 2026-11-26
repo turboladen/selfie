@@ -495,6 +495,14 @@ Optional command to verify the package is installed correctly. Should exit with 
 non-zero if not. If not given, executing the `check` command will always behave as if the package is
 not yet installed.
 
+Any non-zero exit means "not installed", including the two codes a POSIX shell or fish reserves for
+a command it could not run: 127 when a command in the check was not found, and 126 when it could not
+be executed. csh and tcsh exit 1 for a missing command, so under them no diagnosis is shown.
+`package list`, `package check`, `package status` and `package install` say which, as in
+`Not installed (command not found, exit code 127)`. That is the expected answer for a check such as
+`~/.local/bin/jq --version` before the tool is installed, and a sign of a misspelled check
+otherwise.
+
 `selfie package install` runs the check again right after a successful install command, in the same
 session, to confirm the install took. If the check still says the package is not installed, the
 install fails (exit `1`), and no package that depends on it is installed. So the check has to pass

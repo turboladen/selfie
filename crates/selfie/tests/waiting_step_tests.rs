@@ -254,7 +254,7 @@ async fn a_status_names_only_the_checks_it_runs() {
         "{statuses:?}"
     );
     assert!(
-        matches!(statuses[1].1, EnvironmentStatus::NotInstalled),
+        matches!(statuses[1].1, EnvironmentStatus::NotInstalled { .. }),
         "{statuses:?}"
     );
     assert!(

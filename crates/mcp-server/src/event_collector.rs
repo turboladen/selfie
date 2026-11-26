@@ -1097,7 +1097,7 @@ fn check_status_label(status: &EnvironmentStatus) -> Option<&'static str> {
 
     Some(match status {
         EnvironmentStatus::Installed => "installed",
-        EnvironmentStatus::NotInstalled => "not installed",
+        EnvironmentStatus::NotInstalled { .. } => "not installed",
         EnvironmentStatus::Unknown(UnknownStatus::NotInEnvironment) => return None,
         EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand) => "no check command defined",
         EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(CheckFailure::TimedOut(_))) => {
@@ -1115,15 +1115,26 @@ fn with_fields(mut row: Value, fields: serde_json::Map<String, Value>) -> Value 
     row
 }
 
-/// Renders why a check gave no answer as the fields [`failure_fields`] gives,
-/// each null for a check that answered.
+/// Renders a check row's `exit_code`, plus the fields [`failure_fields`] gives
+/// for why a check gave no answer. Each field is null where it does not apply.
 fn check_failure_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
-    failure_fields(match status {
+    let mut fields = failure_fields(match status {
         EnvironmentStatus::Unknown(selfie::package::event::UnknownStatus::CheckFailed(failure)) => {
             Some(failure)
         }
         _ => None,
-    })
+    });
+    fields.insert("exit_code".to_string(), exit_code_json(status));
+    fields
+}
+
+/// The exit code of a check that said not installed, or null for any other
+/// status and for a check that ended on a signal.
+fn exit_code_json(status: &EnvironmentStatus) -> Value {
+    match status {
+        EnvironmentStatus::NotInstalled { exit_code } => Value::from(*exit_code),
+        EnvironmentStatus::Installed | EnvironmentStatus::Unknown(_) => Value::Null,
+    }
 }
 
 /// Renders why a check or audit command gave no answer as `kind`, `reason`,
@@ -1173,12 +1184,15 @@ fn dep_statuses_to_json(statuses: &[selfie::package::event::DependencyStatus]) -
         .collect()
 }
 
-/// Renders a package's status as `status`, and for an unknown one `kind` (the
-/// label to branch on) and `reason` (prose), plus `failure` for a spec that
-/// could not be parsed or read, `conflicting_paths` for a name several files
-/// claim, `refusal`, `{kind, reason}`, for a refused spec, and for a check that
-/// gave no answer the `working_directory`, `timeout_seconds` and `limit`
-/// [`failure_fields`] gives a check row. A field that does not apply is null.
+/// Renders a package's status as fields, each null where it does not apply.
+///
+/// `status` is always set. `exit_code` is the code of a check that said not
+/// installed. An unknown status adds `kind`, the label to branch on, and
+/// `reason`, its prose. A spec that could not be parsed or read adds `failure`,
+/// a name several files claim adds `conflicting_paths`, and a refused spec adds
+/// `refusal` as `{kind, reason}`. A check that gave no answer adds the
+/// `working_directory`, `timeout_seconds` and `limit` that [`failure_fields`]
+/// gives a check row.
 // One function renders the package's own status and every dependency and
 // recommendation row, so the two shapes cannot disagree.
 fn status_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
@@ -1187,10 +1201,11 @@ fn status_fields(status: &EnvironmentStatus) -> serde_json::Map<String, Value> {
     let mut fields = serde_json::Map::new();
     let status_label = match status {
         EnvironmentStatus::Installed => "installed",
-        EnvironmentStatus::NotInstalled => "not installed",
+        EnvironmentStatus::NotInstalled { .. } => "not installed",
         EnvironmentStatus::Unknown(_) => "unknown",
     };
     fields.insert("status".to_string(), Value::from(status_label));
+    fields.insert("exit_code".to_string(), exit_code_json(status));
     let unknown = match status {
         EnvironmentStatus::Unknown(unknown) => Some(unknown),
         _ => None,
@@ -3442,6 +3457,64 @@ mod tests {
         assert_eq!(rows.len(), 2);
     }
 
+    // A check that said not installed carries its exit code in a check row, a
+    // listing row and a status row alike, as null when it ended on a signal,
+    // and its status stays "not installed" whatever the code. An answered
+    // check's row has a null code.
+    #[tokio::test]
+    async fn a_not_installed_check_carries_its_exit_code_in_every_row() {
+        use selfie::package::event::PackageListItem;
+
+        let not_installed = |exit_code| CheckResult::Failed {
+            stdout: selfie::commands::BoundedText::bound(b""),
+            stderr: selfie::commands::BoundedText::bound(b""),
+            exit_code,
+        };
+        for (result, expected_code, expected_status) in [
+            (not_installed(Some(127)), Value::from(127), "not installed"),
+            (not_installed(Some(126)), Value::from(126), "not installed"),
+            (not_installed(Some(1)), Value::from(1), "not installed"),
+            (not_installed(None), Value::Null, "not installed"),
+            (
+                CheckResult::Success {
+                    stdout: selfie::commands::BoundedText::bound(b""),
+                    stderr: selfie::commands::BoundedText::bound(b""),
+                },
+                Value::Null,
+                "installed",
+            ),
+        ] {
+            let mut events = vec![PackageEvent::CheckResultCompleted {
+                operation_info: test_op_info(),
+                check_result: CheckResultData {
+                    package_name: "p".to_string(),
+                    environment: "test".to_string(),
+                    check_command: Some("c".to_string()),
+                    result: result.clone(),
+                },
+            }];
+            events.extend(listing(vec![PackageListItem {
+                check_command: Some("c".to_string()),
+                name: "p".to_string(),
+                environments: vec!["test".to_string()],
+                status: EnvironmentStatus::from(&result),
+            }]));
+
+            let collected = collect_events(Box::pin(stream::iter(events))).await;
+
+            let rows = rows_of_type(&collected.data, &["check_result", "package_list_item"]);
+            assert_eq!(rows.len(), 2);
+            for row in &rows {
+                assert_eq!(row["exit_code"], expected_code, "{row}");
+                assert_eq!(row["status"], expected_status, "{row}");
+                assert_eq!(row["kind"], Value::Null, "{row}");
+            }
+            let status = status_fields(&EnvironmentStatus::from(&result));
+            assert_eq!(status["exit_code"], expected_code, "{status:?}");
+            assert_eq!(status["status"], expected_status, "{status:?}");
+        }
+    }
+
     #[tokio::test]
     async fn test_collect_success_with_check_result() {
         let events = vec![
@@ -4252,7 +4325,7 @@ mod tests {
                 check_command: None,
                 name: "missing-pkg".to_string(),
                 environments: vec!["macos".to_string()],
-                status: EnvironmentStatus::NotInstalled,
+                status: EnvironmentStatus::NotInstalled { exit_code: Some(1) },
             },
         ]);
         events.push(PackageEvent::Completed {
@@ -4511,7 +4584,7 @@ mod tests {
                         },
                         DependencyStatus {
                             name: "wget".to_string(),
-                            status: EnvironmentStatus::NotInstalled,
+                            status: EnvironmentStatus::NotInstalled { exit_code: Some(1) },
                         },
                     ],
                     recommends: vec![],

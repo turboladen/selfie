@@ -25,9 +25,27 @@ pub(crate) fn format_valid(use_colors: bool) -> Shown {
     format_status_indicator(lit!("✓"), lit!("Valid"), use_colors, |s| s.green())
 }
 
-/// Format a "not installed" status indicator
-pub(crate) fn format_not_installed(use_colors: bool) -> Shown {
-    format_status_indicator(lit!("✗"), lit!("Not installed"), use_colors, |s| s.cyan())
+/// Format a "not installed" status indicator for a check that exited
+/// `exit_code`.
+pub(crate) fn format_not_installed(exit_code: Option<i32>, use_colors: bool) -> Shown {
+    shown!(
+        "{} {}",
+        lit!("✗"),
+        styled_text(not_installed_label(exit_code), use_colors, |s| s.cyan())
+    )
+}
+
+/// "Not installed", followed by the shell's diagnosis when the check's exit
+/// code names one.
+fn not_installed_label(exit_code: Option<i32>) -> Shown {
+    match selfie::package::event::ShellDiagnosis::of_exit_code(exit_code) {
+        Some(diagnosis) => shown!(
+            "{} ({})",
+            lit!("Not installed"),
+            crate::received::composed(&diagnosis)
+        ),
+        None => lit!("Not installed").into(),
+    }
 }
 
 /// Format a status check error indicator
@@ -63,8 +81,8 @@ pub(crate) fn format_list_status(
     use selfie::package::event::{CheckFailure, EnvironmentStatus, UnknownStatus};
     match status {
         EnvironmentStatus::Installed => styled_text(lit!("Installed"), use_colors, |s| s.green()),
-        EnvironmentStatus::NotInstalled => {
-            styled_text(lit!("Not installed"), use_colors, |s| s.cyan())
+        EnvironmentStatus::NotInstalled { exit_code } => {
+            styled_text(not_installed_label(*exit_code), use_colors, |s| s.cyan())
         }
         EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand) => {
             styled_text(lit!("No check"), use_colors, |s| s.yellow())
@@ -118,6 +136,41 @@ mod tests {
         assert!(cell.matches('Z').count() < 3_000, "{}", &cell[..80]);
     }
 
+    // A not-installed row names the shell's diagnosis for 127 and 126, and an
+    // ordinary exit code, or none, adds nothing. Both renderers that show a
+    // status word it the same way.
+    #[test]
+    fn a_not_installed_status_names_the_shells_diagnosis() {
+        use selfie::package::event::EnvironmentStatus;
+
+        let cases = [
+            (
+                Some(127),
+                "Not installed (command not found, exit code 127)",
+            ),
+            (
+                Some(126),
+                "Not installed (command not executable, exit code 126)",
+            ),
+            (Some(1), "Not installed"),
+            (Some(128), "Not installed"),
+            (None, "Not installed"),
+        ];
+        for (exit_code, expected) in cases {
+            let status = EnvironmentStatus::NotInstalled { exit_code };
+            assert_eq!(
+                format_list_status(&status, false).to_string(),
+                expected,
+                "{exit_code:?}"
+            );
+            assert_eq!(
+                crate::commands::spec::info::format_status(&status, false).to_string(),
+                format!("✗ {expected}"),
+                "{exit_code:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_format_installed_with_colors() {
         let result = format_installed(true);
@@ -134,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_format_not_installed() {
-        let result = format_not_installed(false);
+        let result = format_not_installed(None, false);
         assert!(result.contains("Not installed"));
         assert!(result.contains("✗"));
     }
@@ -179,7 +232,7 @@ mod tests {
         let formats = vec![
             format_installed(false),
             format_valid(false),
-            format_not_installed(false),
+            format_not_installed(None, false),
             format_no_audit(false),
             format_status_error(false),
             format_audit_clean(false),

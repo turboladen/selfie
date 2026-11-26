@@ -1460,7 +1460,7 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(!output.is_success());
-        assert_eq!(output.exit_code(), 1);
+        assert_eq!(output.code(), Some(1));
     }
 
     #[tokio::test]
@@ -1686,7 +1686,7 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(!output.is_success());
-        assert_eq!(output.exit_code(), 42);
+        assert_eq!(output.code(), Some(42));
     }
 
     #[tokio::test]
@@ -1963,7 +1963,7 @@ mod tests {
             .unwrap();
 
         assert!(!output.is_success());
-        assert_eq!(output.exit_code(), 3);
+        assert_eq!(output.code(), Some(3));
     }
 
     #[tokio::test]
@@ -2609,7 +2609,7 @@ mod tests {
         .expect("the streaming command hung")
         .expect("command failed");
 
-        assert!(output.is_success(), "exit code {}", output.exit_code());
+        assert!(output.is_success(), "exit code {:?}", output.code());
         assert!(
             output.stdout().len() > 200_000,
             "stdout was only {} bytes",

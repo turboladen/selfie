@@ -146,11 +146,14 @@ fn display_check_result_card(
         CheckAnswer::NotInstalled { output, exit_code } => {
             let mut fields = vec![(
                 lit!("Status"),
-                status_style::format_not_installed(use_colors),
+                status_style::format_not_installed(exit_code, use_colors),
             )];
+            // A shell diagnosis already names its code in the status.
             if let Some(output) = output {
                 fields.push((lit!("Details"), output.into()));
-            } else if let Some(code) = exit_code {
+            } else if let Some(code) = exit_code
+                && selfie::package::event::ShellDiagnosis::of_exit_code(exit_code).is_none()
+            {
                 fields.push((lit!("Details"), shown!("Exit code {}", code)));
             }
             fields
@@ -249,6 +252,36 @@ mod tests {
 
         assert_eq!(details("from stdout\n"), "   Details: from stdout");
         assert_eq!(details("\n"), "   Details: Exit code 3");
+    }
+
+    // A silent check the shell could not run names its code once, in the
+    // status, and adds no Details repeating it.
+    #[test]
+    fn a_silent_check_with_a_shell_diagnosis_names_its_code_once() {
+        let config = CliConfig::wrap_for_test(test_common::test_config_with_dir(
+            std::path::Path::new("/packages"),
+        ));
+        let check = CheckResultData {
+            package_name: "pkg".to_string(),
+            environment: "test".to_string(),
+            check_command: None,
+            result: CheckResult::Failed {
+                stdout: BoundedText::bound(b""),
+                stderr: BoundedText::bound(b""),
+                exit_code: Some(127),
+            },
+        };
+        let display = DisplayManager::new(false);
+
+        display_check_result_card(&check, &config, &display);
+
+        let written = display.written().join("\n");
+        assert_eq!(written.matches("127").count(), 1, "{written}");
+        assert!(
+            written.contains("Not installed (command not found, exit code 127)"),
+            "{written}"
+        );
+        assert!(!written.contains("Details"), "{written}");
     }
 
     // Without the card, a failed check whose stderr is only blank space warns

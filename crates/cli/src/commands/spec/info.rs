@@ -229,7 +229,9 @@ pub(crate) fn create_environment_table(
 pub(crate) fn format_status(status: &EnvironmentStatus, use_colors: bool) -> Shown {
     match status {
         EnvironmentStatus::Installed => status_style::format_installed(use_colors),
-        EnvironmentStatus::NotInstalled => status_style::format_not_installed(use_colors),
+        EnvironmentStatus::NotInstalled { exit_code } => {
+            status_style::format_not_installed(*exit_code, use_colors)
+        }
         EnvironmentStatus::Unknown(reason) => status_style::styled_text(
             // The reason ends its line, so a note after it lands under it.
             shown!("Unknown: {}", received::unknown_status(reason)),
@@ -269,7 +271,7 @@ mod tests {
             dependency_statuses: Vec::new(),
             recommends: vec!["r\u{200B}s".to_string()],
             recommend_statuses: Vec::new(),
-            status: EnvironmentStatus::NotInstalled,
+            status: EnvironmentStatus::NotInstalled { exit_code: Some(1) },
         };
 
         let table = create_environment_table(&env_status, &config).to_string();
@@ -344,7 +346,7 @@ mod tests {
             dependency_statuses: Vec::new(),
             recommends: Vec::new(),
             recommend_statuses: Vec::new(),
-            status: EnvironmentStatus::NotInstalled,
+            status: EnvironmentStatus::NotInstalled { exit_code: Some(1) },
         };
 
         let table = create_environment_table(&env_status, &config).to_string();
@@ -383,7 +385,7 @@ mod tests {
         let result = format_status(&status, use_colors);
         assert!(result.contains("Installed"));
 
-        let status = EnvironmentStatus::NotInstalled;
+        let status = EnvironmentStatus::NotInstalled { exit_code: Some(1) };
         let result = format_status(&status, use_colors);
         assert!(result.contains("Not installed"));
     }
@@ -411,7 +413,7 @@ mod tests {
     fn test_format_dependency_with_status_not_installed() {
         let dep = DependencyStatus {
             name: "curl".to_string(),
-            status: EnvironmentStatus::NotInstalled,
+            status: EnvironmentStatus::NotInstalled { exit_code: Some(1) },
         };
         let result = format_dependency_with_status(&Name::new(&dep.name), &dep.status, false);
         assert!(result.starts_with("curl: "));

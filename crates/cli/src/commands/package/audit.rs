@@ -194,7 +194,7 @@ fn display_audit_result_card(
         ],
         AuditFinding::NotInstalled => vec![(
             lit!("Status"),
-            status_style::format_not_installed(use_colors),
+            status_style::format_not_installed(None, use_colors),
         )],
         AuditFinding::NoAuditCommand => {
             vec![(lit!("Status"), status_style::format_no_audit(use_colors))]

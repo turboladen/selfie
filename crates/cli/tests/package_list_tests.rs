@@ -817,3 +817,90 @@ fn an_ambiguous_row_is_labeled_by_the_files_name() {
     assert!(stdout.contains("nvim"), "{stdout}");
     assert!(!stdout.contains("neovim"), "{stdout}");
 }
+
+// The status cell of the row whose name is `name`, in a listing's table.
+fn status_cell<'a>(listing: &'a str, name: &str) -> &'a str {
+    let row = listing
+        .lines()
+        .find(|line| {
+            line.split('┆')
+                .nth(1)
+                .is_some_and(|cell| cell.trim() == name)
+        })
+        .unwrap_or_else(|| panic!("no row for {name} in:\n{listing}"));
+    row.split('┆')
+        .nth(2)
+        .unwrap_or_else(|| panic!("no status cell in: {row}"))
+        .trim()
+        .trim_end_matches('│')
+        .trim()
+}
+
+// A check the shell cannot run still lists as not installed, and the row
+// names what the shell said. An ordinary non-zero exit lists plainly. The
+// listing's exit status is the same either way.
+#[test]
+fn a_check_the_shell_cannot_run_lists_its_diagnosis() {
+    let temp_dir = setup_default_test_config();
+    // Checks run in the package directory, so a relative path reaches the
+    // script with no quoting, whatever the temporary directory is called.
+    let packages = temp_dir.path().join("packages");
+    fs::create_dir_all(&packages).unwrap();
+    fs::write(packages.join("not-executable.sh"), "#!/bin/sh\ntrue\n").unwrap();
+    let missing = format!("selfie-no-such-command-{}", std::process::id());
+    for (name, check) in [
+        ("missing", missing.as_str()),
+        ("unexecutable", "./not-executable.sh"),
+        ("exits-one", "exit 1"),
+        ("present", "true"),
+    ] {
+        let package = PackageBuilder::default()
+            .name(name)
+            .environment(SELFIE_ENV, |b| b.install("true").check_some(check))
+            .build();
+        add_package(&temp_dir, &package);
+    }
+
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["package", "list"]);
+
+    let output = cmd.assert().code(CLEAN).get_output().stdout.clone();
+    let listing = String::from_utf8_lossy(&output);
+    assert_eq!(
+        status_cell(&listing, "missing"),
+        "Not installed (command not found, exit code 127)"
+    );
+    assert_eq!(
+        status_cell(&listing, "unexecutable"),
+        "Not installed (command not executable, exit code 126)"
+    );
+    assert_eq!(status_cell(&listing, "exits-one"), "Not installed");
+    assert_eq!(status_cell(&listing, "present"), "Installed");
+}
+
+// `package check` words a check the shell could not run as the listing does,
+// and still finds the package not installed.
+#[test]
+fn package_check_names_the_shells_diagnosis() {
+    let temp_dir = setup_default_test_config();
+    let missing = format!("selfie-no-such-command-{}", std::process::id());
+    let package = PackageBuilder::default()
+        .name("missing")
+        .environment(SELFIE_ENV, |b| b.install("true").check_some(&missing))
+        .build();
+    add_package(&temp_dir, &package);
+
+    let mut cmd = sandboxed_command(&temp_dir);
+    cmd.args(["package", "check", "missing"]);
+
+    let output = cmd.assert().code(FOUND).get_output().clone();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        all.contains("found it not installed (command not found, exit code 127)"),
+        "got:\n{all}"
+    );
+}
