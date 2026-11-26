@@ -390,12 +390,6 @@ mod tests {
             "test".to_string(),
             OperationContext::default(),
         );
-        // This reaches the warning's call site before the capture starts, as
-        // `capture_tracing` requires, with a canceled task's harmless error.
-        let canceled = tokio::spawn(std::future::pending::<(TailWindows, TailWindows)>());
-        canceled.abort();
-        report_relay_end(canceled.await, &sender).await;
-        let _ = rx.recv().await;
         let log = test_common::capture_tracing(tracing::Level::TRACE);
         let panicked: Result<(TailWindows, TailWindows), _> =
             tokio::spawn(async { panic!("relay held TOKEN={SECRET}") }).await;
