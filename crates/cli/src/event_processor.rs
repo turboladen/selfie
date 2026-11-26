@@ -10,8 +10,8 @@ use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit
 use futures::StreamExt;
 use selfie::package::{
     event::{
-        DotfileSource, EventStream, OperationInfo, OperationResult, OperationType, Outcome,
-        PackageEvent, RefusedPackage, Settled, StepKind,
+        ConsoleOutput, DotfileSource, EventStream, OperationInfo, OperationResult, OperationType,
+        Outcome, PackageEvent, RefusedPackage, Settled, StepId, StepKind,
     },
     port::{PackageError, PackageParseKind},
 };
@@ -118,12 +118,16 @@ pub struct EventProcessingResult {
 #[derive(Debug)]
 pub struct EventProcessor {
     display: DisplayManager,
+    partial: PartialLines,
 }
 
 impl EventProcessor {
     /// Create a new event processor with the given display manager
     pub fn new(display: DisplayManager) -> Self {
-        Self { display }
+        Self {
+            display,
+            partial: PartialLines::default(),
+        }
     }
 
     /// Process events from the stream with a custom event handler
@@ -135,7 +139,7 @@ impl EventProcessor {
     /// - `true` if the event was handled (skip default handling)
     /// - `false` to use default handling for the event
     pub async fn process_events<F>(
-        self,
+        mut self,
         mut stream: EventStream,
         mut custom_handler: F,
     ) -> EventProcessingResult
@@ -149,17 +153,24 @@ impl EventProcessor {
             // exit code is the library's verdict, whoever renders it.
             // A step still open when the operation ends is cleared without a
             // result line, before anything renders the ending: only its own end
-            // event says how it went.
+            // event says how it went. A step's unfinished lines print before
+            // either, so they still carry the step's label and join its tail.
             let canceled = match &event {
                 PackageEvent::Completed { result, .. } => {
                     ending = Some(Exit::from(result.outcome()));
+                    self.flush(None);
                     self.display.clear_waiting();
                     false
                 }
                 PackageEvent::Canceled { .. } => {
                     ending = Some(Exit::Canceled);
+                    self.flush(None);
                     self.display.clear_waiting();
                     true
+                }
+                PackageEvent::StepEnded { step, .. } => {
+                    self.flush(Some(*step));
+                    false
                 }
                 _ => false,
             };
@@ -174,6 +185,7 @@ impl EventProcessor {
             }
         }
 
+        self.flush(None);
         // A stream that ends without saying how the operation went, as one does when
         // the task running it panics, is a failure: nothing reported the work done.
         let exit = ending.unwrap_or_else(|| {
@@ -187,8 +199,16 @@ impl EventProcessor {
         EventProcessingResult { exit }
     }
 
+    /// Print the unfinished lines of step `only`, or of every step when `only`
+    /// is `None`.
+    fn flush(&mut self, only: Option<StepId>) {
+        for (step, line) in self.partial.take(only) {
+            self.display.command_output(step, Output::line(&line));
+        }
+    }
+
     /// Render one event the default way.
-    fn handle_event(&self, event: PackageEvent) {
+    fn handle_event(&mut self, event: PackageEvent) {
         // A line that names a source prints with its heading as one block, so a
         // conflict prompt printing on the service's thread cannot land between
         // them.
@@ -223,10 +243,16 @@ impl EventProcessor {
             }
 
             // A configured command's own output is not the answer: stderr, and at
-            // default verbosity only as the waiting spinner's latest line.
+            // default verbosity only as the waiting spinner's latest line. A read
+            // ends wherever the pipe did, so only its complete lines print here.
             PackageEvent::Info { step, output, .. } => {
-                for line in output.text().lines() {
-                    self.display.command_output(step, Output::line(line));
+                for piece in self.partial.push(step, Pipe::of(&output), output.text()) {
+                    match piece {
+                        Piece::Line(line) => self.display.command_output(step, Output::line(&line)),
+                        Piece::Frame(frame) => {
+                            self.display.command_frame(step, Output::line(&frame));
+                        }
+                    }
                 }
             }
 
@@ -691,6 +717,147 @@ impl EventProcessor {
             target: crate::display_manager::shorten_path(target),
             detail,
         });
+    }
+}
+
+/// Returns where the escape sequence that `buffer` ends inside of begins, if
+/// it ends inside one.
+// A control sequence (`ESC [`) ends at its final byte, an operating-system
+// command or device control string (`ESC ]`, `ESC P`) at BEL or `ESC \`, and
+// any other escape at the byte after ESC. `ESC \` finishes a string because
+// its ESC is the last one, followed by a byte. A control sequence unfinished
+// past 32 bytes, or a string past 512, is not a real one, so the cut goes where
+// it falls. 512 covers a hyperlink's URL and keeps the carry small beside the
+// cap.
+fn unfinished_escape(buffer: &str) -> Option<usize> {
+    let esc = buffer.rfind('\x1b')?;
+    let rest = &buffer.as_bytes()[esc + 1..];
+    let (finished, limit) = match rest.split_first() {
+        None => (false, 1),
+        Some((b'[', params)) => (params.iter().any(|b| (0x40..=0x7e).contains(b)), 32),
+        Some((b']' | b'P', body)) => (body.contains(&0x07), 512),
+        Some(_) => (true, 0),
+    };
+    (!finished && rest.len() < limit).then_some(esc)
+}
+
+/// Names the pipe a piece of a command's output came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pipe {
+    Stdout,
+    Stderr,
+}
+
+impl Pipe {
+    fn of(output: &ConsoleOutput) -> Self {
+        match output {
+            ConsoleOutput::Stdout(_) => Pipe::Stdout,
+            ConsoleOutput::Stderr(_) => Pipe::Stderr,
+        }
+    }
+}
+
+/// Sets how many bytes an unfinished line may hold before it prints as a line
+/// anyway.
+const LINE_CAP: usize = 4096;
+
+/// Holds what one read of a command's output completed.
+#[derive(Debug)]
+enum Piece {
+    /// A line, ended by a newline or by the cap.
+    Line(String),
+    /// The unfinished line, for the spinner to show as a terminal would. It is
+    /// never printed.
+    // The next read may redraw it, so a printed frame would show text the
+    // terminal no longer has.
+    Frame(String),
+}
+
+/// Holds the unfinished last line of each open step's pipes.
+#[derive(Debug, Default)]
+struct PartialLines {
+    open: Vec<(StepId, Pipe, String)>,
+}
+
+// Each buffer belongs to one step's pipe, so output another step or pipe writes
+// between the two halves of a line joins neither. A `Vec` keeps the order the
+// pipes first wrote in, so a run that ends prints its fragments in a fixed order.
+impl PartialLines {
+    /// Add `text`, the next read from `step`'s `pipe`, and return what it
+    /// completed: its lines, then the unfinished line as a frame if the read
+    /// added to it. An unfinished line that reaches [`LINE_CAP`] bytes is
+    /// returned as a line instead, unless it holds a carriage return: then the
+    /// frames already redrawn are dropped, and only a frame that alone reaches
+    /// the cap is returned as a line.
+    fn push(&mut self, step: StepId, pipe: Pipe, text: &str) -> Vec<Piece> {
+        let index = match self
+            .open
+            .iter()
+            .position(|(s, p, _)| *s == step && *p == pipe)
+        {
+            Some(index) => index,
+            None => {
+                self.open.push((step, pipe, String::new()));
+                self.open.len() - 1
+            }
+        };
+        let buffer = &mut self.open[index].2;
+        buffer.push_str(text);
+        // Lines split as `str::lines` splits a failure's whole stderr, so a line
+        // the step's tail showed matches its copy there. A line keeps any
+        // carriage returns, and `Output::line` keeps the text after the last.
+        let mut pieces: Vec<Piece> = match buffer.rfind('\n') {
+            Some(end) => {
+                let lines = buffer[..end]
+                    .lines()
+                    .map(|line| Piece::Line(line.to_owned()))
+                    .collect();
+                buffer.drain(..=end);
+                lines
+            }
+            None => Vec::new(),
+        };
+        // A progress bar redraws with `\r` and may end no line until it is
+        // done. Once its frames reach the cap, those already redrawn are dropped,
+        // keeping the frame being drawn, or the last complete one when the next
+        // has not begun. The cap then prints a frame only when one frame alone
+        // reaches it.
+        if buffer.len() >= LINE_CAP
+            && let Some(last) = buffer.trim_end_matches('\r').rfind('\r')
+        {
+            buffer.drain(..=last);
+        }
+        // A command that never ends a line still streams, and the buffer stays
+        // bounded. The cut never lands inside a character, and an escape
+        // sequence it would split moves on to the next line whole.
+        if buffer.len() >= LINE_CAP {
+            let cut = unfinished_escape(buffer).unwrap_or(buffer.len());
+            let rest = buffer.split_off(cut);
+            pieces.push(Piece::Line(std::mem::replace(buffer, rest)));
+        }
+        // The spinner shows what a terminal would show now: `Output::line` keeps
+        // the frame being drawn, or the last complete one before the next
+        // begins. A read that only ended lines leaves the spinner on its last.
+        // A buffer holding only an escape the cap carried shows as blank, since
+        // `Output::line` strips a cut sequence, and the spinner skips a blank.
+        let added = &text[text.rfind('\n').map_or(0, |end| end + 1)..];
+        if !added.is_empty() && !buffer.is_empty() {
+            pieces.push(Piece::Frame(buffer.clone()));
+        }
+        pieces
+    }
+
+    /// Remove and return the unfinished lines of step `only`, or of every step
+    /// when `only` is `None`.
+    fn take(&mut self, only: Option<StepId>) -> Vec<(StepId, String)> {
+        let (taken, kept) = std::mem::take(&mut self.open)
+            .into_iter()
+            .partition(|(step, _, _)| only.is_none_or(|only| *step == only));
+        self.open = kept;
+        taken
+            .into_iter()
+            .map(|(step, _, line)| (step, line))
+            .collect()
     }
 }
 
@@ -1410,6 +1577,522 @@ mod tests {
         assert!(printed.is_empty(), "{printed:?}");
     }
 
+    fn info(id: u64, output: ConsoleOutput) -> PackageEvent {
+        PackageEvent::Info {
+            operation_info: make_operation_info("bat"),
+            step: StepId::from_raw(id),
+            output,
+        }
+    }
+
+    fn out(text: &str) -> ConsoleOutput {
+        ConsoleOutput::Stdout(text.to_string())
+    }
+
+    fn err(text: &str) -> ConsoleOutput {
+        ConsoleOutput::Stderr(text.to_string())
+    }
+
+    // Returns the waiting step `id`, which runs `package`'s install command.
+    fn installing(id: u64, package: &str) -> PackageEvent {
+        step(
+            StepKind::Waiting(StepId::from_raw(id)),
+            &format!("Running the install command for {package}"),
+        )
+    }
+
+    // Returns `line` as `--verbose` prints it without a terminal, labeled with
+    // `package`'s install step.
+    fn labeled(package: &str, line: &str) -> String {
+        format!("  Running the install command for {package} │ {line}")
+    }
+
+    // Returns the command output lines in `printed`, which are the labeled ones.
+    fn output_lines(printed: &[(crate::display_manager::Channel, String)]) -> Vec<String> {
+        printed
+            .iter()
+            .filter(|(_, line)| line.contains('│'))
+            .map(|(_, line)| line.clone())
+            .collect()
+    }
+
+    // Returns a processor on `display` whose step 1 runs bat's install command.
+    fn running_bat(display: &DisplayManager) -> EventProcessor {
+        let mut processor = EventProcessor::new(display.clone());
+        processor.handle_event(installing(1, "bat"));
+        processor
+    }
+
+    // Returns the text of each line in `printed`.
+    fn texts(printed: &[(crate::display_manager::Channel, String)]) -> Vec<&str> {
+        printed.iter().map(|(_, line)| line.as_str()).collect()
+    }
+
+    // Returns where the first line containing `needle` is in `lines`.
+    fn index_of(lines: &[&str], needle: &str) -> usize {
+        lines
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("no line containing {needle:?} in {lines:?}"))
+    }
+
+    fn failed_with_stderr(stderr: &[u8]) -> PackageEvent {
+        use selfie::package::event::{CommandFailure, OperationFailure};
+
+        PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::ExecutionFailed {
+                    command: "brew install bat".to_string(),
+                    exit_code: Some(1),
+                    stdout: selfie::commands::BoundedText::bound(b""),
+                    stderr: selfie::commands::BoundedText::bound(stderr),
+                },
+            )),
+        }
+    }
+
+    // A line the command wrote in two reads prints once, whole.
+    #[tokio::test]
+    async fn a_line_split_across_two_reads_prints_once() {
+        let printed = printed_for(
+            verbose(),
+            vec![
+                installing(1, "bat"),
+                info(1, out("Downloading foo")),
+                info(1, out(" done\n")),
+            ],
+        )
+        .await;
+        assert_eq!(
+            output_lines(&printed),
+            [labeled("bat", "Downloading foo done")]
+        );
+    }
+
+    // A read holding several lines prints each as it arrives.
+    #[tokio::test]
+    async fn several_lines_in_one_read_print_separately() {
+        let display = verbose();
+        let mut processor = running_bat(&display);
+        processor.handle_event(info(1, out("a\nb\n")));
+        assert_eq!(
+            output_lines(&display.printed()),
+            [labeled("bat", "a"), labeled("bat", "b")]
+        );
+    }
+
+    // A last line with no newline prints when its step ends, still labeled
+    // with the step.
+    #[tokio::test]
+    async fn a_final_fragment_prints_when_its_step_ends() {
+        let printed = printed_for(
+            verbose(),
+            vec![
+                installing(1, "bat"),
+                info(1, out("x\n")),
+                info(1, out("tail")),
+                ended(1, StepEnding::Succeeded),
+            ],
+        )
+        .await;
+        assert_eq!(
+            output_lines(&printed),
+            [labeled("bat", "x"), labeled("bat", "tail")]
+        );
+    }
+
+    // A failed step's tail holds its whole last line, even one with no newline
+    // that reached stderr in two reads. The tail prints when the step ends,
+    // before the failure, and the failure's stderr leaves it out.
+    #[tokio::test]
+    async fn a_failed_steps_tail_holds_the_whole_last_line() {
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        let printed = printed_for(
+            display,
+            vec![
+                installing(1, "bat"),
+                info(1, err("Error: no ")),
+                info(1, err("bottle")),
+                ended(1, StepEnding::Failed),
+                failed_with_stderr(b"Error: no bottle"),
+            ],
+        )
+        .await;
+        let lines = texts(&printed);
+        let bottle: Vec<usize> = (0..lines.len())
+            .filter(|&i| lines[i].contains("bottle"))
+            .collect();
+        assert_eq!(bottle.len(), 1, "{lines:?}");
+        assert_eq!(lines[bottle[0]].trim(), "Error: no bottle", "{lines:?}");
+        assert!(
+            bottle[0] < index_of(&lines, "brew install bat"),
+            "{lines:?}"
+        );
+    }
+
+    // A fragment still open when the operation completes prints before the
+    // result, labeled with its step.
+    #[tokio::test]
+    async fn a_fragment_open_at_the_completion_prints_before_it() {
+        let printed = printed_for(
+            verbose(),
+            vec![installing(1, "bat"), info(1, out("frag")), checked()],
+        )
+        .await;
+        assert_eq!(output_lines(&printed), [labeled("bat", "frag")]);
+        let lines = texts(&printed);
+        assert!(
+            index_of(&lines, "frag") < index_of(&lines, "check completed"),
+            "{lines:?}"
+        );
+    }
+
+    // A fragment still open when the operation is canceled prints, labeled
+    // with its step.
+    #[tokio::test]
+    async fn a_fragment_open_at_cancel_prints() {
+        let printed = printed_for(
+            verbose(),
+            vec![
+                installing(1, "bat"),
+                info(1, out("frag")),
+                PackageEvent::Canceled {
+                    operation_info: make_operation_info("bat"),
+                    reason: "Ctrl+C".to_string(),
+                },
+            ],
+        )
+        .await;
+        assert_eq!(output_lines(&printed), [labeled("bat", "frag")]);
+    }
+
+    // A fragment still open when the stream ends without a result prints,
+    // labeled with its step.
+    #[tokio::test]
+    async fn a_fragment_open_when_the_stream_ends_prints() {
+        let printed =
+            printed_for(verbose(), vec![installing(1, "bat"), info(1, out("frag"))]).await;
+        assert_eq!(output_lines(&printed), [labeled("bat", "frag")]);
+    }
+
+    // A line another step writes between the halves of one step's line joins
+    // neither, and each prints under its own step.
+    #[tokio::test]
+    async fn interleaved_steps_keep_their_own_lines() {
+        let printed = printed_for(
+            verbose(),
+            vec![
+                installing(1, "bat"),
+                installing(2, "fd"),
+                info(1, out("Down")),
+                info(2, out("other\n")),
+                info(1, out("load\n")),
+            ],
+        )
+        .await;
+        assert_eq!(
+            output_lines(&printed),
+            [labeled("fd", "other"), labeled("bat", "Download")]
+        );
+    }
+
+    // A stderr line written between the halves of a stdout line joins neither.
+    #[tokio::test]
+    async fn stdout_and_stderr_of_one_step_keep_their_own_lines() {
+        let printed = printed_for(
+            verbose(),
+            vec![
+                installing(1, "bat"),
+                info(1, out("a")),
+                info(1, err("err\n")),
+                info(1, out("b\n")),
+            ],
+        )
+        .await;
+        assert_eq!(
+            output_lines(&printed),
+            [labeled("bat", "err"), labeled("bat", "ab")]
+        );
+    }
+
+    // A progress bar that starts each frame with a carriage return shows the
+    // frame being drawn in its step's spinner, and prints nothing.
+    #[tokio::test]
+    async fn a_bar_that_leads_with_a_carriage_return_shows_in_the_spinner() {
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        let mut processor = running_bat(&display);
+        processor.handle_event(info(1, out("\r 10%")));
+        assert_eq!(display.waiting_messages(), [" 10%"]);
+        processor.handle_event(info(1, out("\r 55%\r 70%")));
+        assert_eq!(display.waiting_messages(), [" 70%"]);
+        assert!(
+            !display.printed().iter().any(|(_, line)| line.contains('%')),
+            "{:?}",
+            display.printed()
+        );
+    }
+
+    // A progress bar that ends each frame with a carriage return shows each
+    // frame in its step's spinner as it arrives.
+    #[tokio::test]
+    async fn a_bar_that_ends_with_a_carriage_return_shows_in_the_spinner() {
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        let mut processor = running_bat(&display);
+        processor.handle_event(info(1, out(" 10%\r")));
+        assert_eq!(display.waiting_messages(), [" 10%"]);
+        processor.handle_event(info(1, out(" 55%\r")));
+        assert_eq!(display.waiting_messages(), [" 55%"]);
+    }
+
+    // Under `--verbose` a progress bar prints one line, its last frame, however
+    // many frames it drew.
+    #[tokio::test]
+    async fn a_bar_under_verbose_prints_one_line() {
+        let mut events = vec![installing(1, "bat")];
+        events.extend((0..100).map(|percent| info(1, out(&format!("\r{percent}%")))));
+        events.push(info(1, out("\r100%\n")));
+        let printed = printed_for(verbose(), events).await;
+        assert_eq!(output_lines(&printed), [labeled("bat", "100%")]);
+    }
+
+    // A failed bar's frames stay out of its step's tail, so its last frame
+    // prints once, from the tail, and the failure's stderr repeats none of it.
+    #[tokio::test]
+    async fn a_failed_bar_prints_once() {
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        let printed = printed_for(
+            display,
+            vec![
+                installing(1, "bat"),
+                info(1, err("\r10%")),
+                info(1, err("\r55%")),
+                info(1, err("\r100%\nboom\n")),
+                ended(1, StepEnding::Failed),
+                failed_with_stderr(b"\r10%\r55%\r100%\nboom\n"),
+            ],
+        )
+        .await;
+        let shown: Vec<&str> = texts(&printed)
+            .into_iter()
+            .map(str::trim)
+            .filter(|line| line.contains('%') || line.contains("boom"))
+            .collect();
+        assert_eq!(shown, ["100%", "boom"], "{printed:?}");
+    }
+
+    // A fragment with no line end shows in its step's spinner while the
+    // command works, and prints nothing until its line ends.
+    #[tokio::test]
+    async fn a_fragment_with_no_line_end_shows_in_the_spinner() {
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        let mut processor = running_bat(&display);
+        processor.handle_event(info(1, out("Compiling foo")));
+        assert_eq!(display.waiting_messages(), ["Compiling foo"]);
+        assert!(
+            !display
+                .printed()
+                .iter()
+                .any(|(_, line)| line.contains("Compiling")),
+            "{:?}",
+            display.printed()
+        );
+    }
+
+    // Under `--verbose` a bar shows in the spinner after its step's subject,
+    // prints nothing while it draws, and leaves the spinner on the subject once
+    // its line prints.
+    #[tokio::test]
+    async fn a_bar_shows_after_the_subject_under_verbose() {
+        let display = verbose().drawing_as_a_terminal();
+        let mut processor = running_bat(&display);
+        processor.handle_event(info(1, out("\r 10%")));
+        assert_eq!(
+            display.waiting_messages(),
+            ["Running the install command for bat │  10%"]
+        );
+        assert!(
+            !display.printed().iter().any(|(_, line)| line.contains('%')),
+            "{:?}",
+            display.printed()
+        );
+        processor.handle_event(info(1, out("\r100%\n")));
+        assert_eq!(
+            display.waiting_messages(),
+            ["Running the install command for bat"]
+        );
+    }
+
+    // Under `--verbose` two steps drawing at once each show their own frame
+    // after their own subject.
+    #[tokio::test]
+    async fn concurrent_bars_keep_their_subjects_under_verbose() {
+        let display = verbose().drawing_as_a_terminal();
+        let mut processor = running_bat(&display);
+        processor.handle_event(installing(2, "fd"));
+        processor.handle_event(info(1, out("\r 10%")));
+        processor.handle_event(info(2, out("\r 20%")));
+        assert_eq!(
+            display.waiting_messages(),
+            [
+                "Running the install command for bat │  10%",
+                "Running the install command for fd │  20%",
+            ]
+        );
+    }
+
+    // A bar that redraws past the cap without ever ending a line prints only
+    // its last frame, when its step ends, at either verbosity, and whether its
+    // frames start or end with the carriage return.
+    #[tokio::test]
+    async fn a_long_bar_with_no_line_end_prints_only_its_last_frame() {
+        let frames = || (0..300).map(|i| info(1, err(&format!("\r{i:04} frames drawn so far"))));
+        assert!(300 * "\r0000 frames drawn so far".len() > LINE_CAP);
+
+        let mut events = vec![installing(1, "bat")];
+        events.extend(frames());
+        events.push(ended(1, StepEnding::Succeeded));
+        let printed = printed_for(verbose(), events).await;
+        assert_eq!(
+            output_lines(&printed),
+            [labeled("bat", "0299 frames drawn so far")]
+        );
+
+        let mut events = vec![installing(1, "bat")];
+        // One read, so the cap meets a buffer that ends at a carriage return.
+        let trailing: String = (0..300)
+            .map(|i| format!("{i:04} frames drawn so far\r"))
+            .collect();
+        events.push(info(1, err(&trailing)));
+        events.push(ended(1, StepEnding::Succeeded));
+        let printed = printed_for(verbose(), events).await;
+        assert_eq!(
+            output_lines(&printed),
+            [labeled("bat", "0299 frames drawn so far")]
+        );
+
+        let mut events = vec![installing(1, "bat")];
+        events.extend(frames());
+        events.push(ended(1, StepEnding::Failed));
+        let printed = printed_for(DisplayManager::new(false).drawing_as_a_terminal(), events).await;
+        let drawn: Vec<&str> = texts(&printed)
+            .into_iter()
+            .filter(|line| line.contains("frames drawn"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(drawn, ["0299 frames drawn so far"], "{printed:?}");
+    }
+
+    // An escape sequence the cap would cut moves whole onto the next line, so
+    // neither line shows a piece of it.
+    #[tokio::test]
+    async fn an_escape_sequence_cut_by_the_cap_stays_whole() {
+        let long = "x".repeat(LINE_CAP - 3);
+        let printed = printed_for(
+            verbose(),
+            vec![
+                installing(1, "bat"),
+                info(1, out(&format!("{long}\u{1b}[3"))),
+                info(1, out("2mred\u{1b}[0m\n")),
+            ],
+        )
+        .await;
+        assert_eq!(
+            output_lines(&printed),
+            [labeled("bat", &long), labeled("bat", "red")]
+        );
+    }
+
+    // A bar whose frames are too wide for two to fit under the cap still prints
+    // only its last frame.
+    #[tokio::test]
+    async fn a_bar_of_wide_frames_prints_only_its_last_frame() {
+        let mut events = vec![installing(1, "bat")];
+        let frames: Vec<String> = ['a', 'b', 'c', 'd', 'e']
+            .into_iter()
+            .map(|c| c.to_string().repeat(2100))
+            .collect();
+        events.extend(
+            frames
+                .iter()
+                .map(|frame| info(1, out(&format!("\r{frame}")))),
+        );
+        events.push(ended(1, StepEnding::Succeeded));
+        let printed = printed_for(verbose(), events).await;
+        assert_eq!(output_lines(&printed), [labeled("bat", &frames[4])]);
+    }
+
+    // A finished escape sequence before the cap is no reason to carry
+    // anything: the line goes out whole.
+    #[tokio::test]
+    async fn a_finished_escape_at_the_cap_goes_out_with_its_line() {
+        let long = format!("{}\u{1b}[31mred", "x".repeat(LINE_CAP - 8));
+        let printed = printed_for(verbose(), vec![installing(1, "bat"), info(1, out(&long))]).await;
+        let lines = output_lines(&printed);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].ends_with("xred"), "{lines:?}");
+    }
+
+    // Each kind of escape sequence counts as unfinished until its own end, and
+    // only within its bound.
+    #[test]
+    fn unfinished_escape_finds_only_a_sequence_the_end_cuts() {
+        let csi = |params: usize| format!("x\u{1b}[{}", "1".repeat(params));
+        let osc = |body: usize| format!("x\u{1b}]{}", "a".repeat(body));
+        let rows: [(String, Option<usize>); 10] = [
+            ("x\u{1b}".to_string(), Some(1)),
+            ("x\u{1b}[31mred".to_string(), None),
+            ("x\u{1b}(".to_string(), None),
+            (csi(30), Some(1)),
+            (csi(31), None),
+            (osc(510), Some(1)),
+            (osc(511), None),
+            ("x\u{1b}]8;;https://e.example\u{7}".to_string(), None),
+            ("x\u{1b}]8;;https://e.example\u{1b}\\".to_string(), None),
+            ("x\u{1b}Pq".to_string(), Some(1)),
+        ];
+        for (buffer, expected) in rows {
+            assert_eq!(unfinished_escape(&buffer), expected, "{buffer:?}");
+        }
+    }
+
+    // A bar whose frames total exactly the cap drops its redrawn frame rather
+    // than printing a frame while it draws.
+    #[tokio::test]
+    async fn a_bar_at_exactly_the_cap_prints_nothing_while_it_draws() {
+        let display = verbose();
+        let mut processor = running_bat(&display);
+        let frame = format!("\r{}", "a".repeat(LINE_CAP / 2 - 1));
+        processor.handle_event(info(1, out(&frame)));
+        processor.handle_event(info(1, out(&frame)));
+        assert_eq!(2 * frame.len(), LINE_CAP);
+        assert!(
+            output_lines(&display.printed()).is_empty(),
+            "{:?}",
+            display.printed()
+        );
+    }
+
+    // Output that never ends a line prints once it reaches the cap, while the
+    // step is still running, and not a byte before.
+    #[tokio::test]
+    async fn a_flood_with_no_line_end_streams_at_the_cap() {
+        for (bytes, expected) in [(LINE_CAP, 1), (LINE_CAP - 1, 0)] {
+            let display = verbose();
+            let mut processor = running_bat(&display);
+            let flood = ".".repeat(bytes);
+            for piece in flood.as_bytes().chunks(512) {
+                let piece = std::str::from_utf8(piece).unwrap();
+                processor.handle_event(info(1, out(piece)));
+            }
+            let printed = output_lines(&display.printed());
+            assert_eq!(printed.len(), expected, "{bytes} bytes");
+            if expected == 1 {
+                assert_eq!(printed[0], labeled("bat", &flood));
+            }
+        }
+    }
+
     // A failed command's bounded stderr prints with its error, at every
     // verbosity: while it ran, its output was hidden.
     #[tokio::test]
@@ -1548,7 +2231,7 @@ mod tests {
         use selfie::package::event::{BaseKind, DotfileSource, RepoPath, SourceBase};
 
         let display = DisplayManager::new(false);
-        let processor = EventProcessor::new(display.clone());
+        let mut processor = EventProcessor::new(display.clone());
         let skipped = PackageEvent::DotfileSkipped {
             operation_info: make_operation_info("bat"),
             source: DotfileSource::File(RepoPath {
@@ -2167,7 +2850,7 @@ mod tests {
     #[test]
     fn rows_under_every_heading_share_the_announced_columns() {
         let display = DisplayManager::new(false);
-        let processor = EventProcessor::new(display.clone());
+        let mut processor = EventProcessor::new(display.clone());
         let entries = [
             (package_file("a"), "/h/.a"),
             (package_file("bat/config"), "/h/.config/bat/config"),
@@ -2196,7 +2879,7 @@ mod tests {
     #[test]
     fn a_conflict_block_is_set_off_from_the_row_above() {
         let display = DisplayManager::new(false);
-        let processor = EventProcessor::new(display.clone());
+        let mut processor = EventProcessor::new(display.clone());
         processor.handle_event(skipped(package_file("a"), "/h/.a"));
 
         processor.handle_event(PackageEvent::DotfileConflict {
@@ -2217,7 +2900,7 @@ mod tests {
     #[test]
     fn a_row_with_no_announcement_reads_single_spaced() {
         let display = DisplayManager::new(false);
-        let processor = EventProcessor::new(display.clone());
+        let mut processor = EventProcessor::new(display.clone());
 
         processor.handle_event(skipped(package_file("bat/config"), "/h/.b"));
 
