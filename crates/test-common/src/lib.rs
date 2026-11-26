@@ -31,7 +31,7 @@ pub use deadline::{ReleaseFifo, within_deadline};
 pub use deploy_state::{StateValue, every_cause, every_state_value, permission_denied};
 pub use events::{
     assert_failed_answer, assert_failed_operation, assert_successful_operation, collect_events,
-    create_test_operation_info, get_operation_result, warning_text,
+    create_test_operation_info, get_operation_result, relays_output_containing, warning_text,
 };
 pub use fixtures::{
     TestPackageBehavior, create_circular_dependency, create_dependency_chain,
@@ -48,7 +48,7 @@ pub use messages::{every_message, message};
 pub use package::{multi_env_test_package, simple_test_package, test_package_with_check};
 pub use plant::{PLANTED, Plant, PlantsBeforeWrite, Rewrite};
 pub use runner::{command_output, secret_between_filler};
-pub use scripts::{two_marking_lines, write_executable};
+pub use scripts::{LONG_THEN_QUIET, two_marking_lines, write_executable};
 pub use secrets::assert_secret_free;
 pub use selfie::commands::FakeCommandRunner;
 pub use service::{

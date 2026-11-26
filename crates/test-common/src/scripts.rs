@@ -60,3 +60,12 @@ pub fn two_marking_lines(markers: &Path) -> (String, PathBuf, PathBuf) {
     let command = format!("touch {}\ntouch {}", quote(&first), quote(&second));
     (command, first, second)
 }
+
+/// An install command that prints 300 lines, the contents of `secret.txt`, and
+/// 1000 more lines on stdout and again on stderr, then stays quiet for four
+/// seconds.
+///
+/// With a 2-second silence limit it times out, and the file's contents sit
+/// between the first and last 1000 bytes of each pipe.
+pub const LONG_THEN_QUIET: &str = "{ seq 1 300; cat secret.txt; seq 301 1300; }; \
+     { seq 1 300; cat secret.txt; seq 301 1300; } >&2; sleep 4";

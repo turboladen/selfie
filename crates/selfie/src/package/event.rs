@@ -1756,6 +1756,22 @@ pub enum CommandFailure {
     },
     /// A command ran past its timeout and was stopped.
     TimedOut(TimedOut),
+    /// An install command ran past its timeout and was stopped, with what it
+    /// had printed by then.
+    ///
+    /// Its label is `timed_out`, as [`TimedOut`](Self::TimedOut)'s is. Each pipe
+    /// keeps the first and last 1000 bytes of its decoded text, and like
+    /// [`ExecutionFailed`](Self::ExecutionFailed) this reaches every adapter,
+    /// so whatever the command printed within the bound, a credential included,
+    /// reaches every one of them.
+    // Built by `OperationFailure::install_timed_out`, which takes only a
+    // `StreamedTail`, so only the streaming install step can supply the pipes.
+    #[strum(serialize = "timed_out")]
+    InstallTimedOut {
+        timed_out: TimedOut,
+        stdout: crate::commands::BoundedText,
+        stderr: crate::commands::BoundedText,
+    },
     /// A command could not enter the directory it was to run in.
     WorkingDirectoryUnusable(crate::commands::runner::UnusableDirectory),
 }
@@ -1919,6 +1935,22 @@ impl CommandFailure {
         self.into()
     }
 
+    /// The bounded stdout and stderr of an install command that exited non-zero,
+    /// or that was stopped by its timeout once selfie had collected its output,
+    /// and `None` for any other failure, which carries none of a command's
+    /// output. A timeout whose output could not be collected is a plain
+    /// [`TimedOut`](Self::TimedOut) and gives `None`.
+    #[must_use]
+    pub fn install_pipes(
+        &self,
+    ) -> Option<(&crate::commands::BoundedText, &crate::commands::BoundedText)> {
+        match self {
+            CommandFailure::ExecutionFailed { stdout, stderr, .. }
+            | CommandFailure::InstallTimedOut { stdout, stderr, .. } => Some((stdout, stderr)),
+            CommandFailure::TimedOut(_) | CommandFailure::WorkingDirectoryUnusable(_) => None,
+        }
+    }
+
     /// The command as this failure's sentence shows it, bounded.
     #[must_use]
     pub fn command_bounded(&self) -> crate::parts::SpecCommandText {
@@ -1926,7 +1958,8 @@ impl CommandFailure {
             CommandFailure::ExecutionFailed { command, .. } => {
                 crate::parts::SpecCommandText::of(command)
             }
-            CommandFailure::TimedOut(timed_out) => timed_out.command_bounded(),
+            CommandFailure::TimedOut(timed_out)
+            | CommandFailure::InstallTimedOut { timed_out, .. } => timed_out.command_bounded(),
             CommandFailure::WorkingDirectoryUnusable(unusable) => unusable.command_bounded(),
         }
     }
@@ -1951,7 +1984,8 @@ impl Composed for CommandFailure {
                     None => parts,
                 }
             }
-            CommandFailure::TimedOut(timed_out) => timed_out.parts(),
+            CommandFailure::TimedOut(timed_out)
+            | CommandFailure::InstallTimedOut { timed_out, .. } => timed_out.parts(),
             CommandFailure::WorkingDirectoryUnusable(unusable) => unusable.parts(),
         }
     }
@@ -3322,6 +3356,22 @@ impl OperationFailure {
             exit_code: output.code(),
             stdout: crate::commands::BoundedText::bound(output.stdout()),
             stderr: crate::commands::BoundedText::bound(output.stderr()),
+        })
+    }
+
+    /// The failure of an install command that ran into its timeout, carrying
+    /// what it had printed by then.
+    ///
+    /// The output must be a [`StreamedTail`](crate::commands::StreamedTail), so
+    /// a check's, an audit's, a finder's or a provider's output cannot reach a
+    /// failure this way: see [`CommandFailure::InstallTimedOut`].
+    #[must_use]
+    pub fn install_timed_out(timed_out: TimedOut, tail: crate::commands::StreamedTail) -> Self {
+        let (stdout, stderr) = tail.into_parts();
+        OperationFailure::CommandError(CommandFailure::InstallTimedOut {
+            timed_out,
+            stdout,
+            stderr,
         })
     }
 
@@ -5916,6 +5966,14 @@ mod tests {
                 "Command error: Command `false #\u{200B}` failed".to_string(),
             ),
             (
+                CommandFailure::InstallTimedOut {
+                    timed_out: timed_out.clone(),
+                    stdout: crate::commands::BoundedText::bound(b"o"),
+                    stderr: crate::commands::BoundedText::bound(b"e"),
+                },
+                format!("Command error: {timed_out_words}"),
+            ),
+            (
                 CommandFailure::TimedOut(timed_out),
                 format!("Command error: {timed_out_words}"),
             ),
@@ -5968,6 +6026,18 @@ mod tests {
                     std::time::Duration::from_secs(1),
                     crate::commands::runner::TimeLimit::Total,
                 )),
+                vec![command()],
+            ),
+            (
+                CommandFailure::InstallTimedOut {
+                    timed_out: TimedOut::new(
+                        "c\u{200B}md",
+                        std::time::Duration::from_secs(1),
+                        crate::commands::runner::TimeLimit::Silence,
+                    ),
+                    stdout: crate::commands::BoundedText::bound(b""),
+                    stderr: crate::commands::BoundedText::bound(b""),
+                },
                 vec![command()],
             ),
             (

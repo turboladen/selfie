@@ -3,6 +3,8 @@ paths:
   - "crates/selfie/src/dotfile_service/**/*.rs"
   - "crates/selfie/src/package/event.rs"
   - "crates/selfie/src/package/service/audit.rs"
+  - "crates/selfie/src/package/service/install.rs"
+  - "crates/selfie/src/package/service/steps.rs"
   - "crates/selfie/src/commands/runner.rs"
   - "crates/selfie/src/git/**/*.rs"
   - "crates/selfie/src/sync_service/**/*.rs"
@@ -82,54 +84,66 @@ Test egress at the **boundary**, not by listing known paths:
   bound for the terminal, and it would hide forwarded stderr from the event scan above — a secret
   arriving on stderr later would go unseen instead of caught. Apply this rule to types that hold a
   secret, not to types that carry something already on its way out.
-- **No `CommandError` variant carries stdout, and only an install's output reaches
-  `ExecutionFailed`.** A provider's stdout _is_ the secret, and the general failure path cannot know
-  which commands produce one. Three facts make up the contract, and they are enforced to different
-  degrees:
+- **No `CommandError` variant carries stdout, and only an install's output reaches `ExecutionFailed`
+  or `InstallTimedOut`.** A provider's stdout _is_ the secret, and the general failure path cannot
+  know which commands produce one. Three facts make up the contract, and they are enforced to
+  different degrees:
   - **No `CommandError` variant has a `stdout` field.** That is enforced by construction, and it is
-    what keeps a timed-out, canceled or provider command's stdout out of every failure:
-    `OperationFailure::from(CommandError)` has nothing to read. A `stdout` field on `CommandError`,
-    or a new variant that has one, reopens the path and needs a leak test again.
-  - **`CommandFailure::ExecutionFailed` carries both pipes, each a `BoundedText`, and so does
+    what keeps a canceled or provider command's stdout, and a timed-out one's other than an
+    install's, out of every failure: `OperationFailure::from(CommandError)` has nothing to read. A
+    timed-out install is the exception, and its stdout reaches `InstallTimedOut` through the
+    streaming step's own failure type, never through `CommandError`. A `stdout` field on
+    `CommandError`, or a new variant that has one, reopens the path and needs a leak test again.
+  - **`CommandFailure::ExecutionFailed` carries both pipes, each a `BoundedText`, and so do
+    `CommandFailure::InstallTimedOut`, the install stopped by its timeout, and
     `OperationFailure::NotInstalledAfterInstall`, the install whose check still says no.** Each
     reaches every adapter, the MCP transcript included. The last 1000 input bytes of each pipe are
-    always forwarded, so a short failing command that echoed a token forwards it whole. That is the
-    maintainer's ruling for install commands, whose output the terminal already shows.
-  - **Only `OperationFailure::command_failed(&StreamedOutput)` and
-    `OperationFailure::not_installed_after_install(.., &StreamedOutput)` build them, from an
-    install's output.** `StreamedOutput` has a private field, and only the streaming install step
-    (`execute_command_streaming`) wraps one, so a check's, an audit's, a finder's or a provider's
-    output cannot be passed to either from any crate. Three gaps remain:
-    `StreamedOutput::from_output` is `pub` but compiled only under `with_mocks`, which `just build`
-    keeps out of the binaries; `StreamedOutput::new` is `pub(crate)`, so a second caller inside
-    `selfie` could wrap other output, and the variants are struct literals that any crate can write,
-    since `BoundedText::bound` is `pub`. The `BoundedText` fields still bound whatever any gap lets
-    in.
+    always forwarded, so a short failing command that echoed a token forwards it whole. For a
+    timed-out install they are the last 1000 decoded bytes, and nothing is forwarded when the relay
+    did not finish, since that timeout is reported with no pipes. That is the maintainer's ruling
+    for install commands, whose output the terminal already shows.
+  - **Only `OperationFailure::command_failed(&StreamedOutput)`,
+    `OperationFailure::not_installed_after_install(.., &StreamedOutput)` and
+    `OperationFailure::install_timed_out(.., StreamedTail)` build them, from an install's output.**
+    `StreamedOutput` and `StreamedTail` have private fields, and only the streaming install step
+    (`execute_command_streaming`) builds either, so a check's, an audit's, a finder's or a
+    provider's output cannot be passed to any of them from any crate. A `StreamedTail` holds only
+    the two ends of each pipe: the relay keeps them in `TailWindows`, which holds at most about 4 KB
+    per pipe, while the runner itself still keeps the whole of both pipes until the command exits.
+    Three gaps remain: `StreamedOutput::from_output` is `pub` but compiled only under `with_mocks`,
+    which `just build` keeps out of the binaries; `StreamedOutput::new` and `StreamedTail::new` are
+    `pub(crate)`, so a second caller inside `selfie` could wrap other output, and the variants are
+    struct literals that any crate can write, since `BoundedText::bound` is `pub`. The `BoundedText`
+    fields still bound whatever any gap lets in.
 
   Render a `CommandError` with `to_string()`, never `{:?}`: `Display` writes the sentence its
   `Composed::parts` curates, while `Debug` prints whatever fields a future variant adds. Still
   prefer the resolve path's own error type over `from(CommandError)` or `command_failed`: those say
   "a command failed", not which entry or which var, and the resolve variants carry that.
 - **Forward command output on failure only**, bounded: stderr from any failing command, and stdout
-  only from a failing install, as above. It is content selfie does not control; a provider run with
-  a verbose flag can echo secret material to stderr. Every failure's sentence names the package
-  file's own `command:` string only as a `SpecCommandText` part, which bounds it. `BoundedText` in
-  `commands/runner.rs` is the one bound. It is `pub` and re-exported as
+  only from a failing or timed-out install, as above. It is content selfie does not control; a
+  provider run with a verbose flag can echo secret material to stderr. Every failure's sentence
+  names the package file's own `command:` string only as a `SpecCommandText` part, which bounds it.
+  `BoundedText` in `commands/runner.rs` is the one bound. It is `pub` and re-exported as
   `selfie::commands::BoundedText`, so the CLI and the MCP server can construct one — this rule is
   followable from every crate it is scoped to. Call `BoundedText::bound` rather than deciding a
   limit per site. What it _enforces_ is uneven, and the difference is the part worth knowing:
-  - **`CommandFailure::ExecutionFailed`'s `stdout` and `stderr` and the resolve path's
-    `RunFailure::Exited` are compiler-enforced.** Their type is `BoundedText`, whose field is
-    private, so no struct-variant literal — library, adapter, or test — can put unbounded text
-    there. A runner error on the resolve path stays a `CommandError`, whose parts bound each value
-    it names.
+  - **`CommandFailure::ExecutionFailed`'s and `CommandFailure::InstallTimedOut`'s `stdout` and
+    `stderr` and the resolve path's `RunFailure::Exited` are compiler-enforced.** Their type is
+    `BoundedText`, whose field is private, so no struct-variant literal — library, adapter, or test
+    — can put unbounded text there. A runner error on the resolve path stays a `CommandError`, whose
+    parts bound each value it names.
   - **`AuditResult::Error` is a `String`.** It builds a `BoundedText` at the construction site and
     renders it into its sentence, because it is a rendered sentence rather than a stderr field. The
     bound there is still something a person has to remember; it is the site to check when adding a
     failure exit.
-  - **The bound counts input bytes, not the length of the string it returns.** Invalid UTF-8 decodes
-    lossily and each bad byte becomes a 3-byte `U+FFFD`, so 2000 bytes of binary stderr yield about
-    6000 bytes of text. It bounds how much of the command's output survives, not `as_str().len()`.
+  - **Each path's bound counts what that path was given, never the length of the string it
+    returns.** `BoundedText::bound` (`ExecutionFailed`, `NotInstalledAfterInstall`,
+    `RunFailure::Exited`) counts the command's raw bytes. Invalid UTF-8 decodes lossily, and each
+    bad byte becomes a 3-byte `U+FFFD`, so 2000 bytes of binary stderr yield about 6000 bytes of
+    text. A timed-out install's tail is bounded by the streaming relay, which receives text already
+    decoded, so it counts decoded bytes. For invalid UTF-8 that keeps fewer of the command's bytes
+    than `bound` would, never more. Each elision marker names a count in its own path's unit.
   - **It keeps both ends, not a prefix.** The surviving 2000 bytes are split between the head and
     the tail, with the elided byte count named in between, because a failing command puts its
     diagnosis last. That means **the last bytes of each pipe it forwards always survive** — a leak
@@ -144,10 +158,12 @@ Test egress at the **boundary**, not by listing known paths:
   it.** `execute_command_streaming` sends every chunk of an install command's stdout **and** stderr
   as `PackageEvent::Info`, on success and on failure alike, unbounded. The CLI prints those
   verbatim. The MCP server drops them in `event_to_json`'s exhaustive match, so an MCP client sees
-  an install's output only in a failure's bounded pipes. Only the adapter enforces that: a new
-  adapter, or an MCP path that bypasses `collect_events`, must decide again. The `tracing` mirror in
-  `send_info` records the pipe and the decoded text's length, never the text. A dotfile provider
-  does not use this path; the resolve path runs its own non-streaming execution.
+  an install's output only in a failure's bounded pipes. The relay also keeps the first and last
+  window of each pipe, and nothing else, for the failure of an install that times out. Only the
+  adapter enforces that: a new adapter, or an MCP path that bypasses `collect_events`, must decide
+  again. The `tracing` mirror in `send_info` records the pipe and the decoded text's length, never
+  the text. A dotfile provider does not use this path; the resolve path runs its own non-streaming
+  execution.
 - **Git's stderr is untrusted output too, and it has its own bound.** A remote URL can carry a
   credential in its userinfo, and a git that cannot prompt for a password names that URL in the
   failure — `could not read Password for 'http://<token>@host'`. That reaches an AI transcript
