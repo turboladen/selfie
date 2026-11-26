@@ -3670,17 +3670,44 @@ mod timeouts {
         );
     }
 
+    // An install's timeout, with the pipes it carries.
+    fn install_timed_out(
+        events: &[selfie::package::event::PackageEvent],
+    ) -> (TimedOut, String, String) {
+        match get_operation_result(events) {
+            Some(OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::InstallTimedOut {
+                    timed_out,
+                    stdout,
+                    stderr,
+                },
+            ))) => (
+                timed_out.clone(),
+                stdout.as_str().to_string(),
+                stderr.as_str().to_string(),
+            ),
+            other => panic!("expected an install's timeout, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn an_install_that_times_out_fails_as_the_same_timeout() {
-        // The pre-install check answers "not installed", so the install runs.
-        let runner = timing_out("install-app", TimeLimit::Silence).failing("check-app", b"");
+        for limit in [TimeLimit::Silence, TimeLimit::Total] {
+            // The pre-install check answers "not installed", so the install runs.
+            let runner = timing_out("install-app", limit).failing("check-app", b"");
 
-        let events = run(runner, false).await;
+            let events = run(runner, false).await;
 
-        assert_eq!(
-            timed_out(&events),
-            TimedOut::new("install-app", Duration::from_secs(2), TimeLimit::Silence)
-        );
+            // The fake prints nothing before it times out, so both pipes are empty.
+            assert_eq!(
+                install_timed_out(&events),
+                (
+                    TimedOut::new("install-app", Duration::from_secs(2), limit),
+                    String::new(),
+                    String::new()
+                )
+            );
+        }
     }
 }
 

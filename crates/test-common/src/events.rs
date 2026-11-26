@@ -168,3 +168,17 @@ pub fn warning_text(event: &PackageEvent) -> Option<String> {
         _ => None,
     }
 }
+
+/// Whether any event relays a line of command output containing `text`.
+///
+/// The positive control for a leak test: the command did print what the test
+/// then looks for elsewhere.
+#[must_use]
+pub fn relays_output_containing(events: &[PackageEvent], text: &str) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            PackageEvent::Info { output, .. } if output.text().contains(text)
+        )
+    })
+}

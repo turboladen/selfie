@@ -90,29 +90,30 @@ fn failure_json(failure: &OperationFailure, operation: Option<&OperationInfo>) -
 /// - `"execution_failed"`: `exit_code`, and `stdout` and `stderr`, each
 ///   bounded to its first and last 1000 bytes;
 /// - `"timed_out"`: `timeout_seconds`, and `limit`, `"total"` or `"silence"`;
+///   for an install command, also `stdout` and `stderr`, what it had printed
+///   when it was stopped, each bounded to its first and last 1000 bytes;
 /// - `"working_directory_unusable"`: `working_directory`, as the sentence
 ///   bounds it.
-// The pipes ride an execution failure because an MCP client was shown none of
-// the command's output while it ran. The command and the directory are the
-// bounded forms the sentence shows, so the JSON carries no more of either than
-// `error` does.
+// The pipes ride an install's failure and its timeout because an MCP client was
+// shown none of the command's output while it ran. The command and the
+// directory are the bounded forms the sentence shows, so the JSON carries no
+// more of either than `error` does.
 fn command_failure_fields(failure: &CommandFailure) -> serde_json::Map<String, Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("kind".to_string(), failure.kind().into());
     let command = failure.command_bounded();
     fields.insert("command".to_string(), command.as_str().into());
+    if let Some((stdout, stderr)) = failure.install_pipes() {
+        fields.insert("stdout".to_string(), stdout.as_str().into());
+        fields.insert("stderr".to_string(), stderr.as_str().into());
+    }
     match failure {
-        CommandFailure::ExecutionFailed {
-            exit_code,
-            stdout,
-            stderr,
-            ..
-        } => {
+        CommandFailure::ExecutionFailed { exit_code, .. } => {
             fields.insert("exit_code".to_string(), (*exit_code).into());
-            fields.insert("stdout".to_string(), stdout.as_str().into());
-            fields.insert("stderr".to_string(), stderr.as_str().into());
         }
-        CommandFailure::TimedOut(timed_out) => fields.extend(timed_out_fields(Some(timed_out))),
+        CommandFailure::TimedOut(timed_out) | CommandFailure::InstallTimedOut { timed_out, .. } => {
+            fields.extend(timed_out_fields(Some(timed_out)));
+        }
         CommandFailure::WorkingDirectoryUnusable(unusable) => {
             let directory = unusable.working_directory_bounded();
             fields.insert("working_directory".to_string(), directory.into());
@@ -2893,6 +2894,15 @@ mod tests {
             std::time::Duration::from_secs(7),
             TimeLimit::Silence,
         )));
+        let install_timed_out = payload(CommandFailure::InstallTimedOut {
+            timed_out: TimedOut::new(
+                "brew install x",
+                std::time::Duration::from_secs(9),
+                TimeLimit::Total,
+            ),
+            stdout: selfie::commands::BoundedText::bound(b"waiting"),
+            stderr: selfie::commands::BoundedText::bound(b"locked"),
+        });
         let unusable = payload(CommandFailure::WorkingDirectoryUnusable(
             UnusableDirectory::new(
                 "brew install x",
@@ -2924,6 +2934,33 @@ mod tests {
                 Value::from("brew install x"),
                 Value::from(7),
                 Value::from("silence"),
+            ]
+        );
+        // A check's timeout shares the label and carries no pipes, so their
+        // absence never reads as an install that printed nothing.
+        assert!(
+            timed_out.get("stdout").is_none() && timed_out.get("stderr").is_none(),
+            "{timed_out}"
+        );
+        assert_eq!(
+            fields(
+                &install_timed_out,
+                &[
+                    "kind",
+                    "command",
+                    "timeout_seconds",
+                    "limit",
+                    "stdout",
+                    "stderr"
+                ]
+            ),
+            [
+                Value::from("timed_out"),
+                Value::from("brew install x"),
+                Value::from(9),
+                Value::from("total"),
+                Value::from("waiting"),
+                Value::from("locked"),
             ]
         );
         assert_eq!(
@@ -2958,6 +2995,15 @@ mod tests {
                 std::time::Duration::from_secs(1),
                 TimeLimit::Total,
             )),
+            CommandFailure::InstallTimedOut {
+                timed_out: TimedOut::new(
+                    long.clone(),
+                    std::time::Duration::from_secs(1),
+                    TimeLimit::Silence,
+                ),
+                stdout: selfie::commands::BoundedText::bound(b""),
+                stderr: selfie::commands::BoundedText::bound(b""),
+            },
             CommandFailure::WorkingDirectoryUnusable(UnusableDirectory::new(
                 long.clone(),
                 format!("/head-{}-tail", "d".repeat(5_000)),

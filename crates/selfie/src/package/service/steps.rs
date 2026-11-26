@@ -3,7 +3,10 @@ use std::borrow::Cow;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    commands::runner::{CommandError, CommandOutput, CommandRunner, StreamedOutput},
+    commands::runner::{
+        CommandError, CommandOutput, CommandRunner, StreamedOutput, StreamedTail, TailWindows,
+        TimedOut,
+    },
     config::SelfieConfig,
     package::{
         EnvironmentConfig, GetPackage,
@@ -139,7 +142,7 @@ pub async fn execute_command_streaming<CR>(
     sender: &EventSender,
     progress: &mut ProgressTracker,
     token: &CancellationToken,
-) -> Result<StreamedOutput, CommandError>
+) -> Result<StreamedOutput, StreamingFailure>
 where
     CR: CommandRunner,
 {
@@ -164,22 +167,27 @@ where
     // Clone the sender for the async task
     let sender_clone = sender.clone();
 
-    // Spawn a task to handle the streaming output
+    // Spawn a task to handle the streaming output. It keeps the ends of each
+    // pipe, and nothing more, for a command that runs into its timeout.
     let output_task = tokio::spawn(async move {
+        let (mut stdout, mut stderr) = (TailWindows::new(), TailWindows::new());
         while let Some(chunk) = rx.recv().await {
             match chunk {
                 OutputChunk::Stdout(line) => {
+                    stdout.push(&line);
                     sender_clone
                         .send_info(step, ConsoleOutput::Stdout(line))
                         .await;
                 }
                 OutputChunk::Stderr(line) => {
+                    stderr.push(&line);
                     sender_clone
                         .send_info(step, ConsoleOutput::Stderr(line))
                         .await;
                 }
             }
         }
+        (stdout, stderr)
     });
 
     // The package directory is the child's working directory, never a `cd`
@@ -195,7 +203,7 @@ where
         )
         .await;
 
-    report_relay_end(output_task.await, sender).await;
+    let windows = report_relay_end(output_task.await, sender).await;
 
     // Ended before anything else is said about the command, so a consumer
     // closes the step before it reports the result.
@@ -222,11 +230,61 @@ where
             }
             Ok(StreamedOutput::new(output))
         }
-        Err(error) => Err(error),
+        Err(error) => Err(StreamingFailure::of(error, windows)),
     }
 }
 
-/// Warn when the task relaying a command's output did not finish cleanly.
+/// How a streamed command failed without exiting.
+#[derive(Debug)]
+pub(crate) enum StreamingFailure {
+    /// The command ran into its timeout, and `tail` is what it had printed.
+    TimedOut {
+        timed_out: TimedOut,
+        tail: StreamedTail,
+    },
+    /// Any other runner failure, which carries none of the command's output.
+    Command(CommandError),
+}
+
+impl StreamingFailure {
+    // Only a timeout keeps the tail. A cancel is the user's own act, and a
+    // command that asked for input already names its question. A relay that did
+    // not finish leaves no tail, so the timeout is reported with no pipes rather
+    // than with empty ones, which would say the command printed nothing.
+    // The windows are bounded only here, so a command that succeeds never pays
+    // for it.
+    fn of(error: CommandError, windows: Option<(TailWindows, TailWindows)>) -> Self {
+        match (error, windows) {
+            (
+                CommandError::Timeout {
+                    command,
+                    timeout,
+                    limit,
+                    ..
+                },
+                Some((stdout, stderr)),
+            ) => StreamingFailure::TimedOut {
+                timed_out: TimedOut::new(command, timeout, limit),
+                tail: StreamedTail::new(stdout, stderr),
+            },
+            (error, _) => StreamingFailure::Command(error),
+        }
+    }
+}
+
+impl From<StreamingFailure> for OperationFailure {
+    fn from(failure: StreamingFailure) -> Self {
+        match failure {
+            StreamingFailure::TimedOut { timed_out, tail } => {
+                OperationFailure::install_timed_out(timed_out, tail)
+            }
+            StreamingFailure::Command(error) => error.into(),
+        }
+    }
+}
+
+/// Warn when the task relaying a command's output did not finish cleanly, and
+/// give back the ends of each pipe when it did.
 ///
 /// The warning is a fixed sentence and never the [`JoinError`] itself.
 ///
@@ -234,9 +292,13 @@ where
 // A `JoinError`'s `Display` renders the panic payload, and the task that panicked
 // was holding the command's output, so the payload can be derived from a
 // credential. Only `is_cancelled` is read.
-async fn report_relay_end(result: Result<(), tokio::task::JoinError>, sender: &EventSender) {
-    let Err(join_error) = result else {
-        return;
+async fn report_relay_end(
+    result: Result<(TailWindows, TailWindows), tokio::task::JoinError>,
+    sender: &EventSender,
+) -> Option<(TailWindows, TailWindows)> {
+    let join_error = match result {
+        Ok(windows) => return Some(windows),
+        Err(join_error) => join_error,
     };
     let message = if join_error.is_cancelled() {
         "The task relaying the command's output was canceled, so some of it may not have been shown"
@@ -244,6 +306,7 @@ async fn report_relay_end(result: Result<(), tokio::task::JoinError>, sender: &E
         "The task relaying the command's output failed, so some of it may not have been shown"
     };
     sender.send_warning(message).await;
+    None
 }
 
 /// How a waiting step that ran a command ended, given what the command
@@ -329,14 +392,15 @@ mod tests {
         );
         // This reaches the warning's call site before the capture starts, as
         // `capture_tracing` requires, with a canceled task's harmless error.
-        let canceled = tokio::spawn(std::future::pending::<()>());
+        let canceled = tokio::spawn(std::future::pending::<(TailWindows, TailWindows)>());
         canceled.abort();
         report_relay_end(canceled.await, &sender).await;
         let _ = rx.recv().await;
         let log = test_common::capture_tracing(tracing::Level::TRACE);
-        let panicked = tokio::spawn(async { panic!("relay held TOKEN={SECRET}") }).await;
+        let panicked: Result<(TailWindows, TailWindows), _> =
+            tokio::spawn(async { panic!("relay held TOKEN={SECRET}") }).await;
 
-        report_relay_end(panicked, &sender).await;
+        let tail = report_relay_end(panicked, &sender).await;
         drop(sender);
 
         let mut events = Vec::new();
@@ -353,6 +417,132 @@ mod tests {
             .count();
         assert_eq!(warnings, 1, "{events:?}");
         assert!(!logged.is_empty(), "nothing was logged");
+        assert!(tail.is_none(), "{tail:?}");
+    }
+
+    fn timeout(limit: crate::commands::runner::TimeLimit) -> CommandError {
+        CommandError::Timeout {
+            command: "install-app".to_string(),
+            timeout: std::time::Duration::from_secs(2),
+            limit,
+            working_directory: "/p".into(),
+        }
+    }
+
+    fn windows_of(stdout: &str, stderr: &str) -> (TailWindows, TailWindows) {
+        let (mut out, mut err) = (TailWindows::new(), TailWindows::new());
+        out.push(stdout);
+        err.push(stderr);
+        (out, err)
+    }
+
+    // A relay that did not finish leaves no tail, and a timeout without one is
+    // reported as the runner's own error, with no pipes, rather than as a
+    // command that printed nothing.
+    #[tokio::test]
+    async fn a_relay_that_failed_gives_a_timeout_with_no_tail() {
+        let (tx, mut rx) = mpsc::channel::<PackageEvent>(10);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageInstall,
+            "test".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+        let panicked: Result<(TailWindows, TailWindows), _> =
+            tokio::spawn(async { panic!("the relay failed") }).await;
+
+        let tail = report_relay_end(panicked, &sender).await;
+
+        assert!(tail.is_none(), "{tail:?}");
+        assert!(matches!(
+            rx.recv().await,
+            Some(PackageEvent::Warning { .. })
+        ));
+        let failure =
+            StreamingFailure::of(timeout(crate::commands::runner::TimeLimit::Silence), tail);
+        assert!(
+            matches!(
+                failure,
+                StreamingFailure::Command(CommandError::Timeout { .. })
+            ),
+            "{failure:?}"
+        );
+        // Control: a relay that finished does give its windows back.
+        let finished = tokio::spawn(async { (TailWindows::new(), TailWindows::new()) }).await;
+        assert!(report_relay_end(finished, &sender).await.is_some());
+    }
+
+    // Only a timeout carries the tail; any other runner error drops it.
+    #[test]
+    fn an_error_other_than_a_timeout_carries_no_tail() {
+        let canceled = CommandError::Canceled {
+            command: "install-app".to_string(),
+            working_directory: "/p".into(),
+        };
+
+        let failure = StreamingFailure::of(canceled, Some(windows_of("out", "err")));
+
+        assert!(
+            matches!(
+                failure,
+                StreamingFailure::Command(CommandError::Canceled { .. })
+            ),
+            "{failure:?}"
+        );
+    }
+
+    // A runner's total timeout carries the tail too, and each pipe's output
+    // lands in its own field.
+    #[tokio::test]
+    async fn a_total_timeout_carries_both_pipes() {
+        use crate::commands::runner::{MockCommandRunner, OutputChunk, TimeLimit};
+
+        let mut runner = MockCommandRunner::new();
+        runner
+            .expect_execute_streaming()
+            .returning(|_, _, _, output_sender, _| {
+                output_sender
+                    .try_send(OutputChunk::Stdout("out-a\n".to_string()))
+                    .unwrap();
+                output_sender
+                    .try_send(OutputChunk::Stderr("err-b\n".to_string()))
+                    .unwrap();
+                Box::pin(async { Err(timeout(TimeLimit::Total)) })
+            });
+        let config = crate::config::SelfieConfigBuilder::default()
+            .environment("test")
+            .package_directory("/p")
+            .build();
+        let (tx, _rx) = mpsc::channel::<PackageEvent>(1000);
+        let sender = EventSender::new_with_context(
+            tx,
+            OperationType::PackageInstall,
+            "test".to_string(),
+            "test".to_string(),
+            OperationContext::default(),
+        );
+        let mut progress = crate::package::service::ProgressTracker::new(1);
+
+        let failure = execute_command_streaming(
+            &runner,
+            "app",
+            "install-app",
+            "install",
+            &config,
+            &sender,
+            &mut progress,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+
+        let StreamingFailure::TimedOut { timed_out, tail } = failure else {
+            panic!("expected a timeout with its tail, got {failure:?}");
+        };
+        assert_eq!(timed_out.limit(), TimeLimit::Total);
+        assert_eq!(tail.stdout().as_str(), "out-a\n");
+        assert_eq!(tail.stderr().as_str(), "err-b\n");
     }
 
     #[tokio::test]
@@ -496,7 +686,10 @@ rm -rf package package.tar.gz";
         use crate::config::SelfieConfigBuilder;
 
         // Run `cmd` as an install command with `package_dir` configured.
-        async fn install(package_dir: &Path, cmd: &str) -> Result<StreamedOutput, CommandError> {
+        async fn install(
+            package_dir: &Path,
+            cmd: &str,
+        ) -> Result<StreamedOutput, StreamingFailure> {
             let config = SelfieConfigBuilder::default()
                 .environment("test")
                 .package_directory(package_dir)
@@ -528,11 +721,12 @@ rm -rf package package.tar.gz";
             .await
         }
 
-        fn assert_names(error: &CommandError, dir: &Path) {
-            assert!(
-                matches!(error, CommandError::WorkingDirectoryUnusable(_)),
-                "expected WorkingDirectoryUnusable, got: {error:?}"
-            );
+        fn assert_names(failure: &StreamingFailure, dir: &Path) {
+            let StreamingFailure::Command(error @ CommandError::WorkingDirectoryUnusable(_)) =
+                failure
+            else {
+                panic!("expected WorkingDirectoryUnusable, got: {failure:?}");
+            };
             let rendered = error.to_string();
             assert!(
                 rendered.contains(&dir.display().to_string()),

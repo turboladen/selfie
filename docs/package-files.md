@@ -701,7 +701,7 @@ print will be read.**
   is driven through its MCP server rather than the terminal, a successful install's output is not
   sent to the AI assistant at all. An install that exits non-zero, or whose check then says it is
   not installed, carries the first and last 1000 bytes of each stream in its result, as described
-  below; one that is stopped by its timeout carries none.
+  below, and so does one that is stopped by its timeout, for what it had printed by then.
 - **`check` output is displayed** when you run `selfie package check`, so that a check reporting
   "not installed" can tell you why: a passing check's output on stdout with its result, a failing
   check's error output on stderr. `--verbose` adds the full result card.
@@ -732,13 +732,16 @@ prints pages of `==> Downloading` progress and then one `Error:` line keeps that
 cutting only the first 2000 bytes would have kept the progress and dropped the reason. The head is
 worth keeping too, since it is where a command says what it was attempting.
 
-The two cuts land on byte boundaries rather than character boundaries, so a multi-byte character
-straddling either one is replaced rather than split — the head can end mid-character and the tail
-can begin mid-character. Output only slightly over the limit is passed through whole, since eliding
-it would cost more in marker text than it saved.
+Output that is valid UTF-8 is cut between characters, so no character is split. Output that is not
+valid UTF-8 is cut on byte boundaries and then decoded, so the head can end mid-character and the
+tail can begin mid-character. An install stopped by its timeout is cut after its output is decoded,
+so its cuts always fall between characters, whatever it printed. Output only slightly over the limit
+is passed through whole, since eliding it would cost more in marker text than it saved.
 
 The 2000 counts what the command wrote, not the length of the message you read: invalid UTF-8 is
-replaced character by character, so binary output can render longer than the bytes it came from.
+replaced character by character, so binary output can render longer than the bytes it came from. An
+install stopped by its timeout is the exception: its 2000 counts the decoded text, so output that is
+not valid UTF-8 keeps fewer of the command's own bytes.
 
 What `selfie package check` shows of a check's output, with or without `--verbose`, is cut the same
 way: stdout and stderr each to 2000 bytes, keeping both ends.
@@ -755,11 +758,13 @@ that could not run splits the bound the same way: the program that would not sta
 the reason when the shell could not be started, and the command and the reason when an I/O error
 stopped it or its output could not be read.
 
-Where that standard error travels depends on which report carries it. An install or check failure
-shows it in the terminal only — the value an MCP client receives names the command and its exit code
-and stops there. An `audit` error is different: its message reaches a connected MCP client as well,
-which is why the same limit applies to it. Anything else you see about a failed command reached you
-through one of the channels above, as it ran.
+Where that standard error travels depends on which report carries it. A check failure shows it in
+the terminal only — the value an MCP client receives names the command and its exit code and stops
+there. An install that fails, is stopped by its timeout, or whose check then says it is not
+installed sends its bounded standard output and standard error to a connected MCP client too. An
+`audit` error is different: its message reaches a connected MCP client as well, which is why the
+same limit applies to it. Anything else you see about a failed command reached you through one of
+the channels above, as it ran.
 
 If a dotfile's content is itself a secret, use a `command` or `vars` dotfile entry rather than an
 install command — selfie treats those as secret-bearing and never puts their content in a message, a

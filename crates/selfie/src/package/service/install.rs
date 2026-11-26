@@ -540,7 +540,8 @@ where
             ))
             .await;
         // Both pipes ride the failure, bounded, for an adapter that did not show
-        // the command's output as it ran. The CLI reprints the stderr tail with
+        // the command's output as it ran. A timeout carries them too, through
+        // the streaming step's own failure. The CLI reprints the stderr tail with
         // the error and leaves stdout to the step's own tail.
         return Err(OperationFailure::command_failed(
             context.install_cmd.to_string(),
