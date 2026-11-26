@@ -107,14 +107,17 @@ Test egress at the **boundary**, not by listing known paths:
     `OperationFailure::install_timed_out(.., StreamedTail)` build them, from an install's output.**
     `StreamedOutput` and `StreamedTail` have private fields, and only the streaming install step
     (`execute_command_streaming`) builds either, so a check's, an audit's, a finder's or a
-    provider's output cannot be passed to any of them from any crate. A `StreamedTail` holds only
-    the two ends of each pipe: the relay keeps them in `TailWindows`, which holds at most about 4 KB
-    per pipe, while the runner itself still keeps the whole of both pipes until the command exits.
-    Three gaps remain: `StreamedOutput::from_output` is `pub` but compiled only under `with_mocks`,
-    which `just build` keeps out of the binaries; `StreamedOutput::new` and `StreamedTail::new` are
-    `pub(crate)`, so a second caller inside `selfie` could wrap other output, and the variants are
-    struct literals that any crate can write, since `BoundedText::bound` is `pub`. The `BoundedText`
-    fields still bound whatever any gap lets in.
+    provider's output cannot be passed to any of them from any crate. `execute_streaming` itself
+    returns a `StreamedExit`, which no failure constructor takes, so streaming some other command
+    through the public trait does not produce forwardable output either; the `compile_fail` doctests
+    on `StreamedOutput` hold that. Neither the runner nor the relay holds more than the two ends of
+    each pipe: each keeps them in a `TailWindows`, which holds at most about 4 KB per pipe however
+    long the command runs. The runner's windows count raw bytes, so `ExecutionFailed`'s bound counts
+    what the command printed. Three gaps remain: `StreamedOutput::from_output` is `pub` but compiled
+    only under `with_mocks`, which `just build` keeps out of the binaries; `StreamedOutput::new` and
+    `StreamedTail::new` are `pub(crate)`, so a second caller inside `selfie` could wrap other
+    output, and the variants are struct literals that any crate can write, since
+    `BoundedText::bound` is `pub`. The `BoundedText` fields still bound whatever any gap lets in.
 
   Render a `CommandError` with `to_string()`, never `{:?}`: `Display` writes the sentence its
   `Composed::parts` curates, while `Debug` prints whatever fields a future variant adds. Still

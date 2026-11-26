@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     commands::runner::{
-        CommandError, CommandOutput, CommandRunner, StreamedOutput, StreamedTail, TailWindows,
+        CommandError, CommandRunner, StreamedExit, StreamedOutput, StreamedTail, TailWindows,
         TimedOut,
     },
     config::SelfieConfig,
@@ -174,13 +174,13 @@ where
         while let Some(chunk) = rx.recv().await {
             match chunk {
                 OutputChunk::Stdout(line) => {
-                    stdout.push(&line);
+                    stdout.push(line.as_bytes());
                     sender_clone
                         .send_info(step, ConsoleOutput::Stdout(line))
                         .await;
                 }
                 OutputChunk::Stderr(line) => {
-                    stderr.push(&line);
+                    stderr.push(line.as_bytes());
                     sender_clone
                         .send_info(step, ConsoleOutput::Stderr(line))
                         .await;
@@ -208,7 +208,10 @@ where
     // Ended before anything else is said about the command, so a consumer
     // closes the step before it reports the result.
     sender
-        .send_step_ended(step, ending_of(&result, StepEnding::Failed))
+        .send_step_ended(
+            step,
+            ending_of(&result, StreamedExit::is_success, StepEnding::Failed),
+        )
         .await;
 
     match result {
@@ -310,14 +313,16 @@ async fn report_relay_end(
 }
 
 /// How a waiting step that ran a command ended, given what the command
-/// returned. `on_nonzero` is the ending for a non-zero exit: a failure for an
-/// install, and an answer for a check.
-pub(crate) fn ending_of(
-    result: &Result<CommandOutput, CommandError>,
+/// returned and whether `succeeded` says its output is a zero exit.
+/// `on_nonzero` is the ending for a non-zero exit: a failure for an install
+/// or an audit.
+pub(crate) fn ending_of<T>(
+    result: &Result<T, CommandError>,
+    succeeded: impl Fn(&T) -> bool,
     on_nonzero: StepEnding,
 ) -> StepEnding {
     match result {
-        Ok(output) if output.is_success() => StepEnding::Succeeded,
+        Ok(output) if succeeded(output) => StepEnding::Succeeded,
         Ok(_) => on_nonzero,
         Err(CommandError::Canceled { .. }) => StepEnding::Canceled,
         Err(_) => StepEnding::Failed,
@@ -425,8 +430,8 @@ mod tests {
 
     fn windows_of(stdout: &str, stderr: &str) -> (TailWindows, TailWindows) {
         let (mut out, mut err) = (TailWindows::new(), TailWindows::new());
-        out.push(stdout);
-        err.push(stderr);
+        out.push(stdout.as_bytes());
+        err.push(stderr.as_bytes());
         (out, err)
     }
 
@@ -774,7 +779,7 @@ rm -rf package package.tar.gz";
                 .await
                 .unwrap();
 
-            assert!(output.is_success(), "stderr: {}", output.stderr_str());
+            assert!(output.is_success(), "stderr: {}", output.stderr());
         }
     }
 }

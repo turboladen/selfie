@@ -412,7 +412,14 @@ where
     let result = command_runner.execute(cmd, package_dir, token).await;
     // A non-zero exit is an audit error, so the step failed.
     sender
-        .send_step_ended(step, steps::ending_of(&result, StepEnding::Failed))
+        .send_step_ended(
+            step,
+            steps::ending_of(
+                &result,
+                crate::commands::CommandOutput::is_success,
+                StepEnding::Failed,
+            ),
+        )
         .await;
     match result {
         Ok(output) => {
@@ -1973,7 +1980,7 @@ mod tests {
                 _timeout: std::time::Duration,
                 _output_sender: tokio::sync::mpsc::Sender<crate::commands::runner::OutputChunk>,
                 _token: &CancellationToken,
-            ) -> Result<crate::commands::runner::CommandOutput, crate::commands::runner::CommandError>
+            ) -> Result<crate::commands::runner::StreamedExit, crate::commands::runner::CommandError>
             {
                 unimplemented!("not needed for audit tests")
             }

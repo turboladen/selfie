@@ -3345,7 +3345,7 @@ impl OperationFailure {
 
     /// The failure of `command`, which ran and exited non-zero with `output`.
     ///
-    /// Both pipes are bounded here. The output must be a
+    /// Both pipes arrive bounded, as the runner kept them. The output must be a
     /// [`StreamedOutput`](crate::commands::StreamedOutput), so a check's, an
     /// audit's, a finder's or a provider's output cannot reach a failure this
     /// way: see [`CommandFailure::ExecutionFailed`].
@@ -3354,8 +3354,8 @@ impl OperationFailure {
         OperationFailure::CommandError(CommandFailure::ExecutionFailed {
             command,
             exit_code: output.code(),
-            stdout: crate::commands::BoundedText::bound(output.stdout()),
-            stderr: crate::commands::BoundedText::bound(output.stderr()),
+            stdout: output.stdout().clone(),
+            stderr: output.stderr().clone(),
         })
     }
 
@@ -3377,7 +3377,8 @@ impl OperationFailure {
 
     /// The failure of an install of `package_name` whose command succeeded
     /// with `install`, but whose `check_command` still says it is not
-    /// installed. Both of the install command's pipes are bounded here.
+    /// installed. Both of the install command's pipes arrive bounded, as the
+    /// runner kept them.
     #[must_use]
     pub fn not_installed_after_install(
         package_name: String,
@@ -3391,8 +3392,8 @@ impl OperationFailure {
             check_command,
             exit_code,
             required_by,
-            stdout: crate::commands::BoundedText::bound(install.stdout()),
-            stderr: crate::commands::BoundedText::bound(install.stderr()),
+            stdout: install.stdout().clone(),
+            stderr: install.stderr().clone(),
         }
     }
 
@@ -7658,7 +7659,9 @@ mod command_failed_tests {
         };
         OperationFailure::command_failed(
             "install-x".to_string(),
-            &crate::commands::StreamedOutput::new(output),
+            &crate::commands::StreamedOutput::new(crate::commands::StreamedExit::from_output(
+                output,
+            )),
         )
     }
 

@@ -32,22 +32,24 @@ pub enum OutputChunk {
 /// Port for command execution, in buffered and streaming forms.
 ///
 /// A non-zero exit is **not** an error for the `execute*` methods. It is
-/// reported through [`CommandOutput::is_success`], so their `# Errors` sections
-/// list only the ways a command fails to run to completion. Those ways are the
-/// same for all of them: its working directory cannot be entered
-/// ([`CommandError::WorkingDirectoryUnusable`], and then no part of it runs), it
-/// cannot be started or dies part-way through, it times out, it is canceled
-/// via `token`, or an output stream cannot be read to the end
+/// reported through the output's own `is_success`, such as
+/// [`CommandOutput::is_success`] and [`StreamedExit::is_success`], so their
+/// `# Errors` sections list only the ways a command fails to run to completion.
+/// Those ways are the same for all of them: its working directory cannot be
+/// entered ([`CommandError::WorkingDirectoryUnusable`], and then no part of it
+/// runs), it cannot be started or dies part-way through, it times out, it is
+/// canceled via `token`, or an output stream cannot be read to the end
 /// ([`CommandError::OutputReadFailed`]). The last includes stderr on a command
 /// whose correctness depends only on stdout — the runner reports what it could
 /// not read, and does not decide which stream a caller cared about. Each
 /// `execute*` method below names only what it adds to that set.
 ///
-/// They all buffer the command's entire output in memory, and nothing bounds it
-/// — [`execute_streaming`](CommandRunner::execute_streaming) accumulates the
-/// output as well as relaying it. A size check applied by a caller, such as the
-/// dotfile content cap, bounds what selfie compares and writes, not what it
-/// allocates.
+/// The buffered methods hold the command's entire output in memory, and nothing
+/// bounds it. A size check applied by a caller, such as the dotfile content cap,
+/// bounds what selfie compares and writes, not what it allocates.
+/// [`execute_streaming`](CommandRunner::execute_streaming) keeps no more of
+/// each pipe than [`BoundedText::bound`] keeps of the whole pipe, however long
+/// the command runs.
 ///
 /// [`is_command_available`](CommandRunner::is_command_available) is the
 /// exception to both: it runs no command.
@@ -96,8 +98,10 @@ pub trait CommandRunner: Send + Sync {
     /// For long-running commands that need real-time feedback. Every chunk is
     /// delivered while the receiver lives: a receiver that falls behind slows
     /// the command down rather than losing output. Once the receiver is gone,
-    /// chunks are discarded and the command still runs to completion. The
-    /// returned [`CommandOutput`] holds all of the output either way.
+    /// chunks are discarded and the command still runs to completion. Either
+    /// way, the returned [`StreamedExit`] holds the exit status and each pipe
+    /// bounded as [`BoundedText::bound`] bounds the whole pipe, and nothing else
+    /// of the output.
     ///
     /// `timeout` bounds silence, not run time: the command is terminated once
     /// it has written nothing to stdout or stderr for `timeout`, and a command
@@ -116,7 +120,7 @@ pub trait CommandRunner: Send + Sync {
         timeout: Duration,
         output_sender: mpsc::Sender<OutputChunk>,
         token: &CancellationToken,
-    ) -> impl Future<Output = Result<CommandOutput, CommandError>> + Send;
+    ) -> impl Future<Output = Result<StreamedExit, CommandError>> + Send;
 
     /// Execute a command whose stdout becomes a file's content.
     ///
@@ -762,40 +766,192 @@ impl crate::parts::Composed for CommandError {
     }
 }
 
-/// The output of a command whose output selfie streamed to its caller as the
-/// command ran, such as an install.
+/// How a command that selfie streamed exited, with the start and end of each
+/// pipe. [`CommandRunner::execute_streaming`] returns one.
 ///
-/// Only the streaming install step builds one, so a value of this type cannot
-/// hold a check's, an audit's or a finder's output. Read it through
-/// [`CommandOutput`]'s methods.
-// The type marks the one command output whose stdout a failure may forward, by
-// the ruling for install commands. `OperationFailure::command_failed` takes
-// nothing else.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StreamedOutput(CommandOutput);
+/// Each pipe reads as [`BoundedText::bound`] bounds the whole of it, and nothing
+/// else of the output is kept. No failure takes one: see [`StreamedOutput`].
+#[derive(Debug)]
+pub struct StreamedExit {
+    status: std::process::ExitStatus,
+    stdout: TailWindows,
+    stderr: TailWindows,
+}
 
-impl StreamedOutput {
-    pub(crate) fn new(output: CommandOutput) -> Self {
-        Self(output)
+impl StreamedExit {
+    pub(crate) fn new(
+        status: std::process::ExitStatus,
+        stdout: TailWindows,
+        stderr: TailWindows,
+    ) -> Self {
+        Self {
+            status,
+            stdout,
+            stderr,
+        }
     }
 
-    /// Wrap `output` as though it had been streamed.
-    ///
-    /// For test doubles. Gated behind `with_mocks`, as
-    /// [`CommandOutput::from_parts`] is, so that production code cannot pass
-    /// another command's output off as streamed.
-    #[cfg(feature = "with_mocks")]
+    /// Bound a buffered `output` as though it had been streamed, for test
+    /// doubles.
+    // This is a test double's gate. A `StreamedExit` reaches no failure, so
+    // unlike `StreamedOutput::from_output` it needs no stricter one.
+    #[cfg(any(test, feature = "with_mocks"))]
     #[must_use]
     pub fn from_output(output: CommandOutput) -> Self {
-        Self(output)
+        let (mut stdout, mut stderr) = (TailWindows::new(), TailWindows::new());
+        stdout.push(output.stdout());
+        stderr.push(output.stderr());
+        Self::new(output.output.status, stdout, stderr)
+    }
+
+    /// Whether the command exited with status zero.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.status.success()
+    }
+
+    /// The command's exit code, or `None` when it exited on a signal and so
+    /// has none.
+    #[must_use]
+    pub fn code(&self) -> Option<i32> {
+        self.status.code()
+    }
+
+    /// The command's stdout, bounded anew on each call.
+    #[must_use]
+    pub fn bounded_stdout(&self) -> BoundedText {
+        self.stdout.finish()
+    }
+
+    /// The command's stderr, bounded anew on each call.
+    #[must_use]
+    pub fn bounded_stderr(&self) -> BoundedText {
+        self.stderr.finish()
+    }
+
+    // How many bytes each pipe carried in all, kept or not.
+    #[cfg(test)]
+    pub(crate) fn totals(&self) -> (u64, u64) {
+        (self.stdout.total, self.stderr.total)
+    }
+
+    // How many bytes both pipes' windows have reserved. A buffer never gives
+    // capacity back, so this is also the most they ever held.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> usize {
+        self.stdout.capacity() + self.stderr.capacity()
     }
 }
 
-impl std::ops::Deref for StreamedOutput {
-    type Target = CommandOutput;
+/// The output of an install command, which selfie streamed to its caller as it
+/// ran: its exit status and each pipe, bounded.
+///
+/// Its fields are private and no public function builds one outside test
+/// doubles, so a failure built through
+/// [`OperationFailure::command_failed`](crate::package::event::OperationFailure::command_failed)
+/// or
+/// [`OperationFailure::not_installed_after_install`](crate::package::event::OperationFailure::not_installed_after_install)
+/// carries an install's stdout and no other command's.
+/// [`CommandRunner::execute_streaming`] returns a [`StreamedExit`], which no
+/// failure accepts:
+///
+/// ```compile_fail
+/// use selfie::commands::CommandRunner;
+/// use selfie::package::event::OperationFailure;
+/// use std::{path::Path, time::Duration};
+///
+/// async fn forward(runner: &impl CommandRunner) -> OperationFailure {
+///     let (sender, _) = tokio::sync::mpsc::channel(1);
+///     let token = tokio_util::sync::CancellationToken::new();
+///     let dir = Path::new(".");
+///     let exit = runner.execute_streaming("op read x", dir, Duration::ZERO, sender, &token);
+///     OperationFailure::command_failed(String::new(), &exit.await.unwrap())
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use selfie::commands::{StreamedExit, StreamedOutput};
+///
+/// fn wrap(exit: StreamedExit) -> StreamedOutput {
+///     StreamedOutput::new(exit)
+/// }
+/// ```
+///
+/// A streamed install's output does reach a failure:
+///
+/// ```
+/// # // This control uses every import and call the two cases above do, so
+/// # // neither can fail on a renamed export instead of on the boundary.
+/// use selfie::commands::{CommandRunner, StreamedExit, StreamedOutput};
+/// use selfie::package::event::OperationFailure;
+/// use std::{path::Path, time::Duration};
+///
+/// async fn succeeded(runner: &impl CommandRunner) -> bool {
+///     let (sender, _) = tokio::sync::mpsc::channel(1);
+///     let token = tokio_util::sync::CancellationToken::new();
+///     let dir = Path::new(".");
+///     let exit = runner.execute_streaming("op read x", dir, Duration::ZERO, sender, &token);
+///     let exit: StreamedExit = exit.await.unwrap();
+///     exit.is_success()
+/// }
+///
+/// fn forward(output: &StreamedOutput) -> OperationFailure {
+///     OperationFailure::command_failed(String::new(), output)
+/// }
+/// ```
+// Only the streaming install step, `execute_command_streaming`, wraps a
+// `StreamedExit` as one. The type marks the one command output whose stdout a
+// failure may forward, by the ruling for install commands, and
+// `OperationFailure::command_failed` takes nothing else. Each pipe is bounded
+// once, here, rather than on every read.
+#[derive(Debug)]
+pub struct StreamedOutput {
+    status: std::process::ExitStatus,
+    stdout: BoundedText,
+    stderr: BoundedText,
+}
 
-    fn deref(&self) -> &CommandOutput {
-        &self.0
+impl StreamedOutput {
+    pub(crate) fn new(exit: StreamedExit) -> Self {
+        Self {
+            status: exit.status,
+            stdout: exit.stdout.finish(),
+            stderr: exit.stderr.finish(),
+        }
+    }
+
+    /// Wrap `output` as though it had been streamed, for test doubles.
+    // Gated on the feature alone, as `CommandOutput::from_parts` is, so that
+    // production code cannot pass another command's output off as streamed.
+    #[cfg(feature = "with_mocks")]
+    #[must_use]
+    pub fn from_output(output: CommandOutput) -> Self {
+        Self::new(StreamedExit::from_output(output))
+    }
+
+    /// Whether the command exited with status zero.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.status.success()
+    }
+
+    /// The command's exit code, or `None` when it exited on a signal and so
+    /// has none.
+    #[must_use]
+    pub fn code(&self) -> Option<i32> {
+        self.status.code()
+    }
+
+    /// The command's stdout, bounded.
+    #[must_use]
+    pub fn stdout(&self) -> &BoundedText {
+        &self.stdout
+    }
+
+    /// The command's stderr, bounded.
+    #[must_use]
+    pub fn stderr(&self) -> &BoundedText {
+        &self.stderr
     }
 }
 
@@ -962,7 +1118,7 @@ impl std::fmt::Display for BoundedText {
 
 // `head`, then the marker naming the `elided` bytes, then `tail`: the one
 // spelling of an elision, whichever path bounded the text.
-fn marked(head: &str, elided: usize, tail: &str) -> String {
+fn marked(head: &str, elided: impl std::fmt::Display, tail: &str) -> String {
     format!("{head}… ({elided} bytes elided) …{tail}")
 }
 
@@ -972,98 +1128,172 @@ const HEAD_KEEP: usize = BOUNDED_END_BYTES + 4;
 /// At least how many bytes [`TailWindows`] keeps from the end of a long text.
 const TAIL_KEEP: usize = BOUNDED_END_BYTES + 4;
 
-/// The start and end of a text that arrives in pieces, kept so that
-/// [`finish`](Self::finish) bounds it exactly as [`BoundedText::bound`] bounds
-/// the whole text, without holding the whole text.
+/// The start and end of a pipe's bytes as they arrive in pieces, kept so that
+/// [`finish`](Self::finish) bounds them exactly as [`BoundedText::bound`]
+/// bounds the whole pipe, without holding the whole pipe.
 ///
-/// Holds at most `HEAD_KEEP + 3 * TAIL_KEEP + 8` bytes, however long the text.
-// The head and tail each keep a few bytes past what `text_within` cuts at, so
-// the character boundaries it looks for are always inside them. Nothing is
-// dropped until the text is past `HEAD_KEEP + 2 * TAIL_KEEP` bytes, because a
-// text barely over the bound is returned whole, and that needs all of it.
-//
-// Both buffers are reserved once and never grow: an append happens only when it
-// fits, and a piece that would push the tail past that reservation is cut to its
-// own last `TAIL_KEEP` bytes first.
-//
-// `Debug` prints lengths only, because the windows hold bytes `finish` elides.
+/// Holds at most `HEAD_KEEP + 3 * TAIL_KEEP` bytes, about 4 KB, plus a carry of
+/// at most 3, however long the pipe.
 pub(crate) struct TailWindows {
-    head: String,
-    tail: String,
-    total: usize,
+    // The head and tail each keep a few bytes past where `bound` cuts, so the
+    // character boundaries `finish` looks for are always inside them. Both are
+    // reserved once and never grow.
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    // A `u64`, so a pipe past 4 GiB counts true on a 32-bit target too.
+    total: u64,
+    // `bound` cuts valid UTF-8 between characters and anything else as raw
+    // bytes, so the windows track whether every byte so far is UTF-8, and carry
+    // the start of a character whose other bytes have not arrived yet.
+    valid: bool,
+    carry: ([u8; 3], usize),
 }
 
+// It prints lengths only, because the windows and the carry hold bytes `finish`
+// elides.
 impl std::fmt::Debug for TailWindows {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TailWindows")
             .field("head", &format_args!("<{} bytes>", self.head.len()))
             .field("tail", &format_args!("<{} bytes>", self.tail.len()))
             .field("total", &self.total)
-            .finish()
+            .field("valid", &self.valid)
+            .finish_non_exhaustive()
     }
 }
 
 impl TailWindows {
+    // The most bytes the two windows ever hold together, the carry aside.
+    #[cfg(test)]
+    pub(crate) const MOST_HELD: usize = HEAD_KEEP + 3 * TAIL_KEEP;
+
     pub(crate) fn new() -> Self {
         Self {
-            head: String::with_capacity(HEAD_KEEP + 4),
-            tail: String::with_capacity(3 * TAIL_KEEP + 4),
+            head: Vec::with_capacity(HEAD_KEEP),
+            tail: Vec::with_capacity(3 * TAIL_KEEP),
             total: 0,
+            valid: true,
+            carry: ([0; 3], 0),
         }
     }
 
-    /// Add the next piece of the text.
-    pub(crate) fn push(&mut self, text: &str) {
-        self.total += text.len();
-        let mut rest = text;
+    /// Add the next piece of the pipe.
+    // Nothing is dropped until the pipe is past `HEAD_KEEP + 2 * TAIL_KEEP`
+    // bytes, because a pipe barely over the bound is returned whole, and that
+    // needs all of it. A piece that would push the tail past its reservation is
+    // cut to its own last `TAIL_KEEP` bytes first.
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
+        self.track(bytes);
+        self.total += bytes.len() as u64;
+        let mut rest = bytes;
         if self.head.len() < HEAD_KEEP {
-            let take = rest.ceil_char_boundary((HEAD_KEEP - self.head.len()).min(rest.len()));
-            self.head.push_str(&rest[..take]);
+            let take = (HEAD_KEEP - self.head.len()).min(rest.len());
+            self.head.extend_from_slice(&rest[..take]);
             rest = &rest[take..];
         }
         if self.tail.len() + rest.len() <= 2 * TAIL_KEEP {
-            self.tail.push_str(rest);
+            self.tail.extend_from_slice(rest);
         } else if rest.len() >= TAIL_KEEP {
-            let cut = rest.floor_char_boundary(rest.len() - TAIL_KEEP);
             self.tail.clear();
-            self.tail.push_str(&rest[cut..]);
+            self.tail.extend_from_slice(&rest[rest.len() - TAIL_KEEP..]);
         } else {
-            self.tail.push_str(rest);
-            let cut = self.tail.floor_char_boundary(self.tail.len() - TAIL_KEEP);
+            self.tail.extend_from_slice(rest);
+            let cut = self.tail.len() - TAIL_KEEP;
             self.tail.drain(..cut);
         }
     }
 
-    /// The text bounded, as [`BoundedText::bound`] bounds it whole.
-    pub(crate) fn finish(self) -> BoundedText {
-        let tail_start = self.total - self.tail.len();
-        if tail_start == self.head.len() {
-            let mut whole = self.head;
-            whole.push_str(&self.tail);
-            return BoundedText::bound(whole.as_bytes());
+    // Keep `valid` true only while every byte so far, `piece` included, is
+    // UTF-8 or the start of a character still arriving.
+    fn track(&mut self, piece: &[u8]) {
+        if !self.valid {
+            return;
         }
-        // Something was dropped, so the text is far past the bound and the cut
-        // is always shorter than it: the same cut `text_within` makes, which
-        // `the_windows_bound_a_text_as_bound_does` holds the two to.
-        let head = self.head.floor_char_boundary(BOUNDED_END_BYTES);
-        let at = self
-            .tail
-            .ceil_char_boundary(self.total - BOUNDED_END_BYTES - tail_start);
+        let (carry, carried) = &mut self.carry;
+        let mut rest = piece;
+        if *carried > 0 {
+            // Finish the carried character from the piece's first bytes, so the
+            // rest is checked in place rather than copied behind the carry.
+            let mut joined = [0; 6];
+            let take = (joined.len() - *carried).min(rest.len());
+            joined[..*carried].copy_from_slice(&carry[..*carried]);
+            joined[*carried..*carried + take].copy_from_slice(&rest[..take]);
+            let joined = &joined[..*carried + take];
+            let done = match std::str::from_utf8(joined) {
+                Ok(_) => joined.len(),
+                Err(e) if e.valid_up_to() > 0 => e.valid_up_to(),
+                Err(e) if e.error_len().is_none() => {
+                    // Still incomplete, and the piece is used up.
+                    carry[..joined.len()].copy_from_slice(joined);
+                    *carried = joined.len();
+                    return;
+                }
+                Err(_) => {
+                    self.valid = false;
+                    return;
+                }
+            };
+            rest = &rest[done - *carried..];
+            *carried = 0;
+        }
+        if let Err(e) = std::str::from_utf8(rest) {
+            if e.error_len().is_some() {
+                self.valid = false;
+            } else {
+                let start = e.valid_up_to();
+                *carried = rest.len() - start;
+                carry[..*carried].copy_from_slice(&rest[start..]);
+            }
+        }
+    }
+
+    // Whether the whole pipe so far is UTF-8. A character still arriving makes
+    // it not, since nothing may come to finish it.
+    fn utf8(&self) -> bool {
+        self.valid && self.carry.1 == 0
+    }
+
+    /// The pipe bounded, as [`BoundedText::bound`] bounds it whole.
+    pub(crate) fn finish(&self) -> BoundedText {
+        if !self.dropped() {
+            let mut whole = self.head.clone();
+            whole.extend_from_slice(&self.tail);
+            return BoundedText::bound(&whole);
+        }
+        // The cut is `keeping_ends`'s, which `the_windows_bound_bytes_as_bound_does`
+        // holds the two to: raw bytes, moved to character boundaries when the
+        // pipe is UTF-8, as `text_within` moves them.
+        let mut head = BOUNDED_END_BYTES;
+        let mut at = self.tail.len() - BOUNDED_END_BYTES;
+        if self.utf8() {
+            // The head window can end inside a character and the tail window
+            // start inside one, so each is read as its longest valid run.
+            let prefix = self.head.utf8_chunks().next().map_or("", |c| c.valid());
+            head = prefix.floor_char_boundary(head);
+            let suffix = self.tail.utf8_chunks().last().map_or("", |c| c.valid());
+            let skipped = self.tail.len() - suffix.len();
+            at = skipped + suffix.ceil_char_boundary(at.saturating_sub(skipped));
+        }
+        let elided = self.total - (head + self.tail.len() - at) as u64;
+        // `bound` keeps a text whole when its cut would not be shorter. Past the
+        // windows the elided middle is over 1000 bytes and decodes to at least
+        // as many, while the marker and the two seams cost far less.
+        debug_assert!(elided > HEAD_KEEP as u64, "{elided} bytes elided");
         BoundedText(marked(
-            &self.head[..head],
-            tail_start + at - head,
-            &self.tail[at..],
+            &String::from_utf8_lossy(&self.head[..head]),
+            elided,
+            &String::from_utf8_lossy(&self.tail[at..]),
         ))
+    }
+
+    // Whether any byte of the pipe is in neither window.
+    fn dropped(&self) -> bool {
+        self.total > (self.head.len() + self.tail.len()) as u64
     }
 
     #[cfg(test)]
     fn capacity(&self) -> usize {
         self.head.capacity() + self.tail.capacity()
-    }
-
-    #[cfg(test)]
-    fn dropped(&self) -> bool {
-        self.total - self.tail.len() > self.head.len()
     }
 }
 
@@ -1281,44 +1511,76 @@ mod tests {
         text
     }
 
-    // `text` pushed into windows in pieces of about `step` bytes.
-    fn windows_of(text: &str, step: usize) -> TailWindows {
+    // `bytes` pushed into windows in pieces of `step` bytes, cut anywhere, so
+    // a piece can end inside a character.
+    fn windows_of(bytes: &[u8], step: usize) -> TailWindows {
         let mut windows = TailWindows::new();
-        let mut rest = text;
-        while !rest.is_empty() {
-            let at = rest.ceil_char_boundary(step.min(rest.len()));
-            windows.push(&rest[..at]);
-            rest = &rest[at..];
+        for piece in bytes.chunks(step) {
+            windows.push(piece);
         }
         windows
     }
 
-    // For any text and any way of cutting it into pieces, the windows give what
-    // bounding the whole text gives.
+    // Multibyte text with `byte` written at both of `bound`'s cut points, so a
+    // cut on character boundaries and a cut on raw bytes disagree there.
+    fn invalid_at_the_cuts(len: usize, byte: u8) -> Vec<u8> {
+        let mut bytes = text_of("ab€c😀dé\n", len).into_bytes();
+        let len = bytes.len();
+        for at in [BOUNDED_END_BYTES, len.saturating_sub(BOUNDED_END_BYTES)] {
+            if at < len {
+                bytes[at] = byte;
+            }
+        }
+        bytes
+    }
+
+    // The lengths to sweep: every length near the bound's thresholds and the
+    // windows' edges, and a stride between them.
+    fn sweep() -> Vec<usize> {
+        let dense = [0..=40, 995..=1010, 1990..=2040, 2990..=3040];
+        let mut sizes: Vec<usize> = dense.into_iter().flatten().collect();
+        sizes.extend((41..9_000).step_by(97));
+        sizes.push(100_000);
+        sizes
+    }
+
+    // For any pipe, valid UTF-8 or not, and any way of cutting it into pieces,
+    // the windows give what bounding the whole pipe gives.
     #[test]
-    fn the_windows_bound_a_text_as_bound_does() {
+    fn the_windows_bound_bytes_as_bound_does() {
         let mut dropped = 0;
         let mut whole = 0;
-        for pattern in ["0123456789\n", "ab€c😀dé\n", "é"] {
-            for size in [
-                0, 1, 999, 1000, 2000, 2001, 2030, 2500, 3000, 3010, 3013, 3020, 8192, 100_000,
-            ] {
-                for shift in 0..4 {
-                    let text = text_of(pattern, size + shift);
-                    for step in [1, 3, 7, 1000, 1004, 4096, usize::MAX] {
-                        let windows = windows_of(&text, step);
-                        if windows.dropped() {
-                            dropped += 1;
-                        } else {
-                            whole += 1;
-                        }
-                        assert_eq!(
-                            windows.finish().as_str(),
-                            BoundedText::bound(text.as_bytes()).as_str(),
-                            "pattern {pattern:?}, {} bytes, pieces of {step}",
-                            text.len()
-                        );
+        for size in sweep() {
+            let inputs: [(&str, Vec<u8>); 7] = [
+                ("ascii", text_of("0123456789\n", size).into_bytes()),
+                ("multibyte", text_of("ab€c😀dé\n", size).into_bytes()),
+                ("two-byte", text_of("é", size).into_bytes()),
+                ("x and 0xFF", b"x\xFF".repeat(size / 2)),
+                ("continuation at the cuts", invalid_at_the_cuts(size, 0x80)),
+                (
+                    "truncated lead at the cuts",
+                    invalid_at_the_cuts(size, 0xC3),
+                ),
+                ("multibyte ending in a lead", {
+                    let mut bytes = text_of("ab€c😀dé\n", size).into_bytes();
+                    bytes.push(0xC3);
+                    bytes
+                }),
+            ];
+            for (name, bytes) in inputs {
+                for step in [1, 3, 7, 997, 1004, 4096, usize::MAX] {
+                    let windows = windows_of(&bytes, step);
+                    if windows.dropped() {
+                        dropped += 1;
+                    } else {
+                        whole += 1;
                     }
+                    assert_eq!(
+                        windows.finish().as_str(),
+                        BoundedText::bound(&bytes).as_str(),
+                        "{name}, {} bytes, pieces of {step}",
+                        bytes.len()
+                    );
                 }
             }
         }
@@ -1332,39 +1594,64 @@ mod tests {
     fn the_windows_debug_shows_no_text() {
         const SECRET: &str = "7Qx9Lm2Vb8Rt4Kp6Zw3NfHj";
         let text = format!("{}{SECRET}{}", "a".repeat(1100), "b".repeat(1300));
-        let windows = windows_of(&text, 64);
+        let windows = windows_of(text.as_bytes(), 64);
 
         test_common::assert_secret_free(&format!("{windows:?}"), SECRET, "the windows' Debug");
         // Positive control: nothing was dropped, so the tail still holds it.
         assert!(!windows.dropped());
-        assert!(windows.tail.contains(SECRET), "{}", windows.tail);
+        assert!(
+            windows
+                .tail
+                .windows(SECRET.len())
+                .any(|w| w == SECRET.as_bytes()),
+            "the secret never reached the tail"
+        );
         test_common::assert_secret_free(windows.finish().as_str(), SECRET, "the bounded text");
     }
 
-    // However long the text and however it is cut, the windows hold no more than
-    // they reserved at the start.
+    // The carry holds the start of a character, and `Debug` prints neither it
+    // nor any other byte.
     #[test]
-    fn the_windows_hold_a_bounded_amount_of_a_long_output() {
-        let bound = HEAD_KEEP + 3 * TAIL_KEEP + 8;
+    fn the_windows_debug_shows_no_carried_byte() {
+        let windows = windows_of(b"MARK\xC3", 64);
+        let shown = format!("{windows:?}");
+
+        // Positive control: the last byte is carried, not taken for invalid.
+        assert!(
+            windows.valid && !windows.utf8(),
+            "the last byte was not carried"
+        );
+        for byte in ["MARK", "195", "c3", "C3", "77, 65"] {
+            assert!(!shown.contains(byte), "{byte:?} in {shown}");
+        }
+    }
+
+    // However long the pipe and however it is cut, the windows hold no more
+    // than they reserved at the start. A buffer never gives capacity back, so
+    // the last capacity is also the most they ever held.
+    #[test]
+    fn ten_megabytes_never_grow_the_windows() {
+        let bound = TailWindows::MOST_HELD;
         // Large pieces take the replacing route, single bytes the draining one.
-        for (len, step) in [(10_000_000, 8192), (1_000_000, 1)] {
-            let text = text_of("ab€c😀dé\n", len);
+        for (len, step) in [(10_000_000, 65_536), (10_000_000, 8192), (1_000_000, 1)] {
+            let bytes = text_of("ab€c😀dé\n", len).into_bytes();
             let mut windows = TailWindows::new();
-            let mut rest = text.as_str();
-            while !rest.is_empty() {
-                let at = rest.ceil_char_boundary(step.min(rest.len()));
-                windows.push(&rest[..at]);
-                rest = &rest[at..];
+            let reserved = windows.capacity();
+            assert!(reserved <= bound, "{reserved} bytes reserved");
+            for (n, piece) in bytes.chunks(step).enumerate() {
+                windows.push(piece);
                 assert!(
-                    windows.capacity() <= bound,
-                    "{} bytes held after {} of {len}, pieces of {step}",
+                    windows.capacity() == reserved,
+                    "{} bytes held after {} pieces of {step}, of {len}",
                     windows.capacity(),
-                    text.len() - rest.len()
+                    n + 1
                 );
             }
+            assert_eq!(windows.total, bytes.len() as u64);
+            assert!(windows.dropped(), "a long pipe dropped nothing");
             assert_eq!(
                 windows.finish().as_str(),
-                BoundedText::bound(text.as_bytes()).as_str()
+                BoundedText::bound(&bytes).as_str()
             );
         }
     }

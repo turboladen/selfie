@@ -402,7 +402,7 @@ mod tests {
             _timeout: std::time::Duration,
             _output_sender: tokio::sync::mpsc::Sender<crate::commands::runner::OutputChunk>,
             _token: &CancellationToken,
-        ) -> Result<CommandOutput, CommandError> {
+        ) -> Result<crate::commands::StreamedExit, CommandError> {
             unimplemented!("not needed for list tests")
         }
 
