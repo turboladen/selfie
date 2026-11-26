@@ -332,25 +332,30 @@ impl EventProcessor {
                     // two name a spec alike.
                     let message = received::failure(&err);
                     let detail = ErrorDetail::of(&operation_info, message.clone());
-                    let stderr_lines: Vec<Output> = match &err {
-                        OperationFailure::CommandError(CommandFailure::ExecutionFailed {
-                            stderr,
-                            ..
-                        }) => stderr.as_str().lines().map(Output::line).collect(),
-                        _ => Vec::new(),
+                    // An install that failed or timed out carries its pipes.
+                    let install = match &err {
+                        OperationFailure::CommandError(failure) => {
+                            failure.install_pipes().map(|(_, stderr)| (failure, stderr))
+                        }
+                        _ => None,
                     };
+                    let stderr_lines: Vec<Output> = install
+                        .map(|(_, stderr)| stderr.as_str().lines().map(Output::line).collect())
+                        .unwrap_or_default();
+                    let shows_stderr = install.is_some();
                     // The command as the sentence bounds it, so the summary carries
                     // no more of a long command than the error does.
-                    let error_detail = match &err {
-                        OperationFailure::CommandError(
-                            failure @ CommandFailure::ExecutionFailed { exit_code, .. },
-                        ) => ErrorDetail {
+                    let error_detail = match install {
+                        Some((failure, _)) => ErrorDetail {
                             command: Some(Command::written(failure.command_bounded().as_str())),
-                            exit_code: *exit_code,
+                            exit_code: match failure {
+                                CommandFailure::ExecutionFailed { exit_code, .. } => *exit_code,
+                                _ => None,
+                            },
                             stderr: Some(stderr_lines.clone()),
                             ..detail
                         },
-                        _ => detail,
+                        None => detail,
                     };
                     self.display.collect_error(error_detail);
 
@@ -475,9 +480,7 @@ impl EventProcessor {
                         // output is hidden while it runs, and the tail its step showed
                         // may be stdout alone. Lines the tail already showed are left
                         // out.
-                        OperationFailure::CommandError(CommandFailure::ExecutionFailed {
-                            ..
-                        }) => {
+                        OperationFailure::CommandError(_) if shows_stderr => {
                             self.display.print_error(message.clone());
                             self.display.print_command_stderr(&stderr_lines);
                         }
@@ -1731,6 +1734,61 @@ mod tests {
         );
     }
 
+    // A timed-out install's stderr leaves out the lines its step's tail already
+    // showed, and reprints only the older ones.
+    #[tokio::test]
+    async fn a_timed_out_installs_stderr_leaves_out_its_step_tail() {
+        use selfie::commands::runner::{TimeLimit, TimedOut};
+        use selfie::package::event::{CommandFailure, OperationFailure};
+
+        let lines: Vec<String> = (1..=12).map(|i| format!("err-{i}\n")).collect();
+        let mut events = vec![installing(1, "bat")];
+        events.extend(lines.iter().map(|line| info(1, err(line))));
+        events.push(ended(1, StepEnding::Failed));
+        events.push(PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::InstallTimedOut {
+                    timed_out: TimedOut::new(
+                        "brew install bat",
+                        std::time::Duration::from_secs(60),
+                        TimeLimit::Silence,
+                    ),
+                    stdout: selfie::commands::BoundedText::bound(b""),
+                    stderr: selfie::commands::BoundedText::bound(lines.concat().as_bytes()),
+                },
+            )),
+        });
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+
+        let printed = printed_for(display, events).await;
+
+        let lines = texts(&printed);
+        let joined = lines.join("\n");
+        for i in 1..=12 {
+            let line = format!("err-{i}");
+            let count = joined.lines().filter(|shown| shown.trim() == line).count();
+            assert_eq!(count, 1, "{line} in {lines:?}");
+        }
+        // The two lines older than the step's 10-line tail come after the error,
+        // and the tail before it.
+        let error = joined.find("brew install bat").expect("the error printed");
+        let at = |line: &str| {
+            joined
+                .lines()
+                .scan(0, |offset, shown| {
+                    let start = *offset;
+                    *offset += shown.len() + 1;
+                    Some((start, shown))
+                })
+                .find(|(_, shown)| shown.trim() == line)
+                .map(|(start, _)| start)
+                .unwrap_or_else(|| panic!("no {line} in {lines:?}"))
+        };
+        assert!(at("err-3") < error && error < at("err-1"), "{lines:?}");
+        assert!(error < at("err-2"), "{lines:?}");
+    }
+
     // A fragment still open when the operation completes prints before the
     // result, labeled with its step.
     #[tokio::test]
@@ -2121,6 +2179,61 @@ mod tests {
         assert!(
             !printed.iter().any(|(_, line)| line.contains("Pouring")),
             "{printed:?}"
+        );
+    }
+
+    // A timed-out install's bounded stderr prints with its error, as a failed
+    // one's does, and its stdout tail does not.
+    #[tokio::test]
+    async fn a_timed_out_install_shows_its_stderr_at_normal_verbosity() {
+        use crate::display_manager::Channel;
+        use selfie::commands::runner::{TimeLimit, TimedOut};
+        use selfie::package::event::{CommandFailure, OperationFailure};
+
+        let timed_out = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::InstallTimedOut {
+                    timed_out: TimedOut::new(
+                        "brew install bat",
+                        std::time::Duration::from_secs(60),
+                        TimeLimit::Silence,
+                    ),
+                    stdout: selfie::commands::BoundedText::bound(b"==> Pouring bat"),
+                    stderr: selfie::commands::BoundedText::bound(b"Waiting for lock"),
+                },
+            )),
+        };
+        let display = DisplayManager::new(false);
+        let printed = printed_for(display.clone(), vec![timed_out]).await;
+        assert!(
+            printed.contains(&(Channel::Stderr, "Waiting for lock".to_string())),
+            "{printed:?}"
+        );
+        assert!(
+            !printed.iter().any(|(_, line)| line.contains("Pouring")),
+            "{printed:?}"
+        );
+        // The summary names the command and its stderr, and no exit code.
+        let errors = display.collected_errors();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            errors[0]
+                .command
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("brew install bat")
+        );
+        assert_eq!(errors[0].exit_code, None);
+        assert_eq!(
+            errors[0]
+                .stderr
+                .iter()
+                .flatten()
+                .map(Output::as_str)
+                .collect::<Vec<_>>(),
+            ["Waiting for lock"]
         );
     }
 

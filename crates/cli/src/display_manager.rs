@@ -568,10 +568,11 @@ pub(crate) struct ErrorDetail {
     pub command: Option<Command>,
     pub exit_code: Option<i32>,
     /// Bounded by the library: the only producer copies it out of
-    /// `CommandFailure::ExecutionFailed`, whose field is a `BoundedText` and so
-    /// cannot hold unbounded text. There is deliberately no `stdout`
-    /// counterpart: the step's own tail already shows the command's last
-    /// output, and only stderr is reprinted with the error.
+    /// `CommandFailure::install_pipes`, whose pipes are `BoundedText`s and so
+    /// cannot hold unbounded text.
+    // There is deliberately no `stdout` counterpart: the step's own tail already
+    // shows the command's last output, and only stderr is reprinted with the
+    // error.
     pub stderr: Option<Vec<Output>>,
     pub message: Shown,
 }
