@@ -1187,7 +1187,7 @@ environments:
                 assert_eq!(environment_status.dependency_statuses.len(), 1);
                 assert!(matches!(
                     environment_status.dependency_statuses[0].status,
-                    EnvironmentStatus::NotInstalled
+                    EnvironmentStatus::NotInstalled { .. }
                 ));
                 found = true;
             }

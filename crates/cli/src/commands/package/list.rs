@@ -87,7 +87,9 @@ fn format_list_item(
             | UnknownStatus::NoCheckCommand
             | UnknownStatus::NotInEnvironment,
         ) => RowResult::Warning,
-        EnvironmentStatus::NotInstalled | EnvironmentStatus::Unknown(_) => RowResult::Failure,
+        EnvironmentStatus::NotInstalled { .. } | EnvironmentStatus::Unknown(_) => {
+            RowResult::Failure
+        }
     };
 
     let environments = show_all.then(|| {
@@ -340,8 +342,10 @@ mod tests {
 
     #[test]
     fn test_format_check_status_not_installed() {
-        let result =
-            status_style::format_list_status(&event::EnvironmentStatus::NotInstalled, false);
+        let result = status_style::format_list_status(
+            &event::EnvironmentStatus::NotInstalled { exit_code: Some(1) },
+            false,
+        );
         assert_eq!(result, "Not installed");
     }
 
@@ -609,7 +613,7 @@ mod tests {
                 name: "alpha".to_string(),
 
                 environments: vec![TEST_ENV.to_string()],
-                status: event::EnvironmentStatus::NotInstalled,
+                status: event::EnvironmentStatus::NotInstalled { exit_code: Some(1) },
             },
         };
         test_handle_event_with_state(&completed_alpha, &config, &mut state);
@@ -680,7 +684,7 @@ mod tests {
             name: "missing-pkg".to_string(),
 
             environments: vec![TEST_ENV.to_string()],
-            status: event::EnvironmentStatus::NotInstalled,
+            status: event::EnvironmentStatus::NotInstalled { exit_code: Some(1) },
         };
         let row = format_list_item(&failure_item, &config, false, false);
         let (result, content) = (&row.result, format!("{} {}", row.name, row.status));

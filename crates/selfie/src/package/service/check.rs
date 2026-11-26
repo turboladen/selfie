@@ -403,6 +403,7 @@ fn bound_output(bytes: &[u8]) -> BoundedText {
 mod tests {
     use super::*;
     use crate::commands::ShellCommandRunner;
+    use crate::package::event::ShellDiagnosis;
 
     // The result a real `/bin/sh` check gives, run in `dir`.
     async fn result_of(check: &str, dir: &Path) -> CheckResult {
@@ -438,6 +439,32 @@ mod tests {
         let result = result_of("kill -9 $$", dir.path()).await;
 
         assert_eq!(exit_code_of(&result), None);
+    }
+
+    // The shell itself answers 127 for a command it cannot find and 126 for
+    // one it cannot execute, and each check still says not installed. The
+    // shell is pinned to `/bin/sh`: csh answers 1 for a missing command.
+    #[tokio::test]
+    async fn a_check_the_shell_cannot_run_fails_with_its_diagnosis() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // A relative path reaches the script with no quoting, whatever the
+        // temporary directory is called.
+        std::fs::write(dir.path().join("not-executable.sh"), "#!/bin/sh\ntrue\n").unwrap();
+        let missing = format!("selfie-no-such-command-{}", std::process::id());
+
+        let not_found = result_of(&missing, dir.path()).await;
+        let not_executable = result_of("./not-executable.sh", dir.path()).await;
+        let exited = result_of("exit 1", dir.path()).await;
+
+        assert_eq!(
+            ShellDiagnosis::of_exit_code(exit_code_of(&not_found)),
+            Some(ShellDiagnosis::CommandNotFound)
+        );
+        assert_eq!(
+            ShellDiagnosis::of_exit_code(exit_code_of(&not_executable)),
+            Some(ShellDiagnosis::CommandNotExecutable)
+        );
+        assert_eq!(exit_code_of(&exited), Some(1));
     }
 
     // A check that timed out ends its step failed even when the run was

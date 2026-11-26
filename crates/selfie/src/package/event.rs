@@ -1855,7 +1855,7 @@ impl Composed for OperationFailure {
                     .text(" succeeded, but its check command `")
                     .spec_command(check_command)
                     .text("` still says it is not installed")
-                    .text(exit_code.map_or_else(String::new, |code| format!(" (exit {code})")))
+                    .text(exit_note(*exit_code))
             }
             OperationFailure::DeployState(failure) => failure.parts(),
             OperationFailure::UnusableDotfilesDirectory(refusal) => refusal.parts(),
@@ -4054,7 +4054,12 @@ pub struct EnvironmentStatusData {
 #[derive(Debug, Clone)]
 pub enum EnvironmentStatus {
     Installed,
-    NotInstalled,
+    /// The check ran and failed: it exited non-zero, or ended on a signal.
+    NotInstalled {
+        /// The check's exit code, or `None` when it ended on a signal. A code
+        /// the shell reserves names a [`ShellDiagnosis`].
+        exit_code: Option<i32>,
+    },
     /// selfie could not tell, for the reason given.
     Unknown(UnknownStatus),
 }
@@ -4078,7 +4083,9 @@ impl From<&CheckResult> for EnvironmentStatus {
     fn from(result: &CheckResult) -> Self {
         match result {
             CheckResult::Success { .. } => EnvironmentStatus::Installed,
-            CheckResult::Failed { .. } => EnvironmentStatus::NotInstalled,
+            CheckResult::Failed { exit_code, .. } => EnvironmentStatus::NotInstalled {
+                exit_code: *exit_code,
+            },
             CheckResult::NoCheckCommand => {
                 EnvironmentStatus::Unknown(UnknownStatus::NoCheckCommand)
             }
@@ -4086,6 +4093,63 @@ impl From<&CheckResult> for EnvironmentStatus {
                 EnvironmentStatus::Unknown(UnknownStatus::CheckFailed(failure.clone()))
             }
         }
+    }
+}
+
+/// What a check's exit code says when the shell running it reserves that code:
+/// a command in the check was not found, or could not be executed.
+///
+/// A check that exits this way still says the package is not installed. The
+/// diagnosis is a hint for the reader, since a misspelled check and a tool not
+/// yet installed both exit 127.
+// POSIX reserves exactly these two codes. 128 and up mean a signal, which says
+// nothing about whether the command could be found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::FromRepr)]
+#[repr(i32)]
+pub enum ShellDiagnosis {
+    /// The shell found no command by that name, and exited 127.
+    CommandNotFound = 127,
+    /// The shell found the command and could not execute it, and exited 126.
+    CommandNotExecutable = 126,
+}
+
+impl ShellDiagnosis {
+    /// The diagnosis for a check that exited `exit_code`, or `None` for a code
+    /// the shell does not reserve, or for a check that ended on a signal.
+    #[must_use]
+    pub fn of_exit_code(exit_code: Option<i32>) -> Option<Self> {
+        Self::from_repr(exit_code?)
+    }
+
+    /// The exit code this diagnosis is read from.
+    #[must_use]
+    pub fn exit_code(self) -> i32 {
+        self as i32
+    }
+}
+
+/// Words a not-installed check's exit code as a parenthetical that follows a
+/// sentence, such as " (command not found, exit code 127)" or " (exit code 5)".
+/// A check that ended on a signal gets an empty string.
+fn exit_note(exit_code: Option<i32>) -> String {
+    match (ShellDiagnosis::of_exit_code(exit_code), exit_code) {
+        (Some(diagnosis), _) => format!(" ({diagnosis})"),
+        (None, Some(code)) => format!(" (exit code {code})"),
+        (None, None) => String::new(),
+    }
+}
+
+crate::parts::display_from_parts!(ShellDiagnosis);
+
+impl Composed for ShellDiagnosis {
+    fn parts(&self) -> Parts<'_> {
+        let words = match self {
+            Self::CommandNotFound => "command not found",
+            Self::CommandNotExecutable => "command not executable",
+        };
+        Parts::new()
+            .text(words)
+            .text(format!(", exit code {}", self.exit_code()))
     }
 }
 
@@ -5020,11 +5084,9 @@ impl std::fmt::Display for CheckVerdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CheckVerdict::Installed => f.write_str("successfully"),
-            CheckVerdict::NotInstalled {
-                exit_code: Some(code),
-                ..
-            } => write!(f, "and found it not installed (exit code {code})"),
-            CheckVerdict::NotInstalled { .. } => f.write_str("and found it not installed"),
+            CheckVerdict::NotInstalled { exit_code, .. } => {
+                write!(f, "and found it not installed{}", exit_note(*exit_code))
+            }
         }
     }
 }
@@ -5240,6 +5302,82 @@ pub(crate) fn every_check_failure() -> [CheckFailure; 6] {
 mod tests {
     use super::*;
 
+    // Only the two codes the shell reserves for a command it could not run
+    // name a diagnosis. Their neighbors, a signal's 128 and up, and a check
+    // with no code name none.
+    #[test]
+    fn only_the_shells_reserved_exit_codes_name_a_diagnosis() {
+        let cases = [
+            (Some(127), Some(ShellDiagnosis::CommandNotFound)),
+            (Some(126), Some(ShellDiagnosis::CommandNotExecutable)),
+            (Some(125), None),
+            (Some(128), None),
+            (Some(137), None),
+            (Some(2), None),
+            (Some(1), None),
+            (Some(0), None),
+            (Some(-1), None),
+            (None, None),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(ShellDiagnosis::of_exit_code(code), expected, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn a_shell_diagnosis_names_its_cause_and_code() {
+        assert_eq!(
+            ShellDiagnosis::CommandNotFound.to_string(),
+            "command not found, exit code 127"
+        );
+        assert_eq!(
+            ShellDiagnosis::CommandNotExecutable.to_string(),
+            "command not executable, exit code 126"
+        );
+    }
+
+    // A check that said not installed keeps its exit code as a status, and a
+    // check that ended on a signal keeps none.
+    #[test]
+    fn a_not_installed_status_keeps_the_checks_exit_code() {
+        for code in [Some(127), Some(126), Some(1), None] {
+            let result = CheckResult::Failed {
+                stdout: crate::commands::BoundedText::bound(b""),
+                stderr: crate::commands::BoundedText::bound(b""),
+                exit_code: code,
+            };
+            let status = EnvironmentStatus::from(&result);
+            assert!(
+                matches!(status, EnvironmentStatus::NotInstalled { exit_code } if exit_code == code),
+                "{code:?}: {status:?}"
+            );
+        }
+    }
+
+    // `package check` words its verdict with the same diagnosis a listing row
+    // shows, and an ordinary code as the code alone.
+    #[test]
+    fn a_not_installed_verdict_names_the_shells_diagnosis() {
+        let verdict = |exit_code| {
+            CheckVerdict::NotInstalled {
+                command: "c".to_string(),
+                exit_code,
+                stderr: crate::commands::BoundedText::bound(b""),
+            }
+            .to_string()
+        };
+        assert_eq!(
+            verdict(Some(127)),
+            "and found it not installed (command not found, exit code 127)"
+        );
+        assert_eq!(
+            verdict(Some(126)),
+            "and found it not installed (command not executable, exit code 126)"
+        );
+        assert_eq!(verdict(Some(1)), "and found it not installed (exit code 1)");
+        assert_eq!(verdict(None), "and found it not installed");
+    }
+
     // A secret dry run names the link it would replace as a path part, never
     // as words of its sentence: the fixture destination holds U+200B, which
     // `values_of` refuses in a text part. The words around it stay the same.
@@ -5383,7 +5521,9 @@ mod tests {
         }
         for status in [
             EnvironmentStatus::Installed,
-            EnvironmentStatus::NotInstalled,
+            EnvironmentStatus::NotInstalled {
+                exit_code: Some(127),
+            },
         ] {
             assert!(status.gap("p").is_none());
         }
@@ -5662,7 +5802,17 @@ mod tests {
             (
                 installed(Some("q"), Some(1)),
                 "The install command for 'p', which `q` requires, succeeded, but its check \
-                 command `c` still says it is not installed (exit 1)",
+                 command `c` still says it is not installed (exit code 1)",
+            ),
+            (
+                installed(None, Some(127)),
+                "The install command for 'p' succeeded, but its check command `c` still says it \
+                 is not installed (command not found, exit code 127)",
+            ),
+            (
+                installed(None, Some(126)),
+                "The install command for 'p' succeeded, but its check command `c` still says it \
+                 is not installed (command not executable, exit code 126)",
             ),
             (
                 missing(NoSuchPackageReason::NotFound),

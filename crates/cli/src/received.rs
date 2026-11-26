@@ -777,7 +777,7 @@ mod tests {
             failure(&installed).as_str(),
             "The install command for 'p\\u{200b}k', which `ap\\u{200b}p` requires, succeeded, \
              but its check command `ch\u{200B}eck\\nnext` still says it is not installed (exit \
-             1)\nEscaped: ch\\u{200b}eck\\nnext"
+             code 1)\nEscaped: ch\\u{200b}eck\\nnext"
         );
         assert_eq!(
             failure(&invalid).as_str(),
