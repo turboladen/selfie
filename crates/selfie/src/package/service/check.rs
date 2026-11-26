@@ -370,7 +370,7 @@ where
         Ok(output) => CheckResult::Failed {
             stdout: bound_output(output.stdout()),
             stderr: bound_output(output.stderr()),
-            exit_code: Some(output.exit_code()),
+            exit_code: output.code(),
         },
         Err(
             err @ (CommandError::WorkingDirectoryUnusable(_)
@@ -402,6 +402,43 @@ fn bound_output(bytes: &[u8]) -> BoundedText {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::ShellCommandRunner;
+
+    // The result a real `/bin/sh` check gives, run in `dir`.
+    async fn result_of(check: &str, dir: &Path) -> CheckResult {
+        let runner = ShellCommandRunner::new(
+            ShellCommandRunner::default_shell(),
+            std::time::Duration::from_secs(30),
+        );
+        execute_check_command_quiet(
+            "p",
+            "e",
+            Some(check),
+            dir,
+            &runner,
+            &CancellationToken::new(),
+        )
+        .await
+        .result
+    }
+
+    fn exit_code_of(result: &CheckResult) -> Option<i32> {
+        match result {
+            CheckResult::Failed { exit_code, .. } => *exit_code,
+            other => panic!("expected a failed check, got: {other:?}"),
+        }
+    }
+
+    // A check whose shell ended on a signal has no exit code, so none is
+    // published in place of one.
+    #[tokio::test]
+    async fn a_check_ended_by_a_signal_has_no_exit_code() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let result = result_of("kill -9 $$", dir.path()).await;
+
+        assert_eq!(exit_code_of(&result), None);
+    }
 
     // A check that timed out ends its step failed even when the run was
     // canceled meanwhile; any other check that gave no answer then ends it

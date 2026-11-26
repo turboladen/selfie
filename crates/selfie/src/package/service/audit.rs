@@ -470,13 +470,16 @@ where
                 // the bound is applied at this construction site. A
                 // `CheckFailure` bounds its own sentence where it renders.
                 let stderr = crate::commands::BoundedText::bound(output.stderr());
-                let exit_code = output.exit_code();
+                // A shell ended by a signal has no exit code to name.
+                let exit_note = output
+                    .code()
+                    .map_or_else(String::new, |code| format!(" (exit code {code})"));
                 AuditResultData {
                     package_name: package_name.to_string(),
                     environment: environment.to_string(),
                     audit_command: Some(cmd.to_string()),
                     result: AuditResult::Error(format!(
-                        "Audit command failed (exit code {exit_code}): {stderr}"
+                        "Audit command failed{exit_note}: {stderr}"
                     )),
                 }
             }
@@ -817,6 +820,53 @@ mod tests {
             }
             other => panic!("Expected PackageAudited Error, got: {other:?}"),
         }
+    }
+
+    // An audit whose shell ended on a signal names no exit code, and one that
+    // exited names its code.
+    #[tokio::test]
+    async fn an_audit_ended_by_a_signal_names_no_exit_code() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let (sender, _rx) = test_sender();
+        let token = CancellationToken::new();
+
+        // A raw wait status of 9 is death by SIGKILL; 3 << 8 is exit code 3.
+        let mut messages = Vec::new();
+        for raw in [9, 3 << 8] {
+            let mut mock_runner = MockCommandRunner::new();
+            mock_runner.expect_execute().returning(move |_, _, _| {
+                Box::pin(async move {
+                    Ok(CommandOutput {
+                        output: Output {
+                            status: std::process::ExitStatus::from_raw(raw),
+                            stdout: Vec::new(),
+                            stderr: Vec::new(),
+                        },
+                        duration: std::time::Duration::from_millis(10),
+                    })
+                })
+            });
+            let mut progress = ProgressTracker::new(3);
+            let data = execute_audit_command(
+                "test-pkg",
+                "test",
+                Some("a"),
+                &[],
+                temp_dir.path(),
+                &mock_runner,
+                &sender,
+                &mut progress,
+                &token,
+            )
+            .await;
+            match data.result {
+                AuditResult::Error(message) => messages.push(message),
+                other => panic!("Expected AuditResult::Error, got: {other:?}"),
+            }
+        }
+
+        assert!(!messages[0].contains("exit code"), "{}", messages[0]);
+        assert!(messages[1].contains("(exit code 3)"), "{}", messages[1]);
     }
 
     #[tokio::test]

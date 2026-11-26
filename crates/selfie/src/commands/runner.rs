@@ -180,15 +180,6 @@ impl CommandOutput {
         }
     }
 
-    /// Get the command's exit code
-    ///
-    /// Returns the exit status code of the command, or -1 if the exit code
-    /// cannot be determined (e.g., the process was terminated by a signal).
-    #[must_use]
-    pub fn exit_code(&self) -> i32 {
-        self.output.status.code().unwrap_or(-1)
-    }
-
     /// The command's exit code, or `None` when it exited on a signal and so
     /// has none.
     #[must_use]
