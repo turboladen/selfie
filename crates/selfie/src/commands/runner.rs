@@ -1005,7 +1005,48 @@ const BOUNDED_END_BYTES: usize = MAX_BOUNDED_BYTES / 2;
 // fails `a_failing_check_still_reports_why_it_failed`. It does not guard that
 // test's neighbor, which carries its own inline positive control.
 #[derive(Debug, Clone)]
-pub struct BoundedText(String);
+pub struct BoundedText {
+    text: String,
+    // Boxed, so an error type carrying a bounded text stays small.
+    cut: Option<Box<Cut>>,
+}
+
+// Where `cut` put the marker in a `BoundedText`'s text: the kept head ends at
+// `head_end` and the kept tail starts at `tail_start`, both byte offsets into it.
+#[derive(Debug, Clone, Copy)]
+struct Cut {
+    head_end: usize,
+    elided: u64,
+    tail_start: usize,
+}
+
+/// The two ways a [`BoundedText`] holds its input, from [`BoundedText::ends`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ends<'a> {
+    /// The whole input, decoded.
+    Whole(&'a str),
+    /// The input's first and last bytes, with `elided` input bytes cut from
+    /// between them. The text renders them as `head`, an [`Elision`], then
+    /// `tail`. For valid UTF-8 all three count the same bytes. For invalid
+    /// input `head` and `tail` are decoded, so each replaced byte grows to three,
+    /// while `elided` counts the input's bytes.
+    Cut {
+        head: &'a str,
+        elided: u64,
+        tail: &'a str,
+    },
+}
+
+/// Renders the marker that stands for a number of elided bytes, as a
+/// [`BoundedText`] spells it between the ends it kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Elision(pub u64);
+
+impl std::fmt::Display for Elision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "… ({} bytes elided) …", self.0)
+    }
+}
 
 impl BoundedText {
     /// Bound `bytes`, keeping **both ends** and eliding the middle.
@@ -1044,7 +1085,7 @@ impl BoundedText {
     pub(crate) fn text_within(text: &str, share: usize) -> Self {
         let end = share / 2;
         if text.len() <= 2 * end {
-            return Self(text.to_string());
+            return Self::whole(text.to_string());
         }
         let mut head = end;
         while !text.is_char_boundary(head) {
@@ -1072,7 +1113,7 @@ impl BoundedText {
         let whole = String::from_utf8_lossy(bytes);
 
         if bytes.len() <= 2 * end {
-            return Self(whole.into_owned());
+            return Self::whole(whole.into_owned());
         }
 
         let head = String::from_utf8_lossy(&bytes[..end]);
@@ -1083,11 +1124,46 @@ impl BoundedText {
     // `head`, the marker naming the `elided` bytes between, then `tail`; or
     // `whole`, when the marker would cost more bytes than the cut saved.
     fn elided(whole: Cow<'_, str>, head: &str, elided: usize, tail: &str) -> Self {
-        let cut = marked(head, elided, tail);
-        if cut.len() < whole.len() {
-            Self(cut)
+        let cut = Self::cut(head, elided as u64, tail);
+        if cut.text.len() < whole.len() {
+            cut
         } else {
-            Self(whole.into_owned())
+            Self::whole(whole.into_owned())
+        }
+    }
+
+    // Builds a text kept whole, with no marker in it.
+    fn whole(text: String) -> Self {
+        Self { text, cut: None }
+    }
+
+    // Builds `head`, the marker naming the `elided` bytes between, then `tail`.
+    // It is the one way to build a text with a marker in it, so its span is
+    // always recorded.
+    fn cut(head: &str, elided: u64, tail: &str) -> Self {
+        let text = format!("{head}{}{tail}", Elision(elided));
+        let cut = Cut {
+            head_end: head.len(),
+            elided,
+            tail_start: text.len() - tail.len(),
+        };
+        Self {
+            text,
+            cut: Some(Box::new(cut)),
+        }
+    }
+
+    /// Tell the input's kept ends apart: the whole input, or its head and tail
+    /// with the count of bytes cut from between them.
+    #[must_use]
+    pub fn ends(&self) -> Ends<'_> {
+        match self.cut.as_deref() {
+            None => Ends::Whole(&self.text),
+            Some(cut) => Ends::Cut {
+                head: &self.text[..cut.head_end],
+                elided: cut.elided,
+                tail: &self.text[cut.tail_start..],
+            },
         }
     }
 
@@ -1100,26 +1176,20 @@ impl BoundedText {
     /// Borrow the bounded text.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.text
     }
 
     /// Take the bounded text, for a diagnostic whose field is a `String`.
     #[must_use]
     pub fn into_string(self) -> String {
-        self.0
+        self.text
     }
 }
 
 impl std::fmt::Display for BoundedText {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.text)
     }
-}
-
-// `head`, then the marker naming the `elided` bytes, then `tail`: the one
-// spelling of an elision, whichever path bounded the text.
-fn marked(head: &str, elided: impl std::fmt::Display, tail: &str) -> String {
-    format!("{head}… ({elided} bytes elided) …{tail}")
 }
 
 /// At least how many bytes [`TailWindows`] keeps from the start of a long text.
@@ -1279,11 +1349,11 @@ impl TailWindows {
         // windows the elided middle is over 1000 bytes and decodes to at least
         // as many, while the marker and the two seams cost far less.
         debug_assert!(elided > HEAD_KEEP as u64, "{elided} bytes elided");
-        BoundedText(marked(
+        BoundedText::cut(
             &String::from_utf8_lossy(&self.head[..head]),
             elided,
             &String::from_utf8_lossy(&self.tail[at..]),
-        ))
+        )
     }
 
     // Whether any byte of the pipe is in neither window.
@@ -1542,6 +1612,56 @@ mod tests {
         sizes.extend((41..9_000).step_by(97));
         sizes.push(100_000);
         sizes
+    }
+
+    // Returns `ends` rendered back into one text, as the marker joins them.
+    fn reassembled(ends: Ends<'_>) -> String {
+        match ends {
+            Ends::Whole(text) => text.to_string(),
+            Ends::Cut { head, elided, tail } => format!("{head}{}{tail}", Elision(elided)),
+        }
+    }
+
+    // Every way of building a bounded text records its ends: they reassemble to
+    // its text, and they are cut exactly when the text holds a marker.
+    #[test]
+    fn every_bounded_text_tells_its_ends_apart() {
+        let long = "0123456789\n".repeat(400);
+        let mut emoji = vec![b'a'; 999];
+        emoji.extend("😀".as_bytes());
+        emoji.extend(vec![b'b'; 3000]);
+        let mut invalid = vec![b'x'; 2500];
+        invalid[1200] = 0xFF;
+        let mut cases: Vec<(&str, BoundedText)> = vec![
+            ("short", BoundedText::bound(b"not logged in")),
+            ("barely over", BoundedText::bound(&[b'y'; 2010])),
+            ("long", BoundedText::bound(long.as_bytes())),
+            ("split character", BoundedText::bound(&emoji)),
+            ("invalid", BoundedText::bound(&invalid)),
+            ("short invalid", BoundedText::bound(b"a\xFFb")),
+            ("within", BoundedText::text_within(&long, 100)),
+            ("of", BoundedText::of(&long)),
+        ];
+        for step in [7, 4096] {
+            cases.push((
+                "windows dropped",
+                windows_of(long.as_bytes(), step).finish(),
+            ));
+            cases.push(("windows whole", windows_of(b"short\n", step).finish()));
+            cases.push(("windows split character", windows_of(&emoji, step).finish()));
+            cases.push(("windows invalid", windows_of(&invalid, step).finish()));
+        }
+        for (name, bounded) in &cases {
+            let ends = bounded.ends();
+            assert_eq!(reassembled(ends), bounded.as_str(), "{name}");
+            let marked = bounded.as_str().contains("bytes elided");
+            assert_eq!(matches!(ends, Ends::Cut { .. }), marked, "{name}");
+        }
+        let elided = |bounded: &BoundedText| match bounded.ends() {
+            Ends::Cut { elided, .. } => elided,
+            Ends::Whole(_) => 0,
+        };
+        assert_eq!(elided(&cases[2].1), (long.len() - 2000) as u64);
     }
 
     // For any pipe, valid UTF-8 or not, and any way of cutting it into pieces,

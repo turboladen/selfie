@@ -5,8 +5,8 @@ pub mod shell;
 mod terminal;
 
 pub use runner::{
-    BoundedText, CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk,
-    OutputStream, StreamedExit, StreamedOutput, StreamedTail,
+    BoundedText, CommandError, CommandOutput, CommandRunner, ContentOutput, Elision, Ends,
+    OutputChunk, OutputStream, StreamedExit, StreamedOutput, StreamedTail,
 };
 pub use shell::{FallbackNotice, ShellCommandRunner, ShellFallback};
 pub use terminal::{PromptHandler, TerminalAnswer, TerminalPrompt};
