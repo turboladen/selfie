@@ -3604,6 +3604,10 @@ pub enum ComposedWarning {
     DeployState(crate::dotfile_service::DeployStateWarning),
     /// About a standalone dotfiles directory the command could not use.
     DotfilesDirectory(DotfilesDirectoryWarning),
+    /// Says that a streamed command's output did not all reach the caller,
+    /// because the task relaying it did not finish. It comes before the end of
+    /// the step that ran the command.
+    OutputLost(crate::parts::Message),
     /// Any other warning, as its sentence.
     Message(crate::parts::Message),
 }
@@ -3615,7 +3619,7 @@ impl Composed for ComposedWarning {
         match self {
             Self::DeployState(warning) => warning.parts(),
             Self::DotfilesDirectory(warning) => warning.parts(),
-            Self::Message(message) => message.parts(),
+            Self::OutputLost(message) | Self::Message(message) => message.parts(),
         }
     }
 }

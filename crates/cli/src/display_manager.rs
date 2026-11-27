@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
+use selfie::commands::{BoundedText, Elision, Ends};
 use selfie::package::event::{BaseKind, PlannedEntry, StepEnding, StepId};
 use tokio_util::sync::CancellationToken;
 
@@ -690,8 +691,9 @@ impl From<bool> for Verbosity {
     }
 }
 
-/// The stream a line is printed on. A source line's stream gets its own
-/// headings, so a reader of either stream alone can resolve every path.
+/// Names a stream: the one a line is printed on, or the pipe a command's output
+/// came from. A source line's stream gets its own headings, so a reader of
+/// either stream alone can resolve every path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Channel {
     Stdout,
@@ -699,12 +701,127 @@ pub(crate) enum Channel {
 }
 
 // A step the run is waiting on: its spinner on a terminal, what it waits on,
-// and the last lines its command wrote.
+// the last lines its command wrote with their pipe and start in its stream, and
+// how much its stderr streamed.
 struct WaitingLine {
     bar: Option<ProgressBar>,
     subject: Shown,
     started: Instant,
-    tail: VecDeque<Output>,
+    tail: VecDeque<(Channel, u64, Output)>,
+    stderr: Streamed,
+    // The task relaying the step's output did not finish.
+    lost: bool,
+}
+
+/// Says how many bytes a step's stderr streamed, and whether its decoding
+/// replaced any of them.
+#[derive(Debug, Clone, Copy, Default)]
+struct Streamed {
+    bytes: u64,
+    lossy: bool,
+}
+
+/// Says which copy of a command's stderr a failure's bound was cut from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StderrCopy {
+    /// The bytes the runner captured. A stream holding a U+FFFD, which may be
+    /// one its decoding put there, can count them differently.
+    Captured,
+    /// The decoded text the step streamed, which its lines were split from.
+    Relayed,
+}
+
+/// Holds what the last failed step showed of its stderr: every byte from
+/// `shown_from` on, of the `streamed` bytes, which are the lines in `shown`.
+/// `whole` says that the step's output all arrived.
+#[derive(Debug, Clone)]
+struct FailedStep {
+    shown_from: u64,
+    streamed: Streamed,
+    shown: Vec<Output>,
+    whole: bool,
+}
+
+impl FailedStep {
+    /// Returns the lines of `stderr`, a failure's bound of the copy `copy`,
+    /// that the step did not show.
+    // The stream and the bound count the same decoded bytes, so a start in the
+    // stream is a position in the bound's text. A bound cut from captured bytes
+    // of a stream holding a U+FFFD has no positions to compare, so the lines of
+    // its kept tail equal to those shown are left out, as text. A total that
+    // differs means the stream was not all seen, or the record is another
+    // step's, and then all of it prints: it may repeat a line but never hides one.
+    fn unshown(&self, stderr: &BoundedText, copy: StderrCopy) -> Vec<Output> {
+        fn cut_at(text: &str, at: u64) -> Option<&str> {
+            text.get(..usize::try_from(at).ok()?)
+        }
+        let (total, positions) = match stderr.ends() {
+            Ends::Whole(text) => (
+                text.len() as u64,
+                cut_at(text, self.shown_from).map(|kept| lines_of(kept, None, "")),
+            ),
+            Ends::Cut { head, elided, tail }
+                if self.streamed.lossy && copy == StderrCopy::Captured =>
+            {
+                // Only lines after the marker's can be the tail's, so an older copy
+                // in the kept head still prints.
+                let (start, after) = tail.split_once('\n').unwrap_or((tail, ""));
+                let mut lines = lines_of(head, Some(elided), start);
+                lines.extend(
+                    after
+                        .lines()
+                        .map(Output::line)
+                        .filter(|line| !self.shown.contains(line)),
+                );
+                return lines;
+            }
+            Ends::Cut { head, elided, tail } => {
+                let kept = head.len() as u64;
+                let lines = if self.shown_from <= kept {
+                    cut_at(head, self.shown_from).map(|head| lines_of(head, None, ""))
+                } else if self.shown_from <= kept + elided {
+                    Some(lines_of(head, Some(self.shown_from - kept), ""))
+                } else {
+                    cut_at(tail, self.shown_from - kept - elided)
+                        .map(|rest| lines_of(head, Some(elided), rest))
+                };
+                (kept + elided + tail.len() as u64, lines)
+            }
+        };
+        match positions {
+            Some(lines) if total == self.streamed.bytes => lines,
+            _ => bound_lines(stderr),
+        }
+    }
+}
+
+/// Returns every line of `stderr`, a bounded text, as it prints.
+fn bound_lines(stderr: &BoundedText) -> Vec<Output> {
+    match stderr.ends() {
+        Ends::Whole(text) => lines_of(text, None, ""),
+        Ends::Cut { head, elided, tail } => lines_of(head, Some(elided), tail),
+    }
+}
+
+/// Returns `head`, then a marker for `elided` bytes when there is one, then
+/// `tail`, as lines. The line the marker joins is cleaned in its parts, so a
+/// carriage return in the kept tail cannot erase the marker or the head's end.
+fn lines_of(head: &str, elided: Option<u64>, tail: &str) -> Vec<Output> {
+    let Some(elided) = elided else {
+        return head.lines().map(Output::line).collect();
+    };
+    let (before, head_end) = head.rsplit_once('\n').unwrap_or(("", head));
+    let (tail_start, after) = tail.split_once('\n').unwrap_or((tail, ""));
+    let joined = format!(
+        "{}{}{}",
+        Output::line(head_end).as_str(),
+        Elision(elided),
+        Output::line(tail_start).as_str()
+    );
+    let mut lines: Vec<Output> = before.lines().map(Output::line).collect();
+    lines.push(Output::line(&joined));
+    lines.extend(after.lines().map(Output::line));
+    lines
 }
 
 impl WaitingLine {
@@ -741,9 +858,10 @@ pub struct DisplayManager {
     // Steps overlap when a service runs them concurrently, so each is kept by
     // its own id; a `BTreeMap` keeps them in the order they started.
     waiting: Arc<Mutex<BTreeMap<StepId, WaitingLine>>>,
-    // The lines the last failed step showed when it ended, so the failure that
-    // reports it does not show them again.
-    failed_tail: Arc<Mutex<Vec<Output>>>,
+    // What the last failed step showed of its stderr, so the failure that
+    // reports it does not show it again. It is the most recent failed step's:
+    // a failure is reported right after its own step ends.
+    failed: Arc<Mutex<Option<FailedStep>>>,
     // The base directory whose heading each stream showed last, shared by every
     // clone so the conflict prompt and the event processor head against one
     // another.
@@ -916,7 +1034,7 @@ impl DisplayManager {
             verbosity: Verbosity::Normal,
             errors: Arc::new(Mutex::new(ErrorCollector::default())),
             waiting: Arc::new(Mutex::new(BTreeMap::new())),
-            failed_tail: Arc::new(Mutex::new(Vec::new())),
+            failed: Arc::new(Mutex::new(None)),
             last_heading: Arc::new(Mutex::new([None, None])),
             block: Arc::new(Mutex::new(())),
             entry_columns: Arc::new(Mutex::new(EntryColumns::default())),
@@ -1066,6 +1184,8 @@ impl DisplayManager {
                     subject,
                     started: Instant::now(),
                     tail: VecDeque::new(),
+                    stderr: Streamed::default(),
+                    lost: false,
                 },
             );
         }
@@ -1102,13 +1222,32 @@ impl DisplayManager {
                 self.put_above_spinners(&rendered);
             }
         }
-        if ending == StepEnding::Failed && !line.tail.is_empty() {
+        if ending == StepEnding::Failed {
             // Under `--verbose` the lines were printed as they came.
-            if !self.is_verbose() {
-                self.print_error_context(Shown::join(line.tail.iter().cloned(), lit!("\n")));
+            if !self.is_verbose() && !line.tail.is_empty() {
+                let shown = line.tail.iter().map(|(_, _, output)| output.clone());
+                self.print_error_context(Shown::join(shown, lit!("\n")));
             }
-            if let Ok(mut failed) = self.failed_tail.lock() {
-                *failed = line.tail.into_iter().collect();
+            // The tail's oldest stderr line, and every stderr byte after it, is
+            // what the step showed of its stderr.
+            let shown_from = line
+                .tail
+                .iter()
+                .find(|(channel, _, _)| *channel == Channel::Stderr)
+                .map_or(line.stderr.bytes, |(_, start, _)| *start);
+            let shown = line
+                .tail
+                .iter()
+                .filter(|(channel, _, _)| *channel == Channel::Stderr)
+                .map(|(_, _, output)| output.clone())
+                .collect();
+            if let Ok(mut failed) = self.failed.lock() {
+                *failed = Some(FailedStep {
+                    shown_from,
+                    streamed: line.stderr,
+                    shown,
+                    whole: !line.lost,
+                });
             }
         }
     }
@@ -1183,28 +1322,67 @@ impl DisplayManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Print a failed command's stderr, one [`Output`] per line, as context for
-    /// its error (stderr), leaving out the lines its step already showed when
-    /// it ended.
-    pub(crate) fn print_command_stderr(&self, stderr: &[Output]) {
-        let shown = self
-            .failed_tail
-            .lock()
-            .map(|mut failed| std::mem::take(&mut *failed))
-            .unwrap_or_default();
-        let rest: Vec<&Output> = stderr.iter().filter(|line| !shown.contains(line)).collect();
-        if rest.iter().any(|line| !line.as_str().trim().is_empty()) {
-            self.print_error_context(Shown::join(rest.into_iter().cloned(), lit!("\n")));
+    /// Print a failed command's bounded stderr, cut from `copy`, one
+    /// [`Output`] per line, as context for its error (stderr). The part its
+    /// step showed when it ended is left out. When the step's stream cannot be
+    /// matched to it, all of it prints.
+    ///
+    /// Under `--verbose` it prints nothing when the step's stream arrived
+    /// whole, since the step printed every streamed line as it came.
+    pub(crate) fn print_command_stderr(&self, stderr: &BoundedText, copy: StderrCopy) {
+        let failed = self.failed.lock().ok().and_then(|mut failed| failed.take());
+        // A stream the relay did not finish was not all printed, so under
+        // `--verbose` too the bound is all there is.
+        if self.is_verbose() && failed.as_ref().is_some_and(|failed| failed.whole) {
+            return;
+        }
+        let lines = match failed {
+            Some(failed) => failed.unshown(stderr, copy),
+            None => bound_lines(stderr),
+        };
+        if lines.iter().any(|line| !line.as_str().trim().is_empty()) {
+            self.print_error_context(Shown::join(lines, lit!("\n")));
         }
     }
 
-    /// Render one line of the output of the command step `step` runs (stderr).
+    /// Record that some output of every open command step did not arrive, as
+    /// the library reports before such a step ends. Prints nothing.
+    pub(crate) fn output_lost(&self) {
+        if let Ok(mut waiting) = self.waiting.lock() {
+            for line in waiting.values_mut() {
+                line.lost = true;
+            }
+        }
+    }
+
+    /// Record that the pipe `channel` of the command step `step` runs has
+    /// ended, having streamed `bytes` bytes, and whether its decoding replaced
+    /// any (`lossy`). Prints nothing.
+    pub(crate) fn stream_ended(&self, step: StepId, channel: Channel, bytes: u64, lossy: bool) {
+        if channel != Channel::Stderr {
+            return;
+        }
+        if let Ok(mut waiting) = self.waiting.lock()
+            && let Some(current) = waiting.get_mut(&step)
+        {
+            current.stderr = Streamed { bytes, lossy };
+        }
+    }
+
+    /// Render one line of the output of the command step `step` runs (stderr),
+    /// which its pipe `channel` streamed from byte `start` on.
     ///
     /// At normal verbosity it becomes that step's spinner message on a
     /// terminal, and is not shown otherwise. Under `--verbose` every line is
     /// printed: indented and dimmed on a terminal, and prefixed with what the
     /// step waits on without one.
-    pub(crate) fn command_output(&self, step: StepId, output: Output) {
+    pub(crate) fn command_output(
+        &self,
+        step: StepId,
+        channel: Channel,
+        start: u64,
+        output: Output,
+    ) {
         let line = output.as_str();
         if line.trim().is_empty() {
             return;
@@ -1229,7 +1407,7 @@ impl DisplayManager {
             if current.tail.len() == TAIL_LINES {
                 current.tail.pop_front();
             }
-            current.tail.push_back(output.clone());
+            current.tail.push_back((channel, start, output.clone()));
             // Under `--verbose` the line prints above the spinner, which goes
             // back to the subject alone in place of a frame it showed.
             if self.is_verbose() {
@@ -3120,10 +3298,15 @@ mod tests {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
         dm.start_waiting(ONE, Name::new("Running the install command for ripgrep"));
 
-        dm.command_output(ONE, Output::line("\x1b[32mDownloading\x1b[0m ripgrep\r"));
+        dm.command_output(
+            ONE,
+            Channel::Stdout,
+            0,
+            Output::line("\x1b[32mDownloading\x1b[0m ripgrep\r"),
+        );
         assert_eq!(dm.waiting_messages(), vec!["Downloading ripgrep"]);
 
-        dm.command_output(ONE, Output::line("Pouring ripgrep"));
+        dm.command_output(ONE, Channel::Stdout, 0, Output::line("Pouring ripgrep"));
         assert_eq!(dm.waiting_messages(), vec!["Pouring ripgrep"]);
         // Nothing from the command is printed as a line of its own.
         assert!(dm.printed().is_empty(), "{:?}", dm.printed());
@@ -3135,7 +3318,7 @@ mod tests {
     fn a_command_line_is_hidden_without_a_terminal() {
         let dm = DisplayManager::new(false);
         dm.start_waiting(ONE, Name::new("Running the install command for ripgrep"));
-        dm.command_output(ONE, Output::line("Downloading ripgrep"));
+        dm.command_output(ONE, Channel::Stdout, 0, Output::line("Downloading ripgrep"));
 
         assert_eq!(
             dm.printed(),
@@ -3152,7 +3335,7 @@ mod tests {
     fn a_command_line_is_prefixed_when_verbose() {
         let dm = DisplayManager::new(false).with_verbosity(Verbosity::Verbose);
         dm.start_waiting(ONE, Name::new("Running the install command for ripgrep"));
-        dm.command_output(ONE, Output::line("Downloading ripgrep"));
+        dm.command_output(ONE, Channel::Stdout, 0, Output::line("Downloading ripgrep"));
 
         assert_eq!(
             dm.printed().last(),
@@ -3722,7 +3905,7 @@ mod tests {
         dm.start_waiting(ONE, Name::new("Running the install command for a"));
         dm.start_waiting(TWO, Name::new("Running the install command for b"));
 
-        dm.command_output(ONE, Output::line("from a"));
+        dm.command_output(ONE, Channel::Stderr, 0, Output::line("from a"));
 
         assert_eq!(
             dm.printed().last(),
@@ -3741,9 +3924,9 @@ mod tests {
             .drawing_as_a_terminal()
             .with_verbosity(Verbosity::Verbose);
         dm.start_waiting(ONE, Name::new("Running the install command for a"));
-        dm.command_output(ONE, Output::line("alone"));
+        dm.command_output(ONE, Channel::Stderr, 0, Output::line("alone"));
         dm.start_waiting(TWO, Name::new("Running the install command for b"));
-        dm.command_output(ONE, Output::line("beside b"));
+        dm.command_output(ONE, Channel::Stderr, 0, Output::line("beside b"));
 
         let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
         assert_eq!(
@@ -3761,7 +3944,7 @@ mod tests {
     fn a_failed_step_is_marked_and_shows_its_last_lines() {
         let dm = DisplayManager::new(false).drawing_as_a_terminal();
         dm.start_waiting(ONE, Name::new("Running the commands that produce ~/.creds"));
-        dm.command_output(ONE, Output::line("no session"));
+        dm.command_output(ONE, Channel::Stderr, 0, Output::line("no session"));
 
         dm.end_waiting(ONE, StepEnding::Failed);
 
@@ -3785,14 +3968,19 @@ mod tests {
     fn a_failure_shows_the_stderr_its_tail_left_out() {
         let dm = DisplayManager::new(false);
         dm.start_waiting(ONE, Name::new("Running the install command for foo"));
-        dm.command_output(ONE, Output::line("Error: no bottle"));
-        dm.command_output(ONE, Output::line("==> Caveats"));
+        let stderr = "Error: checksum mismatch\nError: no bottle";
+        let start = stderr.find("Error: no bottle").unwrap() as u64;
+        dm.command_output(
+            ONE,
+            Channel::Stderr,
+            start,
+            Output::line("Error: no bottle"),
+        );
+        dm.command_output(ONE, Channel::Stdout, 0, Output::line("==> Caveats"));
+        dm.stream_ended(ONE, Channel::Stderr, stderr.len() as u64, false);
         dm.end_waiting(ONE, StepEnding::Failed);
 
-        dm.print_command_stderr(&[
-            Output::line("Error: checksum mismatch"),
-            Output::line("Error: no bottle"),
-        ]);
+        dm.print_command_stderr(&BoundedText::bound(stderr.as_bytes()), StderrCopy::Captured);
 
         let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
         let count = |needle: &str| lines.iter().filter(|l| l.contains(needle)).count();
@@ -3807,9 +3995,12 @@ mod tests {
     fn a_failed_steps_stderr_shows_as_the_tool_printed_it() {
         let dm = DisplayManager::new(false);
         dm.start_waiting(ONE, Name::new("Running the install command for foo"));
-        dm.command_output(ONE, Output::line("tail x\u{200B}y"));
+        dm.command_output(ONE, Channel::Stderr, 0, Output::line("tail x\u{200B}y"));
         dm.end_waiting(ONE, StepEnding::Failed);
-        dm.print_command_stderr(&[Output::line("stderr a\u{200D}b")]);
+        dm.print_command_stderr(
+            &BoundedText::bound("stderr a\u{200D}b".as_bytes()),
+            StderrCopy::Captured,
+        );
 
         let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
         assert!(lines.contains(&"tail x\u{200B}y".to_string()), "{lines:?}");
@@ -3826,9 +4017,17 @@ mod tests {
     fn a_failed_steps_stderr_is_still_cleaned() {
         let dm = DisplayManager::new(false);
         dm.start_waiting(ONE, Name::new("Running the install command for foo"));
-        dm.command_output(ONE, Output::line("\u{1b}[31mred\u{1b}[0m 10%\r100%"));
+        dm.command_output(
+            ONE,
+            Channel::Stderr,
+            0,
+            Output::line("\u{1b}[31mred\u{1b}[0m 10%\r100%"),
+        );
         dm.end_waiting(ONE, StepEnding::Failed);
-        dm.print_command_stderr(&[Output::line("\u{1b}[2Jcleared\u{7}")]);
+        dm.print_command_stderr(
+            &BoundedText::bound("\u{1b}[2Jcleared\u{7}".as_bytes()),
+            StderrCopy::Captured,
+        );
 
         let lines: Vec<String> = dm.printed().into_iter().map(|(_, l)| l).collect();
         assert!(lines.contains(&"100%".to_string()), "{lines:?}");
@@ -3842,7 +4041,7 @@ mod tests {
     fn a_failed_step_does_not_repeat_lines_shown_verbosely() {
         let dm = DisplayManager::new(false).with_verbosity(Verbosity::Verbose);
         dm.start_waiting(ONE, Name::new("Running the install command for a"));
-        dm.command_output(ONE, Output::line("no bottle"));
+        dm.command_output(ONE, Channel::Stderr, 0, Output::line("no bottle"));
 
         dm.end_waiting(ONE, StepEnding::Failed);
 
@@ -3957,7 +4156,7 @@ mod tests {
             }),
             ("verbose command output", Channel::Stderr, |d| {
                 d.start_waiting(ONE, Name::new("step"));
-                d.command_output(ONE, Output::line("out"));
+                d.command_output(ONE, Channel::Stdout, 0, Output::line("out"));
             }),
         ]
     }
