@@ -22,7 +22,7 @@ for distro in distributions:
     # Create a local resource to run tests in each container
     local_resource(
         distro + '-tests',
-        cmd='docker-compose exec -T ' + distro + ' bash -c "cd /workspace && cargo test --all --color=always"',
+        cmd='docker compose exec -T ' + distro + ' bash -c "cd /workspace && cargo test --all --color=always"',
         deps=['./crates', './Cargo.toml', './Cargo.lock'],
         resource_deps=[distro],
         auto_init=False,
@@ -60,7 +60,7 @@ for distro in distributions:
 print("")
 print("To get a shell in a container:")
 for distro in distributions:
-    print("  • docker-compose exec " + distro + " bash")
+    print("  • docker compose exec " + distro + " bash")
 print("")
 print("All resources are set to manual trigger mode to avoid overwhelming your system.")
 print("Use 'tilt trigger <resource-name>' to run specific tasks.")

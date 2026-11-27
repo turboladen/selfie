@@ -31,7 +31,7 @@ environments:
     check: |
       docker --version && \
         docker info >/dev/null 2>&1 && \
-        docker-compose --version
+        docker compose version
 
   ubuntu:
     install: |
@@ -194,7 +194,7 @@ environments:
     check: |
       docker --version && \
         sudo docker info >/dev/null 2>&1 && \
-        docker-compose --version
+        docker compose version
 
   ci:
     install: |
