@@ -265,6 +265,40 @@ impl ExecuteBits {
     }
 }
 
+/// Whether an owner-only file is executable by its owner. An owner-only file
+/// never carries a group or other execute bit, so this cannot name one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerExecute {
+    /// Not executable.
+    No,
+    /// Executable by its owner.
+    Yes,
+}
+
+impl OwnerExecute {
+    const OWNER_BIT: u32 = 0o100;
+
+    /// [`Yes`](Self::Yes) exactly when `bits` holds the owner's execute bit.
+    /// Group and other execute bits are dropped.
+    #[must_use]
+    pub fn of(bits: ExecuteBits) -> Self {
+        if bits.bits() & Self::OWNER_BIT == 0 {
+            Self::No
+        } else {
+            Self::Yes
+        }
+    }
+
+    /// The bit, as a mode to combine with `0o600`.
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        match self {
+            Self::No => 0,
+            Self::Yes => Self::OWNER_BIT,
+        }
+    }
+}
+
 /// What a write does with anything already at its target when the rename that
 /// puts the new file in place lands.
 #[derive(Clone, PartialEq, Eq)]
@@ -344,14 +378,15 @@ pub enum Removal {
 /// Port for file system operations. Every file system interaction in the selfie
 /// library goes through it.
 ///
-/// It offers two writers and deliberately no third that follows symlinks, so
-/// "selfie never writes through a symlink" is a property of the port rather than
-/// of its call sites:
+/// It offers two kinds of writer, each with a variant that also sets execute
+/// bits, and deliberately no third kind that follows symlinks, so "selfie never
+/// writes through a symlink" is a property of the port rather than of its call
+/// sites:
 ///
 /// | | link at final component | mode | atomic |
 /// |---|---|---|---|
-/// | [`write_file_private`](FileSystem::write_file_private) | replaced | owner-only | yes |
-/// | [`write_file_no_follow`](FileSystem::write_file_no_follow) | refused, as an error | kept | yes |
+/// | private: [`write_file_private`](FileSystem::write_file_private), [`write_file_private_executable`](FileSystem::write_file_private_executable) | replaced | owner-only | yes |
+/// | no-follow: [`write_file_no_follow`](FileSystem::write_file_no_follow), [`write_file_no_follow_executable`](FileSystem::write_file_no_follow_executable) | refused, as an error | kept | yes |
 ///
 /// Under [`IfPresent::ReplaceIfHolding`] the private writer keeps a link rather
 /// than replacing it, since a link is not the file the caller read.
@@ -425,6 +460,8 @@ pub trait FileSystem: Send + Sync {
     ///
     /// The mode is `0o600` masked by the umask — never more permissive. The
     /// durability is as strong as `write_file_no_follow`'s, and no stronger.
+    /// [`write_file_private_executable`](FileSystem::write_file_private_executable)
+    /// can add the owner's execute bit, and nothing else.
     ///
     /// # Errors
     ///
@@ -449,6 +486,26 @@ pub trait FileSystem: Send + Sync {
         path: &TargetPath,
         data: &[u8],
         if_present: IfPresent,
+    ) -> Result<Placed, FileSystemError> {
+        // Provided, so that a wrapper intercepting writes has one method to
+        // intercept and cannot miss the other.
+        self.write_file_private_executable(path, data, if_present, OwnerExecute::No)
+    }
+
+    /// [`write_file_private`](FileSystem::write_file_private), except that the
+    /// file gets the owner's execute bit when `execute` is
+    /// [`OwnerExecute::Yes`], through the umask, so its mode is `0o700` at most.
+    /// Every write takes `execute`: an existing file's mode is never kept.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_file_private`](FileSystem::write_file_private).
+    fn write_file_private_executable(
+        &self,
+        path: &TargetPath,
+        data: &[u8],
+        if_present: IfPresent,
+        execute: OwnerExecute,
     ) -> Result<Placed, FileSystemError>;
 
     /// Write a file, refusing a symlink at the final component. The ordinary
@@ -1324,6 +1381,28 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    // The 0o744 and 0o011 fixtures split the owner's bit from group and other
+    // execute, which a check for any execute bit, or for all three, cannot tell
+    // apart.
+    #[test]
+    fn owner_execute_takes_only_the_owners_bit() {
+        for (mode, expected) in [
+            (0o755, OwnerExecute::Yes),
+            (0o744, OwnerExecute::Yes),
+            (0o100, OwnerExecute::Yes),
+            (0o011, OwnerExecute::No),
+            (0o644, OwnerExecute::No),
+        ] {
+            assert_eq!(
+                OwnerExecute::of(ExecuteBits::of_mode(mode)),
+                expected,
+                "{mode:o}"
+            );
+        }
+        assert_eq!(OwnerExecute::Yes.bits(), 0o100);
+        assert_eq!(OwnerExecute::No.bits(), 0);
+    }
 
     // An error tempfile built names its temporary file in its own text, so a
     // sentence carries that text as foreign, whatever character the path

@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use selfie::fs::{
     DirectoryState, ExecuteBits, FileIdentity, FileSystem, FileSystemError, IfPresent, OpenRefusal,
-    Placed, RealFileSystem, Removal, RepositoryRead, TargetPath, TargetRead,
+    OwnerExecute, Placed, RealFileSystem, Removal, RepositoryRead, TargetPath, TargetRead,
 };
 
 /// A high-entropy value standing in for another tool's own credential, written at
@@ -246,15 +246,16 @@ impl FileSystem for PlantsBeforeWrite {
         self.vanish_if_armed(path.path());
         RealFileSystem.read_file_no_follow(path)
     }
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &TargetPath,
         data: &[u8],
         if_present: IfPresent,
+        execute: OwnerExecute,
     ) -> Result<Placed, FileSystemError> {
         self.rewrite_before_write(path.path());
         self.plant_if_first(path.path());
-        RealFileSystem.write_file_private(path, data, if_present)
+        RealFileSystem.write_file_private_executable(path, data, if_present, execute)
     }
     fn write_file_no_follow_executable(
         &self,
