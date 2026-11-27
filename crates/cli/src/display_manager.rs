@@ -709,6 +709,8 @@ struct WaitingLine {
     started: Instant,
     tail: VecDeque<(Channel, u64, Output)>,
     stderr: Streamed,
+    // The task relaying the step's output did not finish.
+    lost: bool,
 }
 
 /// Says how many bytes a step's stderr streamed, and whether its decoding
@@ -731,11 +733,13 @@ pub(crate) enum StderrCopy {
 
 /// Holds what the last failed step showed of its stderr: every byte from
 /// `shown_from` on, of the `streamed` bytes, which are the lines in `shown`.
+/// `whole` says that the step's output all arrived.
 #[derive(Debug, Clone)]
 struct FailedStep {
     shown_from: u64,
     streamed: Streamed,
     shown: Vec<Output>,
+    whole: bool,
 }
 
 impl FailedStep {
@@ -1181,6 +1185,7 @@ impl DisplayManager {
                     started: Instant::now(),
                     tail: VecDeque::new(),
                     stderr: Streamed::default(),
+                    lost: false,
                 },
             );
         }
@@ -1241,6 +1246,7 @@ impl DisplayManager {
                     shown_from,
                     streamed: line.stderr,
                     shown,
+                    whole: !line.lost,
                 });
             }
         }
@@ -1320,14 +1326,32 @@ impl DisplayManager {
     /// [`Output`] per line, as context for its error (stderr). The part its
     /// step showed when it ended is left out. When the step's stream cannot be
     /// matched to it, all of it prints.
+    ///
+    /// Under `--verbose` it prints nothing when the step's stream arrived
+    /// whole, since the step printed every streamed line as it came.
     pub(crate) fn print_command_stderr(&self, stderr: &BoundedText, copy: StderrCopy) {
         let failed = self.failed.lock().ok().and_then(|mut failed| failed.take());
+        // A stream the relay did not finish was not all printed, so under
+        // `--verbose` too the bound is all there is.
+        if self.is_verbose() && failed.as_ref().is_some_and(|failed| failed.whole) {
+            return;
+        }
         let lines = match failed {
             Some(failed) => failed.unshown(stderr, copy),
             None => bound_lines(stderr),
         };
         if lines.iter().any(|line| !line.as_str().trim().is_empty()) {
             self.print_error_context(Shown::join(lines, lit!("\n")));
+        }
+    }
+
+    /// Record that some output of every open command step did not arrive, as
+    /// the library reports before such a step ends. Prints nothing.
+    pub(crate) fn output_lost(&self) {
+        if let Ok(mut waiting) = self.waiting.lock() {
+            for line in waiting.values_mut() {
+                line.lost = true;
+            }
         }
     }
 

@@ -697,11 +697,13 @@ print will be read.**
 
 - **`install` output is shown as the command runs**, on stderr, both its stdout and its stderr. On a
   terminal the latest line appears beside the spinner; with `--verbose` every line is printed. When
-  the command fails, its last output is printed with the error whatever the verbosity. When selfie
-  is driven through its MCP server rather than the terminal, a successful install's output is not
-  sent to the AI assistant at all. An install that exits non-zero, or whose check then says it is
-  not installed, carries the first and last 1000 bytes of each stream in its result, as described
-  below, and so does one that is stopped by its timeout, for what it had printed by then.
+  the command fails, its last output is printed with the error. With `--verbose`, which already
+  printed every line, the error does not repeat them, unless some of the output failed to reach
+  selfie. When selfie is driven through its MCP server rather than the terminal, a successful
+  install's output is not sent to the AI assistant at all. An install that exits non-zero, or whose
+  check then says it is not installed, carries the first and last 1000 bytes of each stream in its
+  result, as described below, and so does one that is stopped by its timeout, for what it had
+  printed by then.
 - **`check` output is displayed** when you run `selfie package check`, so that a check reporting
   "not installed" can tell you why: a passing check's output on stdout with its result, a failing
   check's error output on stderr. `--verbose` adds the full result card.

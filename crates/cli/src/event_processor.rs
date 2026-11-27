@@ -10,8 +10,8 @@ use crate::terminal_text::{Command, DisplayPath, Name, Output, Prose, Shown, lit
 use futures::StreamExt;
 use selfie::package::{
     event::{
-        ConsoleOutput, DotfileSource, EventStream, OperationInfo, OperationResult, OperationType,
-        Outcome, PackageEvent, RefusedPackage, Settled, StepId, StepKind,
+        ComposedWarning, ConsoleOutput, DotfileSource, EventStream, OperationInfo, OperationResult,
+        OperationType, Outcome, PackageEvent, RefusedPackage, Settled, StepId, StepKind,
     },
     port::{PackageError, PackageParseKind},
 };
@@ -170,6 +170,15 @@ impl EventProcessor {
                 }
                 PackageEvent::StepEnded { step, .. } => {
                     self.flush(Some(*step));
+                    false
+                }
+                // Noted before the custom handler too, which may claim a warning:
+                // the failure that follows depends on it.
+                PackageEvent::ComposedWarning {
+                    warning: ComposedWarning::OutputLost(_),
+                    ..
+                } => {
+                    self.display.output_lost();
                     false
                 }
                 _ => false,
@@ -495,10 +504,10 @@ impl EventProcessor {
                                 }
                             }
                         }
-                        // The command's own stderr, bounded, at every verbosity: its
+                        // The command's own stderr, bounded: at normal verbosity its
                         // output is hidden while it runs, and the tail its step showed
-                        // may be stdout alone. Lines the tail already showed are left
-                        // out.
+                        // may be stdout alone. What the step already showed is left
+                        // out, which under `--verbose` is every line it streamed.
                         OperationFailure::CommandError(_) if bounded_stderr.is_some() => {
                             self.display.print_error(message.clone());
                             if let Some((stderr, copy)) = &bounded_stderr {
@@ -2357,6 +2366,68 @@ mod tests {
         assert_eq!(count_of(&texts, "Error 1"), 2, "{texts:?}");
         let last = texts.iter().rposition(|t| t == "Error 1").unwrap();
         assert!(at(&texts, "brew install bat") < last, "{texts:?}");
+    }
+
+    // Under `--verbose` every stderr line printed as it came, so the failure
+    // reprints none of them, not even those older than the step's tail.
+    #[tokio::test]
+    async fn a_verbose_failure_prints_each_stderr_line_once() {
+        let texts = shown_texts(&printed_for(verbose(), fifteen_lines_exit_3()).await);
+        let lines: Vec<String> = (1..=15).map(|i| format!("err-{i}")).collect();
+        assert_each_once(&texts, &lines);
+        assert_eq!(count_containing(&texts, "brew install bat"), 1, "{texts:?}");
+    }
+
+    // Under `--verbose` a long stderr line prints once, as its pieces came, and
+    // the failure adds no bounded copy of it.
+    #[tokio::test]
+    async fn a_verbose_long_stderr_line_prints_once() {
+        let reads = [
+            format!("long-start{}", "x".repeat(4096)),
+            format!("{}long-end\n", "x".repeat(900)),
+        ];
+        let texts = shown_texts(&printed_for(verbose(), stderr_failure(&reads)).await);
+        assert_eq!(count_containing(&texts, "long-start"), 1, "{texts:?}");
+        assert_eq!(count_containing(&texts, "long-end"), 1, "{texts:?}");
+        assert_eq!(count_containing(&texts, "bytes elided"), 0, "{texts:?}");
+    }
+
+    // Under `--verbose` a stderr whose relay did not finish still prints with
+    // the failure, since some of it never printed.
+    #[tokio::test]
+    async fn a_verbose_failure_whose_relay_did_not_finish_prints_its_stderr() {
+        let lines: Vec<String> = (1..=5).map(|i| format!("err-{i}\n")).collect();
+        let mut events = vec![installing(1, "bat")];
+        events.extend(lines[..3].iter().map(|line| info(1, err(line))));
+        events.push(PackageEvent::ComposedWarning {
+            operation_info: make_operation_info("bat"),
+            warning: ComposedWarning::OutputLost(
+                std::iter::once(selfie::parts::Part::Text("some output was lost".into()))
+                    .collect::<selfie::parts::Parts>()
+                    .into(),
+            ),
+        });
+        events.push(ended(1, StepEnding::Failed));
+        events.push(exited_with(1, lines.concat().as_bytes()));
+        let texts = shown_texts(&printed_for(verbose(), events).await);
+        assert_eq!(count_of(&texts, "err-4"), 1, "{texts:?}");
+        assert_eq!(count_of(&texts, "err-5"), 1, "{texts:?}");
+    }
+
+    // Under `--verbose` a lossy stream against a bound of the captured bytes
+    // printed every line as it came, so the failure prints none again.
+    #[tokio::test]
+    async fn a_verbose_lossy_failure_prints_each_line_once() {
+        let bytes = lossy_stderr();
+        let streamed = String::from_utf8_lossy(&bytes).into_owned();
+        let events = failed_install(vec![err(&streamed)], exited_with(1, &bytes));
+        let texts = shown_texts(&printed_for(verbose(), events).await);
+        for i in 1..=10 {
+            let label = format!("b-{i:02}");
+            let lines = texts.iter().filter(|text| text.starts_with(&label)).count();
+            assert_eq!(lines, 1, "{label}: {texts:?}");
+        }
+        assert_eq!(count_containing(&texts, "bytes elided"), 0, "{texts:?}");
     }
 
     // A fragment still open when the operation completes prints before the
