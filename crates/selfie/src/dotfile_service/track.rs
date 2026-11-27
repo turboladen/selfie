@@ -281,7 +281,7 @@ pub fn already_tracked_refusal<F: FileSystem>(
 //
 // Claims nothing about what a later apply does, because that differs by entry
 // kind: a repository-file entry is refused, while a secret-bearing one is written
-// by `write_file_private`, which replaces a symlink at the final component. This
+// by the private writer, which replaces a symlink at the final component. This
 // breaks the silence and leaves the verdict to the command that has one.
 fn already_tracked_refusal_warning(refusal: &FileSystemError) -> Message {
     refusal

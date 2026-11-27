@@ -11,8 +11,8 @@ use etcetera::{AppStrategy, AppStrategyArgs, choose_app_strategy};
 
 use super::filesystem::{
     AbsentReason, DirectoryState, ExecuteBits, FileIdentity, FileSystem, FileSystemError,
-    IfPresent, IoFailure, IrregularKind, OpenRefusal, Placed, Removal, RepositoryRead, TargetRead,
-    parent_dir,
+    IfPresent, IoFailure, IrregularKind, OpenRefusal, OwnerExecute, Placed, Removal,
+    RepositoryRead, TargetRead, parent_dir,
 };
 use super::target::TargetPath;
 
@@ -97,12 +97,12 @@ fn irregular_refusal(path: &Path) -> Option<FileSystemError> {
 #[derive(Clone, Copy)]
 enum Replacement {
     /// Replace a symlink that does not resolve to an irregular target; create
-    /// owner-only.
+    /// owner-only, at `(0o600 | execute) & !umask`.
     // The deploy state, the copy kept before an overwrite, and every secret target
     // are written this way. The copy is why this flushes its parent: it lands
     // before the overwrite, so losing its directory entry to a crash that keeps
     // the overwrite destroys the only remaining copy.
-    OwnerOnly,
+    OwnerOnly(OwnerExecute),
     /// Refuse a symlink; keep an existing regular file's mode, else create at
     /// `(0o666 | execute) & !umask`.
     KeepingMode(ExecuteBits),
@@ -220,8 +220,8 @@ fn write_by_rename_with(
         // Applied by the creating syscall, so the content is never briefly
         // world-readable. The umask may restrict this further but can never
         // loosen it.
-        (Replacement::OwnerOnly, _) => {
-            builder.permissions(fs::Permissions::from_mode(0o600));
+        (Replacement::OwnerOnly(execute), _) => {
+            builder.permissions(fs::Permissions::from_mode(0o600 | execute.bits()));
         }
         // What an ordinary `open(O_CREAT)` gives: the umask is applied by the
         // kernel, so this is exactly what `fs::write` would have created.
@@ -246,7 +246,7 @@ fn write_by_rename_with(
     // write and no *error* path leaves it behind. A crash is another matter: being
     // killed or losing power between here and the rename leaves a `.selfie-*` file
     // beside the target holding the complete content. For a secret it is mode
-    // 0600, so this is debris rather than disclosure, but nothing sweeps it up.
+    // 0600 or 0700, so this is debris rather than disclosure, but nothing sweeps it up.
     let mut tmp = builder.tempfile_in(parent).map_err(tempfile_err)?;
     tmp.write_all(data).map_err(tempfile_err)?;
     if let Some(mode) = existing_mode {
@@ -940,13 +940,19 @@ impl FileSystem for RealFileSystem {
         read_target(path.path(), Links::NotFollowed)
     }
 
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &TargetPath,
         data: &[u8],
         if_present: IfPresent,
+        execute: OwnerExecute,
     ) -> Result<Placed, FileSystemError> {
-        write_by_rename(path.path(), data, Replacement::OwnerOnly, if_present)
+        write_by_rename(
+            path.path(),
+            data,
+            Replacement::OwnerOnly(execute),
+            if_present,
+        )
     }
 
     // Under `ReplaceIfHolding`, the target is looked at once more after the new
@@ -1514,6 +1520,21 @@ fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+// Answer the mode a file created at `mode` in `dir` gets under this process's umask.
+#[cfg(test)]
+fn created_at(dir: &Path, mode: u32) -> u32 {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let path = dir.join(format!("control-{mode:o}"));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&path)
+        .unwrap();
+    mode_of(&path)
+}
+
 // Tests for [`FileSystem::write_file_private`].
 
 // Grouped by what each test actually proves.
@@ -1525,10 +1546,11 @@ fn mode_of(path: &Path) -> u32 {
 // the port offers.
 
 // Everything in `unix` is load-bearing: against `create_dir_all` + `fs::write`,
-// every one of them that runs here fails, and none of the six above does. Two
-// are not part of that claim: the `/dev/shm` test is Linux-only, and
+// every one of them that runs here fails, and none of the six above does. Three
+// are not part of that claim: the `/dev/shm` test is Linux-only,
 // `refuses_a_fifo_rather_than_renaming_over_it` would hang on a following
-// open rather than fail.
+// open rather than fail, and `is_owner_only_accepts_an_owner_executable_file`
+// tests the companion check rather than the writer.
 #[cfg(test)]
 mod private_write_tests {
     use super::*;
@@ -1656,6 +1678,105 @@ mod private_write_tests {
             );
 
             assert_owner_only(&target);
+        }
+
+        #[test]
+        fn the_private_executable_writer_creates_an_owner_executable_file() {
+            let dir = tempdir().unwrap();
+            // A umask hiding group and other execute would also hide a writer that
+            // set them, and one hiding the owner's would hide a writer that dropped
+            // it, so either leaves this unable to tell a fault from a pass.
+            if created_at(dir.path(), 0o711) != 0o711 {
+                test_common::skip_unless_ci!(
+                    "the_private_executable_writer_creates_an_owner_executable_file",
+                    "the ambient umask clears an execute bit, so this cannot tell the owner's \
+                     bit from none or from all three",
+                );
+            }
+            let target = dir.path().join("script");
+
+            assert_eq!(
+                RealFileSystem
+                    .write_file_private_executable(
+                        &tp(&target),
+                        b"secret",
+                        IfPresent::Replace,
+                        OwnerExecute::Yes,
+                    )
+                    .unwrap(),
+                Placed::Written
+            );
+
+            assert_owner_only(&target);
+            assert_eq!(mode_of(&target), created_at(dir.path(), 0o700));
+        }
+
+        // A rewrite creates a fresh file, so the old one's mode is not inherited:
+        // execute bits are gained and dropped alike. The plain writer is the
+        // provided method, so its case covers the bit it passes.
+        #[test]
+        fn a_private_write_replaces_an_existing_files_mode() {
+            let probe = tempdir().unwrap();
+            if created_at(probe.path(), 0o700) != 0o700 {
+                test_common::skip_unless_ci!(
+                    "a_private_write_replaces_an_existing_files_mode",
+                    "the ambient umask clears the owner execute bit, so this cannot tell a \
+                     writer that drops it from one that sets it",
+                );
+            }
+            // `None` is the plain writer.
+            for (old_mode, execute, expected) in [
+                (0o644, Some(OwnerExecute::Yes), 0o700),
+                (0o755, None, 0o600),
+            ] {
+                let dir = tempdir().unwrap();
+                let target = dir.path().join("script");
+                fs::write(&target, b"old").unwrap();
+                fs::set_permissions(&target, fs::Permissions::from_mode(old_mode)).unwrap();
+
+                let written = match execute {
+                    Some(execute) => RealFileSystem.write_file_private_executable(
+                        &tp(&target),
+                        b"new",
+                        IfPresent::Replace,
+                        execute,
+                    ),
+                    None => {
+                        RealFileSystem.write_file_private(&tp(&target), b"new", IfPresent::Replace)
+                    }
+                };
+                assert_eq!(written.unwrap(), Placed::Written);
+
+                assert_eq!(
+                    mode_of(&target),
+                    created_at(dir.path(), expected),
+                    "from {old_mode:o}"
+                );
+                assert_eq!(fs::read(&target).unwrap(), b"new");
+            }
+        }
+
+        // An owner execute bit is still owner-only; any group or other bit is not.
+        #[test]
+        fn is_owner_only_accepts_an_owner_executable_file() {
+            for (mode, expected) in [
+                (0o700, true),
+                (0o600, true),
+                (0o710, false),
+                (0o701, false),
+                (0o640, false),
+            ] {
+                let dir = tempdir().unwrap();
+                let target = dir.path().join("script");
+                fs::write(&target, b"x").unwrap();
+                fs::set_permissions(&target, fs::Permissions::from_mode(mode)).unwrap();
+
+                assert_eq!(
+                    RealFileSystem.is_owner_only(&tp(&target)).unwrap(),
+                    expected,
+                    "{mode:o}"
+                );
+            }
         }
 
         #[test]
@@ -1849,35 +1970,27 @@ mod private_write_tests {
         // This is only observable where the target and `$TMPDIR` are on different
         // filesystems: a temporary file created anywhere else would then fail to
         // rename into place with `EXDEV`. On CI runners `/dev/shm` is a tmpfs while
-        // `$TMPDIR` is not. Where that does not hold the test cannot discriminate.
-        // A developer machine skips with a message, since an early return is
-        // otherwise indistinguishable from a pass. When the `CI` variable is set
-        // the test fails instead, so a runner that cannot discriminate cannot
-        // report a green run that asserted nothing.
+        // `$TMPDIR` is not. Where that does not hold the test cannot discriminate,
+        // and ends through `skip_unless_ci!`.
         #[cfg(target_os = "linux")]
         #[test]
         fn creates_the_temporary_file_in_the_targets_own_directory() {
             const NAME: &str = "creates_the_temporary_file_in_the_targets_own_directory";
 
-            let skip = |reason: &str| {
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "{NAME} cannot discriminate on CI: {reason}"
-                );
-                eprintln!("SKIP {NAME}: {reason}");
-            };
-
             let Ok(shm) = fs::metadata("/dev/shm") else {
-                return skip("/dev/shm is not present");
+                test_common::skip_unless_ci!(NAME, "/dev/shm is not present");
             };
             let Ok(tmp) = fs::metadata(std::env::temp_dir()) else {
-                return skip("$TMPDIR is not readable");
+                test_common::skip_unless_ci!(NAME, "$TMPDIR is not readable");
             };
             if shm.dev() == tmp.dev() {
-                return skip("/dev/shm and $TMPDIR are on the same filesystem");
+                test_common::skip_unless_ci!(
+                    NAME,
+                    "/dev/shm and $TMPDIR are on the same filesystem"
+                );
             }
             let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
-                return skip("/dev/shm is not writable");
+                test_common::skip_unless_ci!(NAME, "/dev/shm is not writable");
             };
 
             let target = dir.path().join("creds");
@@ -1963,16 +2076,7 @@ mod no_follow_write_tests {
 
     #[test]
     fn the_executable_writer_creates_a_new_file_with_the_execute_bits_given() {
-        use std::os::unix::fs::OpenOptionsExt as _;
-
         let dir = tempdir().unwrap();
-        let control = dir.path().join("control");
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o666 | 0o101)
-            .open(&control)
-            .unwrap();
 
         let target = dir.path().join("script");
         assert_eq!(
@@ -1987,7 +2091,7 @@ mod no_follow_write_tests {
             Placed::Written
         );
 
-        assert_eq!(mode_of(&target), mode_of(&control));
+        assert_eq!(mode_of(&target), created_at(dir.path(), 0o666 | 0o101));
     }
 
     #[test]
@@ -2201,25 +2305,12 @@ mod no_follow_write_tests {
         // could never come back `0o767` and the guard would never fire.
         #[test]
         fn leaves_an_existing_files_mode_alone() {
-            use std::os::unix::fs::OpenOptionsExt as _;
-
             let dir = tempdir().unwrap();
-            let control = dir.path().join("control");
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o767)
-                .open(&control)
-                .unwrap();
-            if mode_of(&control) == 0o767 {
-                let message = "the ambient umask strips no bits from 0o767, \
-                               so this cannot tell the two apart";
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "leaves_an_existing_files_mode_alone: {message}"
+            if created_at(dir.path(), 0o767) == 0o767 {
+                test_common::skip_unless_ci!(
+                    "leaves_an_existing_files_mode_alone",
+                    "the ambient umask strips no bits from 0o767, so this cannot tell the two apart",
                 );
-                eprintln!("SKIP leaves_an_existing_files_mode_alone: {message}");
-                return;
             }
 
             let target = dir.path().join("script");
@@ -2250,14 +2341,11 @@ mod no_follow_write_tests {
             // property under test here.
             fs::write(&control, b"x").unwrap();
             if mode_of(&control) & 0o077 == 0 {
-                let message = "the ambient umask makes ordinary writes owner-only, \
-                               so this cannot tell the two apart";
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "creates_a_new_file_at_the_umask_default_not_owner_only: {message}"
+                test_common::skip_unless_ci!(
+                    "creates_a_new_file_at_the_umask_default_not_owner_only",
+                    "the ambient umask makes ordinary writes owner-only, so this cannot tell the \
+                     two apart",
                 );
-                eprintln!("SKIP creates_a_new_file_at_the_umask_default_not_owner_only: {message}");
-                return;
             }
 
             let target = dir.path().join("config");
@@ -3754,7 +3842,7 @@ mod keep_write_tests {
     // Both writers, so a test cannot pass for one and miss the other.
     fn writers() -> [(&'static str, Replacement); 2] {
         [
-            ("private", Replacement::OwnerOnly),
+            ("private", Replacement::OwnerOnly(OwnerExecute::No)),
             ("no-follow", Replacement::KeepingMode(ExecuteBits::NONE)),
         ]
     }
@@ -3784,7 +3872,12 @@ mod keep_write_tests {
         let target = dir.path().join("creds");
         symlink(dir.path().join("nowhere"), &target).unwrap();
 
-        let result = write_by_rename(&target, b"secret", Replacement::OwnerOnly, IfPresent::Keep);
+        let result = write_by_rename(
+            &target,
+            b"secret",
+            Replacement::OwnerOnly(OwnerExecute::No),
+            IfPresent::Keep,
+        );
 
         assert!(matches!(result, Ok(Placed::Kept)), "{result:?}");
         assert_eq!(fs::read_link(&target).unwrap(), dir.path().join("nowhere"));
@@ -3948,7 +4041,7 @@ mod replace_if_holding_tests {
 
     fn writers() -> [(&'static str, Replacement); 2] {
         [
-            ("private", Replacement::OwnerOnly),
+            ("private", Replacement::OwnerOnly(OwnerExecute::No)),
             ("no-follow", Replacement::KeepingMode(ExecuteBits::NONE)),
         ]
     }
@@ -4762,7 +4855,7 @@ mod swap_if_holding_tests {
     #[test]
     fn both_writers_replace_an_unchanged_file_through_the_swap() {
         for how in [
-            Replacement::OwnerOnly,
+            Replacement::OwnerOnly(OwnerExecute::No),
             Replacement::KeepingMode(ExecuteBits::NONE),
         ] {
             let (dir, target, tmp) = staged();

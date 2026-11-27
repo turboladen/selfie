@@ -4707,7 +4707,8 @@ pub enum SkipReason {
     /// The target already holds what would be written.
     InSync,
     /// A secret-bearing target already held what would be written; only its
-    /// permissions were narrowed to owner-only.
+    /// permissions were rewritten, to owner-only with the owner execute bit the
+    /// entry carries.
     PermissionsTightened,
     /// A dry run: the repository file would have been written.
     DryRun,
@@ -4872,7 +4873,7 @@ impl Composed for SkipReason {
             Self::UpToDate => Parts::new().text("already up to date"),
             Self::InSync => Parts::new().text("already in sync"),
             Self::PermissionsTightened => {
-                Parts::new().text("already in sync (permissions tightened to owner-only)")
+                Parts::new().text("already in sync (permissions set to owner-only)")
             }
             Self::DryRun => Parts::new().text("dry run"),
             Self::SecretDryRun {
@@ -6248,7 +6249,7 @@ mod tests {
             (SkipReason::InSync, "already in sync"),
             (
                 SkipReason::PermissionsTightened,
-                "already in sync (permissions tightened to owner-only)",
+                "already in sync (permissions set to owner-only)",
             ),
             (SkipReason::DryRun, "dry run"),
             (

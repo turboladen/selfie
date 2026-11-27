@@ -501,12 +501,14 @@ where
 
     /// Settle a target whose content already matches — including its mode.
     ///
-    /// Matching content is not the whole guarantee. `write_file_private` is the
+    /// Matching content is not the whole guarantee. The private writer is the
     /// only thing that establishes owner-only permissions, so returning here
     /// without it would leave a pre-existing world-readable target
     /// world-readable while reporting it as managed. That is exactly the
-    /// adoption case this design's safety rests on, and the docs promise mode
-    /// `0600` with no "unless the content already matched" attached.
+    /// adoption case this design's safety rests on, and the docs promise an
+    /// owner-only mode with no "unless the content already matched" attached.
+    /// An owner-only target is left alone even when its owner execute bit
+    /// differs from the template's: only the content is compared.
     ///
     /// Tightening is conditional: rewriting a correct file on every apply would
     /// churn its inode and mtime and make "already in sync" a lie. A failure to
@@ -566,11 +568,7 @@ where
         // and only over the bytes just read: whatever replaced them since is not
         // this file's to rewrite.
         before_write().map_err(SecretOutcome::StateNotWritable)?;
-        match self.filesystem.write_file_private(
-            &target.path,
-            &resolved.bytes,
-            IfPresent::ReplaceIfHolding(bytes.into()),
-        ) {
+        match self.place(target, resolved, IfPresent::ReplaceIfHolding(bytes.into())) {
             Ok(Placed::Written) => {}
             Ok(Placed::Kept) => {
                 return Err(self.settle_changed(target, resolved, before_write).await);
@@ -735,9 +733,7 @@ where
     /// Owner-only and atomic: no window in which the credential is
     /// world-readable, and no interrupted write leaving a truncated one behind.
     async fn write(&self, target: &SecretEntry<'_>, resolved: &ResolvedContent) -> SecretOutcome {
-        let written =
-            self.filesystem
-                .write_file_private(&target.path, &resolved.bytes, IfPresent::Replace);
+        let written = self.place(target, resolved, IfPresent::Replace);
         self.report_write(target, written).await
     }
 
@@ -751,10 +747,7 @@ where
         if_present: IfPresent,
         before_write: &mut BeforeWrite<'_>,
     ) -> SecretOutcome {
-        match self
-            .filesystem
-            .write_file_private(&target.path, &resolved.bytes, if_present)
-        {
+        match self.place(target, resolved, if_present) {
             Ok(Placed::Kept) => self.settle_changed(target, resolved, before_write).await,
             written => self.report_write(target, written).await,
         }
@@ -786,13 +779,28 @@ where
         target: &SecretEntry<'_>,
         resolved: &ResolvedContent,
     ) -> Option<SecretOutcome> {
-        match self
-            .filesystem
-            .write_file_private(&target.path, &resolved.bytes, IfPresent::Keep)
-        {
+        match self.place(target, resolved, IfPresent::Keep) {
             Ok(Placed::Kept) => None,
             written => Some(self.report_write(target, written).await),
         }
+    }
+
+    /// Write the resolved content to `target` through the private writer, with the
+    /// mode it resolved with.
+    fn place(
+        &self,
+        target: &SecretEntry<'_>,
+        resolved: &ResolvedContent,
+        if_present: IfPresent,
+    ) -> Result<Placed, FileSystemError> {
+        // Every write of a secret target goes through here, so none can forget
+        // the execute bit.
+        self.filesystem.write_file_private_executable(
+            &target.path,
+            &resolved.bytes,
+            if_present,
+            resolved.execute,
+        )
     }
 
     /// Report a write of the resolved content to `target`.

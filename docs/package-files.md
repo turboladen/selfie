@@ -1498,9 +1498,19 @@ Consequences worth knowing before you adopt this:
 
 #### Deploy behavior and permissions
 
-Targets are created readable only by their owner (mode `0600` on Unix) and put in place atomically,
-so there is no window in which the content is world-readable and no interrupted write can leave a
-truncated credential.
+Targets are created readable only by their owner (mode `0600` on Unix, or `0700` for an executable
+template, as below) and put in place atomically, so there is no window in which the content is
+world-readable and no interrupted write can leave a truncated credential.
+
+A `source` plus `vars` entry also takes its template's owner execute bit, so an executable script
+that substitutes a token deploys at mode `0700`. Only the owner's bit is carried: a group or other
+execute bit on the template never reaches the target, and your umask applies. A `command` entry has
+no template, so its target never gets an execute bit. Every write takes the template's bit, whether
+it creates the target, rewrites it, or tightens its permissions, so a rewrite of a target you made
+executable by hand drops the bit when the template does not have it. A target that is already
+owner-only and holds the resolved content is in sync and is not written, so it keeps its mode:
+`selfie apply` decides that by content alone. To make one already deployed executable, `chmod u+x`
+it.
 
 A symlink **at the target** is replaced rather than written through: writing through the link would
 send the credential wherever the link points. A symlinked **parent directory** is still followed.

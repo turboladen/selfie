@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use super::refusal::{guarded, located, repository_condition, skipping};
 use super::template;
 use crate::commands::{BoundedText, CommandError, CommandRunner};
-use crate::fs::filesystem::{FileSystem, repository_read_refusal};
+use crate::fs::filesystem::{FileSystem, OwnerExecute, repository_read_refusal};
 use crate::fs::target::repository_path;
 use crate::package::{
     ContentSource, DotfileEntry, InvalidEntry,
@@ -42,6 +42,9 @@ pub(crate) struct ResolvedContent {
     /// Non-fatal advisories. Never contains a resolved value — only commands
     /// and var names.
     pub warnings: Vec<Message>,
+    /// Whether the file is written executable by its owner: a template's own
+    /// owner execute bit, and never for a provider's output.
+    pub execute: OwnerExecute,
 }
 
 /// Prints the content's length, never the content. **Never derive this**: a
@@ -52,6 +55,7 @@ impl std::fmt::Debug for ResolvedContent {
         f.debug_struct("ResolvedContent")
             .field("bytes", &format_args!("<{} bytes>", self.bytes.len()))
             .field("warnings", &self.warnings)
+            .field("execute", &self.execute)
             .finish()
     }
 }
@@ -396,7 +400,11 @@ where
                 return Err(ResolveError::TooLarge);
             }
 
-            Ok(ResolvedContent { bytes, warnings })
+            Ok(ResolvedContent {
+                bytes,
+                warnings,
+                execute: OwnerExecute::No,
+            })
         }
 
         Ok(ContentSource::Template { source, vars }) => {
@@ -413,6 +421,11 @@ where
             // secret exists in scope yet: this reports a path and a file type, and
             // no command has run.
             let text = read_template(filesystem, source, &template_path)?;
+            // This is a separate stat, so a template swapped between it and the read
+            // gives content from one file and the bit from another. The target is
+            // owner-only either way, so the race can only add or drop the owner
+            // execute bit.
+            let execute = OwnerExecute::of(filesystem.execute_bits(&template_path));
 
             // Built fresh for this entry. Sharing or reusing a binding map across
             // entries would splice one entry's secret into another entry's file.
@@ -466,7 +479,11 @@ where
                 return Err(ResolveError::TooLarge);
             }
 
-            Ok(ResolvedContent { bytes, warnings })
+            Ok(ResolvedContent {
+                bytes,
+                warnings,
+                execute,
+            })
         }
     }
 }
@@ -578,7 +595,7 @@ fn capture_warnings(origin: &Parts<'_>, captured: &Captured, into: &mut Vec<Mess
 mod tests {
     use super::*;
     use crate::commands::{FakeCommandRunner, OutputStream};
-    use crate::fs::MockFileSystem;
+    use crate::fs::{ExecuteBits, MockFileSystem};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
     const BASE: &str = "/pkg";
@@ -601,6 +618,11 @@ mod tests {
     }
 
     fn fs_with_template(body: &'static str) -> MockFileSystem {
+        fs_with_template_at(body, 0o644)
+    }
+
+    // A template whose mode is `mode`, as the port's execute-bit stat reports it.
+    fn fs_with_template_at(body: &'static str, mode: u32) -> MockFileSystem {
         let mut fs = MockFileSystem::default();
         // The guard that runs ahead of the read refuses nothing, so the read
         // goes through. This is stated explicitly rather than left to a default,
@@ -609,6 +631,8 @@ mod tests {
         fs.mock_no_irregular_files();
         fs.expect_read_repository_file()
             .returning(move |_| Ok(body.to_string()));
+        fs.expect_execute_bits()
+            .returning(move |_| ExecuteBits::of_mode(mode));
         fs
     }
 
@@ -905,6 +929,40 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved.bytes, b"key: AAA\ncorp: BBB\n");
+    }
+
+    // The template's own mode, read through the port, decides the bit. 0o744 has
+    // the owner's execute bit alone, and 0o611 has only group and other's.
+    #[tokio::test]
+    async fn a_template_resolves_with_its_owners_execute_bit() {
+        for (mode, expected) in [
+            (0o744, OwnerExecute::Yes),
+            (0o611, OwnerExecute::No),
+            (0o644, OwnerExecute::No),
+        ] {
+            let runner = FakeCommandRunner::new().succeeding("op read a", b"AAA");
+            let entry = template_entry("creds.tpl", &[("api_key", "op read a")], "~/bin/tool");
+            let fs = fs_with_template_at("key: {{ api_key }}\n", mode);
+
+            let resolved = resolve(&entry, &fs, &runner).await.unwrap();
+
+            assert_eq!(resolved.execute, expected, "template at {mode:o}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_providers_output_is_never_executable() {
+        let runner = FakeCommandRunner::new().succeeding("op read x", b"secret");
+
+        let resolved = resolve(
+            &provider_entry("op read x", "~/bin/tool"),
+            &no_fs(),
+            &runner,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(resolved.execute, OwnerExecute::No);
     }
 
     #[tokio::test]

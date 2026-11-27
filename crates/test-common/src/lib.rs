@@ -19,6 +19,7 @@ pub mod runner;
 pub mod scripts;
 pub mod secrets;
 pub mod service;
+pub mod skip;
 pub mod successes;
 pub mod tracing_capture;
 

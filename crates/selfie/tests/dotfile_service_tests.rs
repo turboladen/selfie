@@ -683,13 +683,15 @@ impl selfie::fs::FileSystem for CancelOnReadOf {
         self.0.read_file_no_follow(path)
     }
 
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::OwnerExecute,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.0.write_file_private(path, data, if_present)
+        self.0
+            .write_file_private_executable(path, data, if_present, execute)
     }
 
     fn write_file_no_follow_executable(
@@ -985,14 +987,16 @@ impl selfie::fs::FileSystem for RecordsTargetReads {
         self.inner.read_file_no_follow(path)
     }
 
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::OwnerExecute,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
         self.writes.lock().unwrap().push(path.path().to_path_buf());
-        self.inner.write_file_private(path, data, if_present)
+        self.inner
+            .write_file_private_executable(path, data, if_present, execute)
     }
 
     fn write_file_no_follow_executable(
@@ -1164,13 +1168,15 @@ impl selfie::fs::FileSystem for HomeAt {
     ) -> Result<selfie::fs::TargetRead, selfie::fs::FileSystemError> {
         self.0.read_file_no_follow(path)
     }
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::OwnerExecute,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.0.write_file_private(path, data, if_present)
+        self.0
+            .write_file_private_executable(path, data, if_present, execute)
     }
     fn write_file_no_follow_executable(
         &self,
@@ -1294,13 +1300,15 @@ impl selfie::fs::FileSystem for SymlinkAppearsAfterFirstLook {
         self.inner.read_file_no_follow(path)
     }
 
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::OwnerExecute,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.inner.write_file_private(path, data, if_present)
+        self.inner
+            .write_file_private_executable(path, data, if_present, execute)
     }
 
     fn write_file_no_follow_executable(
@@ -1430,13 +1438,15 @@ impl selfie::fs::FileSystem for FollowingStatPanicsAt {
         self.inner.read_file_no_follow(path)
     }
 
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::OwnerExecute,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.inner.write_file_private(path, data, if_present)
+        self.inner
+            .write_file_private_executable(path, data, if_present, execute)
     }
 
     fn write_file_no_follow_executable(
@@ -1577,13 +1587,15 @@ impl selfie::fs::FileSystem for SecondLookIsAnUnknownRefusal {
         self.inner.read_file_no_follow(path)
     }
 
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::OwnerExecute,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
-        self.inner.write_file_private(path, data, if_present)
+        self.inner
+            .write_file_private_executable(path, data, if_present, execute)
     }
 
     fn write_file_no_follow_executable(
@@ -1687,11 +1699,12 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
         self.inner.directory_state(path)
     }
 
-    fn write_file_private(
+    fn write_file_private_executable(
         &self,
         path: &selfie::fs::TargetPath,
         data: &[u8],
         if_present: selfie::fs::IfPresent,
+        execute: selfie::fs::OwnerExecute,
     ) -> Result<selfie::fs::Placed, selfie::fs::FileSystemError> {
         use std::sync::atomic::Ordering::SeqCst;
         if path.path() == self.state_file
@@ -1704,7 +1717,8 @@ impl selfie::fs::FileSystem for StateWritesFailAfter {
                 std::io::Error::other("state directory is not writable").into(),
             ));
         }
-        self.inner.write_file_private(path, data, if_present)
+        self.inner
+            .write_file_private_executable(path, data, if_present, execute)
     }
 
     fn irregular_target_refusal(
@@ -7578,6 +7592,216 @@ mod secret_bearing {
         );
     }
 
+    // A secret target is written at `0o600` plus the template's owner execute bit,
+    // and no other bit. A mode selfie creates is compared with a control file created
+    // under the same umask; a mode selfie must leave alone is compared with a literal.
+    mod execute_bits {
+        use super::*;
+        use std::os::unix::fs::MetadataExt as _;
+        use std::path::Path;
+
+        const TEMPLATE: &str = "key: {{ api_key }}\n";
+        const RENDERED: &str = "key: s3cr3t-v4lue-DO-NOT-LEAK\n";
+
+        // Skip `test` where the umask clears the owner execute bit. There every
+        // expected `0o700` comes back `0o600`, so a writer that dropped the bit
+        // would pass.
+        macro_rules! skip_unless_owner_execute_survives {
+            ($test:expr) => {
+                if created_at(0o700) != 0o700 {
+                    test_common::skip_unless_ci!(
+                        $test,
+                        "the ambient umask clears the owner execute bit, so this cannot tell \
+                         a writer that drops it from one that sets it"
+                    );
+                }
+            };
+        }
+
+        // Deploy a template at `template_mode` to `script` in the target directory,
+        // after `seed` has prepared the target, and answer the target and the run's
+        // events.
+        async fn deploy(
+            template_mode: u32,
+            options: ApplyOptions,
+            seed: impl FnOnce(&Path),
+        ) -> (TestDirs, PathBuf, Vec<PackageEvent>) {
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("script");
+            seed(&target);
+            template_package(
+                &dirs.package_dir,
+                target.to_str().unwrap(),
+                TEMPLATE,
+                &[("api_key", "op read a")],
+            );
+            chmod(
+                &dirs.package_dir.join("creds/credentials.tpl"),
+                template_mode,
+            );
+            let runner = FakeCommandRunner::new().succeeding("op read a", SECRET.as_bytes());
+            let service = dirs.service_with_runner(runner);
+            let events = collect_events(service.apply_all(options).await).await;
+            (dirs, target, events)
+        }
+
+        fn skipped_for(events: &[PackageEvent], expected: SkipReason) -> bool {
+            events.iter().any(
+                |e| matches!(e, PackageEvent::DotfileSkipped { reason, .. } if *reason == expected),
+            )
+        }
+
+        // All three execute bits, the owner's alone, group and other's alone, and
+        // none: only a template with the owner's bit carries anything.
+        #[tokio::test]
+        async fn only_the_templates_owner_execute_bit_is_carried() {
+            skip_unless_owner_execute_survives!("only_the_templates_owner_execute_bit_is_carried");
+            for (template_mode, expected) in [
+                (0o755, 0o700),
+                (0o744, 0o700),
+                (0o611, 0o600),
+                (0o644, 0o600),
+            ] {
+                let (_dirs, target, _) =
+                    deploy(template_mode, ApplyOptions::default(), |_| {}).await;
+
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    RENDERED,
+                    "template at {template_mode:o}"
+                );
+                assert_eq!(
+                    mode_of(&target),
+                    created_at(expected),
+                    "template at {template_mode:o}"
+                );
+                assert_eq!(mode_of(&target) & 0o077, 0, "a secret target is owner-only");
+            }
+        }
+
+        // The accepted conflict takes the rewrite, which creates a fresh file and
+        // takes the template's bit: a bit set on the target by hand is dropped, and
+        // one the template has is gained.
+        #[tokio::test]
+        async fn an_accepted_conflict_takes_the_templates_bit_not_the_targets() {
+            skip_unless_owner_execute_survives!(
+                "an_accepted_conflict_takes_the_templates_bit_not_the_targets"
+            );
+            for (template_mode, seeded, expected) in [
+                (0o755, 0o644, 0o700),
+                (0o644, 0o744, 0o600),
+                (0o644, 0o755, 0o600),
+            ] {
+                let (_dirs, target, _) = deploy(template_mode, accepting(), |target| {
+                    std::fs::write(target, "key: old\n").unwrap();
+                    chmod(target, seeded);
+                })
+                .await;
+
+                let case = format!("template at {template_mode:o}, target at {seeded:o}");
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    RENDERED,
+                    "{case}"
+                );
+                assert_eq!(mode_of(&target), created_at(expected), "{case}");
+            }
+        }
+
+        // A link at the target is replaced through the plain write, the one route
+        // that neither creates nor rewrites a compared file.
+        #[tokio::test]
+        async fn a_link_at_an_executable_templates_target_is_replaced_owner_executable() {
+            skip_unless_owner_execute_survives!(
+                "a_link_at_an_executable_templates_target_is_replaced_owner_executable"
+            );
+            let decoy = std::cell::OnceCell::new();
+            let (_dirs, target, _) = deploy(0o755, ApplyOptions::default(), |target| {
+                let path = target.with_file_name("decoy");
+                std::fs::write(&path, "decoy").unwrap();
+                chmod(&path, 0o644);
+                std::os::unix::fs::symlink(&path, target).unwrap();
+                decoy.set(path).unwrap();
+            })
+            .await;
+            let decoy = decoy.get().unwrap();
+
+            let found = std::fs::symlink_metadata(&target).unwrap();
+            assert!(
+                found.file_type().is_file(),
+                "the link was replaced by a file"
+            );
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), RENDERED);
+            assert_eq!(mode_of(&target), created_at(0o700));
+            assert_eq!(std::fs::read_to_string(decoy).unwrap(), "decoy");
+            assert_eq!(mode_of(decoy), 0o644);
+        }
+
+        // An in-sync target is written only to tighten it, and then takes the
+        // template's bit, gaining or dropping the owner's. One already owner-only
+        // is not written, so it keeps its mode whatever the template's: apply
+        // compares its content only.
+        #[tokio::test]
+        async fn an_in_sync_target_takes_the_templates_bit_only_when_tightened() {
+            skip_unless_owner_execute_survives!(
+                "an_in_sync_target_takes_the_templates_bit_only_when_tightened"
+            );
+            for (template_mode, seeded, expected, reason) in [
+                (
+                    0o755,
+                    0o644,
+                    created_at(0o700),
+                    SkipReason::PermissionsTightened,
+                ),
+                (
+                    0o644,
+                    0o744,
+                    created_at(0o600),
+                    SkipReason::PermissionsTightened,
+                ),
+                (0o755, 0o600, 0o600, SkipReason::InSync),
+                (0o755, 0o700, 0o700, SkipReason::InSync),
+                (0o644, 0o700, 0o700, SkipReason::InSync),
+            ] {
+                let inode = std::cell::Cell::new(0);
+                let (_dirs, target, events) =
+                    deploy(template_mode, ApplyOptions::default(), |target| {
+                        std::fs::write(target, RENDERED).unwrap();
+                        chmod(target, seeded);
+                        inode.set(std::fs::metadata(target).unwrap().ino());
+                    })
+                    .await;
+
+                let case = format!("template at {template_mode:o}, target at {seeded:o}");
+                let in_sync = reason == SkipReason::InSync;
+                assert_eq!(mode_of(&target), expected, "{case}");
+                assert!(skipped_for(&events, reason), "{case}: {events:?}");
+                if in_sync {
+                    assert_eq!(
+                        std::fs::metadata(&target).unwrap().ino(),
+                        inode.get(),
+                        "{case}"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_command_entry_stays_0600() {
+            skip_unless_owner_execute_survives!("a_command_entry_stays_0600");
+            let dirs = TestDirs::new();
+            let target = dirs.target_dir.join("credentials");
+            provider_package(&dirs.package_dir, target.to_str().unwrap(), "op read x");
+            let runner = FakeCommandRunner::new().succeeding("op read x", SECRET.as_bytes());
+            let service = dirs.service_with_runner(runner);
+
+            let _ = collect_events(service.apply_all(ApplyOptions::default()).await).await;
+
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), SECRET);
+            assert_eq!(mode_of(&target), created_at(0o600));
+        }
+    }
+
     // Ctrl+C during `selfie apply`.
     //
     // Apply gained the ability to run commands after the cancellation token was
@@ -8642,13 +8866,15 @@ mod symlinked_targets {
                     .map(selfie::fs::TargetRead::Bytes)
                     .map_err(|e| FileSystemError::IoError(e.into()))
             }
-            fn write_file_private(
+            fn write_file_private_executable(
                 &self,
                 path: &TargetPath,
                 data: &[u8],
                 if_present: selfie::fs::IfPresent,
+                execute: selfie::fs::OwnerExecute,
             ) -> Result<selfie::fs::Placed, FileSystemError> {
-                self.0.write_file_private(path, data, if_present)
+                self.0
+                    .write_file_private_executable(path, data, if_present, execute)
             }
             fn write_file_no_follow_executable(
                 &self,
@@ -23783,36 +24009,40 @@ mod warning_sentences {
     }
 }
 
+// Answer a file's permission bits, setuid, setgid and sticky included.
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[cfg(unix)]
+fn chmod(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+// Answer the mode a file created at `mode` gets under this process's umask.
+#[cfg(unix)]
+fn created_at(mode: u32) -> u32 {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let control = dir.path().join(format!("control-{mode:o}"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&control)
+        .unwrap();
+    mode_of(&control)
+}
+
 // A deployed target takes its execute bits from the source when apply creates
 // it, and a tracked copy takes them from the target. An existing target keeps
 // whatever mode it already has.
 #[cfg(unix)]
 mod execute_bits_follow_the_file {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
-    use std::path::Path;
-
-    fn mode_of(path: &Path) -> u32 {
-        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
-    }
-
-    fn chmod(path: &Path, mode: u32) {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-    }
-
-    // What a file created at `mode` comes back as under this process's umask.
-    fn created_at(mode: u32) -> u32 {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        let control = dir.path().join(format!("control-{mode:o}"));
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&control)
-            .unwrap();
-        mode_of(&control)
-    }
 
     fn script_package(dirs: &TestDirs) -> (PathBuf, PathBuf) {
         let source = dirs.package_dir.join("tools").join("hello.sh");
