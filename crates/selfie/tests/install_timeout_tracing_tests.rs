@@ -1,6 +1,5 @@
 // A timed-out install's output never reaches `tracing`, which bypasses the
-// event stream. This is the only test in its binary, so no other test thread
-// reaches the same call sites while the capture is being set up.
+// event stream.
 
 mod install_timeout;
 
@@ -12,9 +11,6 @@ use tempfile::TempDir;
 #[tokio::test(flavor = "current_thread")]
 async fn a_timed_out_installs_output_never_reaches_tracing() {
     let dir = TempDir::new().unwrap();
-    // Reaches every call site an install's timeout does before the capture
-    // starts, as `capture_tracing` requires.
-    install(dir.path(), "warmup", "echo warm; echo warm >&2; sleep 4").await;
     let log = test_common::capture_tracing(tracing::Level::TRACE);
 
     let events = install(dir.path(), "app", test_common::LONG_THEN_QUIET).await;

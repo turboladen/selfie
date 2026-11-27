@@ -8027,12 +8027,6 @@ mod info_tracing_tests {
             "test".to_string(),
             OperationContext::default(),
         );
-        // This reaches the call site before the capture starts, as
-        // `capture_tracing` requires.
-        sender
-            .send_info(StepId::from_raw(1), ConsoleOutput::Stdout("warm".into()))
-            .await;
-        let _ = rx.recv().await;
         let log = test_common::capture_tracing(tracing::Level::INFO);
 
         sender
