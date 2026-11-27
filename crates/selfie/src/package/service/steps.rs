@@ -10,7 +10,10 @@ use crate::{
     config::SelfieConfig,
     package::{
         EnvironmentConfig, GetPackage,
-        event::{ConsoleOutput, EventSender, OperationFailure, OperationResult, StepEnding},
+        event::{
+            ComposedWarning, ConsoleOutput, EventSender, OperationFailure, OperationResult,
+            StepEnding,
+        },
         port::{PackageError, PackageRepoError, PackageRepository},
         service::ProgressTracker,
     },
@@ -308,7 +311,11 @@ async fn report_relay_end(
     } else {
         "The task relaying the command's output failed, so some of it may not have been shown"
     };
-    sender.send_warning(message).await;
+    sender
+        .send_composed_warning(ComposedWarning::OutputLost(
+            crate::parts::Parts::new().text(message).into(),
+        ))
+        .await;
     None
 }
 
@@ -412,7 +419,15 @@ mod tests {
         // Positive controls: the failure was reported, once, and logged.
         let warnings = events
             .iter()
-            .filter(|event| matches!(event, PackageEvent::Warning { .. }))
+            .filter(|event| {
+                matches!(
+                    event,
+                    PackageEvent::ComposedWarning {
+                        warning: ComposedWarning::OutputLost(_),
+                        ..
+                    }
+                )
+            })
             .count();
         assert_eq!(warnings, 1, "{events:?}");
         assert!(!logged.is_empty(), "nothing was logged");
@@ -456,7 +471,10 @@ mod tests {
         assert!(tail.is_none(), "{tail:?}");
         assert!(matches!(
             rx.recv().await,
-            Some(PackageEvent::Warning { .. })
+            Some(PackageEvent::ComposedWarning {
+                warning: ComposedWarning::OutputLost(_),
+                ..
+            })
         ));
         let failure =
             StreamingFailure::of(timeout(crate::commands::runner::TimeLimit::Silence), tail);
