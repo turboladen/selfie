@@ -65,7 +65,7 @@ async fn a_streaming_command_is_answered_the_same_way() {
         .await
         .unwrap();
 
-    assert_eq!(output.stdout_str(), "got:hunter2-correct");
+    assert_eq!(output.bounded_stdout().as_str(), "got:hunter2-correct");
 }
 
 #[tokio::test]
@@ -319,7 +319,7 @@ async fn time_spent_answering_does_not_count_as_silence_on_a_streaming_command()
             .await
             .unwrap();
 
-    assert_eq!(output.stdout_str(), "got:slow-typist");
+    assert_eq!(output.bounded_stdout().as_str(), "got:slow-typist");
 }
 
 // Opening a pseudo-terminal can fail for an instant while another one closes,

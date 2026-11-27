@@ -24,7 +24,7 @@ use tokio_util::{
 use super::{
     runner::{
         CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
-        TimeLimit,
+        StreamedExit, TailWindows, TimeLimit,
     },
     terminal::{self, Budget, PromptHandler},
 };
@@ -398,8 +398,7 @@ impl CommandRunner for ShellCommandRunner {
         timeout: Duration,
         output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
         token: &CancellationToken,
-    ) -> Result<CommandOutput, CommandError> {
-        let start_time = Instant::now();
+    ) -> Result<StreamedExit, CommandError> {
         let working_directory = working_dir.to_path_buf();
 
         // Check for pre-cancellation before spawning
@@ -428,8 +427,8 @@ impl CommandRunner for ShellCommandRunner {
                 command: command.to_string(),
             })?;
 
-        let mut full_stdout = Vec::new();
-        let mut full_stderr = Vec::new();
+        let mut stdout_windows = TailWindows::new();
+        let mut stderr_windows = TailWindows::new();
 
         // The frames are tapped here, ahead of the relay in `drain_and_wait`: a
         // frame restarts the budget when it is read, whether or not a receiver is
@@ -451,8 +450,8 @@ impl CommandRunner for ShellCommandRunner {
             result = drain_and_wait(
                 &mut child,
                 frames,
-                &mut full_stdout,
-                &mut full_stderr,
+                &mut stdout_windows,
+                &mut stderr_windows,
                 Relay {
                     sender: &output_sender,
                     budget: &budget,
@@ -491,14 +490,7 @@ impl CommandRunner for ShellCommandRunner {
             abandon(&mut child, has_terminal).await;
         }
 
-        Ok(CommandOutput {
-            output: Output {
-                status: outcome?,
-                stdout: full_stdout,
-                stderr: full_stderr,
-            },
-            duration: start_time.elapsed(),
-        })
+        Ok(StreamedExit::new(outcome?, stdout_windows, stderr_windows))
     }
 
     /// Run a command whose stdout becomes a file's content.
@@ -750,9 +742,8 @@ where
 /// `lossy(a) + lossy(b) == lossy(a + b)` for any two consecutive frames. That is
 /// what makes it safe to decode each frame on its own and relay it.
 ///
-/// Yields raw bytes rather than a `String`, so the same frames can be
-/// accumulated byte-exactly into [`CommandOutput`] while only the relayed copy is
-/// decoded.
+/// Yields raw bytes rather than a `String`, so the runner's windows count the
+/// command's own bytes while only the relayed copy is decoded.
 // Not the stronger "a frame never ends inside a character". A frame can end
 // inside an invalid sequence, at the boundary of its maximal subpart, which costs
 // nothing. What never happens is a valid character being split -- the case that
@@ -858,8 +849,8 @@ where
 async fn drain_and_wait<S>(
     child: &mut tokio::process::Child,
     frames: S,
-    full_stdout: &mut Vec<u8>,
-    full_stderr: &mut Vec<u8>,
+    stdout_windows: &mut TailWindows,
+    stderr_windows: &mut TailWindows,
     relay: Relay<'_>,
     command: &str,
     working_directory: &Path,
@@ -879,10 +870,11 @@ where
                     cause: Arc::new(source),
                 })?;
 
-            // The captured output accumulates the raw bytes...
+            // The windows keep the ends of the raw bytes, so a failure's bound
+            // counts what the command printed...
             match stream {
-                OutputStream::Stdout => full_stdout.extend_from_slice(&bytes),
-                OutputStream::Stderr => full_stderr.extend_from_slice(&bytes),
+                OutputStream::Stdout => stdout_windows.push(&bytes),
+                OutputStream::Stderr => stderr_windows.push(&bytes),
             }
 
             // ...and only the relayed copy is decoded. `Utf8Boundary` frames so
@@ -1191,10 +1183,9 @@ mod tests {
     // 1023 ASCII bytes, then a two-byte `é`, then an invalid `0xFF`, then more
     // ASCII. The `é` straddles the 1024-byte read boundary.
     //
-    // The `0xFF` is what lets a byte-exactness assertion fail: a *valid* character
-    // that gets split still round-trips through `from_utf8_lossy(..).as_bytes()`
-    // byte for byte, so a fixture without an invalid byte cannot detect output
-    // decoded before it was captured.
+    // The `0xFF` gives the relayed text exactly one U+FFFD that belongs there,
+    // so a test can count replacement characters and tell a split `é` from the
+    // command's own invalid byte.
     //
     // **Octal, not `\xNN`.** Hex escapes are a bash/BSD extension; `/bin/sh` is
     // dash on Debian, whose `printf` emits `\xc3` as five literal characters.
@@ -2218,8 +2209,8 @@ mod tests {
             drain_and_wait(
                 &mut child,
                 frames,
-                &mut Vec::new(),
-                &mut Vec::new(),
+                &mut TailWindows::new(),
+                &mut TailWindows::new(),
                 Relay {
                     sender: &tx,
                     budget: &Budget::new(Duration::from_secs(30)),
@@ -2245,9 +2236,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_pump_accumulates_raw_bytes_and_relays_decoded_text() {
+    async fn the_pump_windows_each_pipe_and_relays_decoded_text() {
         // Two things at once because they must not diverge: what a caller reads
-        // out of `CommandOutput` and what a watcher sees on the channel come from
+        // out of `StreamedExit` and what a watcher sees on the channel come from
         // the same frames.
         let mut child = Command::new(ShellCommandRunner::default_shell())
             .arg("-c")
@@ -2262,7 +2253,7 @@ mod tests {
             Ok((OutputStream::Stdout, Bytes::from_static(b"out"))),
             Ok((OutputStream::Stderr, Bytes::from_static(b"err"))),
         ]);
-        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let (mut out, mut err) = (TailWindows::new(), TailWindows::new());
 
         drain_and_wait(
             &mut child,
@@ -2280,8 +2271,8 @@ mod tests {
         .unwrap();
         drop(tx);
 
-        assert_eq!(out, b"out");
-        assert_eq!(err, b"err");
+        assert_eq!(out.finish().as_str(), "out");
+        assert_eq!(err.finish().as_str(), "err");
 
         let mut relayed = Vec::new();
         while let Some(chunk) = rx.recv().await {
@@ -2328,15 +2319,14 @@ mod tests {
         .expect("reading both pipes deadlocked")
         .expect("command failed");
 
+        let (stdout, stderr) = output.totals();
         assert!(
-            output.stdout().len() > 200_000,
-            "stdout was only {} bytes, under the pipe buffer",
-            output.stdout().len()
+            stdout > 200_000,
+            "stdout was only {stdout} bytes, under the pipe buffer"
         );
         assert!(
-            output.stderr().len() > 200_000,
-            "stderr was only {} bytes, under the pipe buffer",
-            output.stderr().len()
+            stderr > 200_000,
+            "stderr was only {stderr} bytes, under the pipe buffer"
         );
         // Positive control: without this the test passes against a runner that
         // captures everything and relays nothing, which is not streaming.
@@ -2344,6 +2334,76 @@ mod tests {
             relayed.await.unwrap() > 0,
             "the command's output never reached the channel"
         );
+    }
+
+    // Runs `script` through the streaming path, counting the bytes relayed on
+    // each pipe, and returns the result with those counts.
+    async fn stream_counting(script: &str) -> (StreamedExit, (u64, u64)) {
+        let runner =
+            ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1000);
+        let relayed = tokio::spawn(async move {
+            let (mut out, mut err) = (0, 0);
+            while let Some(chunk) = rx.recv().await {
+                match chunk {
+                    OutputChunk::Stdout(text) => out += text.len() as u64,
+                    OutputChunk::Stderr(text) => err += text.len() as u64,
+                }
+            }
+            (out, err)
+        });
+        let output = tokio::time::timeout(
+            Duration::from_secs(60),
+            runner.execute_streaming(
+                script,
+                Path::new("."),
+                Duration::from_secs(30),
+                tx,
+                &token(),
+            ),
+        )
+        .await
+        .expect("the streaming command hung")
+        .expect("command failed");
+        (output, relayed.await.unwrap())
+    }
+
+    // What the windows reserve, not what the process allocates: the peak is
+    // measured in tests/streaming_memory_tests.rs.
+    #[tokio::test]
+    async fn a_ten_megabyte_streaming_command_keeps_both_ends_in_its_windows() {
+        const MB10: u64 = 10 * 1024 * 1024;
+        let script = format!(
+            "printf OUTHEAD; head -c {MB10} /dev/zero | tr '\\0' a; printf OUTTAIL; \
+             printf ERRHEAD >&2; head -c {MB10} /dev/zero | tr '\\0' b >&2; printf ERRTAIL >&2"
+        );
+
+        let (output, relayed) = stream_counting(&script).await;
+
+        assert!(output.is_success(), "exit code {:?}", output.code());
+        // Positive control: all of both pipes really went through the runner.
+        assert_eq!(relayed, (MB10 + 14, MB10 + 14));
+        assert_eq!(output.totals(), relayed);
+        let bound = 2 * TailWindows::MOST_HELD;
+        assert!(output.held() <= bound, "{} bytes held", output.held());
+        let (stdout, stderr) = (output.bounded_stdout(), output.bounded_stderr());
+        assert!(stdout.as_str().starts_with("OUTHEAD"), "{stdout}");
+        assert!(stdout.as_str().ends_with("aOUTTAIL"), "{stdout}");
+        assert!(stderr.as_str().starts_with("ERRHEAD"), "{stderr}");
+        assert!(stderr.as_str().ends_with("bERRTAIL"), "{stderr}");
+    }
+
+    #[tokio::test]
+    async fn a_streamed_pipe_of_invalid_bytes_is_bounded_by_its_raw_length() {
+        // 6000 bytes of 0xFF decode to 18000 bytes of U+FFFD, so a bound over
+        // the decoded text would name 16000 elided bytes, not 4000.
+        // `LC_ALL=C`, because `tr` in a UTF-8 locale writes `\377` as `ÿ`.
+        let (output, _) =
+            stream_counting("head -c 6000 /dev/zero | LC_ALL=C tr '\\0' '\\377'").await;
+
+        let stdout = output.bounded_stdout();
+        assert!(stdout.as_str().contains("(4000 bytes elided)"), "{stdout}");
+        assert!(stdout.as_str().starts_with('\u{FFFD}'), "{stdout}");
     }
 
     #[tokio::test]
@@ -2389,8 +2449,12 @@ mod tests {
             "a character was split across frames: {text:?}"
         );
         assert!(text.contains('é'), "the character never arrived at all");
-        // The captured output is raw bytes, and stays byte-exact past the split.
-        assert_eq!(output.stdout(), split_character_bytes());
+        // The kept output is what bounding the whole output gives, with the
+        // split character intact.
+        assert_eq!(
+            output.bounded_stdout().as_str(),
+            crate::commands::BoundedText::bound(&split_character_bytes()).as_str()
+        );
     }
 
     #[tokio::test]
@@ -2426,7 +2490,7 @@ mod tests {
     }
 
     // Whether `result` is a timeout that `limit` stopped.
-    fn stopped_by(result: &Result<CommandOutput, CommandError>, limit: TimeLimit) -> bool {
+    fn stopped_by<T>(result: &Result<T, CommandError>, limit: TimeLimit) -> bool {
         matches!(
             result,
             Err(CommandError::Timeout { limit: stopped, .. }) if *stopped == limit
@@ -2438,7 +2502,7 @@ mod tests {
     async fn stream_with_timeout(
         script: &str,
         timeout: Duration,
-    ) -> (Result<CommandOutput, CommandError>, Duration) {
+    ) -> (Result<StreamedExit, CommandError>, Duration) {
         let runner =
             ShellCommandRunner::new(ShellCommandRunner::default_shell(), Duration::from_secs(30));
         let (tx, _rx) = tokio::sync::mpsc::channel(1000);
@@ -2459,7 +2523,7 @@ mod tests {
 
         let output = result.expect("a command that keeps printing was stopped");
         assert!(output.is_success());
-        assert_eq!(output.stdout(), b"1\n2\n3\n4\n5\n6\n7\n8\n");
+        assert_eq!(output.bounded_stdout().as_str(), "1\n2\n3\n4\n5\n6\n7\n8\n");
         assert!(took > Duration::from_millis(1500), "{took:?}");
     }
 
@@ -2471,7 +2535,7 @@ mod tests {
 
         let output = result.expect("a command that keeps writing stderr was stopped");
         assert!(output.is_success());
-        assert_eq!(output.stderr(), b"1\n2\n3\n4\n5\n6\n7\n8\n");
+        assert_eq!(output.bounded_stderr().as_str(), "1\n2\n3\n4\n5\n6\n7\n8\n");
     }
 
     #[tokio::test]
@@ -2519,7 +2583,7 @@ mod tests {
         timeout: Duration,
         delay: Duration,
     ) -> (
-        Result<CommandOutput, CommandError>,
+        Result<StreamedExit, CommandError>,
         Duration,
         Vec<OutputChunk>,
     ) {
@@ -2571,10 +2635,10 @@ mod tests {
         .await;
         let output = result.expect("command failed");
 
-        assert_eq!(output.stdout().len(), 400_000);
+        assert_eq!(output.totals().0, 400_000);
         assert_eq!(
             relayed_stdout(&chunks),
-            String::from_utf8_lossy(output.stdout()),
+            "a".repeat(400_000),
             "the relay lost output"
         );
         // Positive controls: the slot really filled, and the command really
@@ -2610,11 +2674,8 @@ mod tests {
         .expect("command failed");
 
         assert!(output.is_success(), "exit code {:?}", output.code());
-        assert!(
-            output.stdout().len() > 200_000,
-            "stdout was only {} bytes",
-            output.stdout().len()
-        );
+        let stdout = output.totals().0;
+        assert!(stdout > 200_000, "stdout was only {stdout} bytes");
     }
 
     // The script writes three frames, kept apart by the pauses and by switching

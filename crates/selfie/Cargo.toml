@@ -74,6 +74,7 @@ tokio = { version = "1.44", features = [
   "test-util",
   "time",
 ] }
+peak_alloc = "0.3"
 
 [features]
 default = []

@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::runner::{
     CommandError, CommandOutput, CommandRunner, ContentOutput, OutputChunk, OutputStream,
+    StreamedExit,
 };
 
 /// What a scripted command does when run.
@@ -362,8 +363,10 @@ impl CommandRunner for FakeCommandRunner {
         _timeout: Duration,
         _output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
         _token: &CancellationToken,
-    ) -> Result<CommandOutput, CommandError> {
-        self.output_of(command, working_dir).await
+    ) -> Result<StreamedExit, CommandError> {
+        self.output_of(command, working_dir)
+            .await
+            .map(StreamedExit::from_output)
     }
 
     /// Answers with the scripted output, separated as the script says.

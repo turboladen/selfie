@@ -745,7 +745,7 @@ impl CommandRunner for CancelAware {
         timeout: Duration,
         output_sender: tokio::sync::mpsc::Sender<selfie::commands::OutputChunk>,
         token: &CancellationToken,
-    ) -> Result<selfie::commands::CommandOutput, selfie::commands::CommandError> {
+    ) -> Result<selfie::commands::StreamedExit, selfie::commands::CommandError> {
         if token.is_cancelled() {
             return Err(Self::canceled(command, working_dir));
         }

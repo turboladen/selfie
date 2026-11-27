@@ -7742,8 +7742,9 @@ mod secret_bearing {
                 _timeout: Duration,
                 _output_sender: tokio::sync::mpsc::Sender<OutputChunk>,
                 token: &CancellationToken,
-            ) -> Result<CommandOutput, CommandError> {
+            ) -> Result<selfie::commands::StreamedExit, CommandError> {
                 self.answer(command, token)
+                    .map(selfie::commands::StreamedExit::from_output)
             }
 
             // The path resolve actually takes, so this is the one these tests

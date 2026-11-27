@@ -99,7 +99,7 @@ async fn test_command_streaming_captures_all_output() {
     );
 
     // Verify the final output matches what we captured via streaming
-    let final_output = output.stdout_str();
+    let final_output = output.bounded_stdout().into_string();
     let final_line_count = final_output
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -296,7 +296,7 @@ async fn test_command_streaming_preserves_order() {
     }
 
     // Cross-verify with final output ordering
-    let final_output_str = output.stdout_str();
+    let final_output_str = output.bounded_stdout().into_string();
     let final_lines: Vec<&str> = final_output_str
         .lines()
         .filter(|line| !line.trim().is_empty())
