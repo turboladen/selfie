@@ -8862,9 +8862,20 @@ mod symlinked_targets {
                 &self,
                 path: &TargetPath,
             ) -> Result<selfie::fs::TargetRead, FileSystemError> {
-                std::fs::read(path.path())
-                    .map(selfie::fs::TargetRead::Bytes)
-                    .map_err(|e| FileSystemError::IoError(e.into()))
+                use std::io::Read as _;
+                use std::os::unix::fs::PermissionsExt as _;
+
+                let read = || -> std::io::Result<selfie::fs::TargetRead> {
+                    let mut file = std::fs::File::open(path.path())?;
+                    let mode = file.metadata()?.permissions().mode();
+                    let mut bytes = Vec::new();
+                    file.read_to_end(&mut bytes)?;
+                    Ok(selfie::fs::TargetRead::Bytes {
+                        bytes,
+                        execute: selfie::fs::ExecuteBits::of_mode(mode),
+                    })
+                };
+                read().map_err(|e| FileSystemError::IoError(e.into()))
             }
             fn write_file_private_executable(
                 &self,
@@ -24182,5 +24193,63 @@ mod execute_bits_follow_the_file {
         );
         let copy = dirs.dotfiles_dir.join("config").join("config.toml");
         assert_eq!(mode_of(&copy), created_at(0o666));
+    }
+
+    // Track the target at `from` while its mode changes to `to` right after the
+    // read of its content, and answer the copy's mode.
+    async fn track_while_chmodded(dirs: &TestDirs, from: u32, to: u32) -> u32 {
+        let target = dirs.target_dir.join("hello.sh");
+        std::fs::write(&target, "#!/bin/sh\necho hello\n").unwrap();
+        chmod(&target, from);
+        let fs = test_common::PlantsBeforeWrite::chmodded_after_first_read(&target, to);
+
+        let events = collect_events(
+            dirs.service_with_fs(fs.clone(), FakeCommandRunner::new())
+                .track_standalone("hello", target.to_str().unwrap())
+                .await,
+        )
+        .await;
+
+        assert!(fs.chmodded(), "the target was never read: {events:?}");
+        assert!(
+            matches!(
+                get_operation_result(&events),
+                Some(OperationResult::Success(
+                    OperationSuccess::DotfileTracked { .. }
+                ))
+            ),
+            "{events:?}"
+        );
+        let copy = dirs.dotfiles_dir.join("hello").join("hello.sh");
+        assert_eq!(
+            std::fs::read_to_string(&copy).unwrap(),
+            "#!/bin/sh\necho hello\n"
+        );
+        mode_of(&copy)
+    }
+
+    // The copy's mode comes from the read that gave its content, so a chmod
+    // landing after that read reaches neither.
+    #[tokio::test]
+    async fn track_takes_the_execute_bits_the_content_was_read_with() {
+        let expected = created_at(0o777);
+        assert_ne!(
+            expected & 0o100,
+            0,
+            "this umask strips the owner execute bit"
+        );
+
+        let dirs = TestDirs::new();
+        assert_eq!(track_while_chmodded(&dirs, 0o755, 0o644).await, expected);
+    }
+
+    // The other direction: execute bits added after the read are not carried.
+    #[tokio::test]
+    async fn track_ignores_execute_bits_set_after_the_read() {
+        let dirs = TestDirs::new();
+        assert_eq!(
+            track_while_chmodded(&dirs, 0o644, 0o755).await,
+            created_at(0o666)
+        );
     }
 }

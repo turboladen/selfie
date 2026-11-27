@@ -527,7 +527,7 @@ fn holds(
         return Ok(false);
     }
     match read(path, links) {
-        Ok(TargetRead::Bytes(found)) => Ok(found == expected),
+        Ok(TargetRead::Bytes { bytes: found, .. }) => Ok(found == expected),
         Ok(
             TargetRead::Absent
             | TargetRead::BelowNonDirectory { .. }
@@ -825,7 +825,12 @@ fn read_target(path: &Path, links: Links) -> Result<TargetRead, FileSystemError>
 
     let mut bytes = Vec::new();
     match file.read_to_end(&mut bytes) {
-        Ok(_) => Ok(TargetRead::Bytes(bytes)),
+        // The mode is the fstat of the descriptor the bytes came from, so a chmod
+        // or a rename after the read reaches neither.
+        Ok(_) => Ok(TargetRead::Bytes {
+            bytes,
+            execute: ExecuteBits::of_mode(metadata.permissions().mode()),
+        }),
         Err(e) => failure(e),
     }
 }
@@ -1009,7 +1014,7 @@ impl FileSystem for RealFileSystem {
             Ok(Err(TargetRead::Unreadable(e))) => Some(OpenRefusal::Unreadable(e)),
             Ok(Ok(_))
             | Ok(Err(
-                TargetRead::Bytes(_)
+                TargetRead::Bytes { .. }
                 | TargetRead::Absent
                 | TargetRead::BelowNonDirectory { .. }
                 | TargetRead::Directory
@@ -2769,6 +2774,7 @@ mod no_follow_read_tests {
         std::os::unix::fs::symlink(&looped, &looped).unwrap();
         let file = dir.path().join("file");
         fs::write(&file, b"bytes").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o751)).unwrap();
         let to_file = dir.path().join("to-file");
         std::os::unix::fs::symlink(&file, &to_file).unwrap();
 
@@ -2791,7 +2797,11 @@ mod no_follow_read_tests {
             read_target(&looped, Links::Followed)
         );
         assert!(
-            matches!(read_target(&to_file, Links::Followed), Ok(TargetRead::Bytes(ref b)) if b == b"bytes"),
+            matches!(
+                read_target(&to_file, Links::Followed),
+                Ok(TargetRead::Bytes { ref bytes, execute })
+                    if bytes == b"bytes" && execute == ExecuteBits::of_mode(0o751)
+            ),
             "{:?}",
             read_target(&to_file, Links::Followed)
         );
@@ -2810,8 +2820,35 @@ mod no_follow_read_tests {
 
         assert!(matches!(
             read(&file).unwrap(),
-            TargetRead::Bytes(bytes) if bytes == b"\xffbytes"
+            TargetRead::Bytes { bytes, .. } if bytes == b"\xffbytes"
         ));
+    }
+
+    // The bits come from the file read, for each of owner, group and other on its
+    // own, and a file with none answers none. Each expected value is a literal, so
+    // a mapping that blurs one class into another cannot pass.
+    #[test]
+    fn a_regular_files_execute_bits_come_with_its_bytes() {
+        for (mode, expected) in [
+            (0o700, 0o100),
+            (0o610, 0o010),
+            (0o601, 0o001),
+            (0o751, 0o111),
+            (0o644, 0),
+        ] {
+            let dir = tempdir().unwrap();
+            let file = dir.path().join("target");
+            fs::write(&file, b"x").unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+
+            assert!(
+                matches!(
+                    read(&file).unwrap(),
+                    TargetRead::Bytes { execute, .. } if execute.bits() == expected
+                ),
+                "{mode:o}"
+            );
+        }
     }
 
     #[test]

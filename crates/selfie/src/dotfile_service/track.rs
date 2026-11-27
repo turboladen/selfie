@@ -673,9 +673,9 @@ where
     //
     // Text, as apply reads the repository copy back: a file that is not UTF-8 would
     // track and then never deploy.
-    let content = match read_target_state(filesystem, &expanded_target) {
-        TargetState::Readable(bytes) => match String::from_utf8(bytes) {
-            Ok(content) => content,
+    let (content, execute) = match read_target_state(filesystem, &expanded_target) {
+        TargetState::Readable { bytes, execute } => match String::from_utf8(bytes) {
+            Ok(content) => (content, execute),
             Err(e) => {
                 return track_failed(Parts::new().text(format!(
                     "Cannot read target file: it is not UTF-8 text ({e})"
@@ -827,14 +827,13 @@ where
 
     // Replaces nothing: a file that appeared since the check above is the user's,
     // and is refused as one the check found. The copy takes the target's execute
-    // bits, so a tracked script is committed runnable and deploys runnable. The
-    // stat follows a link, which is safe only because a linked target was refused
-    // before its content was read.
+    // bits from the same read as its content, so a tracked script is committed
+    // runnable and deploys runnable, and a chmod after the read reaches neither.
     match filesystem.write_file_no_follow_executable(
         &repository_path(&source_path),
         content.as_bytes(),
         IfPresent::Keep,
-        filesystem.execute_bits(expanded_target.path()),
+        execute,
     ) {
         Ok(Placed::Written) => {}
         Ok(Placed::Kept) => return already_exists(),

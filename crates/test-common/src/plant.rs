@@ -1,7 +1,9 @@
-//! A file system double that makes something appear at a target just before a
-//! write reaches it, the race a write to an absent target has to survive, or that
-//! changes a file just before a write reaches it, the race a rewrite has to
-//! survive.
+//! A file system double that stages the races a write has to survive:
+//!
+//! - something appears at a target just before a write reaches it, as for a write
+//!   to an absent target;
+//! - a file changes just before a write reaches it, as for a rewrite;
+//! - a file's mode changes just after it is read, as for a copy of it.
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -49,6 +51,8 @@ pub type Stamp = (u64, SystemTime);
 /// [`RealFileSystem`], except that `plant` appears at `target` immediately before
 /// the first write to it is delegated, as an app writing its first config would.
 /// Optionally, what is at `target` is removed again at the first read after that.
+/// Built with [`chmodded_after_first_read`](Self::chmodded_after_first_read), it
+/// plants nothing and instead changes `target`'s mode right after it is read.
 #[derive(Clone, Debug)]
 pub struct PlantsBeforeWrite {
     target: PathBuf,
@@ -64,6 +68,8 @@ pub struct PlantsBeforeWrite {
     rewrite_claimed: Arc<AtomicBool>,
     rewritten: Arc<AtomicBool>,
     stamps: Arc<Mutex<Option<(Stamp, Stamp)>>>,
+    chmod_after_read: Option<u32>,
+    chmodded: Arc<AtomicBool>,
 }
 
 impl PlantsBeforeWrite {
@@ -97,6 +103,23 @@ impl PlantsBeforeWrite {
         fs.rewrite = Some(rewrite);
         fs.rewrite_before_remove = true;
         fs
+    }
+
+    /// Plant nothing, and set `target`'s mode to `mode` immediately after the first
+    /// [`read_file_no_follow`](FileSystem::read_file_no_follow) of it returns, so
+    /// the read's answer and the file on disk disagree. No other read triggers it.
+    #[must_use]
+    pub fn chmodded_after_first_read(target: &Path, mode: u32) -> Self {
+        let mut fs = Self::with(target, None);
+        fs.chmod_after_read = Some(mode);
+        fs
+    }
+
+    /// Whether the mode was changed after a read, so a test can confirm it was
+    /// reached.
+    #[must_use]
+    pub fn chmodded(&self) -> bool {
+        self.chmodded.load(SeqCst)
     }
 
     /// Whether the rewrite was made and finished, so a test can confirm it was
@@ -160,7 +183,19 @@ impl PlantsBeforeWrite {
             rewrite_claimed: Arc::default(),
             rewritten: Arc::default(),
             stamps: Arc::default(),
+            chmod_after_read: None,
+            chmodded: Arc::default(),
         }
+    }
+
+    fn chmod_if_first_read(&self, path: &Path) {
+        let Some(mode) = self.chmod_after_read else {
+            return;
+        };
+        if path != self.target || self.chmodded.swap(true, SeqCst) {
+            return;
+        }
+        set_mode(path, mode);
     }
 
     fn rewrite_before_write(&self, path: &Path) {
@@ -210,7 +245,7 @@ impl PlantsBeforeWrite {
         match plant {
             Plant::File(content, mode) => {
                 std::fs::write(path, content).unwrap();
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(*mode)).unwrap();
+                set_mode(path, *mode);
             }
             Plant::Directory => std::fs::create_dir(path).unwrap(),
             Plant::DanglingLink => {
@@ -230,6 +265,10 @@ impl PlantsBeforeWrite {
     }
 }
 
+fn set_mode(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
 fn stamp(path: &Path) -> Stamp {
     let metadata = std::fs::symlink_metadata(path).unwrap();
     (metadata.ino(), metadata.modified().unwrap())
@@ -244,7 +283,9 @@ impl FileSystem for PlantsBeforeWrite {
     }
     fn read_file_no_follow(&self, path: &TargetPath) -> Result<TargetRead, FileSystemError> {
         self.vanish_if_armed(path.path());
-        RealFileSystem.read_file_no_follow(path)
+        let read = RealFileSystem.read_file_no_follow(path);
+        self.chmod_if_first_read(path.path());
+        read
     }
     fn write_file_private_executable(
         &self,
