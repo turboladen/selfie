@@ -1514,6 +1514,21 @@ fn mode_of(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
+// Answer the mode a file created at `mode` in `dir` gets under this process's umask.
+#[cfg(test)]
+fn created_at(dir: &Path, mode: u32) -> u32 {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let path = dir.join(format!("control-{mode:o}"));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&path)
+        .unwrap();
+    mode_of(&path)
+}
+
 // Tests for [`FileSystem::write_file_private`].
 
 // Grouped by what each test actually proves.
@@ -1849,35 +1864,27 @@ mod private_write_tests {
         // This is only observable where the target and `$TMPDIR` are on different
         // filesystems: a temporary file created anywhere else would then fail to
         // rename into place with `EXDEV`. On CI runners `/dev/shm` is a tmpfs while
-        // `$TMPDIR` is not. Where that does not hold the test cannot discriminate.
-        // A developer machine skips with a message, since an early return is
-        // otherwise indistinguishable from a pass. When the `CI` variable is set
-        // the test fails instead, so a runner that cannot discriminate cannot
-        // report a green run that asserted nothing.
+        // `$TMPDIR` is not. Where that does not hold the test cannot discriminate,
+        // and ends through `skip_unless_ci!`.
         #[cfg(target_os = "linux")]
         #[test]
         fn creates_the_temporary_file_in_the_targets_own_directory() {
             const NAME: &str = "creates_the_temporary_file_in_the_targets_own_directory";
 
-            let skip = |reason: &str| {
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "{NAME} cannot discriminate on CI: {reason}"
-                );
-                eprintln!("SKIP {NAME}: {reason}");
-            };
-
             let Ok(shm) = fs::metadata("/dev/shm") else {
-                return skip("/dev/shm is not present");
+                test_common::skip_unless_ci!(NAME, "/dev/shm is not present");
             };
             let Ok(tmp) = fs::metadata(std::env::temp_dir()) else {
-                return skip("$TMPDIR is not readable");
+                test_common::skip_unless_ci!(NAME, "$TMPDIR is not readable");
             };
             if shm.dev() == tmp.dev() {
-                return skip("/dev/shm and $TMPDIR are on the same filesystem");
+                test_common::skip_unless_ci!(
+                    NAME,
+                    "/dev/shm and $TMPDIR are on the same filesystem"
+                );
             }
             let Ok(dir) = tempfile::tempdir_in("/dev/shm") else {
-                return skip("/dev/shm is not writable");
+                test_common::skip_unless_ci!(NAME, "/dev/shm is not writable");
             };
 
             let target = dir.path().join("creds");
@@ -1963,16 +1970,7 @@ mod no_follow_write_tests {
 
     #[test]
     fn the_executable_writer_creates_a_new_file_with_the_execute_bits_given() {
-        use std::os::unix::fs::OpenOptionsExt as _;
-
         let dir = tempdir().unwrap();
-        let control = dir.path().join("control");
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o666 | 0o101)
-            .open(&control)
-            .unwrap();
 
         let target = dir.path().join("script");
         assert_eq!(
@@ -1987,7 +1985,7 @@ mod no_follow_write_tests {
             Placed::Written
         );
 
-        assert_eq!(mode_of(&target), mode_of(&control));
+        assert_eq!(mode_of(&target), created_at(dir.path(), 0o666 | 0o101));
     }
 
     #[test]
@@ -2201,25 +2199,12 @@ mod no_follow_write_tests {
         // could never come back `0o767` and the guard would never fire.
         #[test]
         fn leaves_an_existing_files_mode_alone() {
-            use std::os::unix::fs::OpenOptionsExt as _;
-
             let dir = tempdir().unwrap();
-            let control = dir.path().join("control");
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o767)
-                .open(&control)
-                .unwrap();
-            if mode_of(&control) == 0o767 {
-                let message = "the ambient umask strips no bits from 0o767, \
-                               so this cannot tell the two apart";
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "leaves_an_existing_files_mode_alone: {message}"
+            if created_at(dir.path(), 0o767) == 0o767 {
+                test_common::skip_unless_ci!(
+                    "leaves_an_existing_files_mode_alone",
+                    "the ambient umask strips no bits from 0o767, so this cannot tell the two apart",
                 );
-                eprintln!("SKIP leaves_an_existing_files_mode_alone: {message}");
-                return;
             }
 
             let target = dir.path().join("script");
@@ -2250,14 +2235,11 @@ mod no_follow_write_tests {
             // property under test here.
             fs::write(&control, b"x").unwrap();
             if mode_of(&control) & 0o077 == 0 {
-                let message = "the ambient umask makes ordinary writes owner-only, \
-                               so this cannot tell the two apart";
-                assert!(
-                    std::env::var_os("CI").is_none(),
-                    "creates_a_new_file_at_the_umask_default_not_owner_only: {message}"
+                test_common::skip_unless_ci!(
+                    "creates_a_new_file_at_the_umask_default_not_owner_only",
+                    "the ambient umask makes ordinary writes owner-only, so this cannot tell the \
+                     two apart",
                 );
-                eprintln!("SKIP creates_a_new_file_at_the_umask_default_not_owner_only: {message}");
-                return;
             }
 
             let target = dir.path().join("config");

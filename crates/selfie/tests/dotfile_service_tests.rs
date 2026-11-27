@@ -23783,36 +23783,40 @@ mod warning_sentences {
     }
 }
 
+// Answer a file's permission bits, setuid, setgid and sticky included.
+#[cfg(unix)]
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+}
+
+#[cfg(unix)]
+fn chmod(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+// Answer the mode a file created at `mode` gets under this process's umask.
+#[cfg(unix)]
+fn created_at(mode: u32) -> u32 {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let control = dir.path().join(format!("control-{mode:o}"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&control)
+        .unwrap();
+    mode_of(&control)
+}
+
 // A deployed target takes its execute bits from the source when apply creates
 // it, and a tracked copy takes them from the target. An existing target keeps
 // whatever mode it already has.
 #[cfg(unix)]
 mod execute_bits_follow_the_file {
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
-    use std::path::Path;
-
-    fn mode_of(path: &Path) -> u32 {
-        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
-    }
-
-    fn chmod(path: &Path, mode: u32) {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-    }
-
-    // What a file created at `mode` comes back as under this process's umask.
-    fn created_at(mode: u32) -> u32 {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        let control = dir.path().join(format!("control-{mode:o}"));
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&control)
-            .unwrap();
-        mode_of(&control)
-    }
 
     fn script_package(dirs: &TestDirs) -> (PathBuf, PathBuf) {
         let source = dirs.package_dir.join("tools").join("hello.sh");
