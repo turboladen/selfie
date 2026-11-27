@@ -18,7 +18,7 @@ use selfie::package::{
 use selfie::parts::{Message, SuggestedCommand};
 
 use crate::display_manager::Channel;
-use crate::display_manager::{Diff, DisplayManager, ErrorDetail};
+use crate::display_manager::{Diff, DisplayManager, ErrorDetail, StderrCopy};
 use crate::entry_rows::{EntryOutcome, EntryRow, under_row};
 use crate::source_paths;
 
@@ -202,8 +202,15 @@ impl EventProcessor {
     /// Print the unfinished lines of step `only`, or of every step when `only`
     /// is `None`.
     fn flush(&mut self, only: Option<StepId>) {
-        for (step, line) in self.partial.take(only) {
-            self.display.command_output(step, Output::line(&line));
+        for open in self.partial.take(only) {
+            self.display.command_output(
+                open.step,
+                open.channel,
+                open.start,
+                Output::line(&open.text),
+            );
+            self.display
+                .stream_ended(open.step, open.channel, open.streamed, open.lossy);
         }
     }
 
@@ -246,9 +253,13 @@ impl EventProcessor {
             // default verbosity only as the waiting spinner's latest line. A read
             // ends wherever the pipe did, so only its complete lines print here.
             PackageEvent::Info { step, output, .. } => {
-                for piece in self.partial.push(step, Pipe::of(&output), output.text()) {
+                let channel = channel_of(&output);
+                for piece in self.partial.push(step, channel, output.text()) {
                     match piece {
-                        Piece::Line(line) => self.display.command_output(step, Output::line(&line)),
+                        Piece::Line(line, start) => {
+                            self.display
+                                .command_output(step, channel, start, Output::line(&line));
+                        }
                         Piece::Frame(frame) => {
                             self.display.command_frame(step, Output::line(&frame));
                         }
@@ -342,7 +353,15 @@ impl EventProcessor {
                     let stderr_lines: Vec<Output> = install
                         .map(|(_, stderr)| stderr.as_str().lines().map(Output::line).collect())
                         .unwrap_or_default();
-                    let shows_stderr = install.is_some();
+                    // A timeout's bound is of the text the step streamed; a failed
+                    // exit's is of the bytes the runner captured.
+                    let bounded_stderr = install.map(|(failure, stderr)| {
+                        let copy = match failure {
+                            CommandFailure::InstallTimedOut { .. } => StderrCopy::Relayed,
+                            _ => StderrCopy::Captured,
+                        };
+                        (stderr.clone(), copy)
+                    });
                     // The command as the sentence bounds it, so the summary carries
                     // no more of a long command than the error does.
                     let error_detail = match install {
@@ -480,9 +499,11 @@ impl EventProcessor {
                         // output is hidden while it runs, and the tail its step showed
                         // may be stdout alone. Lines the tail already showed are left
                         // out.
-                        OperationFailure::CommandError(_) if shows_stderr => {
+                        OperationFailure::CommandError(_) if bounded_stderr.is_some() => {
                             self.display.print_error(message.clone());
-                            self.display.print_command_stderr(&stderr_lines);
+                            if let Some((stderr, copy)) = &bounded_stderr {
+                                self.display.print_command_stderr(stderr, *copy);
+                            }
                         }
                         OperationFailure::InvalidSpec { ref issues, .. } => {
                             self.display.print_error(message.clone());
@@ -744,19 +765,11 @@ fn unfinished_escape(buffer: &str) -> Option<usize> {
     (!finished && rest.len() < limit).then_some(esc)
 }
 
-/// Names the pipe a piece of a command's output came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pipe {
-    Stdout,
-    Stderr,
-}
-
-impl Pipe {
-    fn of(output: &ConsoleOutput) -> Self {
-        match output {
-            ConsoleOutput::Stdout(_) => Pipe::Stdout,
-            ConsoleOutput::Stderr(_) => Pipe::Stderr,
-        }
+/// Returns the pipe `output` came from, as the stream its lines belong to.
+fn channel_of(output: &ConsoleOutput) -> Channel {
+    match output {
+        ConsoleOutput::Stdout(_) => Channel::Stdout,
+        ConsoleOutput::Stderr(_) => Channel::Stderr,
     }
 }
 
@@ -767,8 +780,9 @@ const LINE_CAP: usize = 4096;
 /// Holds what one read of a command's output completed.
 #[derive(Debug)]
 enum Piece {
-    /// A line, ended by a newline or by the cap.
-    Line(String),
+    /// A line, ended by a newline or by the cap, and the byte offset in its
+    /// pipe's stream where it starts.
+    Line(String, u64),
     /// The unfinished line, for the spinner to show as a terminal would. It is
     /// never printed.
     // The next read may redraw it, so a printed frame would show text the
@@ -779,7 +793,26 @@ enum Piece {
 /// Holds the unfinished last line of each open step's pipes.
 #[derive(Debug, Default)]
 struct PartialLines {
-    open: Vec<(StepId, Pipe, String)>,
+    open: Vec<OpenLine>,
+}
+
+/// Holds the unfinished last line of one step's pipe, and what the pipe has
+/// streamed so far.
+#[derive(Debug)]
+struct OpenLine {
+    step: StepId,
+    channel: Channel,
+    text: String,
+    /// Counts the bytes the pipe has streamed.
+    streamed: u64,
+    /// Gives the stream offset where the unfinished line starts.
+    // It is `streamed - text.len()` after every line the buffer gives out. Only
+    // dropping redrawn frames moves the text's start past it, since the line
+    // still began where its first frame did.
+    start: u64,
+    /// Says that the stream held a U+FFFD, which may be one its decoding put
+    /// there.
+    lossy: bool,
 }
 
 // Each buffer belongs to one step's pipe, so output another step or pipe writes
@@ -792,34 +825,54 @@ impl PartialLines {
     /// returned as a line instead, unless it holds a carriage return: then the
     /// frames already redrawn are dropped, and only a frame that alone reaches
     /// the cap is returned as a line.
-    fn push(&mut self, step: StepId, pipe: Pipe, text: &str) -> Vec<Piece> {
+    fn push(&mut self, step: StepId, channel: Channel, text: &str) -> Vec<Piece> {
         let index = match self
             .open
             .iter()
-            .position(|(s, p, _)| *s == step && *p == pipe)
+            .position(|open| open.step == step && open.channel == channel)
         {
             Some(index) => index,
             None => {
-                self.open.push((step, pipe, String::new()));
+                self.open.push(OpenLine {
+                    step,
+                    channel,
+                    text: String::new(),
+                    streamed: 0,
+                    start: 0,
+                    lossy: false,
+                });
                 self.open.len() - 1
             }
         };
-        let buffer = &mut self.open[index].2;
-        buffer.push_str(text);
-        // Lines split as `str::lines` splits a failure's whole stderr, so a line
-        // the step's tail showed matches its copy there. A line keeps any
-        // carriage returns, and `Output::line` keeps the text after the last.
-        let mut pieces: Vec<Piece> = match buffer.rfind('\n') {
-            Some(end) => {
-                let lines = buffer[..end]
-                    .lines()
-                    .map(|line| Piece::Line(line.to_owned()))
-                    .collect();
-                buffer.drain(..=end);
-                lines
+        let open = &mut self.open[index];
+        open.text.push_str(text);
+        open.streamed += text.len() as u64;
+        open.lossy |= text.contains('\u{FFFD}');
+        let buffer = &mut open.text;
+        // A line is split as `str::lines` splits text and keeps any carriage
+        // returns; `Output::line` keeps the text after the last. Its start is its
+        // byte position in the stream, which a failure's bound counts alike,
+        // never a running sum of line lengths, which a `\r\n` or a dropped frame
+        // would throw off.
+        let mut pieces: Vec<Piece> = Vec::new();
+        if let Some(end) = buffer.rfind('\n') {
+            let base = open.streamed - buffer.len() as u64;
+            let mut at = 0;
+            for line in buffer[..=end].split_inclusive('\n') {
+                let start = if at == 0 {
+                    open.start
+                } else {
+                    base + at as u64
+                };
+                at += line.len();
+                let line = line.strip_suffix('\n').unwrap_or(line);
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                pieces.push(Piece::Line(line.to_owned(), start));
             }
-            None => Vec::new(),
-        };
+            buffer.drain(..=end);
+            open.start = open.streamed - buffer.len() as u64;
+        }
+        let buffer = &mut open.text;
         // A progress bar redraws with `\r` and may end no line until it is
         // done. Once its frames reach the cap, those already redrawn are dropped,
         // keeping the frame being drawn, or the last complete one when the next
@@ -836,7 +889,8 @@ impl PartialLines {
         if buffer.len() >= LINE_CAP {
             let cut = unfinished_escape(buffer).unwrap_or(buffer.len());
             let rest = buffer.split_off(cut);
-            pieces.push(Piece::Line(std::mem::replace(buffer, rest)));
+            pieces.push(Piece::Line(std::mem::replace(buffer, rest), open.start));
+            open.start = open.streamed - open.text.len() as u64;
         }
         // The spinner shows what a terminal would show now: `Output::line` keeps
         // the frame being drawn, or the last complete one before the next
@@ -844,23 +898,20 @@ impl PartialLines {
         // A buffer holding only an escape the cap carried shows as blank, since
         // `Output::line` strips a cut sequence, and the spinner skips a blank.
         let added = &text[text.rfind('\n').map_or(0, |end| end + 1)..];
-        if !added.is_empty() && !buffer.is_empty() {
-            pieces.push(Piece::Frame(buffer.clone()));
+        if !added.is_empty() && !open.text.is_empty() {
+            pieces.push(Piece::Frame(open.text.clone()));
         }
         pieces
     }
 
     /// Remove and return the unfinished lines of step `only`, or of every step
     /// when `only` is `None`.
-    fn take(&mut self, only: Option<StepId>) -> Vec<(StepId, String)> {
+    fn take(&mut self, only: Option<StepId>) -> Vec<OpenLine> {
         let (taken, kept) = std::mem::take(&mut self.open)
             .into_iter()
-            .partition(|(step, _, _)| only.is_none_or(|only| *step == only));
+            .partition(|open| only.is_none_or(|only| open.step == only));
         self.open = kept;
         taken
-            .into_iter()
-            .map(|(step, _, line)| (step, line))
-            .collect()
     }
 }
 
@@ -1787,6 +1838,525 @@ mod tests {
         };
         assert!(at("err-3") < error && error < at("err-1"), "{lines:?}");
         assert!(error < at("err-2"), "{lines:?}");
+    }
+
+    // Returns an install of bat that exited with `code`, its stderr `stderr`.
+    fn exited_with(code: i32, stderr: &[u8]) -> PackageEvent {
+        use selfie::package::event::{CommandFailure, OperationFailure};
+
+        PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::ExecutionFailed {
+                    command: "brew install bat".to_string(),
+                    exit_code: Some(code),
+                    stdout: selfie::commands::BoundedText::bound(b""),
+                    stderr: selfie::commands::BoundedText::bound(stderr),
+                },
+            )),
+        }
+    }
+
+    // Returns the text of every printed line: what follows the last `│ ` of a
+    // labeled line, and any other line trimmed.
+    fn shown_texts(printed: &[(crate::display_manager::Channel, String)]) -> Vec<String> {
+        printed
+            .iter()
+            .flat_map(|(_, entry)| entry.split('\n'))
+            .map(|line| match line.rfind("│ ") {
+                Some(at) => line[at + "│ ".len()..].to_string(),
+                None => line.trim().to_string(),
+            })
+            .collect()
+    }
+
+    // Returns how many of `texts` are exactly `text`.
+    fn count_of(texts: &[String], text: &str) -> usize {
+        texts.iter().filter(|shown| *shown == text).count()
+    }
+
+    // Returns how many of `texts` contain `needle`.
+    fn count_containing(texts: &[String], needle: &str) -> usize {
+        texts.iter().filter(|shown| shown.contains(needle)).count()
+    }
+
+    // Returns where the first of `texts` containing `needle` is.
+    fn at(texts: &[String], needle: &str) -> usize {
+        texts
+            .iter()
+            .position(|text| text.contains(needle))
+            .unwrap_or_else(|| panic!("no line containing {needle:?} in {texts:?}"))
+    }
+
+    // Returns the events of an install of bat whose step streamed `reads`, one
+    // Info event each, failed, and then reported `failure`, in the order the
+    // library sends them.
+    fn failed_install(reads: Vec<ConsoleOutput>, failure: PackageEvent) -> Vec<PackageEvent> {
+        let mut events = vec![installing(1, "bat")];
+        events.extend(reads.into_iter().map(|read| info(1, read)));
+        events.push(ended(1, StepEnding::Failed));
+        events.push(failure);
+        events
+    }
+
+    // Returns the events of an install whose step streamed `reads` to stderr
+    // and then exited 1, with those reads as its stderr.
+    fn stderr_failure(reads: &[String]) -> Vec<PackageEvent> {
+        failed_install(
+            reads.iter().map(|read| err(read)).collect(),
+            exited_with(1, reads.concat().as_bytes()),
+        )
+    }
+
+    // Returns the text of each line a terminal at normal verbosity shows for
+    // `events`.
+    async fn normal_texts(events: Vec<PackageEvent>) -> Vec<String> {
+        let display = DisplayManager::new(false).drawing_as_a_terminal();
+        shown_texts(&printed_for(display, events).await)
+    }
+
+    // Returns `count` stderr lines named `name-1` onward, each padded with dots
+    // to `width` bytes and ended by `end`.
+    fn padded_lines(name: &str, count: usize, width: usize, end: &str) -> Vec<String> {
+        (1..=count)
+            .map(|i| {
+                let label = format!("{name}-{i:02}");
+                format!(
+                    "{label}{}{end}",
+                    ".".repeat(width - label.len() - end.len())
+                )
+            })
+            .collect()
+    }
+
+    // Asserts that each of `lines` shows exactly once in `texts`.
+    fn assert_each_once(texts: &[String], lines: &[String]) {
+        for line in lines {
+            let line = line.trim_end();
+            assert_eq!(count_of(texts, line), 1, "{line} in {texts:?}");
+        }
+    }
+
+    // Returns the events of fifteen stderr lines, each its own read, from an
+    // install that exits 3.
+    fn fifteen_lines_exit_3() -> Vec<PackageEvent> {
+        let lines: Vec<String> = (1..=15).map(|i| format!("err-{i}\n")).collect();
+        failed_install(
+            lines.iter().map(|line| err(line)).collect(),
+            exited_with(3, lines.concat().as_bytes()),
+        )
+    }
+
+    // At normal verbosity the tail showed only the last ten lines, so the
+    // failure still prints the five older ones, each once.
+    #[tokio::test]
+    async fn a_normal_failure_prints_the_lines_its_tail_left_out() {
+        let texts = normal_texts(fifteen_lines_exit_3()).await;
+        let lines: Vec<String> = (1..=15).map(|i| format!("err-{i}")).collect();
+        assert_each_once(&texts, &lines);
+    }
+
+    // A stderr the bound cut prints only the lines the step's tail did not
+    // show, with no marker when the tail showed everything the bound elided,
+    // whether its lines end in a newline or a carriage return and newline, and
+    // whether they arrive one to a read or all in one.
+    #[tokio::test]
+    async fn a_cut_stderr_prints_only_the_lines_its_tail_left_out() {
+        for (end, one_read) in [("\n", false), ("\r\n", false), ("\n", true), ("\r\n", true)] {
+            let lines = padded_lines("line", 12, 180, end);
+            let reads = if one_read {
+                vec![lines.concat()]
+            } else {
+                lines.clone()
+            };
+            let texts = normal_texts(stderr_failure(&reads)).await;
+            assert_each_once(&texts, &lines);
+            assert_eq!(
+                count_containing(&texts, "bytes elided"),
+                0,
+                "{end:?}: {texts:?}"
+            );
+            assert!(
+                at(&texts, "brew install bat") < at(&texts, "line-01"),
+                "{end:?}: {texts:?}"
+            );
+        }
+    }
+
+    // A long stderr line the step's tail showed whole, in pieces or not, is
+    // not printed again, nor are the lines before it.
+    #[tokio::test]
+    async fn a_long_stderr_line_its_tail_showed_prints_once() {
+        let mut short = padded_lines("short", 5, 20, "\n");
+        short.push(format!("long-start{}", "x".repeat(4096)));
+        short.push(format!("{}long-end\n", "x".repeat(900)));
+        let one_write = vec![format!("long-start{}long-end\n", "x".repeat(4980))];
+        let three_k = vec![format!("long-start{}long-end\n", "x".repeat(2980))];
+        for (case, reads) in [
+            ("after short lines", short),
+            ("one write", one_write),
+            ("3000 bytes", three_k),
+        ] {
+            let texts = normal_texts(stderr_failure(&reads)).await;
+            assert_eq!(
+                count_containing(&texts, "long-start"),
+                1,
+                "{case}: {texts:?}"
+            );
+            assert_eq!(count_containing(&texts, "long-end"), 1, "{case}: {texts:?}");
+            assert_eq!(
+                count_containing(&texts, "bytes elided"),
+                0,
+                "{case}: {texts:?}"
+            );
+            // Only the first case streams short lines, and each shows once.
+            let expected = usize::from(case == "after short lines");
+            for i in 1..=5 {
+                let line = format!("short-{i:02}{}", ".".repeat(11));
+                assert_eq!(count_of(&texts, &line), expected, "{case}: {texts:?}");
+            }
+        }
+    }
+
+    // A long line among warnings shows in the step's tail, and the failure
+    // prints only the warning older than the tail.
+    #[tokio::test]
+    async fn a_long_line_among_warnings_shows_once_in_the_tail() {
+        let mut reads = padded_lines("warn", 6, 300, "\n");
+        reads.push(format!("json-start{}", "x".repeat(4096)));
+        reads.push(format!("{}json-end\n", "x".repeat(900)));
+        reads.extend(padded_lines("after", 3, 400, "\n"));
+        let texts = normal_texts(stderr_failure(&reads)).await;
+        assert_each_once(&texts, &padded_lines("warn", 6, 300, "\n"));
+        assert_each_once(&texts, &padded_lines("after", 3, 400, "\n"));
+        assert_eq!(count_containing(&texts, "json-start"), 1, "{texts:?}");
+        assert_eq!(count_containing(&texts, "json-end"), 1, "{texts:?}");
+        assert!(
+            at(&texts, "brew install bat") < at(&texts, "warn-01"),
+            "{texts:?}"
+        );
+    }
+
+    // A failure that carries no stderr leaves its long stderr line in the
+    // step's tail, which shows it.
+    #[tokio::test]
+    async fn a_long_stderr_line_shows_when_the_failure_carries_no_stderr() {
+        use selfie::commands::runner::{TimeLimit, TimedOut};
+        use selfie::package::event::{CommandFailure, OperationFailure};
+
+        let failure = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::TimedOut(TimedOut::new(
+                    "brew install bat",
+                    std::time::Duration::from_secs(60),
+                    TimeLimit::Silence,
+                )),
+            )),
+        };
+        let reads = vec![
+            err(&format!("long-start{}", "x".repeat(4096))),
+            err(&format!("{}long-end\n", "x".repeat(900))),
+        ];
+        let texts = normal_texts(failed_install(reads, failure)).await;
+        assert_eq!(count_containing(&texts, "long-start"), 1, "{texts:?}");
+        assert_eq!(count_containing(&texts, "long-end"), 1, "{texts:?}");
+    }
+
+    // When the tail's oldest stderr line lies in what the bound elided, the
+    // failure prints the kept head and a marker for only the bytes the tail
+    // did not show.
+    #[tokio::test]
+    async fn a_partly_shown_elision_counts_only_what_the_tail_left_out() {
+        // All in one read, each line's start is its position in that read, so
+        // a carriage return before each newline must not move it.
+        for (end, one_read) in [("\n", false), ("\r\n", true)] {
+            let lines = padded_lines("line", 20, 150, end);
+            let reads = if one_read {
+                vec![lines.concat()]
+            } else {
+                lines.clone()
+            };
+            let texts = normal_texts(stderr_failure(&reads)).await;
+            assert_eq!(
+                count_containing(&texts, "(500 bytes elided)"),
+                1,
+                "{end:?}: {texts:?}"
+            );
+            assert_eq!(
+                count_containing(&texts, "bytes elided"),
+                1,
+                "{end:?}: {texts:?}"
+            );
+            assert_each_once(&texts, &lines[..6]);
+            assert_each_once(&texts, &lines[10..]);
+        }
+    }
+
+    // A stderr whose stream the CLI saw only in part prints whole, so nothing
+    // the step did not show is hidden, whether the bound kept it whole or cut
+    // it.
+    #[tokio::test]
+    async fn a_stderr_streamed_only_in_part_prints_whole() {
+        let lines: Vec<String> = (1..=5).map(|i| format!("err-{i}\n")).collect();
+        let events = failed_install(
+            lines[..3].iter().map(|line| err(line)).collect(),
+            exited_with(1, lines.concat().as_bytes()),
+        );
+        let texts = normal_texts(events).await;
+        assert_eq!(count_of(&texts, "err-4"), 1, "{texts:?}");
+        assert_eq!(count_of(&texts, "err-5"), 1, "{texts:?}");
+        assert_eq!(count_of(&texts, "err-1"), 2, "{texts:?}");
+
+        let lines = padded_lines("line", 30, 100, "\n");
+        let events = failed_install(
+            lines[..25].iter().map(|line| err(line)).collect(),
+            exited_with(1, lines.concat().as_bytes()),
+        );
+        let texts = normal_texts(events).await;
+        assert_each_once(&texts, &lines[26..]);
+    }
+
+    // When the tail showed less than the bound kept at the end, the failure
+    // prints the head, the whole marker, and the kept end's lines the tail
+    // left out.
+    #[tokio::test]
+    async fn a_cut_stderr_prints_the_kept_end_its_tail_left_out() {
+        let mut reads = padded_lines("long", 2, 1200, "\n");
+        let short = padded_lines("short", 15, 20, "\n");
+        reads.extend(short.iter().cloned());
+        let texts = normal_texts(stderr_failure(&reads)).await;
+        assert_each_once(&texts, &short);
+        let elided = reads.concat().len() - 2000;
+        assert_eq!(
+            count_containing(&texts, &format!("({elided} bytes elided)")),
+            1,
+            "{texts:?}"
+        );
+    }
+
+    // A progress bar whose redrawn frames the buffer dropped still counts
+    // them, so the lines after it start where the stream has them, whether
+    // they arrive with the bar's newline or after it.
+    #[tokio::test]
+    async fn lines_after_dropped_frames_keep_their_place() {
+        let frames: Vec<String> = (0..300)
+            .map(|i| format!("\r{i:04} frames drawn so far"))
+            .collect();
+        let new: Vec<String> = (1..=10).map(|i| format!("new-{i:02}\n")).collect();
+        let with_newline = [vec![format!("\n{}", new[0])], new[1..].to_vec()].concat();
+        let after_newline = [vec!["\n".to_string()], new.clone()].concat();
+        for (case, rest) in [
+            ("with the newline", with_newline),
+            ("after it", after_newline),
+        ] {
+            let mut reads = vec!["old\n".to_string()];
+            reads.extend(frames.iter().cloned());
+            reads.extend(rest);
+            let texts = normal_texts(stderr_failure(&reads)).await;
+            // The marker joins the head's last frame to the kept tail's, and
+            // counts every elided byte, which only the right starts give.
+            let elided = reads.concat().len() - 2000;
+            let marker = format!("({elided} bytes elided)");
+            assert_eq!(count_containing(&texts, &marker), 1, "{case}: {texts:?}");
+            let joined = &texts[at(&texts, &marker)];
+            assert!(
+                joined.ends_with("0299 frames drawn so far"),
+                "{case}: {joined}"
+            );
+            assert_each_once(&texts, &new);
+        }
+    }
+
+    // Returns a stderr of a 1000-byte line ending in an emoji the bound's head
+    // cut splits, then ten 300-byte lines, the first holding an invalid byte.
+    fn lossy_stderr() -> Vec<u8> {
+        let mut bytes = "a".repeat(999).into_bytes();
+        bytes.extend("😀\n".as_bytes());
+        for i in 1..=10 {
+            let mut line = format!("b-{i:02}").into_bytes();
+            line.resize(299, b'b');
+            if i == 1 {
+                line[100] = 0xFF;
+            }
+            line.push(b'\n');
+            bytes.extend(line);
+        }
+        bytes
+    }
+
+    // A stream with invalid UTF-8 in it cannot be matched by position against
+    // a bound cut from the captured bytes, so the failure leaves out, as text,
+    // the lines its step's tail showed.
+    #[tokio::test]
+    async fn a_lossy_stream_against_a_captured_cut_leaves_out_what_the_tail_showed() {
+        let bytes = lossy_stderr();
+        let streamed = String::from_utf8_lossy(&bytes).into_owned();
+        let events = failed_install(vec![err(&streamed)], exited_with(1, &bytes));
+        let texts = normal_texts(events).await;
+        for i in 1..=10 {
+            let label = format!("b-{i:02}");
+            let lines = texts.iter().filter(|text| text.starts_with(&label)).count();
+            assert_eq!(lines, 1, "{label}: {texts:?}");
+        }
+        // The whole bound prints, its marker counting every elided byte, less
+        // the lines the tail showed.
+        let elided = bytes.len() - 2000;
+        let marker = format!("({elided} bytes elided)");
+        assert_eq!(count_containing(&texts, &marker), 1, "{texts:?}");
+    }
+
+    // A line in the kept head that a later line repeats still prints when the
+    // stream is matched as text: only the kept tail's lines can be the tail's.
+    #[tokio::test]
+    async fn a_lossy_match_as_text_keeps_an_older_copy() {
+        let mut reads = vec![
+            "dup\n".to_string(),
+            format!("{}\u{FFFD}\n", "x".repeat(2497)),
+        ];
+        reads.extend((1..=8).map(|i| format!("l-{i}\n")));
+        reads.push("dup\n".to_string());
+        let texts = normal_texts(stderr_failure(&reads)).await;
+        assert_eq!(count_of(&texts, "dup"), 2, "{texts:?}");
+        for i in 1..=8 {
+            assert_eq!(count_of(&texts, &format!("l-{i}")), 1, "l-{i}: {texts:?}");
+        }
+    }
+
+    // A timeout's bound is cut from the text the step streamed, so even a lossy
+    // stream matches it by position.
+    #[tokio::test]
+    async fn a_lossy_timeout_is_matched_by_position() {
+        use selfie::commands::runner::{TimeLimit, TimedOut};
+        use selfie::package::event::{CommandFailure, OperationFailure};
+
+        let streamed = String::from_utf8_lossy(&lossy_stderr()).into_owned();
+        let timed_out = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::InstallTimedOut {
+                    timed_out: TimedOut::new(
+                        "brew install bat",
+                        std::time::Duration::from_secs(60),
+                        TimeLimit::Silence,
+                    ),
+                    stdout: selfie::commands::BoundedText::bound(b""),
+                    stderr: selfie::commands::BoundedText::bound(streamed.as_bytes()),
+                },
+            )),
+        };
+        let texts = normal_texts(failed_install(vec![err(&streamed)], timed_out)).await;
+        for i in 1..=10 {
+            let label = format!("b-{i:02}");
+            let lines = texts.iter().filter(|text| text.starts_with(&label)).count();
+            assert_eq!(lines, 1, "{label}: {texts:?}");
+        }
+        // Only the five bytes of the emoji line the head did not keep are
+        // elided from what the tail did not show.
+        assert_eq!(count_containing(&texts, "(5 bytes elided)"), 1, "{texts:?}");
+    }
+
+    // A carriage return in the kept tail's first line does not erase the
+    // marker or the end of the head it follows.
+    #[tokio::test]
+    async fn a_redrawn_line_at_the_cut_keeps_the_marker() {
+        let lines: Vec<String> = (1..=100)
+            .map(|k| {
+                let body = if k == 80 {
+                    format!("l080 {}\rl080 redrawn", "a".repeat(20))
+                } else {
+                    format!("l{k:03}")
+                };
+                format!("{body}{}\n", "z".repeat(47 - body.len()))
+            })
+            .collect();
+        let texts = normal_texts(stderr_failure(&lines)).await;
+        assert_eq!(count_containing(&texts, "bytes elided"), 1, "{texts:?}");
+        let joined = &texts[at(&texts, "bytes elided")];
+        assert!(joined.starts_with("l021"), "{joined}");
+        assert!(joined.contains("l080 redrawn"), "{joined}");
+        for k in (1..=21).chain(81..=100) {
+            assert_eq!(
+                count_containing(&texts, &format!("l{k:03}")),
+                1,
+                "l{k:03}: {texts:?}"
+            );
+        }
+        assert_eq!(count_containing(&texts, "l050"), 0, "{texts:?}");
+    }
+
+    // A short stderr holding invalid UTF-8 is kept whole by the bound, so it
+    // still prints only the lines the tail left out.
+    #[tokio::test]
+    async fn a_short_lossy_stderr_prints_only_what_the_tail_left_out() {
+        let mut bytes = b"x\xFFy\n".to_vec();
+        for i in 1..=10 {
+            bytes.extend(format!("err-{i}\n").into_bytes());
+        }
+        let streamed = String::from_utf8_lossy(&bytes).into_owned();
+        let texts =
+            normal_texts(failed_install(vec![err(&streamed)], exited_with(1, &bytes))).await;
+        assert_eq!(count_of(&texts, "x\u{FFFD}y"), 1, "{texts:?}");
+        let lines: Vec<String> = (1..=10).map(|i| format!("err-{i}")).collect();
+        assert_each_once(&texts, &lines);
+    }
+
+    // A failure is matched against its own step: an earlier failed step's
+    // tail does not hide a later failure's stderr.
+    #[tokio::test]
+    async fn a_failure_is_matched_against_its_own_step() {
+        use selfie::commands::runner::{TimeLimit, TimedOut};
+        use selfie::package::event::{CommandFailure, OperationFailure};
+
+        let timed_out = PackageEvent::Completed {
+            operation_info: make_operation_info("bat"),
+            result: OperationResult::Failure(OperationFailure::CommandError(
+                CommandFailure::TimedOut(TimedOut::new(
+                    "brew install bat",
+                    std::time::Duration::from_secs(60),
+                    TimeLimit::Silence,
+                )),
+            )),
+        };
+        let events = vec![
+            installing(1, "bat"),
+            info(1, err("x\n")),
+            ended(1, StepEnding::Failed),
+            timed_out,
+            installing(2, "bat"),
+            ended(2, StepEnding::Failed),
+            exited_with(1, b"x\n"),
+        ];
+        let texts = normal_texts(events).await;
+        // The summary of both failures that ends the run is left out.
+        let texts = &texts[..at(&texts, "── Errors")];
+        assert_eq!(count_of(texts, "x"), 2, "{texts:?}");
+    }
+
+    // A line the step's tail showed hides only its own copy at the end of the
+    // failure's stderr: an older line with the same text still prints.
+    #[tokio::test]
+    async fn a_repeated_stderr_line_older_than_the_tail_still_prints() {
+        let mut lines = vec!["dup\n".to_string()];
+        lines.extend((1..=10).map(|i| format!("l-{i}\n")));
+        lines.push("dup\n".to_string());
+        let texts = normal_texts(stderr_failure(&lines)).await;
+        assert_eq!(count_of(&texts, "dup"), 2, "{texts:?}");
+        assert_eq!(count_of(&texts, "l-1"), 1, "{texts:?}");
+        assert_eq!(count_of(&texts, "l-2"), 1, "{texts:?}");
+    }
+
+    // A stdout line in the step's tail does not hide a stderr line with the
+    // same text, once the stderr line has left the tail.
+    #[tokio::test]
+    async fn a_stdout_tail_line_does_not_hide_the_same_stderr_line() {
+        let mut reads = vec![err("Error 1\n")];
+        reads.extend((1..=9).map(|i| out(&format!("s-{i}\n"))));
+        reads.push(out("Error 1\n"));
+        let texts = normal_texts(failed_install(reads, exited_with(1, b"Error 1\n"))).await;
+        assert_eq!(count_of(&texts, "Error 1"), 2, "{texts:?}");
+        let last = texts.iter().rposition(|t| t == "Error 1").unwrap();
+        assert!(at(&texts, "brew install bat") < last, "{texts:?}");
     }
 
     // A fragment still open when the operation completes prints before the
