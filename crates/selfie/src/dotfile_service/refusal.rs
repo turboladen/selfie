@@ -13,8 +13,8 @@ use std::{
 use crate::{
     fs::{
         filesystem::{
-            AbsentReason, DirectoryState, FileSystem, FileSystemError, OpenRefusal, RepositoryRead,
-            TargetRead,
+            AbsentReason, DirectoryState, ExecuteBits, FileSystem, FileSystemError, OpenRefusal,
+            RepositoryRead, TargetRead,
         },
         target::{TargetPath, TargetRejection},
     },
@@ -149,10 +149,12 @@ pub(super) enum TargetState {
     Absent,
     /// A component above the target is not a directory, so nothing is there and
     /// nothing can be written there. `parent` is the first such component.
-    BelowNonDirectory {
-        parent: Option<PathBuf>,
+    BelowNonDirectory { parent: Option<PathBuf> },
+    /// A regular file: its bytes, and the execute bits of the file they came from.
+    Readable {
+        bytes: Vec<u8>,
+        execute: ExecuteBits,
     },
-    Readable(Vec<u8>),
     /// A directory, which a file cannot replace.
     Directory,
     /// A symlink, found by the read after every look missed it.
@@ -180,7 +182,7 @@ pub(super) enum TargetState {
 // never written over: apply refuses it on both paths, and drift refuses it too.
 pub(super) fn read_target_state<F: FileSystem>(filesystem: &F, target: &TargetPath) -> TargetState {
     match filesystem.read_file_no_follow(target) {
-        Ok(TargetRead::Bytes(bytes)) => TargetState::Readable(bytes),
+        Ok(TargetRead::Bytes { bytes, execute }) => TargetState::Readable { bytes, execute },
         Ok(TargetRead::Absent) => TargetState::Absent,
         Ok(TargetRead::BelowNonDirectory { parent }) => TargetState::BelowNonDirectory { parent },
         Ok(TargetRead::Directory) => TargetState::Directory,
@@ -316,7 +318,7 @@ pub(super) fn readable_or_refusal(
 ) -> Result<Option<Vec<u8>>, Refusal> {
     Err(match state {
         TargetState::Absent => return Ok(None),
-        TargetState::Readable(bytes) => return Ok(Some(bytes)),
+        TargetState::Readable { bytes, .. } => return Ok(Some(bytes)),
         TargetState::BelowNonDirectory { parent } => {
             below_non_directory_refusal(source, target, parent.as_deref())
         }

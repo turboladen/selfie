@@ -42,8 +42,13 @@ pub enum DirectoryState {
 /// target by decoding an error.
 #[derive(Debug, Clone)]
 pub enum TargetRead {
-    /// A regular file, and its bytes.
-    Bytes(Vec<u8>),
+    /// A regular file.
+    Bytes {
+        /// The file's content.
+        bytes: Vec<u8>,
+        /// The execute bits of the same file, at the same moment, as `bytes`.
+        execute: ExecuteBits,
+    },
     /// Nothing is at the path.
     Absent,
     /// A component above the path is not a directory, so nothing is at the path
